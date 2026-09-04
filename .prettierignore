@@ -1,0 +1,16 @@
+node_modules
+dist
+coverage
+pnpm-lock.yaml
+.claude
+
+# CLAUDE.md hosts the outputty-managed block (<!-- outputty:begin … end -->), which /outputty:init
+# replaces byte-for-byte from the plugin's block.md. That block's Markdown style (compact tables,
+# `*emphasis*`) is not prettier-clean under this repo's config, so prettier would fight every init
+# refresh. The block is plugin-owned formatting, the same category as .claude above — leave it alone.
+CLAUDE.md
+
+# Vendored third-party oxlint plugin (dmmulroy/anti-slop). Kept byte-identical to upstream so it stays
+# re-syncable against a new release — its own tab/style is not this repo's, and reflowing it would fork
+# the vendor. See tools/oxlint/anti-slop/README.md.
+tools/oxlint/anti-slop/

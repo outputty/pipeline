@@ -1,0 +1,50 @@
+{
+  "name": "@outputty/pipeline",
+  "version": "0.1.0",
+  "description": "Async streaming data processing pipelines with chunking and concurrency control",
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "packageManager": "pnpm@11.20.0",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json",
+    "build:watch": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:run": "vitest run --passWithNoTests",
+    "test:coverage": "vitest run --coverage",
+    "watch": "npx wallaby-skill run",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "oxlint",
+    "check": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm test:run"
+  },
+  "dependencies": {
+    "p-limit": "^6.2.0",
+    "ts-pattern": "^5.9.0"
+  },
+  "devDependencies": {
+    "@oxlint/plugins": "1.74.0",
+    "@types/node": "^26.1.1",
+    "oxlint": "^1.74.0",
+    "prettier": "^3.9.5",
+    "tsc-alias": "^1.9.2",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.0.15"
+  }
+}
