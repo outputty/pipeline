@@ -24,9 +24,10 @@ async function run<I, O>(
   return [results, applied.contextManager.toDict()];
 }
 
-const T = <I>() => new Transformer<I, I>();
+const T = <I>() => new Transformer<I, I>({ transform: (chunk) => chunk });
 /** A chunk-sized transformer, so a run crosses chunk boundaries (chunk-level ops need this). */
-const chunked = <I>(chunkSize: number) => new Transformer<I, I>({ chunkSize });
+const chunked = <I>(chunkSize: number) =>
+  new Transformer<I, I>({ chunkSize, transform: (chunk) => chunk });
 
 describe("transforms e2e — element ops through a full pipeline run", () => {
   it("map transforms every item; the 2-arg form receives the run context", async () => {

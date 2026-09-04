@@ -20,5 +20,5 @@ import { DEFAULT_CHUNK_SIZE } from "./types";
  * @returns A new Transformer with sequential execution
  */
 export function createTransformer<T>(chunkSize = DEFAULT_CHUNK_SIZE): Transformer<T, T> {
-  return new Transformer<T, T>({ chunkSize });
+  return new Transformer<T, T>({ chunkSize, transform: (chunk) => chunk });
 }

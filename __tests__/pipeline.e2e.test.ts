@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { concurrent } from "@src/strategies/concurrent";
+import { sequential } from "@src/strategies/sequential";
 import { SimpleContextManager } from "@src/context/simple";
 
 describe("Pipeline", () => {
@@ -303,11 +304,11 @@ describe("Pipeline", () => {
       const results = await pipeline.branch({
         positive: {
           predicate: (x) => x > 0,
-          transformer: new Transformer<number, string>().map(() => "positive"),
+          transformer: new Transformer<number, number>().map(() => "positive"),
         },
         all: {
           predicate: () => true,
-          transformer: new Transformer<number, string>().map(() => "all"),
+          transformer: new Transformer<number, number>().map(() => "all"),
         },
       });
 
@@ -506,6 +507,17 @@ describe("Pipeline", () => {
           // never reached
         }
       }).rejects.toThrow(/withExecutor.*not applied in source position/);
+    });
+
+    it("a pipeline carrying withExecutor(sequential) iterates fine directly — same as no knob at all", async () => {
+      const transformer = new Transformer<number, number>()
+        .map((x: number) => x * 2)
+        .withExecutor(sequential);
+      const pipeline = new Pipeline([1, 2, 3]).apply(transformer);
+
+      const chunks: number[][] = [];
+      for await (const chunk of pipeline) chunks.push(chunk);
+      expect(chunks.flat()).toEqual([2, 4, 6]);
     });
 
     it("a plain pipeline (no inert knobs) iterates fine directly", async () => {

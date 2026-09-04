@@ -187,7 +187,7 @@ describe("execution e2e — async I/O work through a run", () => {
   it("sequential async work keeps order", async () => {
     const out = await run(
       [1, 2, 3],
-      new Transformer<number, { id: number; name: string }>().map((id) => fetchUser(id)),
+      new Transformer<number, number>().map((id) => fetchUser(id)),
     );
     expect(out).toEqual([
       { id: 1, name: "user-1" },
@@ -209,7 +209,7 @@ describe("execution e2e — async I/O work through a run", () => {
   it("an error in async work is turned into a value by the mapping fn, not thrown", async () => {
     const out = await run(
       [1, 2],
-      new Transformer<number, { ok: boolean }>().map(async (id) => {
+      new Transformer<number, number>().map(async (id) => {
         await delay(1);
         return id === 2 ? { ok: false } : { ok: true };
       }),
@@ -219,6 +219,44 @@ describe("execution e2e — async I/O work through a run", () => {
 });
 
 describe("execution e2e — lifecycle hooks fire during a run", () => {
+  it("a plain-value hook (onStart: () => order.push(...)) compiles against the bare void return type", async () => {
+    const order: string[] = [];
+    const out = await run(
+      [1],
+      new Transformer<number, number>()
+        .map((x) => x * 2)
+        .withHooks({
+          onStart: () => order.push("start"),
+          onComplete: () => order.push("complete"),
+        }),
+    );
+    expect(out).toEqual([2]);
+    expect(order).toEqual(["start", "complete"]);
+  });
+
+  it("an async hook is still assignable to the bare void return type, and still awaited", async () => {
+    const order: string[] = [];
+    const out = await run(
+      [1, 2],
+      new Transformer<number, number>()
+        .map((x) => x * 2)
+        .withHooks({
+          onStart: async () => {
+            await delay(1);
+            order.push("start");
+          },
+          onComplete: async () => {
+            await delay(1);
+            order.push("complete");
+          },
+        }),
+    );
+    expect(out).toEqual([2, 4]);
+    // Both async hooks were AWAITED, not fired-and-forgotten: "start" is in before onComplete ran,
+    // and onComplete's own push landed before this assertion, proving execute() awaited it too.
+    expect(order).toEqual(["start", "complete"]);
+  });
+
   it("onStart fires once before work, onComplete once after with item count", async () => {
     const onStart = vi.fn();
     const onComplete = vi.fn();
@@ -294,7 +332,7 @@ describe("execution e2e — streaming edge behaviors", () => {
   it("passes null and undefined items through untouched", async () => {
     const out = await run(
       [1, null, 2, undefined, 3],
-      new Transformer<number | null | undefined, string>().map((x) =>
+      new Transformer<number | null | undefined, number | null | undefined>().map((x) =>
         x === null ? "null" : x === undefined ? "undefined" : String(x),
       ),
     );
