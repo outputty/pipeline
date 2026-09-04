@@ -34,7 +34,7 @@ describe("Pipeline.merge", () => {
     });
 
     it("should return empty pipeline when no pipelines provided", async () => {
-      const merged = Pipeline.merge<number>();
+      const merged = Pipeline.merge();
       const results = await merged.toArray();
 
       expect(results).toEqual([]);

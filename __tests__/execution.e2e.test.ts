@@ -1,17 +1,16 @@
 /**
  * execution.e2e.test.ts — execution strategy, concurrency, custom executors, lifecycle hooks and the
  * factory helpers, each proven through an ENTIRE PIPELINE RUN rather than by calling a strategy /
- * registry / hook in isolation. Concurrency and chunking are observed the only way a caller can:
- * output order, item presence, a live concurrency counter, and correct results across many chunks.
+ * function in isolation. Concurrency and chunking are observed the only way a caller can: output
+ * order, item presence, a live concurrency counter, and correct results across many chunks.
  */
 import { describe, it, expect, vi } from "vitest";
 import {
   Pipeline,
   Transformer,
   createTransformer,
-  createConcurrentTransformer,
-  registerExecutor,
-  ConcurrentStrategy,
+  sequential,
+  concurrent,
   type ExecutionStrategy,
 } from "../src";
 
@@ -34,12 +33,12 @@ describe("execution e2e — sequential vs concurrent through a full run", () => 
   it("ordered concurrency preserves order even when later items finish first", async () => {
     const out = await run(
       [1, 2, 3, 4, 5],
-      createConcurrentTransformer<number>({ maxConcurrency: 4, ordered: true, chunkSize: 1 }).map(
-        async (x) => {
+      new Transformer<number, number>({ chunkSize: 1 })
+        .withExecutor(concurrent({ maxConcurrency: 4, ordered: true }))
+        .map(async (x) => {
           await delay(10 - x); // reverse delay: item 5 finishes first
           return x * 2;
-        },
-      ),
+        }),
     );
     expect(out).toEqual([2, 4, 6, 8, 10]);
   });
@@ -47,9 +46,9 @@ describe("execution e2e — sequential vs concurrent through a full run", () => 
   it("unordered concurrency yields every result (order may vary)", async () => {
     const out = await run(
       [1, 2, 3, 4],
-      createConcurrentTransformer<number>({ maxConcurrency: 4, ordered: false, chunkSize: 1 }).map(
-        (x) => x * 2,
-      ),
+      new Transformer<number, number>({ chunkSize: 1 })
+        .withExecutor(concurrent({ maxConcurrency: 4, ordered: false }))
+        .map((x) => x * 2),
     );
     expect(out.slice().sort((a, b) => a - b)).toEqual([2, 4, 6, 8]);
   });
@@ -59,15 +58,15 @@ describe("execution e2e — sequential vs concurrent through a full run", () => 
     let peak = 0;
     await run(
       [1, 2, 3, 4, 5, 6],
-      createConcurrentTransformer<number>({ maxConcurrency: 2, ordered: true, chunkSize: 1 }).map(
-        async (x) => {
+      new Transformer<number, number>({ chunkSize: 1 })
+        .withExecutor(concurrent({ maxConcurrency: 2, ordered: true }))
+        .map(async (x) => {
           active++;
           peak = Math.max(peak, active);
           await delay(10);
           active--;
           return x;
-        },
-      ),
+        }),
     );
     expect(peak).toBeLessThanOrEqual(2);
   });
@@ -76,13 +75,13 @@ describe("execution e2e — sequential vs concurrent through a full run", () => 
     const finished: number[] = [];
     await run(
       [1, 2, 3],
-      createConcurrentTransformer<number>({ maxConcurrency: 1, ordered: true, chunkSize: 1 }).map(
-        async (x) => {
+      new Transformer<number, number>({ chunkSize: 1 })
+        .withExecutor(concurrent({ maxConcurrency: 1, ordered: true }))
+        .map(async (x) => {
           await delay(10 - x);
           finished.push(x);
           return x;
-        },
-      ),
+        }),
     );
     expect(finished).toEqual([1, 2, 3]);
   });
@@ -99,69 +98,82 @@ describe("execution e2e — sequential vs concurrent through a full run", () => 
 
 describe("execution e2e — switching executors + custom strategies mid-run", () => {
   it("withExecutor switches strategy while preserving the transform chain", async () => {
-    const concurrent = await run(
+    const concurrentOut = await run(
       [1, 2, 3, 4, 5],
       createTransformer<number>()
         .map((x) => x * 2)
         .filter((x) => x > 4)
-        .withExecutor("concurrent", { maxConcurrency: 2 }),
+        .withExecutor(concurrent({ maxConcurrency: 2 })),
     );
-    expect(concurrent.slice().sort((a, b) => a - b)).toEqual([6, 8, 10]);
+    expect(concurrentOut.slice().sort((a, b) => a - b)).toEqual([6, 8, 10]);
 
     // Multiple switches in one chain still compute correctly: (x+1)*2-1
     const switched = await run(
       [1, 2, 3],
       createTransformer<number>()
         .map((x) => x + 1)
-        .withExecutor("concurrent")
+        .withExecutor(concurrent())
         .map((x) => x * 2)
-        .withExecutor("sequential")
+        .withExecutor(sequential)
         .map((x) => x - 1),
     );
     expect(switched).toEqual([3, 5, 7]);
   });
 
+  it("withExecutor(sequential) runs, and withExecutor(concurrent(...)) uppercases every item", async () => {
+    const seqOut = await run(
+      ["a", "b", "c"],
+      new Transformer<string, string>().withExecutor(sequential).map((s) => s.toUpperCase()),
+    );
+    expect(seqOut).toEqual(["A", "B", "C"]);
+
+    const concurrentOut = await run(
+      ["a", "b", "c"],
+      new Transformer<string, string>()
+        .withExecutor(concurrent({ maxConcurrency: 10 }))
+        .map((s) => s.toUpperCase()),
+    );
+    expect(concurrentOut).toEqual(["A", "B", "C"]);
+  });
+
   it("a user-supplied custom strategy runs the whole pipeline and sees every chunk", async () => {
     const processedChunks: number[][] = [];
-    const custom: ExecutionStrategy<number, number> = {
-      async *execute(logic, chunks, ctx) {
-        for await (const chunk of chunks) {
-          processedChunks.push([...chunk]);
-          yield logic(chunk, ctx);
-        }
-      },
+    const custom: ExecutionStrategy<number, number> = async function* (logic, chunks, ctx) {
+      for await (const chunk of chunks) {
+        processedChunks.push([...chunk]);
+        yield logic(chunk, ctx);
+      }
     };
     const out = await run(
       [1, 2, 3],
       createTransformer<number>()
         .map((x) => x * 2)
-        .withExecutor({ custom }),
+        .withExecutor(custom),
     );
     expect(out).toEqual([2, 4, 6]);
     expect(processedChunks).toEqual([[1, 2, 3]]);
   });
 
-  it("a custom executor registered by name is usable via withExecutor(name)", async () => {
-    const seen: number[][] = [];
-    registerExecutor("spy", {
-      create: () => ({
-        async *execute(logic, chunks, ctx) {
-          for await (const chunk of chunks) {
-            seen.push([...(chunk as number[])]);
-            yield logic(chunk, ctx);
-          }
-        },
-      }),
-    });
+  it("withExecutor accepts an inline async function* with un-annotated params (the Interface example, verbatim)", async () => {
+    const out = await run(
+      [1, 2, 3, 4, 5],
+      new Transformer<number, number>()
+        .withExecutor(async function* (logic, chunks, ctx) {
+          for await (const chunk of chunks) yield logic(chunk, ctx);
+        })
+        .map((x) => x * 2),
+    );
+    expect(out).toEqual([2, 4, 6, 8, 10]);
+  });
 
+  it("chunk.map((n) => n * 2) typechecks inside a custom async function* strategy body", async () => {
     const out = await run(
       [1, 2, 3],
-      createTransformer<number>()
-        .map((x) => x + 1)
-        .withExecutor("spy" as "sequential"),
+      new Transformer<number, number>().withExecutor(async function* (_logic, chunks, _ctx) {
+        for await (const chunk of chunks) yield chunk.map((n) => n * 2);
+      }),
     );
-    expect(out).toEqual([2, 3, 4]);
-    expect(seen).toEqual([[1, 2, 3]]);
+    expect(out).toEqual([2, 4, 6]);
   });
 });
 
@@ -187,9 +199,9 @@ describe("execution e2e — async I/O work through a run", () => {
   it("concurrent async work returns every result", async () => {
     const out = await run(
       [1, 2, 3, 4],
-      createConcurrentTransformer<number>({ maxConcurrency: 4, chunkSize: 1 }).map((id) =>
-        fetchUser(id),
-      ),
+      new Transformer<number, number>({ chunkSize: 1 })
+        .withExecutor(concurrent({ maxConcurrency: 4 }))
+        .map((id) => fetchUser(id)),
     );
     expect(out.map((u) => u.id).sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
   });
@@ -317,27 +329,23 @@ describe("execution e2e — factory helpers produce working pipelines", () => {
     expect(out).toEqual([4, 6]);
   });
 
-  it("createConcurrentTransformer builds an ordered concurrent run honoring its options", async () => {
+  it("createTransformer + withExecutor(concurrent(...)) builds an ordered concurrent run honoring its options", async () => {
     const out = await run(
       [1, 2, 3],
-      createConcurrentTransformer<number>({ maxConcurrency: 8, ordered: true, chunkSize: 1 }).map(
-        async (x) => {
+      createTransformer<number>(1)
+        .withExecutor(concurrent({ maxConcurrency: 8, ordered: true }))
+        .map(async (x) => {
           await delay(10 - x);
           return x * 2;
-        },
-      ),
+        }),
     );
     expect(out).toEqual([2, 4, 6]);
   });
 
-  it("ConcurrentStrategy rejects a maxConcurrency below 1, accepts the default and a positive value", () => {
-    expect(() => new ConcurrentStrategy({ maxConcurrency: 0 })).toThrow(
-      "maxConcurrency must be at least 1",
-    );
-    expect(() => new ConcurrentStrategy({ maxConcurrency: -3 })).toThrow(
-      "maxConcurrency must be at least 1",
-    );
-    expect(() => new ConcurrentStrategy()).not.toThrow();
-    expect(() => new ConcurrentStrategy({ maxConcurrency: 8 })).not.toThrow();
+  it("concurrent() rejects a maxConcurrency below 1, accepts the default and a positive value", () => {
+    expect(() => concurrent({ maxConcurrency: 0 })).toThrow("maxConcurrency must be at least 1");
+    expect(() => concurrent({ maxConcurrency: -3 })).toThrow("maxConcurrency must be at least 1");
+    expect(() => concurrent()).not.toThrow();
+    expect(() => concurrent({ maxConcurrency: 8 })).not.toThrow();
   });
 });
