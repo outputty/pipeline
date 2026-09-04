@@ -11,9 +11,6 @@ importers:
       p-limit:
         specifier: ^6.2.0
         version: 6.2.0
-      ts-pattern:
-        specifier: ^5.9.0
-        version: 5.9.0
     devDependencies:
       '@changesets/cli':
         specifier: ^3.0.1
@@ -1355,9 +1352,6 @@ packages:
   ts-interface-checker@0.1.13:
     resolution: {integrity: sha512-Y/arvbn+rrz3JCKl9C4kVNfTfSm2/mEp5FSz5EsZSANGPSlQrpRI5M4PKF+mJnE52jOO90PnPSc3Ur3bTQw0gA==}
 
-  ts-pattern@5.9.0:
-    resolution: {integrity: sha512-6s5V71mX8qBUmlgbrfL33xDUwO0fq48rxAu2LBE11WBeGdpCPOsXksQbZJHvHwhrd3QjUusd3mAOM5Gg0mFBLg==}
-
   tsc-alias@1.9.4:
     resolution: {integrity: sha512-vfhh/N9xQ6oRgdAvuXVbhHSsNtbk+D4LFbJ9YrFPTTP9evGAvf2Xc3MQ7lTVmnJNN+FnuoKHn3524CKDzFYOag==}
     engines: {node: '>=16.20.2'}
@@ -2505,8 +2499,6 @@ snapshots:
   tree-kill@1.2.2: {}
 
   ts-interface-checker@0.1.13: {}
-
-  ts-pattern@5.9.0: {}
 
   tsc-alias@1.9.4:
     dependencies:

@@ -96,9 +96,12 @@ export class Transformer<In, Out> {
   /**
    * Overload 2 — no `transform` given. Only sound when `In` is assignable to `Out` (the identity
    * default below is a real conversion, not a lie): `new Transformer<number, { id: number }>()`
-   * is a compile error here, `new Transformer<number, number>()` is not. Resolves only for a
-   * CONCRETE `In`/`Out` at an external call site — the conditional is deferred (unresolved) inside
-   * this class's own generic methods, which is why they route through overload 1 instead.
+   * is a compile error here, `new Transformer<number, number>()` is not. Resolves only when `In`/
+   * `Out` are CONCRETE types at the call site — a deferred conditional never distributes over an
+   * abstract type parameter, so ANY generic scope still holding `In`/`Out` unresolved (this class's
+   * own methods, but equally `createTransformer<T>()` or a caller's own generic helper) fails to
+   * resolve it too and must route through overload 1 with a real `transform` instead, even where
+   * `In`/`Out` happen to be the same type parameter (`T extends T` is never specially recognized).
    */
   constructor(...args: In extends Out ? [options?: TransformerConstructorOptions<In, Out>] : never);
   constructor(options?: TransformerConstructorOptions<In, Out>) {

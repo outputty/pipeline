@@ -94,7 +94,7 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
       [1, 2, 3],
       T<number>().tap(
         new Transformer<number, unknown>().map((x) => {
-          tapped.push(x * 100);
+          tapped.push((x as number) * 100);
           return x;
         }),
       ),

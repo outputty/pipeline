@@ -25,9 +25,9 @@
     "anti-slop/no-shape-in-symbol-names": "error",
 
     // WARN — real existing violations (count in the comment): `Context`'s dynamic key/value store
-    // (`SimpleContext`, `registry.ts`'s factory map) is a generic bag by design, `unknown` until a
-    // caller parses it at its own boundary. A promotion backlog, not fixed here.
-    "anti-slop/no-known-value-widening": "warn", // 2
+    // (`SimpleContext`) is a generic bag by design, `unknown` until a caller parses it at its own
+    // boundary. A promotion backlog, not fixed here.
+    "anti-slop/no-known-value-widening": "warn", // 1
     "anti-slop/no-unknown-parameters": "warn", // 2
     "anti-slop/no-unknown-returns": "warn", // 3
     "anti-slop/no-unsafe-dictionary-type": "warn", // 6

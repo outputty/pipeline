@@ -42,8 +42,7 @@
     "check": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm test:run"
   },
   "dependencies": {
-    "p-limit": "^6.2.0",
-    "ts-pattern": "^5.9.0"
+    "p-limit": "^6.2.0"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.1",
