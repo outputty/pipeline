@@ -100,19 +100,20 @@ export interface PipelineOptions {
  *
  * Runs once per `Pipeline#apply()` call, to grow `sourcePositionViolations` (this file's `apply()`).
  *
- * Reads the strategy's own `appliesInSourcePosition` capability flag (`ExecutionStrategy`,
- * `./types.ts`) — never `instanceof`/`.name` on a concrete strategy class — so a custom
- * `ExecutionStrategy` implementation is routed correctly without this file knowing it exists. The
- * chunker check reads `transformer.chunker` (public, set by `.setChunker()`) the same way — never
- * a chunk-generator identity comparison, which a rebuilt default generator would fail anyway.
+ * Reads `transformer.executorApplied` — whether `.withExecutor()` was ever called, not what
+ * strategy it set (`ExecutionStrategy` is a plain function now, with no capability flag of its own
+ * to read generically) — so a custom `ExecutionStrategy` function is routed correctly without this
+ * file knowing it exists. The chunker check reads `transformer.chunker` (public, set by
+ * `.setChunker()`) the same way — never a chunk-generator identity comparison, which a rebuilt
+ * default generator would fail anyway.
  *
- * `inertKnobsOf(new Transformer().withExecutor("concurrent"))` → `["withExecutor"]`;
+ * `inertKnobsOf(new Transformer().withExecutor(concurrent()))` → `["withExecutor"]`;
  * `inertKnobsOf(new Transformer().setChunker(custom))` → `["setChunker"]`;
  * `inertKnobsOf(new Transformer())` → `[]`.
  */
 function inertKnobsOf<In, Out>(transformer: Transformer<In, Out>): string[] {
   const violations: string[] = [];
-  if (!transformer.strategy.appliesInSourcePosition) violations.push("withExecutor");
+  if (transformer.executorApplied) violations.push("withExecutor");
   if (transformer.hooks !== undefined) violations.push("withHooks");
   if (transformer.chunkSize !== DEFAULT_CHUNK_SIZE) violations.push("chunkSize");
   if (transformer.chunker !== undefined) violations.push("setChunker");
@@ -178,7 +179,7 @@ export class Pipeline<T> {
    * FAILS LOUD (does not silently drop the knob) when this pipeline carries a `Transformer` knob
    * the chunk-transform replay below cannot honor (`withExecutor`/`withHooks`/a non-default
    * `chunkSize` — `inertKnobsOf`, above `apply()`): those only take effect through
-   * `Transformer.execute()`, which this loop never calls, so a `.withExecutor('concurrent')`
+   * `Transformer.execute()`, which this loop never calls, so a `.withExecutor(concurrent())`
    * pipeline handed straight to `m.from()` would otherwise run — silently sequential, silently
    * un-hooked — instead of raising.
    *
@@ -188,7 +189,7 @@ export class Pipeline<T> {
    * for await (const chunk of pipeline) {
    *   console.log(chunk); // e.g. [2], [4, 6]
    * }
-   * // new Pipeline(source).apply(new Transformer().withExecutor('concurrent'))
+   * // new Pipeline(source).apply(new Transformer().withExecutor(concurrent()))
    * // handed to a for-await loop throws naming 'withExecutor'.
    * ```
    */
@@ -339,7 +340,7 @@ export class Pipeline<T> {
    *
    * `pipeline.apply(new Transformer<T, T>().map((x) => x * 2))` on a pipeline of `[1, 2, 3]` →
    * `.toArray()` resolves `[2, 4, 6]`. `pipeline.apply(new Transformer().withExecutor
-   * ('concurrent'))` then iterated with `for await` (not a terminal op) → throws naming
+   * (concurrent()))` then iterated with `for await` (not a terminal op) → throws naming
    * `'withExecutor'` (`sourcePositionViolations` picked it up here).
    */
   apply<U>(transformer: Transformer<T, U>): Pipeline<U> {

@@ -113,46 +113,20 @@ export interface IContextManager {
 }
 
 /**
- * Execution strategy interface for different processing modes.
+ * Execution strategy — a chunk stream in, a transformed chunk stream out. HOW a chunk stream is
+ * processed (one at a time, or several in flight at once) is entirely this function's call: the
+ * built-in `sequential`/`concurrent` (`./strategies/`) and any caller-supplied function all share
+ * this one shape, so `.withExecutor()` never distinguishes a "built-in" from a "custom" strategy.
  *
- * Python equivalent:
- * ```python
- * class ExecutionStrategy[In, Out](ABC):
- *   @abstractmethod
- *   def execute(
- *     self,
- *     transformer_logic: InternalTransformer[In, Out],
- *     chunks: Iterator[list[In]],
- *     context: IContextManager,
- *   ) -> Iterator[list[Out]]:
- *     ...
- * ```
+ * `sequential` — one chunk at a time, in order. A custom strategy: `async function* (logic, chunks,
+ * ctx) { for await (const chunk of chunks) yield logic(chunk, ctx); }` (the same body `sequential`
+ * itself has).
  */
-export interface ExecutionStrategy<In, Out> {
-  /**
-   * Execute the transformer logic on chunks.
-   *
-   * @param transformerLogic - Function that processes a single chunk
-   * @param chunks - Async iterable of input chunks
-   * @param context - Shared context manager
-   * @returns Async generator of output chunks
-   */
-  execute(
-    transformerLogic: InternalTransformer<In, Out>,
-    chunks: AsyncIterable<In[]>,
-    context: IContextManager,
-  ): AsyncGenerator<Out[]>;
-
-  /**
-   * Capability flag, read GENERICALLY by `Pipeline.apply()` to decide whether a knob
-   * (`withExecutor`/`withHooks`/`chunkSize`) is honored when the pipeline is iterated as a laygo
-   * source (the async-iteration path bypasses `Transformer.execute`, so only a strategy that runs
-   * chunk-by-chunk with no concurrency/ordering machinery of its own can be silently correct
-   * there). `SequentialStrategy.appliesInSourcePosition === true`; `ConcurrentStrategy` and any
-   * other custom strategy default to `false` — routing never inspects `instanceof`/`.name`.
-   */
-  readonly appliesInSourcePosition: boolean;
-}
+export type ExecutionStrategy<In, Out> = (
+  transformerLogic: InternalTransformer<In, Out>,
+  chunks: AsyncIterable<In[]>,
+  context: IContextManager,
+) => AsyncGenerator<Out[]>;
 
 /**
  * Branch definition for Pipeline.branch() routing.
@@ -253,50 +227,6 @@ export interface BranchOptions {
    */
   firstMatch?: boolean;
 }
-
-// ===== Executor Registry Types (Proposal C) =====
-
-/**
- * Built-in executor type identifiers.
- */
-export type ExecutorType = "sequential" | "concurrent";
-
-/**
- * Options for executor creation.
- */
-export interface ExecutorOptions {
-  /**
-   * Maximum concurrency level (for concurrent executor).
-   */
-  maxConcurrency?: number;
-
-  /**
-   * Whether to maintain input order in output.
-   */
-  ordered?: boolean;
-}
-
-/**
- * Factory interface for creating execution strategies.
- */
-export interface ExecutorFactory<In = unknown, Out = unknown> {
-  /**
-   * Create an execution strategy with the given options.
-   */
-  create(options?: ExecutorOptions): ExecutionStrategy<In, Out>;
-}
-
-/**
- * Custom executor specification for user-provided strategies.
- */
-export interface CustomExecutor<In, Out> {
-  custom: ExecutionStrategy<In, Out>;
-}
-
-/**
- * Executor specification - either a built-in type or custom executor.
- */
-export type ExecutorSpec<In, Out> = ExecutorType | CustomExecutor<In, Out>;
 
 /**
  * Lifecycle hooks for transformer execution.

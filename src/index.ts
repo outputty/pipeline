@@ -20,11 +20,6 @@ export type {
   TransformerOptions,
   ConcurrentStrategyOptions,
   ReduceOptions,
-  ExecutorType,
-  ExecutorOptions,
-  ExecutorFactory,
-  CustomExecutor,
-  ExecutorSpec,
   TransformerLifecycleHooks,
 } from "./types";
 export { DEFAULT_CHUNK_SIZE } from "./types";
@@ -39,9 +34,8 @@ export { ErrorHandler } from "./errors/handler";
 export { buildChunkGenerator, normalize, isContextAware, isContextAwareReduce } from "./utils";
 
 // Strategies
-export { SequentialStrategy } from "./strategies/sequential";
-export { ConcurrentStrategy } from "./strategies/concurrent";
-export { registerExecutor, createStrategy } from "./strategies/registry";
+export { sequential } from "./strategies/sequential";
+export { concurrent } from "./strategies/concurrent";
 
 // Transformer
 export { Transformer } from "./transformer";
@@ -50,4 +44,4 @@ export { Transformer } from "./transformer";
 export { Pipeline, type PipelineOptions, type PipelineSource } from "./pipeline";
 
 // Factory functions
-export { createTransformer, createConcurrentTransformer } from "./factories";
+export { createTransformer } from "./factories";

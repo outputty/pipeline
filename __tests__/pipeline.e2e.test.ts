@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
+import { concurrent } from "@src/strategies/concurrent";
 import { SimpleContextManager } from "@src/context/simple";
 
 describe("Pipeline", () => {
@@ -497,7 +498,7 @@ describe("Pipeline", () => {
     it("a pipeline carrying withExecutor raises naming the knob when iterated directly (m.from position)", async () => {
       const transformer = new Transformer<number, number>()
         .map((x: number) => x * 2)
-        .withExecutor("concurrent", { maxConcurrency: 8 });
+        .withExecutor(concurrent({ maxConcurrency: 8 }));
       const pipeline = new Pipeline([1, 2, 3]).apply(transformer);
 
       await expect(async () => {
@@ -519,7 +520,7 @@ describe("Pipeline", () => {
     it("withExecutor is NOT inert through a terminal op (.toArray() calls Transformer.execute)", async () => {
       const transformer = new Transformer<number, number>()
         .map((x: number) => x * 2)
-        .withExecutor("concurrent", { maxConcurrency: 8 });
+        .withExecutor(concurrent({ maxConcurrency: 8 }));
       const results = await new Pipeline([1, 2, 3]).apply(transformer).toArray();
       expect(results.slice().sort((a, b) => a - b)).toEqual([2, 4, 6]);
     });

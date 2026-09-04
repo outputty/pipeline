@@ -25,8 +25,6 @@ import type {
   PipelineFunction,
   PipelineReduceFunction,
   ReduceOptions,
-  ExecutorSpec,
-  ExecutorOptions,
   TransformerLifecycleHooks,
   ChunkerFunction,
 } from "./types";
@@ -34,9 +32,8 @@ import { DEFAULT_CHUNK_SIZE } from "./types";
 import { buildChunkGenerator } from "./utils/chunk";
 import { SimpleContextManager } from "./context/simple";
 import { ErrorHandler, type ChunkErrorHandler } from "./errors/handler";
-import { SequentialStrategy } from "./strategies/sequential";
+import { sequential } from "./strategies/sequential";
 import { isContextAware, isContextAwareReduce } from "./utils/helpers";
-import { createStrategy } from "./strategies/registry";
 
 /**
  * A reusable, composable stage: `In` items in, `Out` items out, applied chunk by chunk. Built by
@@ -70,6 +67,12 @@ export class Transformer<In, Out> {
    * custom chunker the async-iteration path can't honor, the same way it reads `hooks`/`strategy`. */
   readonly chunker?: ChunkerFunction<In>;
 
+  /** Whether `.withExecutor()` was ever called on this chain — `ExecutionStrategy` is a plain
+   * function now, with no capability flag of its own to read generically, so this is the marker
+   * `inertKnobsOf` (`pipeline.ts`) checks instead. Forwarded at every copy-on-write rebuild site
+   * EXCEPT `.catch()`'s fresh `tempTransformer`, which is discarded, not returned to the caller. */
+  readonly executorApplied: boolean;
+
   /** Function to break input into chunks — `chunker` if set, else built from `chunkSize` */
   private chunkGenerator: ChunkerFunction<In>;
 
@@ -81,6 +84,7 @@ export class Transformer<In, Out> {
       hooks?: TransformerLifecycleHooks<In, Out>;
       errorHandler?: ErrorHandler<In>;
       chunker?: ChunkerFunction<In>;
+      executorApplied?: boolean;
     },
   ) {
     this.chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
@@ -89,7 +93,8 @@ export class Transformer<In, Out> {
     this.chunker = options?.chunker;
     this.chunkGenerator = this.chunker ?? buildChunkGenerator(this.chunkSize);
     this.defaultContext = new SimpleContextManager();
-    this.strategy = options?.strategy ?? new SequentialStrategy<In, Out>();
+    this.strategy = options?.strategy ?? sequential<In, Out>;
+    this.executorApplied = options?.executorApplied ?? false;
     this.hooks = options?.hooks;
   }
 
@@ -120,6 +125,7 @@ export class Transformer<In, Out> {
       transform: this.transform,
       errorHandler: this.errorHandler,
       chunker: this.chunker,
+      executorApplied: this.executorApplied,
       hooks,
     });
   }
@@ -140,7 +146,7 @@ export class Transformer<In, Out> {
    * def __call__(self, data: Iterable[In], context: IContextManager | None = None) -> Iterator[Out]:
    *   run_context = context if context is not None else self._default_context
    *   chunks = self._chunk_generator(data)
-   *   transformed_chunks = self.strategy.execute(self.transformer, chunks, run_context)
+   *   transformed_chunks = self.strategy(self.transformer, chunks, run_context)
    *   for chunk in transformed_chunks:
    *     yield from chunk
    * ```
@@ -181,10 +187,10 @@ export class Transformer<In, Out> {
 
       if (hasItemHooks) {
         const wrappedTransform = this.wrapTransformForItemHooks(itemCounter);
-        const transformedChunks = this.strategy.execute(wrappedTransform, chunks, runContext);
+        const transformedChunks = this.strategy(wrappedTransform, chunks, runContext);
         yield* this.drainChunks(transformedChunks);
       } else {
-        const transformedChunks = this.strategy.execute(this.transform, chunks, runContext);
+        const transformedChunks = this.strategy(this.transform, chunks, runContext);
         yield* this.drainChunks(transformedChunks, () => itemCounter.index++);
       }
 
@@ -330,6 +336,7 @@ export class Transformer<In, Out> {
       // silently dropping the configuration this pipe() call would otherwise discard.
       errorHandler: this.errorHandler,
       chunker: this.chunker,
+      executorApplied: this.executorApplied,
       // Note: hooks are NOT preserved through pipe() since types change Out -> U
       // Use withHooks() at the end of the chain
     });
@@ -533,6 +540,7 @@ export class Transformer<In, Out> {
       transform: this.transform,
       hooks: this.hooks,
       chunker: this.chunker,
+      executorApplied: this.executorApplied,
       errorHandler,
     });
   }
@@ -565,6 +573,7 @@ export class Transformer<In, Out> {
       transform: this.transform,
       hooks: this.hooks,
       errorHandler: this.errorHandler,
+      executorApplied: this.executorApplied,
       chunker,
     });
   }
@@ -818,30 +827,30 @@ export class Transformer<In, Out> {
   // ===== Executor Configuration =====
 
   /**
-   * Create a new Transformer with a different execution strategy.
-   *
-   * This method allows switching between execution strategies (sequential,
-   * concurrent, or custom) while preserving the current transformation chain.
+   * Create a new Transformer with a different execution strategy, preserving the current
+   * transformation chain. `strategy` is a plain `ExecutionStrategy` function — a built-in
+   * (`sequential`/`concurrent(options)`) or a caller's own — never a name or a spec object, so
+   * there is nothing else to register or look up.
    *
    * Usage:
    * ```typescript
    * // Use concurrent execution with 8 workers
    * const transformer = createTransformer<number>()
    *   .map(x => x * 2)
-   *   .withExecutor('concurrent', { maxConcurrency: 8 })
+   *   .withExecutor(concurrent({ maxConcurrency: 8 }))
    *
    * // Use a custom executor
    * const transformer = createTransformer<number>()
    *   .map(x => x * 2)
-   *   .withExecutor({ custom: myCustomStrategy })
+   *   .withExecutor(async function* (logic, chunks, ctx) {
+   *     for await (const chunk of chunks) yield logic(chunk, ctx);
+   *   })
    * ```
    *
-   * @param spec - Executor type ('sequential', 'concurrent') or custom executor
-   * @param options - Options for the executor (maxConcurrency, ordered)
+   * @param strategy - The execution strategy to switch to
    * @returns New Transformer with the specified execution strategy
    */
-  withExecutor(spec: ExecutorSpec<In, Out>, options?: ExecutorOptions): Transformer<In, Out> {
-    const strategy = createStrategy<In, Out>(spec, options);
+  withExecutor(strategy: ExecutionStrategy<In, Out>): Transformer<In, Out> {
     return new Transformer<In, Out>({
       strategy,
       chunkSize: this.chunkSize,
@@ -849,6 +858,7 @@ export class Transformer<In, Out> {
       hooks: this.hooks,
       errorHandler: this.errorHandler,
       chunker: this.chunker,
+      executorApplied: true,
     });
   }
 }
