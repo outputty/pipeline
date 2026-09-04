@@ -80,9 +80,31 @@ it stays correct when consumed directly as an async source rather than through `
 `ConcurrentStrategy` and any caller-supplied custom strategy default `false`, since routing this way
 reads the flag generically - never an `instanceof` or `.name` check.
 
+`ConcurrentStrategy` bounds CHUNKS, not items: `maxConcurrency` chunks are in flight and every item
+inside a chunk runs together, so a chain's items in flight is `chunkSize` times `maxConcurrency`.
+Measured peak simultaneous callbacks, N=5000 (`10x10` 100, `50x4` 200, `100x3` 300, `1000x1` 1000,
+`7x11` 77) - the product exactly, including coprime factors. How the product is split does not
+change throughput: five pairs with product 16 over a 2 ms-per-item workload ran 377-402 ms.
+
 `src/strategies/registry.ts`'s `createStrategy(spec, options?)` resolves a `.withExecutor()` call's
 spec (a built-in name or `{custom: strategy}`) to a concrete instance; `registerExecutor` lets a caller
 add a named built-in of their own alongside `"sequential"`/`"concurrent"`.
+
+## Benchmarks (pending #11)
+
+`benchmarks/` is a separate project, outside the pnpm workspace, that installs its comparators once
+in a `deps` image and runs them on six pinned runtimes: `node:20/22/24/26-alpine`,
+`oven/bun:1.3.14-alpine`, `denoland/deno:alpine`. It consumes the package the way a consumer does -
+`npm pack` to a tarball, installed by `file:` reference - so `exports` and the `files` allowlist are
+exercised rather than bypassed.
+
+Two tables. The first times `map` then `filter` then `toArray` at 10k, 100k, 1M and 10M rows across
+every chaining surface: `Array.prototype`, `Iterator.prototype`, `node:stream` `Readable`, Web
+Streams `pipeThrough`, a hand-written `async function*`, this package, and `ix` /
+`streaming-iterables` / `effect` / `rxjs`. The second controls ITEMS IN FLIGHT rather than any
+declared concurrency option, because no two libraries name that knob the same way and this package
+reaches it through `chunkSize`; the harness asserts each leg's measured peak equals the target
+before recording a time.
 
 ## Constraints in dependencies
 

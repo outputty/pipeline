@@ -9,8 +9,13 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-None yet - this repo's own tracker starts empty at the split (`outputty/laygo` #745). The next two
-candidates, not yet filed:
+- **Cross-runtime benchmarks** (#11, blocked by #5) - the package ships no numbers, so nothing
+  compares it against `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream
+  helpers, and a hot-path change has no baseline to regress against. Now, because #5 rewrites the
+  per-chunk hot path and any number taken before it lands is invalidated by it. Six pinned runtimes
+  in Docker, two tables, results committed as JSON.
+
+The next two candidates, not yet filed:
 
 - An executable docs harness mirroring `outputty/laygo`'s `docs-examples.test.ts`: every `<!-- compiles
   -->`/`<!-- illustrative -->` fence in `product.md`/`architecture.md`/`README.md` is hand-verified

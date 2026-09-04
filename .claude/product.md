@@ -73,6 +73,19 @@ const enrich = new Transformer<number, unknown>()
   .map(async (id: number) => (await fetch(`/api/users/${id}`)).json());
 ```
 
+The chunk is the unit of concurrency, so a chain's parallelism is `chunkSize` times
+`maxConcurrency`, never `maxConcurrency` alone. The example above holds 3000 requests in flight at
+the default `chunkSize` of 1000, not 3. Lower `chunkSize` to lower the ceiling.
+
+> **Items in flight** - the number of callbacks a chain runs at once: `chunkSize` times
+> `maxConcurrency`. `maxConcurrency` bounds chunks; the items inside one chunk run together.
+
+| `chunkSize` | `maxConcurrency` | items in flight |
+| --- | --- | --- |
+| 1000 | 1 | 1000 |
+| 100 | 3 | 300 |
+| 1 | 16 | 16 |
+
 ### Context
 
 A shared key-value store threads through every stage of a chain, so a downstream `map` can read a

@@ -156,6 +156,11 @@ family, the dist-linked self-reference typecheck harness) and none of it survive
   generically - true only for a strategy with no concurrency/ordering machinery of its own, so it stays
   correct when a `Transformer` is iterated directly as an async source rather than through
   `.execute()`.
+- **Items in flight** - the number of transform callbacks a chain runs at once: `chunkSize` times
+  `maxConcurrency`. `maxConcurrency` bounds chunks, and the items inside one chunk run together, so
+  `chunkSize: 1000, maxConcurrency: 1` holds 1000 in flight while `chunkSize: 1, maxConcurrency: 16`
+  holds 16. It is the quantity a cross-library comparison controls, because every other streaming
+  library bounds items directly and none of them names the knob the same way.
 - **Executor registry** - `src/strategies/registry.ts`'s `ExecutorFactory`/`CustomExecutor`/
   `ExecutorSpec` machinery resolving a `.withExecutor()` spec (a built-in name or a caller's own
   `ExecutionStrategy`) to a concrete strategy instance.

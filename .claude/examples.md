@@ -62,6 +62,37 @@ const t = new Transformer<string, string>()
   .map((s: string) => s.toUpperCase());
 ```
 
+## Case 2b - items in flight
+
+`maxConcurrency` bounds chunks, and every item inside a chunk runs together, so the callbacks
+actually running at once is `chunkSize` times `maxConcurrency`. Both chains below hold 16 in flight.
+
+<!-- illustrative -->
+
+```ts
+import { Pipeline, Transformer } from "@outputty/pipeline";
+
+const wide = new Transformer<number, number>({ chunkSize: 16 })
+  .withExecutor("concurrent", { maxConcurrency: 1 })
+  .map(async (x: number) => x * 2);
+
+const deep = new Transformer<number, number>({ chunkSize: 1 })
+  .withExecutor("concurrent", { maxConcurrency: 16 })
+  .map(async (x: number) => x * 2);
+```
+
+Measured peak simultaneous callbacks, per `(chunkSize, maxConcurrency)` pair, N=5000:
+
+```json
+[
+  { "chunkSize": 10, "maxConcurrency": 10, "measuredPeak": 100 },
+  { "chunkSize": 50, "maxConcurrency": 4, "measuredPeak": 200 },
+  { "chunkSize": 100, "maxConcurrency": 3, "measuredPeak": 300 },
+  { "chunkSize": 1000, "maxConcurrency": 1, "measuredPeak": 1000 },
+  { "chunkSize": 7, "maxConcurrency": 11, "measuredPeak": 77 }
+]
+```
+
 ## Case 3 - branching
 
 One source, several named sub-chains, routed by predicate.
