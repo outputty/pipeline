@@ -2,8 +2,6 @@
 
 Async streaming data processing pipelines with chunking and concurrency control.
 
-Migrated from [laygo-python](https://github.com/ringoldsdev/laygo-python).
-
 ## Installation
 
 ```bash
@@ -29,7 +27,7 @@ console.log(data); // [6, 8, 10]
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  LAYGO ARCHITECTURE                                                     │
+│  PIPELINE ARCHITECTURE                                                  │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐          │
@@ -195,7 +193,7 @@ const totals = await new Pipeline(orders)
 
 ## Chunking
 
-Laygo processes data in chunks for efficiency:
+This library processes data in chunks for efficiency:
 
 <!-- compiles -->
 
@@ -375,7 +373,7 @@ See [Strategy Documentation](./docs/strategies/) for details:
 
 ## Comparison with JSON Graph
 
-Laygo provides a more ergonomic API than JSON-based graph definitions:
+This package provides a more ergonomic API than JSON-based graph definitions:
 
 <!-- illustrative -->
 
@@ -390,7 +388,7 @@ const graph = {
 };
 execute(graph, { id: 123 });
 
-// Laygo approach
+// @outputty/pipeline approach
 new Pipeline([123])
   .transform((t) =>
     t
@@ -401,7 +399,7 @@ new Pipeline([123])
   .toArray();
 ```
 
-Benefits of Laygo:
+Benefits:
 
 - **Type safety** - Full TypeScript support with generics
 - **Composability** - Build reusable transformers
