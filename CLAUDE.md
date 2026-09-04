@@ -149,16 +149,19 @@ family, the dist-linked self-reference typecheck harness) and none of it survive
 - **Chunk** - the streaming unit a `Transformer` actually operates on: `In[]`/`Out[]`, sized by
   `TransformerOptions.chunkSize` (default `DEFAULT_CHUNK_SIZE = 1000`). A `ChunkerFunction<T>` breaks
   an `AsyncIterable<T>` into chunks; an `InternalTransformer<In, Out>` processes one chunk at a time.
-- **Execution strategy** - the `ExecutionStrategy<In, Out>` interface deciding HOW a chunk stream is
-  processed: `SequentialStrategy` (default, one chunk at a time, order-preserving) and
-  `ConcurrentStrategy` (`{maxConcurrency, ordered}`), selected via `.withExecutor("sequential" |
-  "concurrent" | {custom})`. `appliesInSourcePosition` is the one capability flag routing reads
-  generically - true only for a strategy with no concurrency/ordering machinery of its own, so it stays
-  correct when a `Transformer` is iterated directly as an async source rather than through
-  `.execute()`.
-- **Executor registry** - `src/strategies/registry.ts`'s `ExecutorFactory`/`CustomExecutor`/
-  `ExecutorSpec` machinery resolving a `.withExecutor()` spec (a built-in name or a caller's own
-  `ExecutionStrategy`) to a concrete strategy instance.
+- **Execution strategy** - the FUNCTION TYPE `ExecutionStrategy<In, Out> = (transformerLogic, chunks,
+  context) => AsyncGenerator<Out[]>`, deciding HOW a chunk stream is processed. Never a class and never
+  an interface with an `execute` method: it sits beside the five other function-typed seams in
+  `types.ts`, and `ChunkerFunction` is its direct shape sibling. `sequential` is the default, one bare
+  `async function*`; `concurrent(options)` is a closure factory over `{maxConcurrency, ordered}` and
+  the ONE owner of those defaults. `.withExecutor(strategy)` takes the function, so a caller's own
+  strategy is an `async function*` written inline - an arrow can never be a generator, so it is always
+  `async function*`. (#5)
+- **Source position** - the `Pipeline` drain path that does NOT run the strategy: async iteration
+  (`m.from(pipeline)`) replays each transform's plain function from `chunkTransforms` and never calls
+  `Transformer.execute()`. `inertKnobsOf` (`pipeline.ts`) throws there rather than run silently
+  sequential, by asking the `Transformer` whether `.withExecutor()` was called. It replaced an
+  `appliesInSourcePosition` flag on the strategy, which had exactly one true implementation. (#5)
 - **Context / `IContextManager`** - the shared key-value store threading through a pipeline run:
   `.get()`/`.set()`/`.getOrDefault()`/`.toDict()`. `SimpleContext` is the one shipped implementation.
   Every `PipelineFunction`/`PipelineReduceFunction` callback receives it as an optional second
