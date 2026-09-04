@@ -9,15 +9,7 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **The execution-strategy seam, and a typechecked test suite** (#5) - `ExecutionStrategy` becomes a
-  function type, so a caller's strategy is an `async function*` with nothing to implement and nothing
-  to register. Now, because `tsconfig.json` excludes `__tests__`: `pnpm check` never typechecks the
-  suite, and it hides 12 errors from 5 causes. Two of those are the seam itself, and the other three
-  are consumer-facing defects nobody could see - hooks returning `void | Promise<void>`, `loop`'s
-  union-of-arities condition, and `new Transformer<In, Out>()` claiming a conversion it never makes.
-  The gate ships in the same ticket, so the suite cannot drift again.
-
-The next two candidates, not yet filed:
+None yet. The next two candidates, not yet filed:
 
 - An executable docs harness mirroring `outputty/laygo`'s `docs-examples.test.ts`: every `<!-- compiles
   -->`/`<!-- illustrative -->` fence in `product.md`/`architecture.md`/`README.md` is hand-verified
@@ -34,10 +26,17 @@ The next two candidates, not yet filed:
   a terminal op resolves; #744 swept every caller and test onto the new shape; #745 deleted the package
   from `outputty/laygo` and flattened laygo itself to a single-package repo.
 - **Core chunked-transform engine** - `Pipeline`, `Transformer`, chunking, the sequential and
-  concurrent execution strategies, `SimpleContextManager`, `.catch()` chunk-level error handling, `.branch()` /
-  `Pipeline.merge()`, lifecycle hooks. Migrated from
+  concurrent execution strategies, `SimpleContextManager`, `.catch()` chunk-level error handling,
+  `.branch()` / `Pipeline.merge()`, lifecycle hooks. Migrated from
   [laygo-python](https://github.com/ringoldsdev/laygo-python), async-first, before this repo's own
   tracker existed - no ticket number.
+- **The execution-strategy seam as a function type** (#5) - `ExecutionStrategy<In, Out>` moved from a
+  class-implementing interface (with its own closed, name-keyed executor registry) to a plain function
+  type: `sequential`/`concurrent(options?)` replace the classes, a caller's own strategy is the same
+  shape with no cast or registration, and `__tests__/` is typechecked for the first time. Also closed
+  three related consumer-facing defects the untypechecked suite had hidden: `TransformerLifecycleHooks`
+  callbacks, `loop`'s `condition` arity, and `Transformer`'s constructor accepting a mismatched
+  `In`/`Out` with no `transform`. PRs #7, #8, #10, #12.
 
 ## Killed
 
@@ -51,7 +50,7 @@ The next two candidates, not yet filed:
   passing the function already covers, backed by process-wide mutable state with no per-test reset.
 - **`appliesInSourcePosition` on `ExecutionStrategy`** (#5) - a flag with exactly one true
   implementation, which made every other strategy declare a line whose only correct value was `false`.
-  `inertKnobsOf` asks the `Transformer` whether `.withExecutor()` was called instead.
+  `inertKnobsOf` compares `transformer.strategy` against the built-in `sequential` by reference instead.
 - **`createConcurrentTransformer`** (#5) - `createTransformer(chunkSize).withExecutor(concurrent(...))`
   says the same thing, and the helper was the last duplicate of the `maxConcurrency: 4 / ordered: true`
   defaults that `concurrent()` owns.

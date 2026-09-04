@@ -94,16 +94,16 @@ Control how chunks are processed:
 <!-- compiles -->
 
 ```typescript
-import { Transformer } from "@outputty/pipeline";
+import { Transformer, sequential, concurrent } from "@outputty/pipeline";
 
 // Sequential (default) - one chunk at a time
-const sequential = new Transformer<string, string>()
-  .withExecutor("sequential")
+const sequentialUppercase = new Transformer<string, string>()
+  .withExecutor(sequential)
   .map((s: string) => s.toUpperCase());
 
 // Concurrent - parallel with limits
-const concurrent = new Transformer<string, string>()
-  .withExecutor("concurrent", { maxConcurrency: 10 })
+const concurrentUppercase = new Transformer<string, string>()
+  .withExecutor(concurrent({ maxConcurrency: 10 }))
   .map((s: string) => s.toUpperCase());
 ```
 
@@ -141,7 +141,7 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.reduce(fn, initial)`** - reduce to single value.
 - **`.tap(fn)`** - execute side-effect without changing data.
 - **`.catch(build, onError?)`** - run a sub-chain, handling its errors.
-- **`.withExecutor(spec, options?)`** - set execution strategy.
+- **`.withExecutor(strategy)`** - set execution strategy (a function - `sequential`, `concurrent(options?)`, or your own).
 
 ### Context-Aware Functions
 
@@ -262,7 +262,7 @@ console.log(data.odds); // [1, 3, 5]
 <!-- compiles -->
 
 ```typescript
-import { Pipeline } from "@outputty/pipeline";
+import { Pipeline, concurrent } from "@outputty/pipeline";
 
 interface User {
   id: number;
@@ -271,7 +271,7 @@ interface User {
 
 const enrichedUsers = await new Pipeline([1, 2, 3, 4, 5])
   .transform((t) =>
-    t.withExecutor("concurrent", { maxConcurrency: 3 }).map(async (id: number): Promise<User> => {
+    t.withExecutor(concurrent({ maxConcurrency: 3 })).map(async (id: number): Promise<User> => {
       const res = await fetch(`/api/users/${id}`);
       return (await res.json()) as User;
     }),
@@ -313,7 +313,7 @@ console.log(stats);
 <!-- illustrative -->
 
 ```typescript
-import { Pipeline } from "@outputty/pipeline";
+import { Pipeline, concurrent } from "@outputty/pipeline";
 import type { IContextManager } from "@outputty/pipeline";
 
 interface LLM {
@@ -324,7 +324,7 @@ const summaries = await new Pipeline(documents)
   .context({ llm: myLlmInstance })
   .transform((t) =>
     t
-      .withExecutor("concurrent", { maxConcurrency: 5, ordered: true })
+      .withExecutor(concurrent({ maxConcurrency: 5, ordered: true }))
       .map(async (doc: Document, ctx: IContextManager) => {
         const llm = ctx.get("llm") as LLM;
         const summary = await llm.complete(`Summarize: ${doc.content}`);
@@ -367,9 +367,8 @@ const processed = await new Pipeline(rawFiles)
 
 See [Strategy Documentation](./docs/strategies/) for details:
 
-- [SequentialStrategy](./docs/strategies/sequential.md)
-- [ConcurrentStrategy](./docs/strategies/concurrent.md)
-- [Executor Registry](./docs/strategies/registry.md)
+- [sequential](./docs/strategies/sequential.md)
+- [concurrent](./docs/strategies/concurrent.md)
 
 ## Comparison with JSON Graph
 

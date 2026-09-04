@@ -8,9 +8,16 @@
 
 ## Executive Summary
 
-This document evaluates approaches to implementing **true multi-core parallelism** as a custom execution strategy in laygo. Our current `ConcurrentStrategy` uses `p-limit` for concurrency control, but this only provides **async concurrency** on a single thread (the Node.js event loop). True parallelism requires `worker_threads` or `child_process`.
+This document evaluates approaches to implementing **true multi-core parallelism** as a custom execution strategy in laygo. Our current `concurrent()` uses `p-limit` for concurrency control, but this only provides **async concurrency** on a single thread (the Node.js event loop). True parallelism requires `worker_threads` or `child_process`.
 
 ---
+
+**Note (2026-09-04):** the class-shaped `WorkerPoolStrategy implements ExecutionStrategy<In, Out>` and
+its `.execute()` method below predate `ExecutionStrategy`'s move from a class-implementing interface to
+a plain function type (#5). `ExecutionStrategy<In, Out>` is now `(transformerLogic, chunks, context) =>
+AsyncGenerator<Out[]>` - a class can no longer `implements` it. Building this proposal for real means a
+factory function returning that shape, the same pattern `concurrent(options?)` already uses, with the
+pool held in a closure instead of an instance field.
 
 ## Understanding the Problem
 
@@ -18,7 +25,7 @@ This document evaluates approaches to implementing **true multi-core parallelism
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  CURRENT: ConcurrentStrategy with p-limit                               │
+│  CURRENT: concurrent() with p-limit                               │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  Main Thread (Event Loop)                                               │
@@ -54,15 +61,15 @@ This document evaluates approaches to implementing **true multi-core parallelism
 
 ### When Is Multi-Core Parallelism Beneficial?
 
-- **I/O-bound** (HTTP, file reads) - Current ConcurrentStrategy: ✅ Excellent. WorkerThread
+- **I/O-bound** (HTTP, file reads) - Current concurrent(): ✅ Excellent. WorkerThread
   Strategy: ❌ Overhead hurts.
-- **CPU-bound** (parsing, crypto) - Current ConcurrentStrategy: ❌ Sequential. WorkerThread
+- **CPU-bound** (parsing, crypto) - Current concurrent(): ❌ Sequential. WorkerThread
   Strategy: ✅ True parallel.
-- **Mixed I/O + CPU** - Current ConcurrentStrategy: 🟡 Partial benefit. WorkerThread Strategy: ✅
+- **Mixed I/O + CPU** - Current concurrent(): 🟡 Partial benefit. WorkerThread Strategy: ✅
   Full benefit.
-- **Small data volume** - Current ConcurrentStrategy: ✅ Low overhead. WorkerThread Strategy: ❌
+- **Small data volume** - Current concurrent(): ✅ Low overhead. WorkerThread Strategy: ❌
   Thread overhead.
-- **Large data volume** - Current ConcurrentStrategy: 🟡 Event loop blocks. WorkerThread Strategy:
+- **Large data volume** - Current concurrent(): 🟡 Event loop blocks. WorkerThread Strategy:
   ✅ Scales to cores.
 
 ---
@@ -571,7 +578,7 @@ export default transform;
 ### Usage Example
 
 ```typescript
-import { Transformer, WorkerPoolStrategy, SequentialStrategy } from "@outputty/pipeline";
+import { Transformer, WorkerPoolStrategy, sequential } from "@outputty/pipeline";
 
 // Create strategy pointing to worker file
 const workerStrategy = new WorkerPoolStrategy({
@@ -583,7 +590,7 @@ const pipeline = Transformer.from([1, 2, 3, 4, 5])
   .map((x) => x * 2) // Main thread
   .withExecutor(workerStrategy) // Switch to workers
   .batched() // Worker processes batches
-  .withExecutor(new SequentialStrategy()) // Back to main thread
+  .withExecutor(sequential) // Back to main thread
   .filter((x) => x > 5);
 
 const results = await pipeline.collect();
@@ -673,5 +680,5 @@ await workerStrategy.destroy();
 2. [ ] Create worker file template
 3. [ ] Add TypeScript type checking for worker↔main contract
 4. [ ] Write comprehensive tests (CPU-bound workloads)
-5. [ ] Benchmark against ConcurrentStrategy
+5. [ ] Benchmark against concurrent()
 6. [ ] Document usage and limitations

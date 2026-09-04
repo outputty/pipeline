@@ -50,19 +50,17 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 
 ## Case 2 - concurrent execution
 
-The same chain shape, run with a bounded concurrency instead of sequentially.
+The same chain shape, run with a bounded concurrency instead of sequentially. `.withExecutor()` takes
+the strategy directly - a function, never a name - so `sequential`/`concurrent(options?)` and a
+caller's own strategy are all the same shape.
 
 <!-- illustrative -->
 
 ```ts
-import { Pipeline, Transformer, concurrent } from "@outputty/pipeline";
+import { Pipeline, concurrent } from "@outputty/pipeline";
 
 const data = await new Pipeline(["a", "b", "c"])
-  .apply(
-    new Transformer<string, string>()
-      .withExecutor(concurrent({ maxConcurrency: 10 }))
-      .map((s: string) => s.toUpperCase()),
-  )
+  .transform((t) => t.withExecutor(concurrent({ maxConcurrency: 10 })).map((s) => s.toUpperCase()))
   .toArray();
 ```
 
@@ -73,16 +71,16 @@ const data = await new Pipeline(["a", "b", "c"])
 ## Case 2b - a strategy of your own
 
 A strategy is a function. Writing one takes no class, no interface to implement and no registration -
-this one drops every second chunk.
+this one drops every second CHUNK, not every second item, so `chunkSize` decides what "second" means.
 
 <!-- illustrative -->
 
 ```ts
 import { Pipeline, Transformer } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3])
+const data = await new Pipeline([1, 2, 3, 4])
   .apply(
-    new Transformer<number, number>()
+    new Transformer<number, number>({ chunkSize: 1 })
       .withExecutor(async function* (logic, chunks, ctx) {
         let n = 0;
         for await (const chunk of chunks) {
@@ -96,7 +94,7 @@ const data = await new Pipeline([1, 2, 3])
 ```
 
 ```json
-[2, 4, 6]
+[2, 6]
 ```
 
 ## Case 3 - branching

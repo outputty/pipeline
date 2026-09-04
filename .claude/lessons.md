@@ -7,6 +7,42 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-04 A deferred conditional type never resolves inside its own abstract scope
+
+`Transformer`'s constructor tried gating a mismatched `In`/`Out` with no `transform` via a single
+conditional-tuple overload (`In extends Out ? [options?] : never`), verified in isolated probes against
+concrete types. It failed at every internal call site still holding `In`/`Out` abstract - the class's own
+methods, and even `.catch()`'s `tempTransformer` where both sides of `extends` were the literally same
+parameter (`Out extends Out`). TypeScript never distributes a deferred conditional over an unresolved
+type parameter. The fix, from a second `advisor` consult: a plain, non-conditional overload for "a real
+transform already in hand," ahead of the conditional one, so internal generic sites resolve against the
+first. `.claude/rules/typescript.md` now carries the rule.
+
+## 2026-09-04 An array literal widens inside a wrapping generic call, not just at its own site
+
+Ticket #5's `Pipeline.merge` Done-when example assumed `new Pipeline(["a","b"])` (no annotation) would
+carry `"a"|"b"` through `Pipeline.merge(...)`'s inferred return type. A real probe
+(`tmp/merge-literal-probe.ts`) showed the literal widens to `string` inside `merge`'s own arguments
+regardless of the outer assignment's target type - only an explicit annotation at the `Pipeline`
+construction site (`new Pipeline<"a" | "b">([...])`) preserves it. `merge`'s own `ElementOf<Ps[number]>`
+inference is correct once given explicitly-typed pipelines; reported the discrepancy on the ticket rather
+than silently rewriting its example. `.claude/rules/typescript.md` now carries the rule.
+
+## 2026-09-04 A ticket's "spiked and verified" claim missed the one signature that mattered most
+
+Ticket #5's Constraints claimed every Interface signature - the execution-strategy seam, `merge`'s
+`ElementOf` inference, the hooks/loop fixes, and `Transformer`'s constructor - "was spiked against real
+`src/` during planning, each spike asserting its failure cases with `@ts-expect-error`, and each
+returned clean." Re-spiking the constructor's own conditional-tuple design during build (per
+`~/.claude/rules/typescript.md`'s existing "extract a distributing conditional" rule) surfaced a real
+gap: a conditional type gating a constructor's OWN parameter never resolves inside any generic scope
+still holding its type parameters abstract, even where both sides of `extends` are the literally same
+parameter (`Out extends Out` inside `.catch()`'s own `tempTransformer` construction still failed) - a
+case the ticket's blanket "spiked" claim did not actually cover. The fix (a plain, non-conditional
+overload for "a real transform already in hand," ahead of the conditional one) came from a second
+`advisor` consult, not the ticket text. `~/.claude/rules/issues.md` now says a ticket's own
+verification claim is re-run as a probe during build, never trusted at face value.
+
 ## 2026-09-04 A spike's rejected rows were the design space, not settled negatives
 
 Planning #5, a spike enumerated five ways to author an execution strategy and asserted two of them
