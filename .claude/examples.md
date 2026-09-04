@@ -55,11 +55,48 @@ The same chain shape, run with a bounded concurrency instead of sequentially.
 <!-- illustrative -->
 
 ```ts
-import { Transformer } from "@outputty/pipeline";
+import { Pipeline, Transformer, concurrent } from "@outputty/pipeline";
 
-const t = new Transformer<string, string>()
-  .withExecutor("concurrent", { maxConcurrency: 10 })
-  .map((s: string) => s.toUpperCase());
+const data = await new Pipeline(["a", "b", "c"])
+  .apply(
+    new Transformer<string, string>()
+      .withExecutor(concurrent({ maxConcurrency: 10 }))
+      .map((s: string) => s.toUpperCase()),
+  )
+  .toArray();
+```
+
+```json
+["A", "B", "C"]
+```
+
+## Case 2b - a strategy of your own
+
+A strategy is a function. Writing one takes no class, no interface to implement and no registration -
+this one drops every second chunk.
+
+<!-- illustrative -->
+
+```ts
+import { Pipeline, Transformer } from "@outputty/pipeline";
+
+const data = await new Pipeline([1, 2, 3])
+  .apply(
+    new Transformer<number, number>()
+      .withExecutor(async function* (logic, chunks, ctx) {
+        let n = 0;
+        for await (const chunk of chunks) {
+          n += 1;
+          if (n % 2 === 1) yield logic(chunk, ctx);
+        }
+      })
+      .map((x) => x * 2),
+  )
+  .toArray();
+```
+
+```json
+[2, 4, 6]
 ```
 
 ## Case 3 - branching

@@ -58,19 +58,38 @@ const t = new Transformer<number, number>({ chunkSize: 100 }).map((x: number) =>
 
 ### Execution strategies
 
-A chain declares once whether its chunks run one at a time or in parallel with a concurrency limit; the
+A chain declares once whether its chunks run one at a time or in parallel with a concurrency limit. The
 chain itself - the `map`/`filter`/`reduce` calls - never changes between the two.
 
-> **Execution strategy** - `SequentialStrategy` (default, order-preserving, one chunk at a time) or
-> `ConcurrentStrategy` (`{maxConcurrency, ordered}`), selected via `.withExecutor("sequential" |
-> "concurrent" | {custom})`.
+A strategy is a function, not a class. `.withExecutor()` takes one, and a caller writes their own
+inline as an `async function*` with no type to implement and no registration step.
+
+> **Execution strategy** - a function `(transformerLogic, chunks, context) => AsyncGenerator<Out[]>`,
+> passed to `.withExecutor()`. `sequential` is the default: order-preserving, one chunk at a time.
+> `concurrent(options)` returns a strategy holding `{maxConcurrency, ordered}`.
+
+```ts
+import { Transformer, concurrent } from "@outputty/pipeline";
+
+const enrich = new Transformer<number, number>()
+  .withExecutor(concurrent({ maxConcurrency: 3 }))
+  .map(async (id) => (await fetch(`/api/users/${id}`)).json());
+```
+
+A caller's own strategy is the same function, written where it is used:
 
 ```ts
 import { Transformer } from "@outputty/pipeline";
 
-const enrich = new Transformer<number, unknown>()
-  .withExecutor("concurrent", { maxConcurrency: 3 })
-  .map(async (id: number) => (await fetch(`/api/users/${id}`)).json());
+const everyOther = new Transformer<number, number>()
+  .withExecutor(async function* (logic, chunks, ctx) {
+    let n = 0;
+    for await (const chunk of chunks) {
+      n += 1;
+      if (n % 2 === 1) yield logic(chunk, ctx);
+    }
+  })
+  .map((x) => x * 2);
 ```
 
 ### Context
@@ -104,7 +123,8 @@ into one - the two directions of composing whole pipelines rather than chaining 
 > `Transformer`; `BranchOptions.firstMatch` (default `true`) sends an item to the first matching branch
 > only, `false` broadcasts it to every match.
 > **Merge** - the static `Pipeline.merge(...pipelines)`: concatenates every source pipeline's data and
-> merges their contexts into one new `Pipeline`.
+> merges their contexts into one new `Pipeline`. Each pipeline's item type is inferred on its own, so
+> merging a `Pipeline<"a"|"b">` with a `Pipeline<"c"|"d">` gives a `Pipeline<"a"|"b"|"c"|"d">`.
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
