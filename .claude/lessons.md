@@ -7,6 +7,24 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-04 A shared knob name is not a shared quantity
+
+Planning #11's cross-runtime benchmark, I offered four priced ways to make a "concurrency 10" column
+fair across `Pipeline` and five comparators, before checking that the 10 meant the same thing in
+each. It did not: `Pipeline` bounds CHUNKS, so its in-flight count is `chunkSize` times
+`maxConcurrency`, while every comparator bounds items. The user stopped it - "Pipeline by definition
+operates on chunks" - and measuring settled it: peak in-flight is the product exactly, coprime
+factors included (`7x11` peaked at 77). The fix was not a fairness rule but a different controlled
+variable: measured items in flight, which every leg reaches through its own knob and which the
+harness asserts before recording a time. `chunkSize: 1`, the normalisation all four options rested
+on, turned out never to be needed - `chunkSize: 16, maxConcurrency: 1` hits the same 16 with
+chunking intact. Two rules came out of it, both in `~/.claude/rules/code.md`: measure that a number
+means the same in both implementations before pricing options that normalise it, and control a
+zero-hit search against a term the SAME package is known to contain (I had "proved" `ix` lacks
+bounded concurrency from a grep controlled on a sibling package; `ix` has
+`flatMap(selector, concurrent?)`). See `.claude/product.md`'s Execution strategies section and
+`.claude/examples.md` Case 2b for where the rule now lives as product truth.
+
 ## 2026-09-04 The package outgrew a callback-arity split before it outgrew a monorepo
 
 `outputty/laygo` carried this package as `packages/pipeline` inside its own pnpm workspace from the
