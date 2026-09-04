@@ -1,6 +1,6 @@
 {
   "name": "@outputty/pipeline",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Async streaming data processing pipelines with chunking and concurrency control",
   "type": "module",
   "engines": {
