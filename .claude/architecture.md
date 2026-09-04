@@ -83,8 +83,14 @@ reads the flag generically - never an `instanceof` or `.name` check.
 `ConcurrentStrategy` bounds CHUNKS, not items: `maxConcurrency` chunks are in flight and every item
 inside a chunk runs together, so a chain's items in flight is `chunkSize` times `maxConcurrency`.
 Measured peak simultaneous callbacks, N=5000 (`10x10` 100, `50x4` 200, `100x3` 300, `1000x1` 1000,
-`7x11` 77) - the product exactly, including coprime factors. How the product is split does not
-change throughput: five pairs with product 16 over a 2 ms-per-item workload ran 377-402 ms.
+`7x11` 77) and N=20000 (`1000x3` 3000) - the product exactly, including coprime factors.
+
+How the product is SPLIT is a throughput choice, not a parallelism one. Two pairs reaching the same
+16 in flight, N=50000, microtask-only work: `chunkSize:16 maxConcurrency:1` ran 36 ms and
+`chunkSize:1 maxConcurrency:16` ran 124 ms, because a chunk pays the per-chunk cost once and
+`chunkSize: 1` pays it per item. The gap closes when the callback dominates - the same pairs over a
+2 ms-per-item workload ran 377-402 ms, within noise. Prefer the widest chunk that fits the in-flight
+budget.
 
 `src/strategies/registry.ts`'s `createStrategy(spec, options?)` resolves a `.withExecutor()` call's
 spec (a built-in name or `{custom: strategy}`) to a concrete instance; `registerExecutor` lets a caller
