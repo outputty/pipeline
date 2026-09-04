@@ -116,9 +116,13 @@ export interface PipelineOptions {
  * `strategy` to that exact same function reference the constructor already defaults to, so it
  * reads as safe, same as never calling `.withExecutor()` at all; any other function reference
  * (`concurrent(...)`, a caller's own) is flagged, whether or not it happens to behave like
- * `sequential`. The chunker check reads `transformer.chunker` (public, set by `.setChunker()`) the
- * same way — never a chunk-generator identity comparison, which a rebuilt default generator would
- * fail anyway.
+ * `sequential` — a plain function carries no capability metadata of its own to ask instead, unlike
+ * the class-based `SequentialStrategy.appliesInSourcePosition` this seam replaced, so ONLY the
+ * built-in `sequential` export is ever recognized as source-position-safe. Matches the OLD design's
+ * own default: a strategy there was flagged unsafe unless it explicitly declared otherwise, and no
+ * custom strategy could inherit `sequential`'s safety without doing so itself either. The chunker
+ * check reads `transformer.chunker` (public, set by `.setChunker()`) the same way — never a
+ * chunk-generator identity comparison, which a rebuilt default generator would fail anyway.
  *
  * `inertKnobsOf(new Transformer().withExecutor(concurrent()))` → `["withExecutor"]`;
  * `inertKnobsOf(new Transformer().withExecutor(sequential))` → `[]`;
