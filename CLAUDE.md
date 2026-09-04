@@ -131,10 +131,11 @@ The canonical Language - one term per line, its definition, the synonyms it repl
 under **Language**. `product.md`'s quote blocks repeat these terms deliberately, trimmed to
 product-reader depth; this copy keeps the full implementation nuance a session needs.
 
-Repo-specific rules live in `.claude/rules/` when the first one is written; none exist yet - every rule
-carried from this package's former home inside `outputty/laygo` (`.claude/rules/patterns.md`,
-`.claude/rules/typescript.md`) was laygo-specific (engine boundaries, the strategy-pattern class
-family, the dist-linked self-reference typecheck harness) and none of it survived the hand-trim (#745).
+Repo-specific rules live in `.claude/rules/`. `.claude/rules/typescript.md` holds the TypeScript rules
+this repo's own builds surfaced (#5); every rule carried from this package's former home inside
+`outputty/laygo` (`.claude/rules/patterns.md`, `.claude/rules/typescript.md`) was laygo-specific (engine
+boundaries, the strategy-pattern class family, the dist-linked self-reference typecheck harness) and
+none of it survived the hand-trim (#745).
 
 ## Language
 

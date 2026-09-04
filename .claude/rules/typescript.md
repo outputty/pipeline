@@ -6,9 +6,9 @@ paths: ["**/*.ts", "**/*.tsx"]
 
 - A conditional type gating a constructor or function's own parameter never resolves inside any generic
   scope that still holds its type parameters abstract, even where both sides of `extends` are the
-  literally same parameter. Give the concrete-value call site a plain, non-conditional overload ahead
-  of the conditional one, so an internal generic call site resolves against the plain overload instead.
-  (2026-09-04)
+  literally same parameter. Put a plain, non-conditional overload for the fully-supplied argument shape
+  ahead of the conditional one: an internal generic call site resolves against the plain overload,
+  while a concrete external call site still meets the conditional gate. (2026-09-04)
 - An array literal passed with no assignment-context annotation widens to its element's base type, not
   its literal union, and this widening happens independently inside a wrapping generic function call's
   own arguments - the outer call's return-type annotation does not propagate it back in. Annotate the
