@@ -9,15 +9,16 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-None yet - this repo's own tracker starts empty at the split (`outputty/laygo` #745). The next two
-candidates, not yet filed:
+None yet - this repo's own tracker starts empty at the split (`outputty/laygo` #745).
 
-- An executable docs harness mirroring `outputty/laygo`'s `docs-examples.test.ts`: every `<!-- compiles
-  -->`/`<!-- illustrative -->` fence in `product.md`/`architecture.md`/`README.md` is hand-verified
-  today, not machine-checked. Until it exists, a docs pass is checked against the real test suite by
-  hand, per `.claude/rules/docs.md`'s standing rule.
-- A `Pipeline`-against-real-`Layer` integration proof, once both packages publish to npm
-  (`outputty/laygo` #746) and a consumer can actually install both.
+## Later - a why, no ticket yet
+
+- **Executable docs harness** - every `<!-- compiles -->`/`<!-- illustrative -->` fence in
+  `product.md`, `architecture.md`, `examples.md` and `README.md` is hand-verified today, not
+  machine-checked. It would mirror `outputty/laygo`'s `docs-examples.test.ts`. Until it exists, a docs
+  pass is checked against the real test suite by hand, per `rules/docs.md`.
+- **`Pipeline` against a real `Layer`** - an integration proof, once both packages publish to npm
+  (`outputty/laygo` #746) and a consumer can install both. Today the two connect structurally only.
 
 ## Built
 

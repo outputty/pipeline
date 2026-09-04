@@ -1,0 +1,40 @@
+{
+  "advisorModel": "fable",
+  "worktree": {
+    "baseRef": "head"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(pnpm check)",
+      "Bash(pnpm test:run)",
+      "Bash(pnpm test:run:*)",
+      "Bash(pnpm lint)",
+      "Bash(pnpm typecheck)",
+      "Bash(pnpm build)",
+      "Bash(pnpm format:check)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Edit(.env)",
+      "Write(.env)",
+      "Read(.env.local)",
+      "Edit(.env.local)",
+      "Write(.env.local)",
+      "Read(secrets/**)",
+      "Edit(secrets/**)",
+      "Write(secrets/**)",
+      "Read(*.pem)",
+      "Edit(*.pem)",
+      "Write(*.pem)",
+      "Read(*.key)",
+      "Edit(*.key)",
+      "Write(*.key)",
+      "Read(credentials.json)",
+      "Edit(credentials.json)",
+      "Write(credentials.json)"
+    ],
+    "ask": ["Bash(rm -rf:*)", "Bash(git clean -f:*)"]
+  }
+}
