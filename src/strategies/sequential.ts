@@ -4,7 +4,8 @@ import type { InternalTransformer, IContextManager } from "@src/types";
  * The DEFAULT execution strategy: one chunk at a time, in order, each fully processed before the
  * next starts. No buffering and no reordering — the same reason `Transformer`'s default runs safely
  * when consumed directly as an async source rather than through `.execute()` (`pipeline.ts`'s
- * `inertKnobsOf`, which tracks whether `.withExecutor()` was ever called, not what strategy it set).
+ * `inertKnobsOf` compares `transformer.strategy` against this exact function BY REFERENCE, so
+ * `.withExecutor(sequential)` reads as safe and any other strategy does not).
  *
  * `sequential(logic, chunks, ctx)` → each output chunk yielded in input order.
  */

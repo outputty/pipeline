@@ -66,7 +66,8 @@ inline as an `async function*` with no type to implement and no registration ste
 
 > **Execution strategy** - a function `(transformerLogic, chunks, context) => AsyncGenerator<Out[]>`,
 > passed to `.withExecutor()`. `sequential` is the default: order-preserving, one chunk at a time.
-> `concurrent(options)` returns a strategy holding `{maxConcurrency, ordered}`.
+> `concurrent(options)` returns a strategy holding `{maxConcurrency, ordered}` - a caller's own
+> strategy is the same shape, no name or registry between them.
 
 ```ts
 import { Transformer, concurrent } from "@outputty/pipeline";
@@ -81,7 +82,7 @@ A caller's own strategy is the same function, written where it is used:
 ```ts
 import { Transformer } from "@outputty/pipeline";
 
-const everyOther = new Transformer<number, number>()
+const everyOther = new Transformer<number, number>({ chunkSize: 1 })
   .withExecutor(async function* (logic, chunks, ctx) {
     let n = 0;
     for await (const chunk of chunks) {

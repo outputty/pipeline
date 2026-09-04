@@ -1,6 +1,7 @@
 # Sequential Strategy
 
-The `SequentialStrategy` processes chunks one at a time in order. This is the **default strategy** used by Laygo when no execution strategy is specified.
+`sequential` processes chunks one at a time in order. This is the **default strategy** used by
+`@outputty/pipeline` when no execution strategy is specified.
 
 ## When to Use
 
@@ -26,10 +27,10 @@ const result = await new Pipeline([1, 2, 3])
 ### Explicit Strategy
 
 ```typescript
-import { Pipeline, Transformer, SequentialStrategy } from "@outputty/pipeline";
+import { Pipeline, Transformer, sequential } from "@outputty/pipeline";
 
 const transformer = new Transformer<number, number>({
-  strategy: new SequentialStrategy(),
+  strategy: sequential,
   chunkSize: 10,
 }).map((x: number) => x * 2);
 ```
@@ -37,8 +38,10 @@ const transformer = new Transformer<number, number>({
 ### Using withExecutor
 
 ```typescript
+import { Transformer, sequential } from "@outputty/pipeline";
+
 const transformer = new Transformer<number, number>()
-  .withExecutor("sequential")
+  .withExecutor(sequential)
   .map((x: number) => x * 2);
 ```
 
@@ -68,25 +71,23 @@ const transformer = new Transformer<number, number>()
 
 ## Options
 
-`SequentialStrategy` takes no configuration options. It simply processes chunks in order.
+`sequential` takes no options. It simply processes chunks in order.
 
 ## Implementation
 
+`sequential` is an `ExecutionStrategy<In, Out>` - a plain function, `(transformerLogic, chunks,
+context) => AsyncGenerator<Out[]>` - not a class. A custom strategy is the exact same shape:
+
 ```typescript
-class SequentialStrategy<In, Out> implements ExecutionStrategy<In, Out> {
-  async *execute(
-    transformerLogic: InternalTransformer<In, Out>,
-    chunks: AsyncIterable<In[]>,
-    context: IContextManager,
-  ): AsyncGenerator<Out[]> {
-    for await (const chunk of chunks) {
-      yield transformerLogic(chunk, context);
-    }
-  }
-}
+import type { ExecutionStrategy } from "@outputty/pipeline";
+
+// This is `sequential`'s own implementation, and the shape any custom strategy takes:
+const mySequential: ExecutionStrategy<number, number> = async function* (logic, chunks, ctx) {
+  for await (const chunk of chunks) yield logic(chunk, ctx);
+};
 ```
 
-## Comparison with ConcurrentStrategy
+## Comparison with concurrent
 
 - **Order guarantee** - Sequential: ✅ Always preserved. Concurrent: ✅ With `ordered: true`.
 - **Throughput** - Sequential: lower. Concurrent: higher.
@@ -118,6 +119,5 @@ const [result] = await new Pipeline(["Document content"])
 
 ## See Also
 
-- [ConcurrentStrategy](./concurrent.md) - Parallel execution
-- [Executor Registry](./registry.md) - Strategy management
+- [concurrent](./concurrent.md) - Parallel execution
 - [Pipeline](../pipeline.md) - Data pipeline API

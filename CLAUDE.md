@@ -158,10 +158,12 @@ family, the dist-linked self-reference typecheck harness) and none of it survive
   strategy is an `async function*` written inline - an arrow can never be a generator, so it is always
   `async function*`. (#5)
 - **Source position** - the `Pipeline` drain path that does NOT run the strategy: async iteration
-  (`m.from(pipeline)`) replays each transform's plain function from `chunkTransforms` and never calls
-  `Transformer.execute()`. `inertKnobsOf` (`pipeline.ts`) throws there rather than run silently
-  sequential, by asking the `Transformer` whether `.withExecutor()` was called. It replaced an
-  `appliesInSourcePosition` flag on the strategy, which had exactly one true implementation. (#5)
+  (`[Symbol.asyncIterator]`, reached when a caller uses a `Pipeline` directly as an `AsyncIterable`
+  rather than through a terminal op) replays each transform's plain function from `_chunkTransforms`
+  and never calls `Transformer.execute()`. `inertKnobsOf` (`pipeline.ts`) throws there instead of
+  running silently sequential, by comparing the `Transformer`'s `strategy` against the built-in
+  `sequential` BY REFERENCE - a plain function carries no capability flag of its own the way the prior
+  class-based strategy interface's own source-position flag did. (#5)
 - **Context / `IContextManager`** - the shared key-value store threading through a pipeline run:
   `.get()`/`.set()`/`.getOrDefault()`/`.toDict()`. `SimpleContext` is the one shipped implementation.
   Every `PipelineFunction`/`PipelineReduceFunction` callback receives it as an optional second
