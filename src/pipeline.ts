@@ -26,6 +26,7 @@ import type { IContextManager, BranchDefinition, BranchOptions } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
 import { SimpleContextManager } from "./context/simple";
 import { Transformer } from "./transformer";
+import { sequential } from "./strategies/sequential";
 import { normalize } from "./utils/chunk";
 
 /**
@@ -33,6 +34,16 @@ import { normalize } from "./utils/chunk";
  * next chunk (array), optionally reading/writing the shared context.
  */
 type ChunkTransform = (chunk: unknown[], ctx: IContextManager) => unknown[] | Promise<unknown[]>;
+
+/**
+ * The item type a `Pipeline<T>` carries, extracted from `P` itself rather than referenced as
+ * `Pipeline<U>[number]` inline. A conditional type distributes only over a NAKED type parameter —
+ * `Ps[number] extends Pipeline<infer U> ? U : never` (`Ps` a rest-param array) is an indexed
+ * access, not naked, so it compiles but silently evaluates to `never`; extracting it into its own
+ * `P extends Pipeline<infer U> ? U : never` and applying that to `Ps[number]` at the call site
+ * keeps `P` naked, so it distributes across a union of differently-typed `Pipeline`s correctly.
+ */
+type ElementOf<P> = P extends Pipeline<infer U> ? U : never;
 
 /**
  * Drain complete batches off the front of `buffer` while it holds at least
@@ -100,20 +111,23 @@ export interface PipelineOptions {
  *
  * Runs once per `Pipeline#apply()` call, to grow `sourcePositionViolations` (this file's `apply()`).
  *
- * Reads `transformer.executorApplied` — whether `.withExecutor()` was ever called, not what
- * strategy it set (`ExecutionStrategy` is a plain function now, with no capability flag of its own
- * to read generically) — so a custom `ExecutionStrategy` function is routed correctly without this
- * file knowing it exists. The chunker check reads `transformer.chunker` (public, set by
- * `.setChunker()`) the same way — never a chunk-generator identity comparison, which a rebuilt
- * default generator would fail anyway.
+ * Compares `transformer.strategy` against the built-in `sequential` BY REFERENCE — never
+ * `instanceof`/`.name`, which a plain function has neither of. `.withExecutor(sequential)` sets
+ * `strategy` to that exact same function reference the constructor already defaults to, so it
+ * reads as safe, same as never calling `.withExecutor()` at all; any other function reference
+ * (`concurrent(...)`, a caller's own) is flagged, whether or not it happens to behave like
+ * `sequential`. The chunker check reads `transformer.chunker` (public, set by `.setChunker()`) the
+ * same way — never a chunk-generator identity comparison, which a rebuilt default generator would
+ * fail anyway.
  *
  * `inertKnobsOf(new Transformer().withExecutor(concurrent()))` → `["withExecutor"]`;
+ * `inertKnobsOf(new Transformer().withExecutor(sequential))` → `[]`;
  * `inertKnobsOf(new Transformer().setChunker(custom))` → `["setChunker"]`;
  * `inertKnobsOf(new Transformer())` → `[]`.
  */
 function inertKnobsOf<In, Out>(transformer: Transformer<In, Out>): string[] {
   const violations: string[] = [];
-  if (transformer.executorApplied) violations.push("withExecutor");
+  if (transformer.strategy !== sequential) violations.push("withExecutor");
   if (transformer.hooks !== undefined) violations.push("withHooks");
   if (transformer.chunkSize !== DEFAULT_CHUNK_SIZE) violations.push("chunkSize");
   if (transformer.chunker !== undefined) violations.push("setChunker");
@@ -236,7 +250,11 @@ export class Pipeline<T> {
    * @param pipelines - Pipelines to merge
    * @returns A new pipeline that yields all items from all input pipelines
    */
-  static merge<U>(...pipelines: Pipeline<U>[]): Pipeline<U> {
+  static merge<Ps extends readonly Pipeline<any>[]>(
+    ...pipelines: Ps
+  ): Pipeline<ElementOf<Ps[number]>> {
+    type U = ElementOf<Ps[number]>;
+
     if (pipelines.length === 0) {
       return new Pipeline<U>([]);
     }
@@ -367,7 +385,7 @@ export class Pipeline<T> {
    * ```
    */
   transform<U>(t: (transformer: Transformer<T, T>) => Transformer<T, U>): Pipeline<U> {
-    const transformer = t(new Transformer<T, T>());
+    const transformer = t(new Transformer<T, T>({ transform: (chunk) => chunk }));
     return this.apply(transformer);
   }
 

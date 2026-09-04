@@ -246,7 +246,7 @@ export interface TransformerLifecycleHooks<In = unknown, Out = unknown> {
   /**
    * Called when transformer execution starts.
    */
-  onStart?: () => void | Promise<void>;
+  onStart?: () => void;
 
   /**
    * Called before each item is processed.
@@ -254,7 +254,7 @@ export interface TransformerLifecycleHooks<In = unknown, Out = unknown> {
    * @param index - Zero-based index of the item
    * @param total - Total number of items (-1 if unknown/streaming)
    */
-  onItemStart?: (item: In, index: number, total: number) => void | Promise<void>;
+  onItemStart?: (item: In, index: number, total: number) => void;
 
   /**
    * Called after each item is successfully processed.
@@ -262,25 +262,25 @@ export interface TransformerLifecycleHooks<In = unknown, Out = unknown> {
    * @param output - The transformed output item
    * @param durationMs - Processing time in milliseconds
    */
-  onItemComplete?: (input: In, output: Out, durationMs: number) => void | Promise<void>;
+  onItemComplete?: (input: In, output: Out, durationMs: number) => void;
 
   /**
    * Called when an item fails to process.
    * @param item - The input item that failed
    * @param error - The error that occurred
    */
-  onItemError?: (item: In, error: Error) => void | Promise<void>;
+  onItemError?: (item: In, error: Error) => void;
 
   /**
    * Called when transformer execution completes successfully.
    * @param totalItems - Total number of items processed
    * @param totalDurationMs - Total execution time in milliseconds
    */
-  onComplete?: (totalItems: number, totalDurationMs: number) => void | Promise<void>;
+  onComplete?: (totalItems: number, totalDurationMs: number) => void;
 
   /**
    * Called when transformer execution fails.
    * @param error - The error that caused the failure
    */
-  onError?: (error: Error) => void | Promise<void>;
+  onError?: (error: Error) => void;
 }

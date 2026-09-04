@@ -36,6 +36,16 @@ import { sequential } from "./strategies/sequential";
 import { isContextAware, isContextAwareReduce } from "./utils/helpers";
 
 /**
+ * Construction-time knobs shared by every `Transformer<In, Out>` constructor overload below —
+ * named once rather than repeated per overload.
+ */
+type TransformerConstructorOptions<In, Out> = TransformerOptions<In, Out> & {
+  hooks?: TransformerLifecycleHooks<In, Out>;
+  errorHandler?: ErrorHandler<In>;
+  chunker?: ChunkerFunction<In>;
+};
+
+/**
  * A reusable, composable stage: `In` items in, `Out` items out, applied chunk by chunk. Built by
  * chaining (`.map()`, `.filter()`, `.reduce()`, …), each call returning a NEW `Transformer` so one
  * can be shared across pipelines without aliasing. It carries its own chunk size, execution
@@ -44,7 +54,7 @@ import { isContextAware, isContextAwareReduce } from "./utils/helpers";
  * copy-on-write like `.map()`/`.filter()`: it returns a NEW `Transformer` carrying every other
  * knob forward, never mutates `this` — the shape `@outputty/laygo`'s own `Model#named` follows.
  *
- * `new Transformer<number>().map((n) => n * 2)` → a transformer a pipeline can `.apply()`.
+ * `new Transformer<number, number>().map((n) => n * 2)` → a transformer a pipeline can `.apply()`.
  */
 export class Transformer<In, Out> {
   /** Number of items per chunk */
@@ -67,34 +77,39 @@ export class Transformer<In, Out> {
    * custom chunker the async-iteration path can't honor, the same way it reads `hooks`/`strategy`. */
   readonly chunker?: ChunkerFunction<In>;
 
-  /** Whether `.withExecutor()` was ever called on this chain — `ExecutionStrategy` is a plain
-   * function now, with no capability flag of its own to read generically, so this is the marker
-   * `inertKnobsOf` (`pipeline.ts`) checks instead. Forwarded at every copy-on-write rebuild site
-   * EXCEPT `.catch()`'s fresh `tempTransformer`, which is discarded, not returned to the caller. */
-  readonly executorApplied: boolean;
-
   /** Function to break input into chunks — `chunker` if set, else built from `chunkSize` */
   private chunkGenerator: ChunkerFunction<In>;
 
   /** Default context to use when none provided */
   private defaultContext: IContextManager;
 
+  /**
+   * Overload 1 — a real `transform` in hand. Not conditional on `In extends Out`, so it resolves
+   * (and is preferred) even from inside this class's OWN generic methods, where `In`/`Out` are
+   * still abstract type parameters a deferred conditional can never distribute over. Every
+   * copy-on-write rebuild site below (`.pipe()`, `.withHooks()`, `.onError()`, `.setChunker()`,
+   * `.withExecutor()`) already carries a real `transform` forward, so all of them land here.
+   */
   constructor(
-    options?: TransformerOptions<In, Out> & {
-      hooks?: TransformerLifecycleHooks<In, Out>;
-      errorHandler?: ErrorHandler<In>;
-      chunker?: ChunkerFunction<In>;
-      executorApplied?: boolean;
-    },
-  ) {
+    options: TransformerConstructorOptions<In, Out> & { transform: InternalTransformer<In, Out> },
+  );
+  /**
+   * Overload 2 — no `transform` given. Only sound when `In` is assignable to `Out` (the identity
+   * default below is a real conversion, not a lie): `new Transformer<number, { id: number }>()`
+   * is a compile error here, `new Transformer<number, number>()` is not. Resolves only for a
+   * CONCRETE `In`/`Out` at an external call site — the conditional is deferred (unresolved) inside
+   * this class's own generic methods, which is why they route through overload 1 instead.
+   */
+  constructor(...args: In extends Out ? [options?: TransformerConstructorOptions<In, Out>] : never);
+  constructor(options?: TransformerConstructorOptions<In, Out>) {
     this.chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
+    // Reachable only via overload 2's `In extends Out` branch — a real conversion there, not a lie.
     this.transform = options?.transform ?? ((chunk, _ctx) => chunk as unknown as Out[]);
     this.errorHandler = options?.errorHandler ?? new ErrorHandler<In>();
     this.chunker = options?.chunker;
     this.chunkGenerator = this.chunker ?? buildChunkGenerator(this.chunkSize);
     this.defaultContext = new SimpleContextManager();
     this.strategy = options?.strategy ?? sequential<In, Out>;
-    this.executorApplied = options?.executorApplied ?? false;
     this.hooks = options?.hooks;
   }
 
@@ -125,7 +140,6 @@ export class Transformer<In, Out> {
       transform: this.transform,
       errorHandler: this.errorHandler,
       chunker: this.chunker,
-      executorApplied: this.executorApplied,
       hooks,
     });
   }
@@ -336,7 +350,6 @@ export class Transformer<In, Out> {
       // silently dropping the configuration this pipe() call would otherwise discard.
       errorHandler: this.errorHandler,
       chunker: this.chunker,
-      executorApplied: this.executorApplied,
       // Note: hooks are NOT preserved through pipe() since types change Out -> U
       // Use withHooks() at the end of the chain
     });
@@ -540,7 +553,6 @@ export class Transformer<In, Out> {
       transform: this.transform,
       hooks: this.hooks,
       chunker: this.chunker,
-      executorApplied: this.executorApplied,
       errorHandler,
     });
   }
@@ -573,7 +585,6 @@ export class Transformer<In, Out> {
       transform: this.transform,
       hooks: this.hooks,
       errorHandler: this.errorHandler,
-      executorApplied: this.executorApplied,
       chunker,
     });
   }
@@ -584,16 +595,10 @@ export class Transformer<In, Out> {
    * The loop continues until the condition returns false or maxIterations is reached.
    * Useful for iterative refinement operations where data needs multiple passes.
    *
-   * Python equivalent:
-   * ```python
-   * def loop(
-   *   self,
-   *   loop_transformer: "Transformer[Out, Out]",
-   *   condition: Callable[[list[Out]], bool] | Callable[[list[Out], IContextManager], bool],
-   *   max_iterations: int | None = None,
-   * ) -> "Transformer[In, Out]":
-   *   ...
-   * ```
+   * `condition` is ONE signature, `(chunk, ctx) => boolean` — the same reason `PipelineFunction`
+   * (`types.ts`) is one signature rather than a union of arities: a union blocks contextual
+   * inference, making an un-annotated `(c) => c.every(...)` an implicit-`any` `c`. A 1-arg caller
+   * stays valid by arity flexibility; `condition.length` still tells `ctx`-aware apart at runtime.
    *
    * @param loopTransformer - Transformer to apply on each iteration
    * @param condition - Function that returns true to continue looping
@@ -602,7 +607,7 @@ export class Transformer<In, Out> {
    */
   loop(
     loopTransformer: Transformer<Out, Out>,
-    condition: ((chunk: Out[]) => boolean) | ((chunk: Out[], ctx: IContextManager) => boolean),
+    condition: (chunk: Out[], ctx: IContextManager) => boolean,
     maxIterations?: number,
   ): Transformer<In, Out> {
     const loopedTransform = loopTransformer.transform;
@@ -618,7 +623,7 @@ export class Transformer<In, Out> {
         }
 
         const shouldContinue = conditionIsContextAware
-          ? (condition as (chunk: Out[], ctx: IContextManager) => boolean)(currentChunk, ctx)
+          ? condition(currentChunk, ctx)
           : (condition as (chunk: Out[]) => boolean)(currentChunk);
 
         if (!shouldContinue) {
@@ -782,7 +787,10 @@ export class Transformer<In, Out> {
       catchErrorHandler.onError(onError);
     }
 
-    const tempTransformer = new Transformer<Out, Out>({ chunkSize: this.chunkSize });
+    const tempTransformer = new Transformer<Out, Out>({
+      chunkSize: this.chunkSize,
+      transform: (chunk) => chunk,
+    });
     const subPipeline = subPipelineBuilder(tempTransformer);
     const subTransform = subPipeline.transform;
 
@@ -858,7 +866,6 @@ export class Transformer<In, Out> {
       hooks: this.hooks,
       errorHandler: this.errorHandler,
       chunker: this.chunker,
-      executorApplied: true,
     });
   }
 }

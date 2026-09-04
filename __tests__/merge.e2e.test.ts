@@ -24,6 +24,18 @@ describe("Pipeline.merge", () => {
       expect(results).toEqual(["a", "b", "c", "d", "e", "f"]);
     });
 
+    it("infers a union of the merged pipelines' literal item types", async () => {
+      // Explicit type args on the two `Pipeline` constructions - a bare `new Pipeline(["a", "b"])`
+      // widens to `Pipeline<string>` on its own (Pipeline's own constructor inference, unrelated
+      // to `merge()`); `Pipeline<T>` is invariant (architecture.md), so the mismatched-type
+      // assignment below would fail to COMPILE, not just to assert, if merge() collapsed the union.
+      const typed: Pipeline<"a" | "b" | "c" | "d"> = Pipeline.merge(
+        new Pipeline<"a" | "b">(["a", "b"]),
+        new Pipeline<"c" | "d">(["c", "d"]),
+      );
+      expect(await typed.toArray()).toEqual(["a", "b", "c", "d"]);
+    });
+
     it("should handle single pipeline", async () => {
       const pipeline = new Pipeline([1, 2, 3]);
 
