@@ -132,7 +132,7 @@ describe("#17 three ClusterPipelines share one port and worker set (Done-when 4)
 });
 
 describe("#17 HttpPipeline across two real instances (Done-when 5)", () => {
-  it.fails(
+  it(
     "dispatches over a real loopback HTTP request and prints [6,8,10]",
     async () => {
       const worker = makeWorker((t) =>
@@ -150,7 +150,7 @@ describe("#17 HttpPipeline across two real instances (Done-when 5)", () => {
 });
 
 describe("#17 { local: true } keeps a stage in-process (Done-when 6)", () => {
-  it.fails(
+  it(
     "makes ZERO HTTP requests for the local stage",
     async () => {
       let requests = 0;
@@ -199,22 +199,19 @@ describe("#17 .constructor.name is the leaf class after two .transform() calls (
     expect(p.constructor.name).toBe("ConcurrentPipeline");
   });
 
-  it.fails("an HttpPipeline stays HttpPipeline", () => {
+  it("an HttpPipeline stays HttpPipeline", () => {
     const p = new HttpPipeline([1], { url: "http://localhost:1" })
       .transform((t) => t.map((x: number) => x))
       .transform((t) => t.map((x: number) => x));
     expect(p.constructor.name).toBe("HttpPipeline");
   });
 
-  it.fails(
-    "a ClusterPipeline stays ClusterPipeline (constructed only - never drained, never forks)",
-    () => {
-      const p = new ClusterPipeline([1])
-        .transform((t) => t.map((x: number) => x))
-        .transform((t) => t.map((x: number) => x));
-      expect(p.constructor.name).toBe("ClusterPipeline");
-    },
-  );
+  it("a ClusterPipeline stays ClusterPipeline (constructed only - never drained, never forks)", () => {
+    const p = new ClusterPipeline([1])
+      .transform((t) => t.map((x: number) => x))
+      .transform((t) => t.map((x: number) => x));
+    expect(p.constructor.name).toBe("ClusterPipeline");
+  });
 });
 
 describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createPipeline)", () => {
@@ -366,7 +363,7 @@ describe("#17 async map/filter results are awaited (Done-when 11)", () => {
 });
 
 describe("#17 the same async chain over HttpPipeline (Done-when 12)", () => {
-  it.fails(
+  it(
     "prints [4,6] over the wire, never [{},{},{}]",
     async () => {
       const worker = makeWorker((t) =>
@@ -384,7 +381,7 @@ describe("#17 the same async chain over HttpPipeline (Done-when 12)", () => {
 });
 
 describe("#17 an unknown stage index 404s (Done-when 13)", () => {
-  it.fails(
+  it(
     'returns 404 {"error":"unknown stage 99; this deployment serves 0..1"}',
     async () => {
       const worker = makeWorker((t) =>
@@ -403,8 +400,47 @@ describe("#17 an unknown stage index 404s (Done-when 13)", () => {
   );
 });
 
+describe("#17 .fetch() fails loud on a malformed request, never hangs the client", () => {
+  // Regression: review found request.json() called outside any try/catch, inside toNodeHandler's
+  // un-caught async IIFE - a bodyless or malformed POST rejected uncaught, leaving the client
+  // hanging with no response until its own timeout, rather than a fast, real 400.
+  const worker = makeWorker((t) => t.transform((tr) => tr.map((x: number) => x * 2)));
+
+  it("400s on a missing body", async () => {
+    const res = await worker.fetch(new Request("http://x/stage/0", { method: "POST" }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "request body is not valid JSON" });
+  });
+
+  it("400s on malformed JSON", async () => {
+    const res = await worker.fetch(
+      new Request("http://x/stage/0", { method: "POST", body: "not json" }),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "request body is not valid JSON" });
+  });
+
+  it("400s when the 'context' field is missing", async () => {
+    const res = await worker.fetch(
+      new Request("http://x/stage/0", { method: "POST", body: JSON.stringify({ chunk: [1] }) }),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "request body is missing a 'context' object" });
+  });
+
+  it("toNodeHandler's bridge itself never hangs, even for a handler that throws", async () => {
+    const throwingHandler = (_request: Request): Promise<Response> => {
+      throw new Error("handler blew up");
+    };
+    await withServer(throwingHandler, async (url) => {
+      const res = await fetch(url, { method: "POST" });
+      expect(res.status).toBe(500);
+    });
+  });
+});
+
 describe("#17 .context() propagates through the wire (Done-when 14)", () => {
-  it.fails(
+  it(
     "prints [10,20,30,40,50] through HttpPipeline",
     async () => {
       const worker = makeWorker((t) =>
@@ -438,7 +474,7 @@ describe("#17 .context() propagates through the wire (Done-when 14)", () => {
 });
 
 describe("#17 a stage's HTTP 500 throws from the terminal op, never reaches .catch() (Done-when 15)", () => {
-  it.fails(
+  it(
     "rejects naming the stage index and url, and the .catch() handler never runs",
     async () => {
       const worker = makeWorker((t) =>

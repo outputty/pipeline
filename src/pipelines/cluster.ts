@@ -1,6 +1,17 @@
 /**
- * `ClusterPipeline` — STUB (#17 L1), copy-on-write wired (#17 L2). L5 fills in the worker
- * bootstrap: one shared port and worker set per process, lazily brought up on first drain.
+ * `ClusterPipeline` — STUB (#17 L1-L4): `.transform()`/`.apply()` are real (inherited from
+ * `HttpPipeline`/`ConcurrentPipeline` unchanged), so building a chain never throws and never
+ * touches a network socket.
+ *
+ * `stageWork()` itself runs at BUILD time, synchronously - `ConcurrentPipeline.apply()` calls it
+ * to get the function it fans out, before any chunk exists (review, #17 L3→L4: an earlier draft of
+ * this comment claimed `stageWork()` "only ever runs when a chunk is dispatched", which is false -
+ * verified live, `new ClusterPipeline([1]).transform(f)` throws immediately). The RETURNED
+ * closure is what stays lazy, and that is where this stub's throw lives - a chain still builds
+ * without ever draining it (case 7, `.constructor.name` after two `.transform()` calls, checks
+ * exactly that). L5's real worker bootstrap belongs inside that same closure, on its first call,
+ * for the identical reason: a `ClusterPipeline` built in-process during a test must never fork on
+ * construction, only on an actual drain.
  */
 
 import type { ConcurrentPipelineOptions, StageOptions } from "@src/pipelines/concurrent";
@@ -60,20 +71,24 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
   }
 
   override transform<U>(
-    _builder: (t: Transformer<T, T>) => Transformer<T, U>,
-    _options?: StageOptions,
+    builder: (t: Transformer<T, T>) => Transformer<T, U>,
+    options?: StageOptions,
   ): ClusterPipeline<U> {
-    throw new Error("ClusterPipeline.transform: not implemented (#17 L5)");
+    return super.transform(builder, options) as ClusterPipeline<U>;
   }
 
-  override apply<U>(_transformer: Transformer<T, U>, _options?: StageOptions): ClusterPipeline<U> {
-    throw new Error("ClusterPipeline.apply: not implemented (#17 L5)");
+  override apply<U>(transformer: Transformer<T, U>, options?: StageOptions): ClusterPipeline<U> {
+    return super.apply(transformer, options) as ClusterPipeline<U>;
   }
 
   protected override stageWork<U>(
     _transformer: Transformer<T, U>,
     _stageIndex: number,
   ): InternalTransformer<T, U> {
-    throw new Error("ClusterPipeline.stageWork: not implemented (#17 L5)");
+    // The throw lives INSIDE the returned closure, not here - stageWork() itself must succeed at
+    // build time (see the class docstring), so a chain builds without ever draining it.
+    return () => {
+      throw new Error("ClusterPipeline.stageWork: not implemented (#17 L5)");
+    };
   }
 }
