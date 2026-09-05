@@ -8,7 +8,7 @@
  * chunk and hide it.
  */
 import { describe, it, expect } from "vitest";
-import { Pipeline, Transformer, SimpleContextManager } from "../src";
+import { Pipeline, Transformer, SimpleContextManager, ErrorHandler } from "../src";
 
 /** Run `input` through a real pipeline built on `transformer`, returning [results, contextSnapshot].
  * `Pipeline.toArray()` itself carries no context slot (#744) - this LOCAL helper builds its own
@@ -230,10 +230,51 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
             if (x === 2) throw new Error("Test error");
             return x;
           }),
-        (chunk, error) => errors.push({ chunk: [...chunk], message: error.message }),
+        (chunk, error) => {
+          errors.push({ chunk: [...chunk], message: error.message });
+        },
       ),
     );
     expect(errors).toEqual([{ chunk: [1, 2, 3], message: "Test error" }]);
+
+    // #15 — onError's returned array REPLACES the failing chunk, one chunk so the whole run fails.
+    const parseChunk = (t: Transformer<string, string>): Transformer<string, number> =>
+      t.map((s: string) => {
+        const n = parseInt(s);
+        if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+        return n;
+      });
+    const [replaced] = await run(
+      ["a", "b", "3", "d", "5"],
+      chunked<string>(5).catch(parseChunk, () => [999]),
+    );
+    expect(replaced).toEqual([999]);
+
+    // A handler returning nothing still drops the chunk — the replacement is optional, not implied.
+    const [dropped] = await run(
+      ["a", "b", "3", "d", "5"],
+      chunked<string>(5).catch(parseChunk, () => undefined),
+    );
+    expect(dropped).toEqual([]);
+
+    // Chaining several handlers onto one ErrorHandler (real object, no mock): the LIFO winner
+    // (last registered, runs first) supplies the replacement, but EVERY handler still runs.
+    const calls: string[] = [];
+    const chained = new ErrorHandler<string, number>()
+      .onError(() => {
+        calls.push("first-registered");
+        return undefined;
+      })
+      .onError(() => {
+        calls.push("second-registered");
+        return [999];
+      });
+    const [chainedResult] = await run(
+      ["a", "b", "3", "d", "5"],
+      chunked<string>(5).catch(parseChunk, chained.handle.bind(chained)),
+    );
+    expect(calls).toEqual(["second-registered", "first-registered"]);
+    expect(chainedResult).toEqual([999]);
   });
 
   it("shortCircuit aborts the run when its (optionally context-driven) condition holds", async () => {
