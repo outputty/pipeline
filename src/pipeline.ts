@@ -26,7 +26,6 @@ import type { IContextManager, BranchDefinition, BranchOptions } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
 import { SimpleContextManager } from "./context/simple";
 import { Transformer } from "./transformer";
-import { sequential } from "./strategies/sequential";
 import { normalize } from "./utils/chunk";
 
 /**
@@ -99,13 +98,13 @@ export interface PipelineOptions {
    */
   chunkTransforms?: ChunkTransform[];
   /**
-   * Internal: names of `Transformer` knobs (`withExecutor`/`withHooks`/a non-default
-   * `chunkSize`) applied onto this pipeline that the ASYNC-ITERATION path (`[Symbol.asyncIterator]`,
+   * Internal: names of `Transformer` knobs (`withHooks`/a non-default `chunkSize`/`setChunker`, or
+   * a dispatching `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` stage's own class name)
+   * applied onto this pipeline that the ASYNC-ITERATION path (`[Symbol.asyncIterator]`,
    * `chunkTransforms` above) cannot honor — it replays each transform's plain function directly,
-   * never `Transformer.execute()`, so a strategy/hooks/chunk-size configured via `.withExecutor()`/
-   * `.withHooks()`/a custom `chunkSize` is silently inert on that path. Accumulated (never cleared)
-   * across `.apply()` calls so iterating a pipeline built from several applied transformers reports
-   * every inert knob. Not intended for direct external use.
+   * never `Transformer.execute()`, so hooks/chunk-size/a dispatched stage is silently inert on that
+   * path. Accumulated (never cleared) across `.apply()` calls so iterating a pipeline built from
+   * several applied transformers reports every inert knob. Not intended for direct external use.
    */
   sourcePositionViolations?: string[];
 }
@@ -113,38 +112,32 @@ export interface PipelineOptions {
 /**
  * Which of a `Transformer`'s knobs are INERT when replayed via `Pipeline`'s async-iteration path
  * (`chunkTransforms`, which calls the transform function directly — never `Transformer.execute()`,
- * so `.strategy`/`.hooks`/a non-default `.chunkSize`/a custom `.setChunker()` chunker never take
+ * so `.hooks`/`.onError()`/a non-default `.chunkSize`/a custom `.setChunker()` chunker never take
  * effect there).
  *
  * Runs once per `Pipeline#apply()` call, to grow `sourcePositionViolations` (this file's `apply()`).
+ * The chunker check reads `transformer.chunker` (public, set by `.setChunker()`) — never a
+ * chunk-generator identity comparison, which a rebuilt default generator would fail anyway. The
+ * `errorHandler` check reads `.hasHandlers()` (`errors/handler.ts`) — an `ErrorHandler` always
+ * exists on a `Transformer` (the constructor default), so its PRESENCE is never the signal, only
+ * whether anything was ever registered via `.onError()`.
  *
- * Compares `transformer.strategy` against the built-in `sequential` BY REFERENCE — never
- * `instanceof`/`.name`, which a plain function has neither of. `.withExecutor(sequential)` sets
- * `strategy` to that exact same function reference the constructor already defaults to, so it
- * reads as safe, same as never calling `.withExecutor()` at all; any other function reference
- * (`concurrent(...)`, a caller's own) is flagged, whether or not it happens to behave like
- * `sequential` — a plain function carries no capability metadata of its own to ask instead, unlike
- * the class-based capability flag this seam replaced, so ONLY the built-in `sequential` export is
- * ever recognized as source-position-safe. Matches the OLD design's own default: a strategy there
- * was flagged unsafe unless it explicitly declared otherwise, and no custom strategy could inherit
- * `sequential`'s safety without doing so itself either. The chunker
- * check reads `transformer.chunker` (public, set by `.setChunker()`) the same way — never a
- * chunk-generator identity comparison, which a rebuilt default generator would fail anyway.
- *
- * `inertKnobsOf(new Transformer().withExecutor(concurrent()))` → `["withExecutor"]`;
- * `inertKnobsOf(new Transformer().withExecutor(sequential))` → `[]`;
+ * `inertKnobsOf(new Transformer().withHooks({}))` → `["withHooks"]`;
+ * `inertKnobsOf(new Transformer().onError(() => {}))` → `["onError"]`;
  * `inertKnobsOf(new Transformer().setChunker(custom))` → `["setChunker"]`;
  * `inertKnobsOf(new Transformer())` → `[]`.
  *
  * Exported (#17) so `ConcurrentPipeline.apply()` (`src/pipelines/concurrent.ts`) can report the
  * SAME transformer-level violations alongside its own ("this stage was dispatched, not applied
  * in-process") - the two lists have different sources but the same shape and the same consumer
- * (`sourcePositionViolations`).
+ * (`sourcePositionViolations`). Review (#17) found `.onError()` missing here entirely - silently
+ * inert on a dispatched stage (`stageWork()` never calls `execute()`, the only path that consults
+ * it) with no fail-loud signal, unlike every other knob this function already covered.
  */
 export function inertKnobsOf<In, Out>(transformer: Transformer<In, Out>): string[] {
   const violations: string[] = [];
-  if (transformer.strategy !== sequential) violations.push("withExecutor");
   if (transformer.hooks !== undefined) violations.push("withHooks");
+  if (transformer.errorHandler.hasHandlers()) violations.push("onError");
   if (transformer.chunkSize !== DEFAULT_CHUNK_SIZE) violations.push("chunkSize");
   if (transformer.chunker !== undefined) violations.push("setChunker");
   return violations;
@@ -228,18 +221,19 @@ export class Pipeline<T> {
    *
    * ```text
    * [Symbol.asyncIterator]()
-   * ├─ any inert knob recorded (withExecutor/withHooks/chunkSize, `inertKnobsOf`)? ──yes──▶ throw
+   * ├─ any inert knob recorded (withHooks/chunkSize/a dispatched stage, `inertKnobsOf`)? ──yes──▶ throw
    * │        no
    * ▼
    * for chunk of normalize(rootSource) → replay each chunkTransform in order → yield
    * ```
    *
    * FAILS LOUD (does not silently drop the knob) when this pipeline carries a `Transformer` knob
-   * the chunk-transform replay below cannot honor (`withExecutor`/`withHooks`/a non-default
-   * `chunkSize` — `inertKnobsOf`, above `apply()`): those only take effect through
-   * `Transformer.execute()`, which this loop never calls, so a `.withExecutor(concurrent())`
-   * pipeline handed straight to `m.from()` would otherwise run — silently sequential, silently
-   * un-hooked — instead of raising.
+   * the chunk-transform replay below cannot honor (`withHooks`/a non-default `chunkSize` —
+   * `inertKnobsOf`, above `apply()` — or a dispatched `ConcurrentPipeline`/`HttpPipeline`/
+   * `ClusterPipeline` stage, `pipelines/concurrent.ts`'s own `apply()`): those only take effect
+   * through `Transformer.execute()` or the fan-out itself, which this loop never calls, so a
+   * `ConcurrentPipeline` handed straight to `m.from()` would otherwise run silently sequential and
+   * in-process instead of raising.
    *
    * @example
    * ```typescript
@@ -247,8 +241,8 @@ export class Pipeline<T> {
    * for await (const chunk of pipeline) {
    *   console.log(chunk); // e.g. [2], [4, 6]
    * }
-   * // new Pipeline(source).apply(new Transformer().withExecutor(concurrent()))
-   * // handed to a for-await loop throws naming 'withExecutor'.
+   * // new Pipeline(source).apply(new Transformer().withHooks({ onStart: () => {} }))
+   * // handed to a for-await loop throws naming 'withHooks'.
    * ```
    */
   async *[Symbol.asyncIterator](): AsyncGenerator<T[]> {
@@ -406,9 +400,9 @@ export class Pipeline<T> {
    * consumption fails loud instead of silently ignoring them.
    *
    * `pipeline.apply(new Transformer<T, T>().map((x) => x * 2))` on a pipeline of `[1, 2, 3]` →
-   * `.toArray()` resolves `[2, 4, 6]`. `pipeline.apply(new Transformer().withExecutor
-   * (concurrent()))` then iterated with `for await` (not a terminal op) → throws naming
-   * `'withExecutor'` (`sourcePositionViolations` picked it up here).
+   * `.toArray()` resolves `[2, 4, 6]`. `pipeline.apply(new Transformer().withHooks({onStart:
+   * ()=>{}}))` then iterated with `for await` (not a terminal op) → throws naming `'withHooks'`
+   * (`sourcePositionViolations` picked it up here).
    */
   apply<U>(transformer: Transformer<T, U>): Pipeline<U> {
     const newData = transformer.execute(this.dataSource, this._context);

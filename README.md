@@ -87,25 +87,25 @@ for await (const item of transformer.execute(source())) {
 }
 ```
 
-### Execution Strategies
+### Where the work runs
 
-Control how chunks are processed:
+The class you construct decides where a chain's chunks are processed - the chain itself never
+changes, only the class name does:
 
 <!-- compiles -->
 
 ```typescript
-import { Transformer, sequential, concurrent } from "@outputty/pipeline";
+import { ConcurrentPipeline } from "@outputty/pipeline";
 
-// Sequential (default) - one chunk at a time
-const sequentialUppercase = new Transformer<string, string>()
-  .withExecutor(sequential)
-  .map((s: string) => s.toUpperCase());
-
-// Concurrent - parallel with limits
-const concurrentUppercase = new Transformer<string, string>()
-  .withExecutor(concurrent({ maxConcurrency: 10 }))
-  .map((s: string) => s.toUpperCase());
+// Up to 10 chunks in flight at once, in this process - Pipeline (one at a time) is the default
+const data = await new ConcurrentPipeline(["a", "b", "c"], { maxConcurrency: 10 })
+  .transform((t) => t.map((s: string) => s.toUpperCase()))
+  .toArray();
 ```
+
+`HttpPipeline` dispatches each chunk to another instance over HTTP; `ClusterPipeline` dispatches to
+worker processes on the same machine, brought up automatically. See [Core Concepts](#core-concepts)
+above.
 
 ## API Reference
 
@@ -141,7 +141,6 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.reduce(fn, initial)`** - reduce to single value.
 - **`.tap(fn)`** - execute side-effect without changing data.
 - **`.catch(build, onError?)`** - run a sub-chain, handling its errors.
-- **`.withExecutor(strategy)`** - set execution strategy (a function - `sequential`, `concurrent(options?)`, or your own).
 
 ### Context-Aware Functions
 
@@ -262,16 +261,16 @@ console.log(data.odds); // [1, 3, 5]
 <!-- compiles -->
 
 ```typescript
-import { Pipeline, concurrent } from "@outputty/pipeline";
+import { ConcurrentPipeline } from "@outputty/pipeline";
 
 interface User {
   id: number;
   name: string;
 }
 
-const enrichedUsers = await new Pipeline([1, 2, 3, 4, 5])
+const enrichedUsers = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 3 })
   .transform((t) =>
-    t.withExecutor(concurrent({ maxConcurrency: 3 })).map(async (id: number): Promise<User> => {
+    t.map(async (id: number): Promise<User> => {
       const res = await fetch(`/api/users/${id}`);
       return (await res.json()) as User;
     }),
@@ -313,23 +312,21 @@ console.log(stats);
 <!-- illustrative -->
 
 ```typescript
-import { Pipeline, concurrent } from "@outputty/pipeline";
+import { ConcurrentPipeline } from "@outputty/pipeline";
 import type { IContextManager } from "@outputty/pipeline";
 
 interface LLM {
   complete(prompt: string): Promise<string>;
 }
 
-const summaries = await new Pipeline(documents)
+const summaries = await new ConcurrentPipeline(documents, { maxConcurrency: 5, ordered: true })
   .context({ llm: myLlmInstance })
   .transform((t) =>
-    t
-      .withExecutor(concurrent({ maxConcurrency: 5, ordered: true }))
-      .map(async (doc: Document, ctx: IContextManager) => {
-        const llm = ctx.get("llm") as LLM;
-        const summary = await llm.complete(`Summarize: ${doc.content}`);
-        return { ...doc, summary };
-      }),
+    t.map(async (doc: Document, ctx: IContextManager) => {
+      const llm = ctx.get("llm") as LLM;
+      const summary = await llm.complete(`Summarize: ${doc.content}`);
+      return { ...doc, summary };
+    }),
   )
   .toArray();
 ```
@@ -359,16 +356,6 @@ const processed = await new Pipeline(rawFiles)
   )
   .toArray();
 ```
-
-## Execution Strategies
-
-- **`sequential`** - default. Safe, predictable order. Use for I/O-bound or order-sensitive work.
-- **`concurrent`** - parallel processing. Use for independent operations with rate limits.
-
-See [Strategy Documentation](./docs/strategies/) for details:
-
-- [sequential](./docs/strategies/sequential.md)
-- [concurrent](./docs/strategies/concurrent.md)
 
 ## Comparison with JSON Graph
 
