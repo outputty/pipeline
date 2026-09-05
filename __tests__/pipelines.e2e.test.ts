@@ -18,7 +18,10 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Pipeline, ConcurrentPipeline, HttpPipeline, ClusterPipeline, toNodeHandler } from "../src";
 
+/** A subprocess fixture (`node:cluster`, `execFile`) pays real process/fork startup cost. */
 const FIXTURE_TIMEOUT = 20000;
+/** An in-process, loopback-only HTTP case - no fork, no subprocess - fails fast on a real hang. */
+const HTTP_TIMEOUT = 5000;
 
 interface FixtureResult {
   stdout: string;
@@ -27,7 +30,9 @@ interface FixtureResult {
 }
 
 /** Spawns a fixture script under `tsx` (needed for `src`'s extensionless imports and the `@src/*`
- * alias - Node's own ESM resolver has neither) and collects its stdout/stderr/exit code. */
+ * alias - Node's own ESM resolver has neither) and collects its stdout/stderr/exit code. Every
+ * assertion a fixture's OWN Done-when cases need reads one shared run - never re-spawn the same
+ * script per assertion. */
 function runFixture(relativePath: string): Promise<FixtureResult> {
   return new Promise((resolve) => {
     execFile(
@@ -42,37 +47,37 @@ function runFixture(relativePath: string): Promise<FixtureResult> {
   });
 }
 
-/** Binds `handler` to a real loopback HTTP server and returns its `http://localhost:<port>` url. */
-async function serve(handler: (request: Request) => Promise<Response>): Promise<{
-  url: string;
-  close: () => Promise<void>;
-}> {
+/** Binds `handler` to a real loopback HTTP server, runs `use` against its `http://localhost:<port>`
+ * url, and always closes the server after - the one seam every HTTP-backed case below goes
+ * through, so a leaked listening socket on a failed assertion can't happen. */
+async function withServer<T>(
+  handler: (request: Request) => Promise<Response>,
+  use: (url: string) => Promise<T>,
+): Promise<T> {
   const server = createServer(toNodeHandler(handler));
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const port = (server.address() as AddressInfo).port;
-  return {
-    url: `http://localhost:${port}`,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
-  };
+  try {
+    return await use(`http://localhost:${port}`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/** The "another instance" side of an `HttpPipeline` chain: an empty-source pipeline whose only
+ * job is to hold the SAME stage definitions `builder` describes, so its `.fetch` can serve them. */
+function makeWorker<U>(builder: (t: HttpPipeline<number>) => HttpPipeline<U>): HttpPipeline<U> {
+  return builder(new HttpPipeline<number>([], { url: "" }));
 }
 
 describe("#17 ClusterPipeline canonical program (Done-when 1, 3)", () => {
   it.fails(
-    "prints [6,8,10] with no server/listen/fork/url in caller code",
+    "prints [6,8,10] with no server/listen/fork/url in caller code, and exits on its own",
     async () => {
       const { stdout, code, stderr } = await runFixture("__tests__/fixtures/cluster-basic.ts");
       expect(stderr).toBe("");
-      expect(code).toBe(0);
-      expect(stdout.trim()).toBe("[6,8,10]");
-    },
-    FIXTURE_TIMEOUT,
-  );
-
-  it.fails(
-    "the script holding only case 1 exits on its own with code 0",
-    async () => {
-      const { code } = await runFixture("__tests__/fixtures/cluster-basic.ts");
-      expect(code).toBe(0);
+      expect(code).toBe(0); // Done-when 3: exits cleanly on its own, no explicit teardown
+      expect(stdout.trim()).toBe("[6,8,10]"); // Done-when 1: the canonical result
     },
     FIXTURE_TIMEOUT,
   );
@@ -109,20 +114,17 @@ describe("#17 HttpPipeline across two real instances (Done-when 5)", () => {
   it.fails(
     "dispatches over a real loopback HTTP request and prints [6,8,10]",
     async () => {
-      const worker = new HttpPipeline<number>([], { url: "" }).transform((t) =>
-        t.map((x: number) => x * 2).filter((x: number) => x > 4),
+      const worker = makeWorker((t) =>
+        t.transform((tr) => tr.map((x: number) => x * 2).filter((x: number) => x > 4)),
       );
-      const server = await serve(worker.fetch);
-      try {
-        const out = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url: server.url })
+      await withServer(worker.fetch, async (url) => {
+        const out = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url })
           .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
           .toArray();
         expect(out).toEqual([6, 8, 10]);
-      } finally {
-        await server.close();
-      }
+      });
     },
-    FIXTURE_TIMEOUT,
+    HTTP_TIMEOUT,
   );
 });
 
@@ -131,26 +133,21 @@ describe("#17 { local: true } keeps a stage in-process (Done-when 6)", () => {
     "makes ZERO HTTP requests for the local stage",
     async () => {
       let requests = 0;
-      const worker = new HttpPipeline<number>([], { url: "" }).transform((t) =>
-        t.map((x: number) => x * 2),
-      );
+      const worker = makeWorker((t) => t.transform((tr) => tr.map((x: number) => x * 2)));
       const countingHandler = async (request: Request): Promise<Response> => {
         requests++;
         return worker.fetch(request);
       };
-      const server = await serve(countingHandler);
-      try {
-        const out = await new HttpPipeline<number>([1, 2, 3], { url: server.url })
+      await withServer(countingHandler, async (url) => {
+        const out = await new HttpPipeline<number>([1, 2, 3], { url })
           .transform((t) => t.map((x: number) => x * 2))
           .transform((t) => t.filter((x: number) => x > 2), { local: true })
           .toArray();
         expect(out).toEqual([4, 6]);
         expect(requests).toBe(1); // only the first (non-local) stage crossed the wire
-      } finally {
-        await server.close();
-      }
+      });
     },
-    FIXTURE_TIMEOUT,
+    HTTP_TIMEOUT,
   );
 
   it("a plain Pipeline has no { local: true } second argument to .transform() - compile error", () => {
@@ -228,7 +225,6 @@ describe("#17 a chunk failure never leaks an unhandled rejection (Done-when 8)",
 
 describe("#17 ordered: false streams instead of draining the source first (Done-when 9)", () => {
   it.fails("dispatches before the whole source has been pulled", async () => {
-    const dispatched: number[] = [];
     const pulled: number[] = [];
     async function* source() {
       for (const x of [1, 2, 3, 4, 5, 6]) {
@@ -237,10 +233,9 @@ describe("#17 ordered: false streams instead of draining the source first (Done-
       }
     }
     const cp = new ConcurrentPipeline<number>(source(), { maxConcurrency: 2, ordered: false });
-    const resultPromise = cp
+    await cp
       .transform((t) =>
         t.map(async (x: number) => {
-          dispatched.push(x);
           // A real, if crude, snapshot: once dispatch for x=1 begins, the source must not have
           // already been pulled to the end - that is what "not drained first" means here.
           if (x === 1) expect(pulled.length).toBeLessThan(6);
@@ -248,7 +243,6 @@ describe("#17 ordered: false streams instead of draining the source first (Done-
         }),
       )
       .toArray();
-    await resultPromise;
   });
 });
 
@@ -285,20 +279,17 @@ describe("#17 the same async chain over HttpPipeline (Done-when 12)", () => {
   it.fails(
     "prints [4,6] over the wire, never [{},{},{}]",
     async () => {
-      const worker = new HttpPipeline<number>([], { url: "" }).transform((t) =>
-        t.map(async (x: number) => x * 2).filter((x) => x > 2),
+      const worker = makeWorker((t) =>
+        t.transform((tr) => tr.map(async (x: number) => x * 2).filter((x) => x > 2)),
       );
-      const server = await serve(worker.fetch);
-      try {
-        const out = await new HttpPipeline<number>([1, 2, 3], { url: server.url })
+      await withServer(worker.fetch, async (url) => {
+        const out = await new HttpPipeline<number>([1, 2, 3], { url })
           .transform((t) => t.map(async (x: number) => x * 2).filter((x) => x > 2))
           .toArray();
         expect(out).toEqual([4, 6]);
-      } finally {
-        await server.close();
-      }
+      });
     },
-    FIXTURE_TIMEOUT,
+    HTTP_TIMEOUT,
   );
 });
 
@@ -306,9 +297,9 @@ describe("#17 an unknown stage index 404s (Done-when 13)", () => {
   it.fails(
     'returns 404 {"error":"unknown stage 99; this deployment serves 0..1"}',
     async () => {
-      const worker = new HttpPipeline<number>([], { url: "" })
-        .transform((t) => t.map((x: number) => x))
-        .transform((t) => t.map((x: number) => x));
+      const worker = makeWorker((t) =>
+        t.transform((tr) => tr.map((x: number) => x)).transform((tr) => tr.map((x: number) => x)),
+      );
       const res = await worker.fetch(
         new Request("http://x/stage/99", {
           method: "POST",
@@ -318,7 +309,7 @@ describe("#17 an unknown stage index 404s (Done-when 13)", () => {
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual({ error: "unknown stage 99; this deployment serves 0..1" });
     },
-    FIXTURE_TIMEOUT,
+    HTTP_TIMEOUT,
   );
 });
 
@@ -326,21 +317,18 @@ describe("#17 .context() propagates through the wire (Done-when 14)", () => {
   it.fails(
     "prints [10,20,30,40,50] through HttpPipeline",
     async () => {
-      const worker = new HttpPipeline<number>([], { url: "" }).transform((t) =>
-        t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)),
+      const worker = makeWorker((t) =>
+        t.transform((tr) => tr.map((x: number, ctx) => x * (ctx.get("multiplier") as number))),
       );
-      const server = await serve(worker.fetch);
-      try {
-        const out = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url: server.url })
+      await withServer(worker.fetch, async (url) => {
+        const out = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url })
           .context({ multiplier: 10 })
           .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))
           .toArray();
         expect(out).toEqual([10, 20, 30, 40, 50]);
-      } finally {
-        await server.close();
-      }
+      });
     },
-    FIXTURE_TIMEOUT,
+    HTTP_TIMEOUT,
   );
 
   it.fails(
@@ -360,33 +348,30 @@ describe("#17 a stage's HTTP 500 throws from the terminal op, never reaches .cat
   it.fails(
     "rejects naming the stage index and url, and the .catch() handler never runs",
     async () => {
-      const worker = new HttpPipeline<number>([], { url: "" }).transform((t) =>
-        t.map((_x: number) => {
-          throw new Error("boom");
-        }),
+      const worker = makeWorker((t) =>
+        t.transform((tr) =>
+          tr.map((_x: number) => {
+            throw new Error("boom");
+          }),
+        ),
       );
-      const server = await serve(worker.fetch);
       const onError = () => {
         throw new Error("must not be reached");
       };
-      try {
-        const orchestrator = new HttpPipeline<number>([1, 2, 3], { url: server.url }).transform(
-          (t) =>
-            t.catch(
-              (sub) => sub.map((x: number) => x),
-              () => {
-                onError();
-                return undefined;
-              },
-            ),
+      await withServer(worker.fetch, async (url) => {
+        const orchestrator = new HttpPipeline<number>([1, 2, 3], { url }).transform((t) =>
+          t.catch(
+            (sub) => sub.map((x: number) => x),
+            () => {
+              onError();
+              return undefined;
+            },
+          ),
         );
-        await expect(orchestrator.toArray()).rejects.toThrow(
-          new RegExp(`stage 0.*${server.url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
-        );
-      } finally {
-        await server.close();
-      }
+        const escapedUrl = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        await expect(orchestrator.toArray()).rejects.toThrow(new RegExp(`stage 0.*${escapedUrl}`));
+      });
     },
-    FIXTURE_TIMEOUT,
+    HTTP_TIMEOUT,
   );
 });
