@@ -158,6 +158,23 @@ none of it survived the hand-trim (#745).
   the ONE owner of those defaults. `.withExecutor(strategy)` takes the function, so a caller's own
   strategy is an `async function*` written inline - an arrow can never be a generator, so it is always
   `async function*`. (#5)
+  ⚠ `pending #17` DELETES this term and everything under it: `ExecutionStrategy`,
+  `ConcurrentStrategyOptions`, `sequential`, `concurrent`, `TransformerOptions.strategy` and
+  `.withExecutor()`. **Pipeline family** below replaces it.
+- **Pipeline family** - `pending #17`. WHERE a chain's chunks run is chosen by CONSTRUCTING A CLASS, not
+  by configuring a `Transformer`. `Pipeline` runs one chunk at a time in this process;
+  `ConcurrentPipeline` keeps `maxConcurrency` chunks in flight and owns the fan-out window, the reorder
+  buffer and failure containment; `HttpPipeline` overrides `stageWork()` alone to POST a chunk to
+  another instance and adds a `.fetch` handler; `ClusterPipeline` adds the worker bootstrap and a
+  localhost url. Each level overrides ONE thing, and the chain is identical in all four.
+- **Stage** - `pending #17`. One `.apply()` call, and therefore one `.transform()` call, since
+  `transform()` is `return this.apply(transformer)` (`pipeline.ts:391-394`). A stage's identity is its
+  INDEX in `_chunkTransforms`, so a dispatching class sends a chunk plus an index and never a function.
+  `.transform((t) => t.map(f).filter(g))` is ONE stage; two chained `.transform()` calls are TWO, and
+  on a dispatching class that is two network hops.
+- **`{ local: true }`** - `pending #17`. The optional SECOND argument to a dispatching subclass's own
+  `transform()`/`apply()`, keeping that stage in the orchestrating process. It is `super.apply()` at
+  every level, and the base `Pipeline` never gains it.
 - **Source position** - the `Pipeline` drain path that does NOT run the strategy: async iteration
   (`[Symbol.asyncIterator]`, reached when a caller uses a `Pipeline` directly as an `AsyncIterable`
   rather than through a terminal op) replays each transform's plain function from `_chunkTransforms`
@@ -182,6 +199,9 @@ none of it survived the hand-trim (#745).
   chunk-level throw, hands the failing chunk and error to a `ChunkErrorHandler` - return a replacement
   array to substitute the chunk, or nothing to drop it. Never a per-item try/catch: the unit of failure
   and recovery is the chunk.
+  ⚠ `pending #15` - the shipped code discards that return value and always drops the chunk. Two
+  `ChunkErrorHandler` types disagree: `src/types.ts:49` (exported, promises `U[] | void`) and
+  `src/errors/handler.ts:24` (what `.catch()` uses, returns `void`). #15 makes the sentence above true.
 
 ## Toolchain
 

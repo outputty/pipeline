@@ -7,8 +7,9 @@
 
 `@outputty/pipeline` is a TypeScript-native, async-first streaming transform library: chain
 `map`/`filter`/`reduce`/`flatMap` over a data source the way `Array` methods chain over a list, but
-process it in chunks, streaming, with an explicit choice between sequential and concurrent execution
-per chain. It is `outputty/laygo`'s caller-side transform layer - laygo's own `Source` accepts any
+process it in chunks, streaming, and choose where that work runs by choosing a `Pipeline` class. The
+chain never changes between them: the same `.transform()` calls run one chunk at a time, several at
+once, across processes, or across machines. It is `outputty/laygo`'s caller-side transform layer - laygo's own `Source` accepts any
 `AsyncIterable`, so this package reaches a `Model`'s `from` structurally, unimported, never as a
 laygo dependency. It must never grow a query-planning or storage layer of its own: chunking,
 transforming and controlling concurrency over data already in flight is the whole job.
@@ -56,42 +57,55 @@ import { Transformer } from "@outputty/pipeline";
 const t = new Transformer<number, number>({ chunkSize: 100 }).map((x: number) => x * 2);
 ```
 
-### Execution strategies
+### Where the work runs
 
-A chain declares once whether its chunks run one at a time or in parallel with a concurrency limit. The
-chain itself - the `map`/`filter`/`reduce` calls - never changes between the two.
+The class you construct decides where a chain's chunks are processed. The chain itself - the
+`map`/`filter`/`reduce` calls - is identical in all four, and so is the output. Only the class name
+changes.
 
-A strategy is a function, not a class. `.withExecutor()` takes one, and a caller writes their own
-inline as an `async function*` with no type to implement and no registration step.
-
-> **Execution strategy** - a function `(transformerLogic, chunks, context) => AsyncGenerator<Out[]>`,
-> passed to `.withExecutor()`. `sequential` is the default: order-preserving, one chunk at a time.
-> `concurrent(options)` returns a strategy holding `{maxConcurrency, ordered}` - a caller's own
-> strategy is the same shape, no name or registry between them.
-
-```ts
-import { Transformer, concurrent } from "@outputty/pipeline";
-
-const enrich = new Transformer<number, number>()
-  .withExecutor(concurrent({ maxConcurrency: 3 }))
-  .map(async (id) => (await fetch(`/api/users/${id}`)).json());
-```
-
-A caller's own strategy is the same function, written where it is used:
+> **`Pipeline`** - one chunk at a time, in this process. The default, and the base every other one
+> extends.
+> **`ConcurrentPipeline`** - several chunks in flight in this process, bounded by `maxConcurrency` and
+> re-ordered by `ordered` (default `true`). Use it when the per-chunk work is I/O-bound.
+> **`HttpPipeline`** - each chunk dispatched over HTTP to another instance running the same code. It
+> mounts its own routes, one per stage; the caller gives it the url where it is mounted.
+> **`ClusterPipeline`** - each chunk dispatched to another process on the same machine. It brings up
+> its own workers on first run and every later pipeline in the process reuses them.
+> **Stage** - one `.transform()` or `.apply()` call. A stage is identified by its position in the
+> chain, so a dispatching class sends a chunk and a stage index, never a function.
 
 ```ts
-import { Transformer } from "@outputty/pipeline";
+import { ClusterPipeline } from "@outputty/pipeline";
 
-const everyOther = new Transformer<number, number>({ chunkSize: 1 })
-  .withExecutor(async function* (logic, chunks, ctx) {
-    let n = 0;
-    for await (const chunk of chunks) {
-      n += 1;
-      if (n % 2 === 1) yield logic(chunk, ctx);
-    }
-  })
-  .map((x) => x * 2);
+const data = await new ClusterPipeline([1, 2, 3, 4, 5])
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+  .toArray();
 ```
+
+```json
+[6, 8, 10]
+```
+
+A dispatching class runs every stage elsewhere by default. `{ local: true }` keeps one stage in the
+orchestrating process - useful when a stage is cheap, or touches something only the orchestrator has:
+
+```ts
+import { HttpPipeline } from "@outputty/pipeline";
+
+const pipeline = new HttpPipeline(rows, { url: process.env.SELF_URL!, chunkSize: 1000 })
+  .transform((t) => t.map(expensiveScore))
+  .transform((t) => t.filter((r) => r.ok), { local: true });
+
+app.mount("/pipeline", pipeline.fetch);
+```
+
+Two rules follow from a stage being a position rather than a name, and both are the caller's to keep:
+
+- Every instance must run the same build. A rolling deploy that mixes versions can run a chunk through
+  an older stage and return it with HTTP 200, so drain the old instances before the new ones serve.
+- A file that constructs a `ClusterPipeline` is re-executed once per worker, because a worker has to
+  run it to hold the transforms. Keep top-level work out of that file - a query or a migration there
+  runs once per worker, not once.
 
 ### Context
 
@@ -148,6 +162,8 @@ bounded and explicit.
 
 > **`.catch(build, onError?)`** - `build` is the sub-chain to guard; `onError` receives the failing
 > `chunk` and `Error`, and its return value (an array, or nothing) replaces or drops the chunk.
+> ⚠ `pending #15` - the shipped code discards that return value and always drops the chunk. #15 makes
+> the behaviour above true.
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";

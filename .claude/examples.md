@@ -50,6 +50,11 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 
 ## Case 2 - concurrent execution
 
+> ⚠ `pending #17` - #17 removes `.withExecutor()` and the `ExecutionStrategy` seam. This case becomes
+> `new ConcurrentPipeline(["a", "b", "c"], { maxConcurrency: 10 })`, and Case 2b has no replacement:
+> a strategy could change which chunks ran at all, and a concurrency knob cannot. Both blocks below are
+> true against the shipped code until #17 lands.
+
 The same chain shape, run with a bounded concurrency instead of sequentially. `.withExecutor()` takes
 the strategy directly - a function, never a name - so `sequential`/`concurrent(options?)` and a
 caller's own strategy are all the same shape.
@@ -95,6 +100,46 @@ const data = await new Pipeline([1, 2, 3, 4])
 
 ```json
 [2, 6]
+```
+
+## Case 2c - execution somewhere else
+
+> ⚠ `pending #17` - not yet built. The output block is what #17's Done when case 1 asserts.
+
+The base pipeline, with its work running in other processes. The chain is unchanged and the output is
+unchanged; only the class differs. `ClusterPipeline` brings up its own workers on first run and every
+later pipeline in the process reuses them - there is no server, port, url or fork in caller code.
+
+<!-- illustrative -->
+
+```ts
+import { ClusterPipeline } from "@outputty/pipeline";
+
+const data = await new ClusterPipeline([1, 2, 3, 4, 5])
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+  .toArray();
+```
+
+```json
+[6, 8, 10]
+```
+
+Across machines instead of processes, the same chain takes a url and mounts its own routes:
+
+<!-- illustrative -->
+
+```ts
+import { HttpPipeline } from "@outputty/pipeline";
+
+const pipeline = new HttpPipeline([1, 2, 3, 4, 5], { url: process.env.SELF_URL!, chunkSize: 2 })
+  .transform((t) => t.map((x: number) => x * 2))
+  .transform((t) => t.filter((x: number) => x > 4), { local: true });
+
+app.mount("/pipeline", pipeline.fetch);
+```
+
+```json
+[6, 8, 10]
 ```
 
 ## Case 3 - branching
