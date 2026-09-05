@@ -16,7 +16,14 @@ import { describe, it, expect } from "vitest";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { Pipeline, ConcurrentPipeline, HttpPipeline, ClusterPipeline, toNodeHandler } from "../src";
+import {
+  Pipeline,
+  Transformer,
+  ConcurrentPipeline,
+  HttpPipeline,
+  ClusterPipeline,
+  toNodeHandler,
+} from "../src";
 
 /** A subprocess fixture (`node:cluster`, `execFile`) pays real process/fork startup cost. */
 const FIXTURE_TIMEOUT = 20000;
@@ -185,7 +192,7 @@ describe("#17 .constructor.name is the leaf class after two .transform() calls (
     expect(p.constructor.name).toBe("Pipeline");
   });
 
-  it.fails("a ConcurrentPipeline stays ConcurrentPipeline", () => {
+  it("a ConcurrentPipeline stays ConcurrentPipeline", () => {
     const p = new ConcurrentPipeline([1])
       .transform((t) => t.map((x: number) => x))
       .transform((t) => t.map((x: number) => x));
@@ -233,6 +240,45 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
     expect(p.constructor.name).toBe("ClusterPipeline");
     expect(p.workers).toBe(3);
   });
+
+  it("a dispatched stage's source-position violation survives .buffer()", async () => {
+    // Regression: `.buffer()` used to build its next Pipeline with only `{ context }`, dropping
+    // rootSource/chunkTransforms/sourcePositionViolations - a ConcurrentPipeline dispatch's own
+    // "not applied in source position" marker (apply(), above) silently vanished after `.buffer()`,
+    // so async-iterating the result ran the dispatched stage in-process instead of throwing.
+    const p = new ConcurrentPipeline([1, 2, 3])
+      .transform((t) => t.map((x: number) => x * 2))
+      .buffer(10);
+    await expect(async () => {
+      for await (const _chunk of p) {
+        // never reached
+      }
+    }).rejects.toThrow(/ConcurrentPipeline.*not applied in source position/);
+  });
+});
+
+describe("#17 a knob that only takes effect via Transformer.execute() fails loud, not silent", () => {
+  // Regression: stageWork() never calls execute() on ANY consumption path (not just async
+  // iteration), so .withHooks()/.onError() on a dispatched stage used to run with the hook
+  // silently never firing - no error, no warning. ConcurrentPipeline.apply() now throws instead.
+  it("rejects .withHooks() on a non-local stage", () => {
+    const hooked = new Transformer<number, number>()
+      .map((x: number) => x * 2)
+      .withHooks({ onStart: () => {} });
+    expect(() => new ConcurrentPipeline([1, 2, 3]).apply(hooked)).toThrow(
+      /withHooks never take effect on a dispatched stage/,
+    );
+  });
+
+  it("{ local: true } still runs a hooked stage in-process, hooks intact", async () => {
+    const order: string[] = [];
+    const hooked = new Transformer<number, number>()
+      .map((x: number) => x * 2)
+      .withHooks({ onStart: () => order.push("start"), onComplete: () => order.push("complete") });
+    const out = await new ConcurrentPipeline([1, 2, 3]).apply(hooked, { local: true }).toArray();
+    expect(out).toEqual([2, 4, 6]);
+    expect(order).toEqual(["start", "complete"]);
+  });
 });
 
 describe("#17 a chunk failure never leaks an unhandled rejection (Done-when 8)", () => {
@@ -247,7 +293,7 @@ describe("#17 a chunk failure never leaks an unhandled rejection (Done-when 8)",
     FIXTURE_TIMEOUT,
   );
 
-  it.fails(
+  it(
     "ConcurrentPipeline leaves UNHANDLED [] at both ordered: true and ordered: false",
     async () => {
       const fixture = await runFixture("__tests__/fixtures/concurrent-unhandled.ts");
@@ -264,7 +310,7 @@ describe("#17 a chunk failure never leaks an unhandled rejection (Done-when 8)",
 });
 
 describe("#17 ordered: false streams instead of draining the source first (Done-when 9)", () => {
-  it.fails("dispatches before the whole source has been pulled", async () => {
+  it("dispatches before the whole source has been pulled", async () => {
     const pulled: number[] = [];
     async function* source() {
       for (const x of [1, 2, 3, 4, 5, 6]) {
@@ -272,7 +318,11 @@ describe("#17 ordered: false streams instead of draining the source first (Done-
         yield x;
       }
     }
-    const cp = new ConcurrentPipeline<number>(source(), { maxConcurrency: 2, ordered: false });
+    const cp = new ConcurrentPipeline<number>(source(), {
+      maxConcurrency: 2,
+      ordered: false,
+      chunkSize: 1, // one item per chunk, so "not drained first" is actually observable
+    });
     await cp
       .transform((t) =>
         t.map(async (x: number) => {
@@ -287,7 +337,7 @@ describe("#17 ordered: false streams instead of draining the source first (Done-
 });
 
 describe("#17 ordered: true restores source order under a slow first chunk (Done-when 10)", () => {
-  it.fails("chunk 0 made 12x slower still comes out first", async () => {
+  it("chunk 0 made 12x slower still comes out first", async () => {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const cp = new ConcurrentPipeline<number>([1, 2, 3, 4], {
       maxConcurrency: 4,
