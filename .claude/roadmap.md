@@ -41,11 +41,12 @@ The two older candidates, still not filed:
 
 ## Built
 
-- **`.catch()` honours `onError`'s replacement array** (#15) - the two disagreeing `ChunkErrorHandler`
-  declarations (`src/types.ts`, exported, promising a replacement; `src/errors/handler.ts`, what
-  `.catch()` actually ran, always dropping the chunk) are one signature now. `ErrorHandler.handle()`
-  runs its handlers LIFO and returns the first one's replacement array, `undefined` if none replaced -
-  `.catch()` substitutes on an array, drops on `undefined`.
+- **`.catch()` honours `onError`'s replacement array** (#15, PR #19) - the two disagreeing
+  `ChunkErrorHandler` declarations (`src/types.ts`, exported, promising a replacement;
+  `src/errors/handler.ts`, what `.catch()` actually ran, always dropping the chunk) are one
+  signature now. `ErrorHandler.handle()` runs its handlers LIFO and returns the first one's
+  replacement array, `undefined` if none replaced - `.catch()` substitutes on an array, drops on
+  `undefined`.
 - **Split from `outputty/laygo`** (`outputty/laygo` #743, #744, #745) - `@outputty/pipeline` moves from
   `packages/pipeline` inside the laygo monorepo to its own repository. #743 dropped the terminal ops'
   context-tuple return in favor of reading `.contextManager` directly off the `Pipeline` instance after

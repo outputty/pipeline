@@ -534,9 +534,16 @@ export class Transformer<In, Out> {
    * forward, so `t.onError(fn).map(g)` no longer silently drops `fn` — `pipe()`'s constructor call
    * used to always start a fresh, empty `ErrorHandler`, discarding whatever `onError()` had just set.
    *
+   * The function arm is typed as a bare `void` return, never `ChunkErrorHandler<In>` (`void[] |
+   * void` with its default `U`) — a union loses the void-return exemption TypeScript grants a
+   * literal `void`, so an ordinary `(chunk, err) => arr.push(err)` would stop compiling
+   * (`.claude/rules/typescript.md`, 2026-09-05). This handler's return is ignored regardless (see
+   * `execute()`'s own catch, above) - `.onError()` is a notification hook here, never `.catch()`'s
+   * recovery path, so bare `void` also states that intent.
+   *
    * Python equivalent:
    * ```python
-   * def on_error(self, handler: ChunkErrorHandler[In, Out] | ErrorHandler) -> "Transformer[In, Out]":
+   * def on_error(self, handler: ChunkErrorHandler[In, None] | ErrorHandler) -> "Transformer[In, Out]":
    *   match handler:
    *     case ErrorHandler():
    *       new_handler = handler
@@ -548,7 +555,9 @@ export class Transformer<In, Out> {
    * @param handler - Error handler function or ErrorHandler instance (replaces the chain entirely)
    * @returns A new Transformer carrying the updated error handler
    */
-  onError(handler: ChunkErrorHandler<In> | ErrorHandler<In>): Transformer<In, Out> {
+  onError(
+    handler: ((chunk: In[], error: Error, ctx: IContextManager) => void) | ErrorHandler<In>,
+  ): Transformer<In, Out> {
     const errorHandler =
       handler instanceof ErrorHandler ? handler : this.errorHandler.clone().onError(handler);
     return new Transformer<In, Out>({
