@@ -1,21 +1,22 @@
 /**
- * `ClusterPipeline` — STUB (#17 L1-L4): `.transform()`/`.apply()` are real (inherited from
- * `HttpPipeline`/`ConcurrentPipeline` unchanged), so building a chain never throws and never
- * touches a network socket.
+ * `ClusterPipeline` (#17) — each chunk of a stage dispatched to another PROCESS on the same
+ * machine, via `node:cluster`. Reuses `HttpPipeline`'s own dispatch and `.fetch()` wholesale -
+ * a cluster worker is just another `HttpPipeline` instance, reached at
+ * `http://localhost:<bootstrapped port>`; only `stagePath()` changes, to route several pipeline
+ * definitions through the ONE server every worker runs (`/pipeline/<i>/stage/<n>`).
  *
- * `stageWork()` itself runs at BUILD time, synchronously - `ConcurrentPipeline.apply()` calls it
- * to get the function it fans out, before any chunk exists (review, #17 L3→L4: an earlier draft of
- * this comment claimed `stageWork()` "only ever runs when a chunk is dispatched", which is false -
- * verified live, `new ClusterPipeline([1]).transform(f)` throws immediately). The RETURNED
- * closure is what stays lazy, and that is where this stub's throw lives - a chain still builds
- * without ever draining it (case 7, `.constructor.name` after two `.transform()` calls, checks
- * exactly that). L5's real worker bootstrap belongs inside that same closure, on its first call,
- * for the identical reason: a `ClusterPipeline` built in-process during a test must never fork on
- * construction, only on an actual drain.
+ * Brings its own workers up lazily, on the first chunk actually dispatched - `stageWork()` itself
+ * still runs at BUILD time (`ConcurrentPipeline.apply()` calls it synchronously), but the bootstrap
+ * lives inside the closure it RETURNS, which only ever runs when a terminal op drains the pipeline.
+ * A `ClusterPipeline` built and never drained (case 7's own `.constructor.name` check) never forks.
  */
 
+import cluster from "node:cluster";
+import { createServer } from "node:http";
+import { availableParallelism } from "node:os";
+import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions, StageOptions } from "@src/pipelines/concurrent";
-import { HttpPipeline } from "@src/pipelines/http";
+import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
 import type { PipelineOptions, PipelineSource } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type { InternalTransformer } from "@src/types";
@@ -24,8 +25,114 @@ import type { InternalTransformer } from "@src/types";
 export type ClusterPipelineOptions = { workers?: number } & ConcurrentPipelineOptions;
 
 /** `ClusterPipeline`'s real constructor parameter type - see `ConcurrentPipelineConstructorOptions`
- * (`pipelines/concurrent.ts`) for why the base `Pipeline` internals must be included here too. */
-type ClusterPipelineConstructorOptions = ClusterPipelineOptions & PipelineOptions;
+ * (`pipelines/concurrent.ts`) for why the base `Pipeline` internals must be included here too.
+ * `pipelineIndex` is internal plumbing (below), never set by a caller. */
+type ClusterPipelineConstructorOptions = ClusterPipelineOptions &
+  PipelineOptions & { pipelineIndex?: number };
+
+// ---- module-level, per-PROCESS state - one shared bootstrap and one shared registry for every
+// ClusterPipeline instance, on both the primary and every worker (`cluster.fork()` re-execs the
+// entry module, so this file, and everything in it, runs once per worker too). ----
+
+let nextPipelineIndex = 0;
+/** Every `ClusterPipeline` ever constructed in THIS process, keyed by its `pipelineIndex` - a
+ * worker's own copy of this registry ends up identical to the primary's, because both run the
+ * exact same entry module, constructing pipelines in the exact same order (product.md's own
+ * "index N means the same transform on both sides", one level up). */
+const registry = new Map<number, ClusterPipeline<unknown>>();
+
+interface BootstrapResult {
+  port: number;
+}
+let bootstrapPromise: Promise<BootstrapResult> | undefined;
+let inFlight = 0;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
+/** How long with zero in-flight dispatches before workers are killed and the process can exit on
+ * its own (Done-when 3). Not a caller-facing option - the ticket names the mechanism (an unref'd
+ * idle timer), not a tuned value; a re-fork after a real idle gap costs ~50-60ms (architecture.md's
+ * own measurement), which this window is comfortably larger than for back-to-back dispatches. */
+const IDLE_KILL_MS = 500;
+
+/** `worker.kill()` (not `.unref()`) - forked workers hold the event loop open through cluster's
+ * shared `TCPServerWrap`, which no public API exposes to release (architecture.md's own
+ * constraint), so an idle process only exits once every worker is actually killed. */
+function killWorkers(): void {
+  for (const worker of Object.values(cluster.workers ?? {})) {
+    worker?.kill();
+  }
+  bootstrapPromise = undefined; // a later dispatch bootstraps a fresh set
+}
+
+/** Reschedules the idle-kill check, `unref()`'d so the timer itself never keeps the process alive -
+ * only the (deliberately NOT unref'd) worker processes do that, until this fires. */
+function scheduleIdleCheck(): void {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    if (inFlight > 0) {
+      scheduleIdleCheck();
+      return;
+    }
+    killWorkers();
+  }, IDLE_KILL_MS);
+  idleTimer.unref();
+}
+
+/** Forks `workerCount` workers (default `os.availableParallelism()`, per the ticket's own
+ * Constraints), waits for every one to report the port it ended up listening on via `.fork()`'s own
+ * IPC channel - `listen(0)` inside `cluster` yields every worker the SAME port (architecture.md's
+ * own probe), so the first one to report it IS the shared port. Memoized: every `ClusterPipeline`
+ * in this process shares the same in-flight or already-resolved bootstrap (Done-when 4). */
+function bootstrapCluster(workerCount: number): Promise<BootstrapResult> {
+  bootstrapPromise ??= new Promise((resolve) => {
+    const count = workerCount > 0 ? workerCount : availableParallelism();
+    let sharedPort: number | undefined;
+    let readyCount = 0;
+    for (let i = 0; i < count; i++) {
+      const worker = cluster.fork();
+      worker.on("message", (message: unknown) => {
+        const { type, port } = (message ?? {}) as { type?: string; port?: number };
+        if (type !== "outputty-pipeline-ready" || typeof port !== "number") return;
+        sharedPort ??= port;
+        readyCount++;
+        if (readyCount === count) resolve({ port: sharedPort! });
+      });
+    }
+  });
+  return bootstrapPromise;
+}
+
+/** The one HTTP server every worker runs, routing `/pipeline/<i>/stage/<n>` to pipeline `i`'s own
+ * `.fetch()` - which then parses `/stage/<n>` itself, prefix-agnostic, exactly as `HttpPipeline`
+ * already does for two plain instances. `registry` is read at REQUEST time, always after the
+ * worker's own copy of the entry module has finished its synchronous top-level construction (Node
+ * runs a script's synchronous code to completion before any I/O callback, an incoming request
+ * included) - architecture.md's own "the module must complete so every apply() call registers its
+ * stage" falls out of that ordering, not anything this function does itself. */
+function startWorkerServer(): void {
+  const routeToRegisteredPipeline = async (request: Request): Promise<Response> => {
+    const { pathname } = new URL(request.url);
+    const match = /^\/pipeline\/(\d+)\//.exec(pathname);
+    const pipeline = match ? registry.get(Number(match[1])) : undefined;
+    if (!pipeline) {
+      return Response.json({ error: `unknown pipeline route ${pathname}` }, { status: 404 });
+    }
+    return pipeline.fetch(request);
+  };
+
+  const server = createServer(toNodeHandler(routeToRegisteredPipeline));
+  server.listen(0, () => {
+    const { port } = server.address() as AddressInfo;
+    process.send?.({ type: "outputty-pipeline-ready", port });
+  });
+}
+
+if (cluster.isWorker) {
+  startWorkerServer();
+}
+
+/** A worker's own `dataSource` (constructor, below) - the worker exists to serve `.fetch()`
+ * requests, never to drain a pipeline itself. */
+async function* emptyAsyncIterable(): AsyncGenerator<never> {}
 
 /**
  * Each chunk of a stage dispatched to another process on the SAME machine (#17). Brings up its
@@ -33,25 +140,40 @@ type ClusterPipelineConstructorOptions = ClusterPipelineOptions & PipelineOption
  * them. Fully opaque: no server, no listen, no fork, no url in caller code.
  *
  * `new ClusterPipeline([1,2,3,4,5]).transform((t) => t.map((x) => x * 2)).toArray()` →
- * `[2,4,6,8,10]`, served by real worker processes (L5).
+ * `[2,4,6,8,10]`, served by real worker processes.
  */
 export class ClusterPipeline<T> extends HttpPipeline<T> {
-  /** Worker processes to bring up on first drain. `0` here is the L1/L2 stub default; L5 picks
-   * the real one (`os.availableParallelism()`, per the ticket's own Constraints). */
+  /** Worker processes to bring up on first drain. Default `os.availableParallelism()`. */
   readonly workers: number;
+  /** This pipeline's stable position among every `ClusterPipeline` constructed in this process -
+   * carried forward through copy-on-write (never reassigned by `.transform()`/`.context()`/…), so
+   * the SAME logical pipeline keeps the SAME route on both the primary and every worker. */
+  readonly pipelineIndex: number;
 
   constructor(source: PipelineSource<T>, options?: ClusterPipelineConstructorOptions) {
-    // The real url is only known once L5's bootstrap picks a port; "" is inert here — never
-    // dialled, since every method below still throws.
+    // The real url is only known once bootstrapCluster() (below) picks a port; "" is inert until
+    // the first actual dispatch sets it, inside stageWork()'s own returned closure.
     super(source, { ...options, url: "" });
-    this.workers = options?.workers ?? 0;
+    this.workers = options?.workers ?? availableParallelism();
+    this.pipelineIndex = options?.pipelineIndex ?? nextPipelineIndex++;
+    registry.set(this.pipelineIndex, this as ClusterPipeline<unknown>);
+
+    // architecture.md's own constraint: a WORKER process's terminal op must resolve immediately
+    // with an EMPTY result - the worker exists to hold the transforms (registered by the
+    // .transform() calls below THIS constructor call, in the entry module the worker re-executes),
+    // never to orchestrate. Emptying `dataSource` here, once, propagates through every later
+    // copy-on-write step automatically: a fan-out built over an empty source yields nothing, so
+    // the NEXT instance's own `dataSource` (that fan-out's generator) is empty too.
+    if (cluster.isWorker) {
+      this.dataSource = emptyAsyncIterable();
+    }
   }
 
   /**
-   * Carries `workers` into the NEXT instance a copy-on-write call builds, alongside
-   * `maxConcurrency`/`ordered`/`chunkSize` (`concurrentOptions()`, inherited) and `url` (currently
-   * inert here - the constructor below forces `url: ""` regardless of what it is given, until L5's
-   * bootstrap gives it a real one to forward).
+   * Carries `workers`/`pipelineIndex` into the NEXT instance a copy-on-write call builds, alongside
+   * `maxConcurrency`/`ordered`/`chunkSize` (`concurrentOptions()`, inherited) and `url` (kept
+   * correct once a real dispatch has set it, so a `.context()` call after the pipeline is already
+   * live does not reset it back to "").
    */
   protected override createPipeline<U>(
     data: AsyncIterable<U>,
@@ -65,6 +187,7 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
       ...options,
       ...this.concurrentOptions(),
       workers: this.workers,
+      pipelineIndex: this.pipelineIndex,
       url: this._url,
     };
     return new Ctor(data, merged);
@@ -81,14 +204,33 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
     return super.apply(transformer, options) as ClusterPipeline<U>;
   }
 
+  /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/stage/<n>` instead of plain
+   * `HttpPipeline`'s `/stage/<n>` - the one hook `stagePath()` (`http.ts`) exists for, so several
+   * `ClusterPipeline`s can share one worker server without colliding on stage 0. */
+  protected override stagePath(stageIndex: number): string {
+    return `/pipeline/${this.pipelineIndex}/stage/${stageIndex}`;
+  }
+
+  /**
+   * Lazily bootstraps the shared worker set on the FIRST actual dispatch (never at build time -
+   * the class docstring above explains why), sets `this._url` to the bootstrapped port, then
+   * delegates to `HttpPipeline`'s own dispatch logic (`stagePath()` above already redirects it).
+   */
   protected override stageWork<U>(
-    _transformer: Transformer<T, U>,
-    _stageIndex: number,
+    transformer: Transformer<T, U>,
+    stageIndex: number,
   ): InternalTransformer<T, U> {
-    // The throw lives INSIDE the returned closure, not here - stageWork() itself must succeed at
-    // build time (see the class docstring), so a chain builds without ever draining it.
-    return () => {
-      throw new Error("ClusterPipeline.stageWork: not implemented (#17 L5)");
+    const dispatch = super.stageWork(transformer, stageIndex);
+    return async (chunk, ctx) => {
+      const { port } = await bootstrapCluster(this.workers);
+      this._url = `http://localhost:${port}`;
+      inFlight++;
+      try {
+        return await dispatch(chunk, ctx);
+      } finally {
+        inFlight--;
+        scheduleIdleCheck();
+      }
     };
   }
 }
