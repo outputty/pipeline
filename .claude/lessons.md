@@ -7,6 +7,47 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-05 Four spikes argued for designs the user had not asked for
+
+Planning #17, the user asked for "everything implemented as a Pipeline subclass? One for http, one for
+cluster?". The reply built a standalone `HttpPipeline` holding a caller-owned stage map - not a subclass
+at all - and let a fork's "a WorkerPoolPipeline class is not coherent" verdict, which was about the
+worker's far side, kill the second class without ever addressing the subclass question. Corrected, the
+next re-pitch proposed `.apply(stages.double)` recognised by reference, which still kept the stage map.
+Both fork briefs had been written from a paraphrase rather than the user's own words, so both spikes
+returned real output arguing for the wrong shape. `~/.claude/rules/code.md` now says to restate the
+user's words as code before writing a spike brief.
+
+## 2026-09-05 A ratio of two total runtimes was reported as overhead
+
+Planning #17 compared `node:cluster` against a worker-thread pool on one CPU-bound job - sequential
+77ms, piscina 24ms, cluster 33ms - and reported "roughly 30-40% more overhead" from 33 divided by 24.
+Both numbers were mostly the CPU work; the dispatch cost was never isolated. Challenged with "how did
+you measure 40%", a proper measurement (identity transform, work removed, paired interleaved rounds
+across payload sizes) showed the ranking FLIPS at roughly 7-8 KB per chunk, so the original claim was
+wrong in method and in direction. The same session then divided a per-request cost measured at one
+payload size by 1000 rows to state a per-row figure, which the measurement does not support.
+`~/.claude/rules/code.md`'s existing measure-before-normalising rule gained both sharpenings.
+
+## 2026-09-05 Two counts were repeated from prose instead of being run
+
+Planning #17 carried "94 tests" through several rounds; it came from PR #4's body and the real count is
+100, confirmed by `npx vitest run`. The same session claimed `inertKnobsOf` "exists only to catch a
+strategy the async-iteration path cannot honor" after reading one line of it - it checks four knobs
+(`strategy`, `hooks`, `chunkSize`, `chunker`), so removing the execution seam shrinks it rather than
+deleting it. `~/.claude/rules/code.md`'s "a docstring's claim is not evidence" line now covers counts
+read from a PR body and scope claims made from one line of a function.
+
+## 2026-09-05 Four rounds were spent on options the reader could not judge
+
+Planning #17 put decisions to the user as priced options without first showing the mechanism they
+rested on, and drew "I dont understand your conclusions", "why are we specifically talking about this?"
+and two more. The round that landed instead wrote the causal chain first - the user asked for opacity,
+so the library calls `cluster.fork()`, so Node re-runs the entry module, so a `db.migrate()` in that
+file runs once per worker - and the answer came immediately. `~/.claude/rules/docs.md` now requires the
+problem as currently seen, then the causal chain, then the options, each with its own end-to-end
+example.
+
 ## 2026-09-04 A deferred conditional type never resolves inside its own abstract scope
 
 `Transformer`'s constructor tried gating a mismatched `In`/`Out` with no `transform` via a single
