@@ -27,6 +27,10 @@ interface FixtureResult {
   stdout: string;
   stderr: string;
   code: number;
+  /** Set when `execFile`'s own timeout killed the process - a killed process reports `err.code`
+   * as `null` (Node has no exit code for it), not a real assertion failure's code. Surfaced here
+   * instead of silently folding into a generic non-zero `code`. */
+  timedOut: boolean;
 }
 
 /** Spawns a fixture script under `tsx` (needed for `src`'s extensionless imports and the `@src/*`
@@ -40,8 +44,11 @@ function runFixture(relativePath: string): Promise<FixtureResult> {
       ["--import", "tsx", relativePath],
       { timeout: FIXTURE_TIMEOUT },
       (err, stdout, stderr) => {
-        const code = err ? ((err as NodeJS.ErrnoException & { code?: number }).code ?? 1) : 0;
-        resolve({ stdout, stderr, code: typeof code === "number" ? code : 1 });
+        const errno = err as
+          (NodeJS.ErrnoException & { code?: number; signal?: string; killed?: boolean }) | null;
+        const timedOut = errno?.killed === true && errno?.signal != null;
+        const code = errno ? (typeof errno.code === "number" ? errno.code : 1) : 0;
+        resolve({ stdout, stderr, code, timedOut });
       },
     );
   });
@@ -70,14 +77,21 @@ function makeWorker<U>(builder: (t: HttpPipeline<number>) => HttpPipeline<U>): H
   return builder(new HttpPipeline<number>([], { url: "" }));
 }
 
+/** Asserts a fixture exited 0 - and, when it didn't, says whether that's because
+ * `FIXTURE_TIMEOUT`/`HTTP_TIMEOUT` killed it (a hang) rather than a real non-zero exit. */
+function expectFixtureOk(result: FixtureResult): void {
+  expect(result.timedOut, `fixture timed out; stderr:\n${result.stderr}`).toBe(false);
+  expect(result.code, `fixture exited ${result.code}; stderr:\n${result.stderr}`).toBe(0);
+}
+
 describe("#17 ClusterPipeline canonical program (Done-when 1, 3)", () => {
   it.fails(
     "prints [6,8,10] with no server/listen/fork/url in caller code, and exits on its own",
     async () => {
-      const { stdout, code, stderr } = await runFixture("__tests__/fixtures/cluster-basic.ts");
-      expect(stderr).toBe("");
-      expect(code).toBe(0); // Done-when 3: exits cleanly on its own, no explicit teardown
-      expect(stdout.trim()).toBe("[6,8,10]"); // Done-when 1: the canonical result
+      const result = await runFixture("__tests__/fixtures/cluster-basic.ts");
+      expect(result.stderr).toBe("");
+      expectFixtureOk(result); // Done-when 3: exits cleanly on its own, no explicit teardown
+      expect(result.stdout.trim()).toBe("[6,8,10]"); // Done-when 1: the canonical result
     },
     FIXTURE_TIMEOUT,
   );
@@ -87,9 +101,9 @@ describe("#17 ClusterPipeline dispatches to real worker processes (Done-when 2)"
   it.fails(
     "distinct process.pid values serve stage 0, count matches workers",
     async () => {
-      const { stdout, code } = await runFixture("__tests__/fixtures/cluster-pids.ts");
-      expect(code).toBe(0);
-      const result = JSON.parse(stdout.trim()) as { distinctPids: number; workers: number };
+      const fixture = await runFixture("__tests__/fixtures/cluster-pids.ts");
+      expectFixtureOk(fixture);
+      const result = JSON.parse(fixture.stdout.trim()) as { distinctPids: number; workers: number };
       expect(result.distinctPids).toBe(result.workers);
     },
     FIXTURE_TIMEOUT,
@@ -100,9 +114,9 @@ describe("#17 three ClusterPipelines share one port and worker set (Done-when 4)
   it.fails(
     "every pipeline's url is identical",
     async () => {
-      const { stdout, code } = await runFixture("__tests__/fixtures/cluster-shared-port.ts");
-      expect(code).toBe(0);
-      const result = JSON.parse(stdout.trim()) as { ports: string[]; results: number[][] };
+      const fixture = await runFixture("__tests__/fixtures/cluster-shared-port.ts");
+      expectFixtureOk(fixture);
+      const result = JSON.parse(fixture.stdout.trim()) as { ports: string[]; results: number[][] };
       expect(new Set(result.ports).size).toBe(1);
       expect(result.results).toEqual([[1], [2], [3]]);
     },
@@ -196,15 +210,38 @@ describe("#17 .constructor.name is the leaf class after two .transform() calls (
   );
 });
 
+describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createPipeline)", () => {
+  // Regression: review found ConcurrentPipeline/HttpPipeline dropping maxConcurrency/url on
+  // .context() - Pipeline.createPipeline()'s base implementation only forwards PipelineOptions
+  // fields, so a subclass with EXTRA constructor knobs must override it, which these two now do.
+  it("ConcurrentPipeline keeps maxConcurrency/ordered through .context()", () => {
+    const p = new ConcurrentPipeline([1], { maxConcurrency: 8, ordered: false }).context({ k: 1 });
+    expect(p.constructor.name).toBe("ConcurrentPipeline");
+    expect(p.maxConcurrency).toBe(8);
+    expect(p.ordered).toBe(false);
+    expect(p.contextManager.toDict()).toEqual({ k: 1 });
+  });
+
+  it("HttpPipeline keeps url through .context()", () => {
+    const p = new HttpPipeline([1], { url: "http://example.test" }).context({ k: 1 });
+    expect(p.constructor.name).toBe("HttpPipeline");
+    expect(p.url).toBe("http://example.test");
+  });
+
+  it("ClusterPipeline keeps workers through .context()", () => {
+    const p = new ClusterPipeline([1], { workers: 3 }).context({ k: 1 });
+    expect(p.constructor.name).toBe("ClusterPipeline");
+    expect(p.workers).toBe(3);
+  });
+});
+
 describe("#17 a chunk failure never leaks an unhandled rejection (Done-when 8)", () => {
   it(
     "control: the shipped concurrent() strategy DOES leak, on this chain",
     async () => {
-      const { stdout, code } = await runFixture(
-        "__tests__/fixtures/concurrent-unhandled-control.ts",
-      );
-      expect(code).toBe(0);
-      const result = JSON.parse(stdout.trim()) as { control: string[] };
+      const fixture = await runFixture("__tests__/fixtures/concurrent-unhandled-control.ts");
+      expectFixtureOk(fixture);
+      const result = JSON.parse(fixture.stdout.trim()) as { control: string[] };
       expect(result.control.length).toBeGreaterThan(0);
     },
     FIXTURE_TIMEOUT,
@@ -213,9 +250,12 @@ describe("#17 a chunk failure never leaks an unhandled rejection (Done-when 8)",
   it.fails(
     "ConcurrentPipeline leaves UNHANDLED [] at both ordered: true and ordered: false",
     async () => {
-      const { stdout, code } = await runFixture("__tests__/fixtures/concurrent-unhandled.ts");
-      expect(code).toBe(0);
-      const result = JSON.parse(stdout.trim()) as { ordered: string[]; unordered: string[] };
+      const fixture = await runFixture("__tests__/fixtures/concurrent-unhandled.ts");
+      expectFixtureOk(fixture);
+      const result = JSON.parse(fixture.stdout.trim()) as {
+        ordered: string[];
+        unordered: string[];
+      };
       expect(result.ordered).toEqual([]);
       expect(result.unordered).toEqual([]);
     },
@@ -267,7 +307,7 @@ describe("#17 ordered: true restores source order under a slow first chunk (Done
 });
 
 describe("#17 async map/filter results are awaited (Done-when 11)", () => {
-  it.fails("prints [4,6], not []", async () => {
+  it("prints [4,6], not []", async () => {
     const out = await new Pipeline([1, 2, 3])
       .transform((t) => t.map(async (x: number) => x * 2).filter((x) => x > 2))
       .toArray();
@@ -334,9 +374,12 @@ describe("#17 .context() propagates through the wire (Done-when 14)", () => {
   it.fails(
     "prints [10,20,30,40,50] through ClusterPipeline, still a ClusterPipeline after .context()",
     async () => {
-      const { stdout, code } = await runFixture("__tests__/fixtures/cluster-context.ts");
-      expect(code).toBe(0);
-      const result = JSON.parse(stdout.trim()) as { out: number[]; ctorNameAfterContext: string };
+      const fixture = await runFixture("__tests__/fixtures/cluster-context.ts");
+      expectFixtureOk(fixture);
+      const result = JSON.parse(fixture.stdout.trim()) as {
+        out: number[];
+        ctorNameAfterContext: string;
+      };
       expect(result.out).toEqual([10, 20, 30, 40, 50]);
       expect(result.ctorNameAfterContext).toBe("ClusterPipeline");
     },

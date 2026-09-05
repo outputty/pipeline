@@ -54,6 +54,8 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   // A real fault (not the expected chunk failure) - print it plainly instead of leaving stdout
-  // empty, so a failing test's own output says why.
+  // empty, and exit non-zero so the calling test's own exit-code check catches it FIRST, before
+  // JSON.parse on a "FATAL ..." line obscures the real message with a generic SyntaxError.
   console.log(`FATAL ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
 });
