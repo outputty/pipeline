@@ -27,11 +27,12 @@ import type {
   ReduceOptions,
   TransformerLifecycleHooks,
   ChunkerFunction,
+  ChunkErrorHandler,
 } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
 import { buildChunkGenerator } from "./utils/chunk";
 import { SimpleContextManager } from "./context/simple";
-import { ErrorHandler, type ChunkErrorHandler } from "./errors/handler";
+import { ErrorHandler } from "./errors/handler";
 import { sequential } from "./strategies/sequential";
 import { isContextAware, isContextAwareReduce } from "./utils/helpers";
 
@@ -533,9 +534,16 @@ export class Transformer<In, Out> {
    * forward, so `t.onError(fn).map(g)` no longer silently drops `fn` — `pipe()`'s constructor call
    * used to always start a fresh, empty `ErrorHandler`, discarding whatever `onError()` had just set.
    *
+   * The function arm is typed as a bare `void` return, never `ChunkErrorHandler<In>` (`void[] |
+   * void` with its default `U`) — a union loses the void-return exemption TypeScript grants a
+   * literal `void`, so an ordinary `(chunk, err) => arr.push(err)` would stop compiling
+   * (`.claude/rules/typescript.md`, 2026-09-05). This handler's return is ignored regardless (see
+   * `execute()`'s own catch, above) - `.onError()` is a notification hook here, never `.catch()`'s
+   * recovery path, so bare `void` also states that intent.
+   *
    * Python equivalent:
    * ```python
-   * def on_error(self, handler: ChunkErrorHandler[In, Out] | ErrorHandler) -> "Transformer[In, Out]":
+   * def on_error(self, handler: ChunkErrorHandler[In, None] | ErrorHandler) -> "Transformer[In, Out]":
    *   match handler:
    *     case ErrorHandler():
    *       new_handler = handler
@@ -547,7 +555,9 @@ export class Transformer<In, Out> {
    * @param handler - Error handler function or ErrorHandler instance (replaces the chain entirely)
    * @returns A new Transformer carrying the updated error handler
    */
-  onError(handler: ChunkErrorHandler<In> | ErrorHandler<In>): Transformer<In, Out> {
+  onError(
+    handler: ((chunk: In[], error: Error, ctx: IContextManager) => void) | ErrorHandler<In>,
+  ): Transformer<In, Out> {
     const errorHandler =
       handler instanceof ErrorHandler ? handler : this.errorHandler.clone().onError(handler);
     return new Transformer<In, Out>({
@@ -762,29 +772,31 @@ export class Transformer<In, Out> {
   /**
    * Execute a sub-pipeline with error handling.
    *
-   * If the sub-pipeline throws an error, the error handler is invoked and
-   * an empty array is returned for that chunk. This allows graceful recovery
-   * from errors during processing.
+   * If the sub-pipeline throws, `onError` is invoked with the failing chunk and the error. Its
+   * return value REPLACES the chunk (an array) or DROPS it (`undefined`, or no `onError` given) -
+   * `ErrorHandler.handle()` (`errors/handler.ts`) is what resolves that value when several
+   * handlers are chained onto `onError` (#15).
    *
    * Python equivalent:
    * ```python
    * def catch[U](
    *   self,
    *   sub_pipeline_builder: Callable[["Transformer[Out, Out]"], "Transformer[Out, U]"],
-   *   on_error: ChunkErrorHandler[Out, None] | None = None,
+   *   on_error: ChunkErrorHandler[Out, U] | None = None,
    * ) -> "Transformer[In, U]":
    *   ...
    * ```
    *
    * @param subPipelineBuilder - Function that builds the sub-pipeline to execute
-   * @param onError - Optional error handler called when an error occurs
+   * @param onError - Optional error handler called when an error occurs; its returned array
+   *   replaces the failing chunk, `undefined` drops it
    * @returns New transformer with error handling applied
    */
   catch<U>(
     subPipelineBuilder: (t: Transformer<Out, Out>) => Transformer<Out, U>,
-    onError?: ChunkErrorHandler<Out>,
+    onError?: ChunkErrorHandler<Out, U>,
   ): Transformer<In, U> {
-    const catchErrorHandler = new ErrorHandler<Out>();
+    const catchErrorHandler = new ErrorHandler<Out, U>();
 
     if (onError) {
       catchErrorHandler.onError(onError);
@@ -801,8 +813,10 @@ export class Transformer<In, Out> {
       try {
         return await subTransform(chunk, ctx);
       } catch (error) {
-        catchErrorHandler.handle(chunk, error as Error, ctx);
-        return [];
+        // `handle()` (`errors/handler.ts`) returns the first registered handler's replacement
+        // array, LIFO order; `undefined` (no handler, or every one passed) drops the chunk.
+        const replacement = catchErrorHandler.handle(chunk, error as Error, ctx);
+        return replacement ?? [];
       }
     });
   }

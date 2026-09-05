@@ -196,12 +196,11 @@ none of it survived the hand-trim (#745).
   `onItemError`/`onComplete`/`onError`), attached via `.withHooks()` for observability without
   embedding event logic in a transform.
 - **Error handling / `.catch()`** - a `Transformer.catch(build, onError?)` runs a sub-chain and, on a
-  chunk-level throw, hands the failing chunk and error to a `ChunkErrorHandler` - return a replacement
-  array to substitute the chunk, or nothing to drop it. Never a per-item try/catch: the unit of failure
-  and recovery is the chunk.
-  ⚠ `pending #15` - the shipped code discards that return value and always drops the chunk. Two
-  `ChunkErrorHandler` types disagree: `src/types.ts:49` (exported, promises `U[] | void`) and
-  `src/errors/handler.ts:24` (what `.catch()` uses, returns `void`). #15 makes the sentence above true.
+  chunk-level throw, hands the failing chunk and error to a `ChunkErrorHandler` (`src/types.ts` - the
+  ONE declaration; `src/errors/handler.ts` takes the same shape inline, never re-declaring or
+  re-importing the name) - return a replacement array to substitute the chunk, or nothing to drop it.
+  Never a per-item try/catch: the unit of failure and recovery is the chunk. Several handlers registered
+  via `.onError()` run LIFO (last-registered first); the first one to return an array wins (#15).
 
 ## Toolchain
 

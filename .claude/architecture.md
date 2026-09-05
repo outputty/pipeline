@@ -67,7 +67,12 @@ Pipeline.toArray() (or any terminal op)
 `.catch(build, onError)` wraps one internal transformer function in a try/catch at the CHUNK boundary:
 a throw inside `build`'s chain hands the whole failing chunk to `onError`, whose return value (an
 array, or nothing) replaces or drops it. The unit of failure is the chunk, never the row - there is no
-per-item try/catch anywhere in the chain.
+per-item try/catch anywhere in the chain. `ErrorHandler.handle()` (`errors/handler.ts`) runs every
+registered handler LIFO (last-registered first) and returns the FIRST one that returns an array; a
+handler returning `undefined` passes to the next-oldest one, and `handle()` itself returns `undefined`
+once every handler has passed, which `.catch()` reads as "drop the chunk" (#15). `.onError()`'s own
+call into the same `handle()`, from `Transformer.execute()`'s catch, ignores this return value - it is
+a notification hook there, never a recovery path.
 
 ## The pipeline family - `pending #17`
 
