@@ -32,8 +32,15 @@ import { normalize } from "./utils/chunk";
 /**
  * A chunk-wise transform function: takes one chunk (array) and produces the
  * next chunk (array), optionally reading/writing the shared context.
+ *
+ * Exported (#17) so a dispatching subclass (`ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`,
+ * `src/pipelines/`) can type its own `_chunkTransforms`-adjacent bookkeeping against the same shape
+ * `Pipeline` itself uses, rather than re-declaring it.
  */
-type ChunkTransform = (chunk: unknown[], ctx: IContextManager) => unknown[] | Promise<unknown[]>;
+export type ChunkTransform = (
+  chunk: unknown[],
+  ctx: IContextManager,
+) => unknown[] | Promise<unknown[]>;
 
 /**
  * The item type a `Pipeline<T>` carries, extracted from `P` itself rather than referenced as
@@ -151,11 +158,14 @@ function inertKnobsOf<In, Out>(transformer: Transformer<In, Out>): string[] {
  * for that.
  */
 export class Pipeline<T> {
-  private dataSource: AsyncIterable<T>;
-  private _context: IContextManager;
-  private _rootSource: AsyncIterable<unknown>;
-  private _chunkTransforms: ChunkTransform[];
-  private _sourcePositionViolations: string[];
+  // Protected (#17), not private: a dispatching subclass's own overridden `createPipeline()`
+  // (below) reads these to carry them into the next instance the same way this base
+  // implementation does - `private` would put them out of reach from `src/pipelines/`.
+  protected dataSource: AsyncIterable<T>;
+  protected _context: IContextManager;
+  protected _rootSource: AsyncIterable<unknown>;
+  protected _chunkTransforms: ChunkTransform[];
+  protected _sourcePositionViolations: string[];
 
   /**
    * Create a new Pipeline from a data source.
@@ -173,6 +183,31 @@ export class Pipeline<T> {
     this._rootSource = options?.rootSource ?? (this.dataSource as AsyncIterable<unknown>);
     this._chunkTransforms = options?.chunkTransforms ?? [];
     this._sourcePositionViolations = options?.sourcePositionViolations ?? [];
+  }
+
+  /**
+   * Builds the NEXT `Pipeline` in a copy-on-write chain, via `this.constructor` rather than a
+   * hard-coded `new Pipeline<U>` (#17) — the ONE seam every copy-on-write method below
+   * (`.apply()`, `.context()`, `.buffer()`) goes through, so a subclass built on `Pipeline`
+   * survives its own `.transform()` chain instead of silently decaying to a plain `Pipeline`.
+   *
+   * A subclass whose constructor takes EXTRA knobs (`ConcurrentPipeline.maxConcurrency`,
+   * `HttpPipeline.url`, …) overrides this method to carry them forward explicitly — `this.
+   * constructor` alone only reproduces knobs `PipelineOptions` itself already carries. This base
+   * implementation is correct for `Pipeline` itself and for any subclass whose constructor takes
+   * nothing beyond `(source, options)`.
+   *
+   * @example
+   * A `Sub extends Pipeline` with no extra constructor params: `new Sub([1]).transform(f)
+   * .constructor.name` → `"Sub"`, because `apply()` (below) calls this method rather than `new
+   * Pipeline(...)` directly.
+   */
+  protected createPipeline<U>(data: AsyncIterable<U>, options: PipelineOptions): Pipeline<U> {
+    const Ctor = this.constructor as new (
+      data: AsyncIterable<U>,
+      options?: PipelineOptions,
+    ) => Pipeline<U>;
+    return new Ctor(data, options);
   }
 
   /**
@@ -307,9 +342,14 @@ export class Pipeline<T> {
    * ```
    *
    * @param ctx - Dictionary of context values to merge in
-   * @returns A new Pipeline carrying the merged context
+   * @returns A new instance of THIS pipeline's own class, carrying the merged context. Typed
+   *   `this` (#17), not `Pipeline<T>` - `T` never changes here, so a dispatching subclass's own
+   *   `.transform(fn, { local: true })` still typechecks after a `.context()` call, the same as it
+   *   would directly off the constructor. The cast below is honest only because `createPipeline()`
+   *   is the one seam every subclass overrides to return its own class (verified: `new
+   *   ConcurrentPipeline([1], { maxConcurrency: 8 }).context({}).maxConcurrency` → `8`).
    */
-  context(ctx: Record<string, unknown>): Pipeline<T> {
+  context(ctx: Record<string, unknown>): this {
     const newContext = new SimpleContextManager();
     for (const [key, value] of Object.entries(this._context.toDict())) {
       newContext.set(key, value);
@@ -317,12 +357,12 @@ export class Pipeline<T> {
     for (const [key, value] of Object.entries(ctx)) {
       newContext.set(key, value);
     }
-    return new Pipeline<T>(this.dataSource, {
+    return this.createPipeline<T>(this.dataSource, {
       context: newContext,
       rootSource: this._rootSource,
       chunkTransforms: this._chunkTransforms,
       sourcePositionViolations: this._sourcePositionViolations,
-    });
+    }) as this;
   }
 
   /**
@@ -367,7 +407,7 @@ export class Pipeline<T> {
    */
   apply<U>(transformer: Transformer<T, U>): Pipeline<U> {
     const newData = transformer.execute(this.dataSource, this._context);
-    return new Pipeline<U>(newData, {
+    return this.createPipeline<U>(newData, {
       context: this._context,
       rootSource: this._rootSource,
       chunkTransforms: [
@@ -399,6 +439,9 @@ export class Pipeline<T> {
    * Note: In TypeScript with async iterators, natural backpressure exists.
    * This method creates a simple batching buffer.
    *
+   * Typed `this`, like `.context()` (#17) - `T` never changes here either, so this stays chainable
+   * on a dispatching subclass without losing its own `.transform(fn, { local: true })` overload.
+   *
    * Python equivalent:
    * ```python
    * def buffer(self, size: int, batch_size: int = 1000) -> "Pipeline[T]":
@@ -406,7 +449,7 @@ export class Pipeline<T> {
    *   ...
    * ```
    */
-  buffer(size: number, batchSize = 1000): Pipeline<T> {
+  buffer(size: number, batchSize = 1000): this {
     const source = this.dataSource;
 
     async function* bufferedStream(): AsyncGenerator<T> {
@@ -432,7 +475,7 @@ export class Pipeline<T> {
       }
     }
 
-    return new Pipeline<T>(bufferedStream(), { context: this._context });
+    return this.createPipeline<T>(bufferedStream(), { context: this._context }) as this;
   }
 
   // ===== Terminal Operations =====

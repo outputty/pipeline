@@ -377,9 +377,12 @@ export class Transformer<In, Out> {
    */
   map<U>(fn: PipelineFunction<Out, U>): Transformer<In, U> {
     if (isContextAware(fn)) {
-      return this.pipe((chunk, ctx) => chunk.map((x) => fn(x, ctx) as U));
+      return this.pipe((chunk, ctx) => Promise.all(chunk.map((x) => fn(x, ctx))) as Promise<U[]>);
     }
-    return this.pipe((chunk, _ctx) => chunk.map((x) => (fn as (item: Out) => U)(x)));
+    return this.pipe(
+      (chunk, _ctx) =>
+        Promise.all(chunk.map((x) => (fn as (item: Out) => U | Promise<U>)(x))) as Promise<U[]>,
+    );
   }
 
   /**
@@ -401,11 +404,16 @@ export class Transformer<In, Out> {
    */
   filter(predicate: PipelineFunction<Out, boolean>): Transformer<In, Out> {
     if (isContextAware(predicate)) {
-      return this.pipe((chunk, ctx) => chunk.filter((x) => predicate(x, ctx) as boolean));
+      return this.pipe(async (chunk, ctx) => {
+        const keep = await Promise.all(chunk.map((x) => predicate(x, ctx)));
+        return chunk.filter((_x, i) => keep[i]);
+      });
     }
-    return this.pipe((chunk, _ctx) =>
-      chunk.filter((x) => (predicate as (item: Out) => boolean)(x)),
-    );
+    return this.pipe(async (chunk, _ctx) => {
+      const fn = predicate as (item: Out) => boolean | Promise<boolean>;
+      const keep = await Promise.all(chunk.map((x) => fn(x)));
+      return chunk.filter((_x, i) => keep[i]);
+    });
   }
 
   /**
@@ -479,9 +487,9 @@ export class Transformer<In, Out> {
     // Check if arg is a Transformer instance
     if (arg instanceof Transformer) {
       const tappedTransform = arg.transform;
-      return this.pipe((chunk, ctx) => {
-        // Execute the tapped transformer for side effects only
-        tappedTransform(chunk, ctx);
+      return this.pipe(async (chunk, ctx) => {
+        // Execute the tapped transformer for side effects only, awaited before the chunk moves on
+        await tappedTransform(chunk, ctx);
         return chunk;
       });
     }
@@ -489,15 +497,15 @@ export class Transformer<In, Out> {
     // Handle function case
     const fn = arg;
     if (isContextAware(fn)) {
-      return this.pipe((chunk, ctx) => {
-        chunk.forEach((x) => fn(x, ctx));
+      return this.pipe(async (chunk, ctx) => {
+        await Promise.all(chunk.map((x) => fn(x, ctx)));
         return chunk;
       });
     }
 
     const nonContextFn = fn as (item: Out) => unknown;
-    return this.pipe((chunk, _ctx) => {
-      chunk.forEach((x) => nonContextFn(x));
+    return this.pipe(async (chunk, _ctx) => {
+      await Promise.all(chunk.map((x) => nonContextFn(x)));
       return chunk;
     });
   }
@@ -689,23 +697,29 @@ export class Transformer<In, Out> {
     const perChunk = options?.perChunk !== false; // Default to true
 
     if (perChunk) {
-      // Per-chunk reduce: chainable operation
+      // Per-chunk reduce: chainable operation. A `for` loop, not `Array.reduce`, since `fn` may be
+      // async - `reduce`'s own callback never awaits between iterations, so an async `fn` would
+      // hand the NEXT call a `Promise<U>` accumulator instead of the resolved `U`.
       if (isContextAwareReduce(fn)) {
-        return this.pipe((chunk, ctx) => {
+        const contextAwareFn = fn as (acc: U, item: Out, ctx: IContextManager) => U | Promise<U>;
+        return this.pipe(async (chunk, ctx) => {
           if (chunk.length === 0) return [];
-          return [
-            chunk.reduce(
-              (acc, val) => (fn as (acc: U, item: Out, ctx: IContextManager) => U)(acc, val, ctx),
-              initial,
-            ),
-          ];
+          let acc = initial;
+          for (const val of chunk) {
+            acc = await contextAwareFn(acc, val, ctx);
+          }
+          return [acc];
         });
       }
 
-      const simpleFn = fn as (acc: U, item: Out) => U;
-      return this.pipe((chunk, _ctx) => {
+      const simpleFn = fn as (acc: U, item: Out) => U | Promise<U>;
+      return this.pipe(async (chunk, _ctx) => {
         if (chunk.length === 0) return [];
-        return [chunk.reduce(simpleFn, initial)];
+        let acc = initial;
+        for (const val of chunk) {
+          acc = await simpleFn(acc, val);
+        }
+        return [acc];
       });
     }
 
@@ -724,17 +738,18 @@ export class Transformer<In, Out> {
       const asyncData = self.toAsyncIterable(data);
       const processedItems = self.execute(asyncData, runContext);
 
-      // Reduce all items to a single value
+      // Reduce all items to a single value - awaited per item, same reason as the per-chunk arms
+      // above: an async `fn` must resolve before the next call sees the accumulator.
       let accumulator = initial;
       for await (const item of processedItems) {
         if (isContextAware) {
-          accumulator = (fn as (acc: U, item: Out, ctx: IContextManager) => U)(
+          accumulator = await (fn as (acc: U, item: Out, ctx: IContextManager) => U | Promise<U>)(
             accumulator,
             item,
             runContext,
           );
         } else {
-          accumulator = (fn as (acc: U, item: Out) => U)(accumulator, item);
+          accumulator = await (fn as (acc: U, item: Out) => U | Promise<U>)(accumulator, item);
         }
       }
 
