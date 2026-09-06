@@ -48,6 +48,4 @@ Sibling: `<path:line>` or `none, new surface` · Where: `<the one folder the wor
 
 - <an unresolved question, or "none">
 
-## Layers
-
-<left empty; the build session posts its layer plan as a comment before the first edit>
+<!-- No Layers section. The build session posts its layer plan as its own comment on the ticket. -->

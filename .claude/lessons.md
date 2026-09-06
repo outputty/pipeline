@@ -7,6 +7,17 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-06 A probe counted instances and the ticket claimed invocations
+
+Planning #31 measured `contextFactory` with a spike that counted distinct manager instances SERVING
+a chunk - one per worker - and wrote "the factory runs once per process" into `product.md`, the
+README, `CLAUDE.md`'s Language and a Done-when case. Counting invocations instead showed each worker
+called it TWICE: once in the `Pipeline` constructor for its own `_context`, which a worker never
+uses, and once in `.fetch()`. For the user's own `new Pool(...)` example that is two pools per
+worker, one dead. Caught by `advisor` after the ticket was already filed; corrected with a real
+re-run (`maxBuiltPerWorkerPid` `[2,2]` before the unification, `[1,1]` after) posted as #31's first
+comment. `~/.claude/rules/code.md`'s measure-the-right-quantity rule gained the sharpening.
+
 ## 2026-09-06 A base-class fix was priced without ever reaching a subclass
 
 Planning #31, `.context()`'s mutate-in-place fix was patched into `src/pipeline.ts`, the full suite
