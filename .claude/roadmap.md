@@ -14,8 +14,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   `.withExecutor()` entirely. A stage is its position in the chain, so a chunk crosses a boundary with
   an index instead of a function. Now, because the package cannot run CPU-bound work at all today: a
   chain finishes no faster on ten cores than on one, whatever `maxConcurrency` says.
-- **`.catch()` must honour `onError`'s replacement array** (#15) - the exported `ChunkErrorHandler`
-  promises a replacement and `.catch()` returns `[]`, so a caller's fallback silently drops rows.
 - **`concurrent()` leaks unhandled rejections** (#16) - one chunk failure leaves every other in-flight
   rejection unhandled, which crashes the process under Node's defaults. #17 deletes `concurrent()`; if
   it lands first, #16 closes as moot.
@@ -43,6 +41,12 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`.catch()` honours `onError`'s replacement array** (#15, PR #19) - the two disagreeing
+  `ChunkErrorHandler` declarations (`src/types.ts`, exported, promising a replacement;
+  `src/errors/handler.ts`, what `.catch()` actually ran, always dropping the chunk) are one
+  signature now. `ErrorHandler.handle()` runs its handlers LIFO and returns the first one's
+  replacement array, `undefined` if none replaced - `.catch()` substitutes on an array, drops on
+  `undefined`.
 - **Split from `outputty/laygo`** (`outputty/laygo` #743, #744, #745) - `@outputty/pipeline` moves from
   `packages/pipeline` inside the laygo monorepo to its own repository. #743 dropped the terminal ops'
   context-tuple return in favor of reading `.contextManager` directly off the `Pipeline` instance after

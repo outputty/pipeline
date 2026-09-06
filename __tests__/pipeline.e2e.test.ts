@@ -493,6 +493,24 @@ describe("Pipeline", () => {
       expect(seen).toHaveLength(1);
       expect(seen[0].message).toBe("boom");
     });
+
+    it("an expression-body handler returning a non-void value still typechecks (#15)", async () => {
+      // Regression: onError()'s function arm must stay a bare `void` return, never
+      // `ChunkErrorHandler<In>` (a `void[] | void` union under #15's own U default) - a union
+      // loses the void-return exemption, so `(chunk, err) => arr.push(err)` (returning `push()`'s
+      // own `number`) would fail TS2345 under the union even though it compiled before #15.
+      const seen: Error[] = [];
+      const boom = new Error("boom");
+      const transformer = new Transformer<number, number>()
+        .map((x: number) => {
+          if (x === 2) throw boom;
+          return x;
+        })
+        .onError((_chunk, error) => seen.push(error));
+
+      await expect(new Pipeline([1, 2, 3]).apply(transformer).toArray()).rejects.toThrow(boom);
+      expect(seen).toHaveLength(1);
+    });
   });
 
   describe("source-position knobs fail loud on async iteration", () => {

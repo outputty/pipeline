@@ -217,7 +217,8 @@ const t3 = new Transformer<number, number>({ chunkSize: 100 }).map((x: number) =
 ```typescript
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline(["a", "b", "3", "d", "5"])
+// A handler's returned array REPLACES the failing chunk.
+const replaced = await new Pipeline(["a", "b", "3", "d", "5"])
   .transform((t) =>
     t.catch(
       (sub) =>
@@ -226,15 +227,29 @@ const data = await new Pipeline(["a", "b", "3", "d", "5"])
           if (isNaN(n)) throw new Error(`Invalid: ${s}`);
           return n;
         }),
-      (chunk, err) => {
-        console.warn(`Skipping chunk [${chunk.join(", ")}]: ${err.message}`);
-        // return a fallback array here to replace the failed chunk instead of dropping it
-      },
+      () => [999],
     ),
   )
   .toArray();
 
-console.log(data); // chunks that threw were dropped (or replaced by the handler's return)
+console.log(replaced); // [999]
+
+// A handler returning nothing DROPS the failing chunk instead.
+const dropped = await new Pipeline(["a", "b", "3", "d", "5"])
+  .transform((t) =>
+    t.catch(
+      (sub) =>
+        sub.map((s: string) => {
+          const n = parseInt(s);
+          if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+          return n;
+        }),
+      () => undefined,
+    ),
+  )
+  .toArray();
+
+console.log(dropped); // []
 ```
 
 ## Branching

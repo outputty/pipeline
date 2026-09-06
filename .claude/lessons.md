@@ -7,6 +7,40 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-05 A background code-review agent was polled with a /loop-mode scheduling tool
+
+Waiting on the #15 `/code-review medium` subagent, `ScheduleWakeup` was called to "check back in 3
+minutes" - a tool meant for `/loop` pacing, not for a task the harness already notifies on completion
+for. `~/.claude/rules/code.md` already named this exact mistake from two earlier dates; this is its
+third occurrence, now stamped onto that rule's own date list rather than left unremarked. The correct
+move, used for the rest of the wait, was `ListAgents` once to confirm it was still running, then
+stopping the turn and letting the real `<task-notification>` arrive on its own.
+
+## 2026-09-05 A type's new default parameter silently tightened a sibling method it did not touch
+
+Building #15, `ChunkErrorHandler<In, U = void>` moved into `Transformer.onError()`'s signature to
+replace the duplicate `handler.ts` declaration it used to take. `errors/handler.ts`'s old type was a
+bare-`void`-returning function; the imported one at its `U = void` default is `void[] | void` - a
+union, which loses TypeScript's void-return exemption. `pnpm typecheck` on the untouched suite still
+passed (every existing `.onError()` handler uses a block body, which returns `undefined` either way),
+so the break reached an ordinary expression-body `(chunk, err) => arr.push(err)` caller with no test
+covering it, and was caught only by `advisor` naming the exact rule this violated. `~/.claude/rules/
+typescript.md` gained the grep-every-sibling-site rule; `Transformer.onError()`'s function arm is now
+typed inline as a bare `void`, independent of `ChunkErrorHandler`'s default.
+
+## 2026-09-05 An early-exit loop passed every test because no test registered two handlers
+
+`ErrorHandler.handle()`'s first draft (#15) picked a "winning" return value by returning as soon as
+one handler returned non-`undefined`, which also skipped calling every handler after it - a real
+regression from the shipped code's "run every handler, ignore what it returns" loop. `pnpm test`
+stayed green because no existing test chained two `.onError()` handlers together; `/code-review
+medium` caught it (independently, from four of five review angles), and a fix verified by reverting it
+and confirming the added regression test actually failed first (`.claude/rules/code.md`'s own
+flip-the-value-not-just-delete-the-line rule). `.claude/rules/typescript.md` (repo-local) has no entry
+for this shape yet; the general form - a loop rewritten to also compute a return value must keep every
+existing SIDE EFFECT unconditional unless the ticket says otherwise - is worth a `~/.claude/rules/
+code.md` line if it recurs.
+
 ## 2026-09-05 Four spikes argued for designs the user had not asked for
 
 Planning #17, the user asked for "everything implemented as a Pipeline subclass? One for http, one for
