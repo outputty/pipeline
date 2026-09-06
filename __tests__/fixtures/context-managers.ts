@@ -1,6 +1,7 @@
 /**
- * #31 - two `IContextManager` test doubles a caller might reasonably bring their own class for,
- * shared by `pipeline.e2e.test.ts` and `merge.e2e.test.ts` rather than declared twice.
+ * #31 - two `IContextManager` test doubles a caller might reasonably bring their own class for.
+ * Used by `pipeline.e2e.test.ts`; `merge.e2e.test.ts` imports the same file once its own L2 layer
+ * needs a manager-identity check, rather than declaring a second copy.
  */
 import type { IContextManager } from "@src/types";
 
