@@ -26,7 +26,7 @@ import type { IContextManager, BranchDefinition, BranchOptions } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
 import { SimpleContextManager } from "./context/simple";
 import { Transformer } from "./transformer";
-import { normalize } from "./utils/chunk";
+import { buildChunkGenerator, flattenChunks } from "./utils/chunk";
 
 /**
  * A chunk-wise transform function: takes one chunk (array) and produces the
@@ -52,33 +52,12 @@ export type ChunkTransform = (
 type ElementOf<P> = P extends Pipeline<infer U> ? U : never;
 
 /**
- * Drain complete batches off the front of `buffer` while it holds at least
- * `size` batches, flattening each drained batch into individual items.
- *
- * Runs from within `Pipeline#buffer`'s streaming loop, once per incoming
- * item that fills a batch. Mutates `buffer` in place (shifting drained
- * batches off) and yields their items in order.
- *
- * @example
- * `[...drainReadyBatches([[1, 2], [3, 4]], 2)]` → `[1, 2, 3, 4]`, leaving
- * `buffer` empty.
+ * What a `Pipeline<T>` may be built from - a stream/collection of items. Terminal ops
+ * (`toArray`/`first`/…) and async iteration both read the SAME persisted chunk stream (#39) - there
+ * is no longer a separate pre-chunked-array reading, since the only consumer that ever cared about
+ * an array-shaped source element (the deleted source-position replay) is gone.
  */
-function* drainReadyBatches<T>(buffer: T[][], size: number): Generator<T> {
-  while (buffer.length >= size) {
-    const batch = buffer.shift()!;
-    yield* batch;
-  }
-}
-
-/**
- * What a `Pipeline<T>` may be built from — a stream/collection of **items**
- * (`T`) OR of pre-chunked **arrays** (`T[]`), in any mix. Async iteration
- * (`for await…of`, chunk-preserving) accepts both: an array element is its own
- * chunk boundary, loose items accumulate (via `normalize`). Terminal ops
- * (`toArray`/`first`/…) assume an **item** stream — feeding them a pre-chunked
- * source is undefined; use async iteration for that case.
- */
-export type PipelineSource<T> = AsyncIterable<T | T[]> | Iterable<T | T[]>;
+export type PipelineSource<T> = AsyncIterable<T> | Iterable<T>;
 
 /** Construction-time knobs for a `Pipeline` — every field optional. */
 export interface PipelineOptions {
@@ -102,60 +81,24 @@ export interface PipelineOptions {
    */
   contextFactory?: () => IContextManager;
   /**
-   * Internal: the original, untransformed source used to derive chunk
-   * boundaries for async iteration. Not intended for direct external use.
+   * Internal: an already-cut chunk stream to seed `_chunks` with directly, bypassing the
+   * constructor's own default cut - the copy-on-write path every method below (`.apply()`,
+   * `.buffer()`, `.context()`) uses via `createPipeline()`. Not intended for direct external use.
    */
-  rootSource?: AsyncIterable<unknown>;
+  chunks?: AsyncIterable<unknown[]>;
   /**
-   * Internal: the chain of chunk-wise transforms accumulated via `.apply()`/
-   * `.transform()`, replayed over each `normalize()` chunk during async
-   * iteration. Not intended for direct external use.
+   * Internal: the pre-buffer ITEM view `.buffer()` recuts from on a second, back-to-back call -
+   * `null` once a real stage has consumed `chunks` (`.apply()` sets it), so a LATER `.buffer()`
+   * falls back to flattening whatever that stage actually produced instead. Not intended for
+   * direct external use.
+   */
+  preBufferItems?: AsyncIterable<unknown> | null;
+  /**
+   * Internal: the chain of chunk-wise transforms accumulated via `.apply()`/`.transform()` -
+   * `HttpPipeline`'s own `.fetch()` (`src/pipelines/http.ts:170`) looks a stage up by index here
+   * to serve a dispatched request. Not intended for direct external use.
    */
   chunkTransforms?: ChunkTransform[];
-  /**
-   * Internal: names of `Transformer` knobs (`withHooks`/a non-default `chunkSize`/`setChunker`, or
-   * a dispatching `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` stage's own class name)
-   * applied onto this pipeline that the ASYNC-ITERATION path (`[Symbol.asyncIterator]`,
-   * `chunkTransforms` above) cannot honor — it replays each transform's plain function directly,
-   * never `Transformer.execute()`, so hooks/chunk-size/a dispatched stage is silently inert on that
-   * path. Accumulated (never cleared) across `.apply()` calls so iterating a pipeline built from
-   * several applied transformers reports every inert knob. Not intended for direct external use.
-   */
-  sourcePositionViolations?: string[];
-}
-
-/**
- * Which of a `Transformer`'s knobs are INERT when replayed via `Pipeline`'s async-iteration path
- * (`chunkTransforms`, which calls the transform function directly — never `Transformer.execute()`,
- * so `.hooks`/`.onError()`/a non-default `.chunkSize`/a custom `.setChunker()` chunker never take
- * effect there).
- *
- * Runs once per `Pipeline#apply()` call, to grow `sourcePositionViolations` (this file's `apply()`).
- * The chunker check reads `transformer.chunker` (public, set by `.setChunker()`) — never a
- * chunk-generator identity comparison, which a rebuilt default generator would fail anyway. The
- * `errorHandler` check reads `.hasHandlers()` (`errors/handler.ts`) — an `ErrorHandler` always
- * exists on a `Transformer` (the constructor default), so its PRESENCE is never the signal, only
- * whether anything was ever registered via `.onError()`.
- *
- * `inertKnobsOf(new Transformer().withHooks({}))` → `["withHooks"]`;
- * `inertKnobsOf(new Transformer().onError(() => {}))` → `["onError"]`;
- * `inertKnobsOf(new Transformer().setChunker(custom))` → `["setChunker"]`;
- * `inertKnobsOf(new Transformer())` → `[]`.
- *
- * Exported (#17) so `ConcurrentPipeline.apply()` (`src/pipelines/concurrent.ts`) can report the
- * SAME transformer-level violations alongside its own ("this stage was dispatched, not applied
- * in-process") - the two lists have different sources but the same shape and the same consumer
- * (`sourcePositionViolations`). Review (#17) found `.onError()` missing here entirely - silently
- * inert on a dispatched stage (`stageWork()` never calls `execute()`, the only path that consults
- * it) with no fail-loud signal, unlike every other knob this function already covered.
- */
-export function inertKnobsOf<In, Out>(transformer: Transformer<In, Out>): string[] {
-  const violations: string[] = [];
-  if (transformer.hooks !== undefined) violations.push("withHooks");
-  if (transformer.errorHandler.hasHandlers()) violations.push("onError");
-  if (transformer.chunkSize !== DEFAULT_CHUNK_SIZE) violations.push("chunkSize");
-  if (transformer.chunker !== undefined) violations.push("setChunker");
-  return violations;
 }
 
 /**
@@ -175,11 +118,15 @@ export class Pipeline<T> {
   // Protected (#17), not private: a dispatching subclass's own overridden `createPipeline()`
   // (below) reads these to carry them into the next instance the same way this base
   // implementation does - `private` would put them out of reach from `src/pipelines/`.
-  protected dataSource: AsyncIterable<T>;
+  /** The persisted chunk stream every terminal op and async iteration reads (#39) - cut ONCE,
+   * either by the constructor's own default or by `.buffer(size)`, and carried unchanged through
+   * every later stage until another `.buffer()` call declares a new one. */
+  protected _chunks: AsyncIterable<T[]>;
+  /** The pre-buffer ITEM view a back-to-back `.buffer()` call recuts from, or `null` once a real
+   * stage (`.apply()`) has consumed `_chunks` - see `PipelineOptions.preBufferItems`. */
+  protected _preBufferItems: AsyncIterable<T> | null;
   protected _context: IContextManager;
-  protected _rootSource: AsyncIterable<unknown>;
   protected _chunkTransforms: ChunkTransform[];
-  protected _sourcePositionViolations: string[];
 
   /**
    * Create a new Pipeline from a data source.
@@ -188,19 +135,23 @@ export class Pipeline<T> {
    * @param options - Optional pipeline configuration
    */
   constructor(data: PipelineSource<T>, options?: PipelineOptions) {
-    // `dataSource` is the ITEM-view terminal ops (`toArray`/`apply`/…) consume;
-    // a pre-chunked (`T[]`) source is only sound under async iteration, which
-    // reads `_rootSource` through `normalize` (Array.isArray at runtime), so the
-    // compile-time narrowing to `AsyncIterable<T>` here is safe for its callers.
-    this.dataSource = this.toAsyncIterable(data) as AsyncIterable<T>;
     // `contextFactory` runs ONLY when `context` is absent, and only HERE - every copy-on-write
     // call below (`.context()`, `.apply()`, `.buffer()`) always passes an already-resolved
     // `context`, so a `ClusterPipeline` chain's later `.transform()` calls never re-invoke it
     // (#31, Done-when 6: once per process, not once per stage or per request).
     this._context = options?.context ?? options?.contextFactory?.() ?? new SimpleContextManager();
-    this._rootSource = options?.rootSource ?? (this.dataSource as AsyncIterable<unknown>);
     this._chunkTransforms = options?.chunkTransforms ?? [];
-    this._sourcePositionViolations = options?.sourcePositionViolations ?? [];
+
+    if (options?.chunks !== undefined) {
+      // The copy-on-write path: `data` is inert (an internal caller passes `[]`) since the chunk
+      // stream already exists - `createPipeline()` (below) is the one caller that takes this.
+      this._chunks = options.chunks as AsyncIterable<T[]>;
+      this._preBufferItems = (options.preBufferItems ?? null) as AsyncIterable<T> | null;
+    } else {
+      const items = this.toAsyncIterable(data);
+      this._preBufferItems = items;
+      this._chunks = buildChunkGenerator<T>(DEFAULT_CHUNK_SIZE)(items);
+    }
   }
 
   /**
@@ -208,6 +159,12 @@ export class Pipeline<T> {
    * hard-coded `new Pipeline<U>` (#17) — the ONE seam every copy-on-write method below
    * (`.apply()`, `.context()`, `.buffer()`) goes through, so a subclass built on `Pipeline`
    * survives its own `.transform()` chain instead of silently decaying to a plain `Pipeline`.
+   *
+   * `chunks` is an ALREADY-CUT stream (#39) - this method never cuts one of its own, it only
+   * threads the caller's chunk stream (plus context/chunkTransforms/preBufferItems) into a fresh
+   * instance of THIS pipeline's own class. `[]` is passed as the constructor's own positional
+   * `data` and is never read: `options.chunks` being set routes the constructor past its
+   * default-cutting branch entirely.
    *
    * A subclass whose constructor takes EXTRA knobs (`ConcurrentPipeline.maxConcurrency`,
    * `HttpPipeline.url`, …) overrides this method to carry them forward explicitly — `this.
@@ -220,40 +177,25 @@ export class Pipeline<T> {
    * .constructor.name` → `"Sub"`, because `apply()` (below) calls this method rather than `new
    * Pipeline(...)` directly.
    */
-  protected createPipeline<U>(data: AsyncIterable<U>, options: PipelineOptions): Pipeline<U> {
+  protected createPipeline<U>(chunks: AsyncIterable<U[]>, options: PipelineOptions): Pipeline<U> {
     const Ctor = this.constructor as new (
-      data: AsyncIterable<U>,
+      data: PipelineSource<U>,
       options?: PipelineOptions,
     ) => Pipeline<U>;
-    return new Ctor(data, options);
+    return new Ctor([], { ...options, chunks });
   }
 
   /**
-   * Async-iterate the pipeline yielding TRANSFORMED CHUNKS whose boundaries
-   * match `normalize(rootSource)` — i.e. the original source's array/single-item
-   * shape decides where one chunk ends and the next begins, not a fixed
-   * chunk size. Each chunk is replayed through every chunk-wise transform
-   * accumulated via `.apply()`/`.transform()`, in order.
+   * Async-iterate the pipeline yielding TRANSFORMED CHUNKS - the exact same persisted `_chunks`
+   * stream every terminal op reads (#39). Whichever transforms were accumulated via `.apply()`/
+   * `.transform()` already ran when `_chunks` was built (each `.apply()` call runs
+   * `Transformer.process()` immediately, lazily, over the prior `_chunks`); this loop simply
+   * drains that result, so hooks/`.onError()` fire identically here as through `.toArray()` - no
+   * separate replay, no knob this path can't honor.
    *
-   * Runs whenever the pipeline is consumed with `for await...of` instead of
-   * a terminal operation like `.toArray()` — this is also the path a bare
-   * `Pipeline` handed to laygo's `m.from()` (`@outputty/laygo`) drains as a source.
-   *
-   * ```text
-   * [Symbol.asyncIterator]()
-   * ├─ any inert knob recorded (withHooks/chunkSize/a dispatched stage, `inertKnobsOf`)? ──yes──▶ throw
-   * │        no
-   * ▼
-   * for chunk of normalize(rootSource) → replay each chunkTransform in order → yield
-   * ```
-   *
-   * FAILS LOUD (does not silently drop the knob) when this pipeline carries a `Transformer` knob
-   * the chunk-transform replay below cannot honor (`withHooks`/a non-default `chunkSize` —
-   * `inertKnobsOf`, above `apply()` — or a dispatched `ConcurrentPipeline`/`HttpPipeline`/
-   * `ClusterPipeline` stage, `pipelines/concurrent.ts`'s own `apply()`): those only take effect
-   * through `Transformer.execute()` or the fan-out itself, which this loop never calls, so a
-   * `ConcurrentPipeline` handed straight to `m.from()` would otherwise run silently sequential and
-   * in-process instead of raising.
+   * Runs whenever the pipeline is consumed with `for await...of` instead of a terminal operation
+   * like `.toArray()` — this is also the path a bare `Pipeline` handed to laygo's `m.from()`
+   * (`@outputty/laygo`) drains as a source.
    *
    * @example
    * ```typescript
@@ -261,26 +203,10 @@ export class Pipeline<T> {
    * for await (const chunk of pipeline) {
    *   console.log(chunk); // e.g. [2], [4, 6]
    * }
-   * // new Pipeline(source).apply(new Transformer().withHooks({ onStart: () => {} }))
-   * // handed to a for-await loop throws naming 'withHooks'.
    * ```
    */
   async *[Symbol.asyncIterator](): AsyncGenerator<T[]> {
-    if (this._sourcePositionViolations.length > 0) {
-      throw new Error(
-        `Pipeline: ${this._sourcePositionViolations.join("/")} not applied in source position ` +
-          `(iterating a Pipeline directly — e.g. via m.from(pipeline) — replays each chunk ` +
-          `transform's plain function, bypassing Transformer.execute()). Call a terminal op ` +
-          `(.toArray()/.forEach()/.consume()/…) instead, or drop the knob.`,
-      );
-    }
-    for await (const chunk of normalize(this._rootSource)) {
-      let current: unknown[] = chunk;
-      for (const transform of this._chunkTransforms) {
-        current = await transform(current, this._context);
-      }
-      yield current as T[];
-    }
+    yield* this._chunks;
   }
 
   // ===== Static Factory Methods =====
@@ -288,13 +214,14 @@ export class Pipeline<T> {
   /**
    * Merge multiple pipelines into a single pipeline (fan-in pattern).
    *
-   * All items from all input pipelines are yielded in sequence. `options.context`, when given, is
-   * the SAME instance returned as `.contextManager` on the merged pipeline - mutated in place with
-   * every source pipeline's own context values, later pipelines taking precedence on a shared key
-   * (#31; the one place values flow BACKWARD across pipelines, which is why this is the one seam
-   * that takes a manager explicitly rather than only ever receiving one at construction). With no
-   * `options`, a fresh `SimpleContextManager` is built and populated the same way - today's
-   * behaviour, unchanged.
+   * All items from all input pipelines are yielded in sequence, each source pipeline's OWN
+   * already-cut `_chunks` boundary preserved rather than re-derived - merging never re-chunks
+   * (#39). `options.context`, when given, is the SAME instance returned as `.contextManager` on
+   * the merged pipeline - mutated in place with every source pipeline's own context values, later
+   * pipelines taking precedence on a shared key (#31; the one place values flow BACKWARD across
+   * pipelines, which is why this is the one seam that takes a manager explicitly rather than only
+   * ever receiving one at construction). With no `options`, a fresh `SimpleContextManager` is
+   * built and populated the same way - today's behaviour, unchanged.
    *
    * Python equivalent:
    * ```python
@@ -306,11 +233,11 @@ export class Pipeline<T> {
    *   for p in pipelines:
    *     for key, value in p.context_manager.to_dict().items():
    *       merged_context[key] = value
-   *   async def merged_generator():
+   *   async def merged_chunks():
    *     for pipeline in pipelines:
-   *       async for item in pipeline.dataSource:
-   *         yield item
-   *   return cls(merged_generator(), context=merged_context)
+   *       async for chunk in pipeline.chunks:
+   *         yield chunk
+   *   return cls([], chunks=merged_chunks(), context=merged_context)
    * ```
    *
    * @param pipelines - Pipelines to merge, as an array - not a rest param (#31, BREAKING): an array
@@ -354,16 +281,17 @@ export class Pipeline<T> {
       }
     }
 
-    // Create async generator that yields from all pipelines in sequence
-    async function* mergedGenerator(): AsyncGenerator<U> {
+    // Concatenates each source pipeline's OWN chunk stream in sequence - no new chunking decision
+    // at merge time (#39): a pipeline cut at 2 and one cut at 4 both keep their own boundary.
+    async function* mergedChunks(): AsyncGenerator<U[]> {
       for (const pipeline of pipelines) {
-        for await (const item of pipeline.dataSource) {
-          yield item;
+        for await (const chunk of pipeline._chunks) {
+          yield chunk as U[];
         }
       }
     }
 
-    return new Pipeline<U>(mergedGenerator(), { context: mergedContext });
+    return new Pipeline<U>([], { context: mergedContext, chunks: mergedChunks() });
   }
 
   /**
@@ -416,11 +344,10 @@ export class Pipeline<T> {
     for (const [key, value] of Object.entries(ctx)) {
       this._context.set(key, value);
     }
-    return this.createPipeline<T>(this.dataSource, {
+    return this.createPipeline<T>(this._chunks, {
       context: this._context,
-      rootSource: this._rootSource,
       chunkTransforms: this._chunkTransforms,
-      sourcePositionViolations: this._sourcePositionViolations,
+      preBufferItems: this._preBufferItems,
     }) as this;
   }
 
@@ -445,35 +372,31 @@ export class Pipeline<T> {
   }
 
   /**
-   * Apply a transformer to the pipeline data.
+   * Apply a transformer to the pipeline data - `transformer.process(this._chunks, ctx)` runs it
+   * directly over the pipeline's own persisted chunk stream, no cut here (#39): chunking is never
+   * this method's decision, only `.buffer()`'s.
    *
    * Python equivalent:
    * ```python
    * def apply(self, transformer: Transformer[T, U]) -> "Pipeline[U]":
-   *   if isinstance(transformer, Transformer):
-   *     self.processed_data = transformer(self.processed_data, self.context_manager)
+   *   self.chunks = transformer.process(self.chunks, self.context_manager)
    *   return self
    * ```
    *
-   * Also records any of the transformer's knobs the async-iteration path (`[Symbol.asyncIterator]`,
-   * above) cannot honor (`inertKnobsOf`) onto `sourcePositionViolations`, so a later source-position
-   * consumption fails loud instead of silently ignoring them.
-   *
    * `pipeline.apply(new Transformer<T, T>().map((x) => x * 2))` on a pipeline of `[1, 2, 3]` →
-   * `.toArray()` resolves `[2, 4, 6]`. `pipeline.apply(new Transformer().withHooks({onStart:
-   * ()=>{}}))` then iterated with `for await` (not a terminal op) → throws naming `'withHooks'`
-   * (`sourcePositionViolations` picked it up here).
+   * `.toArray()` resolves `[2, 4, 6]`.
    */
   apply<U>(transformer: Transformer<T, U>): Pipeline<U> {
-    const newData = transformer.execute(this.dataSource, this._context);
-    return this.createPipeline<U>(newData, {
+    const newChunks = transformer.process(this._chunks, this._context);
+    return this.createPipeline<U>(newChunks, {
       context: this._context,
-      rootSource: this._rootSource,
       chunkTransforms: [
         ...this._chunkTransforms,
         transformer.transform as unknown as ChunkTransform,
       ],
-      sourcePositionViolations: [...this._sourcePositionViolations, ...inertKnobsOf(transformer)],
+      // A real stage just consumed `_chunks` - nothing left to recut a back-to-back `.buffer()`
+      // from except this stage's own output, so the pre-buffer item view resets to null.
+      preBufferItems: null,
     });
   }
 
@@ -493,57 +416,38 @@ export class Pipeline<T> {
   }
 
   /**
-   * Create a buffered version of the pipeline for pre-fetching.
+   * The chunk boundary - explicit, opt-in (#39). Every later `.transform()`/`.apply()` sees these
+   * chunks unchanged until another `.buffer()` call declares a new one.
    *
-   * Note: In TypeScript with async iterators, natural backpressure exists.
-   * This method creates a simple batching buffer.
+   * Recuts from `_preBufferItems` (the raw item stream) when it is still set - nothing has
+   * consumed `_chunks` since the last cut, so a run of `.buffer()` calls with nothing between them
+   * collapses to only the LAST one ever actually applied, never stacking a redundant
+   * flatten-then-recut on top of an intermediate cut nobody asked to see. Once a real stage
+   * (`.apply()`) has run, `_preBufferItems` is `null` and this flattens `_chunks` itself first -
+   * a genuine re-chunk of that stage's own output.
    *
-   * Typed `this`, like `.context()` (#17) - `T` never changes here either, so this stays chainable
-   * on a dispatching subclass without losing its own `.transform(fn, { local: true })` overload.
+   * Typed `this` (#17) - `T` never changes here either, so this stays chainable on a dispatching
+   * subclass without losing its own `.transform(fn, { local: true })` overload.
    *
    * Python equivalent:
    * ```python
-   * def buffer(self, size: int, batch_size: int = 1000) -> "Pipeline[T]":
-   *   # Uses Queue and ThreadPoolExecutor for pre-fetching
-   *   ...
+   * def buffer(self, size: int) -> "Pipeline[T]":
+   *   items = self.pre_buffer_items if self.pre_buffer_items is not None else flatten(self.chunks)
+   *   return Pipeline(build_chunk_generator(size)(items), pre_buffer_items=items)
    * ```
+   *
+   * @example
+   * `new Pipeline([1, 2, 3, 4, 5, 6, 7, 8, 9]).buffer(2).buffer(3).buffer(4)` yields the same
+   * chunks as `.buffer(4)` alone: `[[1, 2, 3, 4], [5, 6, 7, 8], [9]]` - no trace of an
+   * intermediate 2- or 3-cut.
    */
-  buffer(size: number, batchSize = 1000): this {
-    const source = this.dataSource;
-
-    async function* bufferedStream(): AsyncGenerator<T> {
-      const buffer: T[][] = [];
-      let currentBatch: T[] = [];
-
-      for await (const item of source) {
-        currentBatch.push(item);
-
-        if (currentBatch.length >= batchSize) {
-          buffer.push(currentBatch);
-          currentBatch = [];
-          yield* drainReadyBatches(buffer, size);
-        }
-      }
-
-      // Flush remaining items
-      if (currentBatch.length > 0) {
-        buffer.push(currentBatch);
-      }
-      for (const batch of buffer) {
-        yield* batch;
-      }
-    }
-
-    // Carries rootSource/chunkTransforms/sourcePositionViolations forward unchanged (#17) - only
-    // the item stream itself is rebatched here. Dropping them (as this line used to) loses the
-    // async-iteration replay's own stage history AND silently erases any "not applied in source
-    // position" violation `.apply()` already recorded - review found `.buffer()` after a
-    // `ConcurrentPipeline` dispatch made the fail-loud guarantee vanish, verified live.
-    return this.createPipeline<T>(bufferedStream(), {
+  buffer(size: number): this {
+    const items = this._preBufferItems ?? flattenChunks(this._chunks);
+    const chunks = buildChunkGenerator<T>(size)(items);
+    return this.createPipeline<T>(chunks, {
       context: this._context,
-      rootSource: this._rootSource,
       chunkTransforms: this._chunkTransforms,
-      sourcePositionViolations: this._sourcePositionViolations,
+      preBufferItems: items,
     }) as this;
   }
 
@@ -561,7 +465,7 @@ export class Pipeline<T> {
    */
   async toArray(): Promise<T[]> {
     const results: T[] = [];
-    for await (const item of this.dataSource) {
+    for await (const item of flattenChunks(this._chunks)) {
       results.push(item);
     }
     return results;
@@ -583,7 +487,7 @@ export class Pipeline<T> {
     }
 
     const results: T[] = [];
-    for await (const item of this.dataSource) {
+    for await (const item of flattenChunks(this._chunks)) {
       results.push(item);
       if (results.length >= n) {
         break;
@@ -604,7 +508,7 @@ export class Pipeline<T> {
    * ```
    */
   async consume(): Promise<void> {
-    for await (const _ of this.dataSource) {
+    for await (const _ of flattenChunks(this._chunks)) {
       // Just consume, don't collect
     }
   }
@@ -621,7 +525,7 @@ export class Pipeline<T> {
    * ```
    */
   async forEach(fn: (item: T) => void | Promise<void>): Promise<void> {
-    for await (const item of this.dataSource) {
+    for await (const item of flattenChunks(this._chunks)) {
       await fn(item);
     }
   }
@@ -663,7 +567,7 @@ export class Pipeline<T> {
       results[key] = [];
     }
 
-    for await (const item of this.dataSource) {
+    for await (const item of flattenChunks(this._chunks)) {
       await this.routeItemToBranches(item, branches, results, firstMatch);
     }
 
@@ -703,7 +607,9 @@ export class Pipeline<T> {
   /**
    * Run a single item through a branch's transformer and collect its output.
    *
-   * Runs once per matched (item, branch) pair from `routeItemToBranches`.
+   * Runs once per matched (item, branch) pair from `routeItemToBranches`. The item is its own
+   * one-item CHUNK (#39: `Transformer.process()` takes chunks, not items) - no default-chunking
+   * question here, since a branch always sends exactly one item at a time.
    *
    * @example
    * `pushBranchOutput(4, doubler, { even: [] }, "even")` mutates
@@ -715,14 +621,14 @@ export class Pipeline<T> {
     results: Record<string, U[]>,
     key: string,
   ): Promise<void> {
-    const singleItemIterable = {
+    const singleItemChunk = {
       [Symbol.asyncIterator]: async function* () {
-        yield item;
+        yield [item];
       },
     };
 
-    for await (const output of transformer.execute(singleItemIterable, this._context)) {
-      results[key].push(output);
+    for await (const chunk of transformer.process(singleItemChunk, this._context)) {
+      results[key].push(...chunk);
     }
   }
 }

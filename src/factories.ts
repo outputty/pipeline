@@ -5,20 +5,19 @@
  */
 
 import { Transformer } from "./transformer";
-import { DEFAULT_CHUNK_SIZE } from "./types";
 
 /**
- * Create a new sequential Transformer.
+ * Create a new sequential Transformer. Chunk-agnostic (#39) - it takes no chunk size; the caller's
+ * `Pipeline` decides that via `.buffer(size)`.
  *
  * Python equivalent:
  * ```python
- * def create_transformer[T](_type_hint: type[T], chunk_size: int = DEFAULT_CHUNK_SIZE) -> Transformer[T, T]:
- *   return Transformer[T, T](chunk_size=chunk_size)
+ * def create_transformer[T](_type_hint: type[T]) -> Transformer[T, T]:
+ *   return Transformer[T, T]()
  * ```
  *
- * @param chunkSize - Number of items per chunk (default: 1000)
  * @returns A new Transformer with sequential execution
  */
-export function createTransformer<T>(chunkSize = DEFAULT_CHUNK_SIZE): Transformer<T, T> {
-  return new Transformer<T, T>({ chunkSize, transform: (chunk) => chunk });
+export function createTransformer<T>(): Transformer<T, T> {
+  return new Transformer<T, T>({ transform: (chunk) => chunk });
 }

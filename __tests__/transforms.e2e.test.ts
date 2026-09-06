@@ -2,32 +2,32 @@
  * transforms.e2e.test.ts — every `Transformer` operation proven through an ENTIRE PIPELINE RUN
  * (`new Pipeline(input).apply(transformer).toArray()`), never by poking a strategy/util/context
  * function in isolation. A behavior is only "covered" here if it changes the output (or context) of
- * a full run — the same way a caller would observe it. Chunk-level ops (`reduce`/`loop`/`catch`/
- * `setChunker`) use `.apply()` with an explicit `chunkSize` so the run actually crosses chunk
- * boundaries; `Pipeline.transform()` alone would collapse everything into one default 1000-item
- * chunk and hide it.
+ * a full run — the same way a caller would observe it. Chunk-level ops (`reduce`/`loop`/`catch`)
+ * pass `run()` an explicit `bufferSize` so the run actually crosses chunk boundaries (#39: the
+ * `Pipeline`'s own `.buffer()`, never a `Transformer` knob) - `Pipeline.transform()` alone would
+ * collapse everything into one default 1000-item chunk and hide it.
  */
 import { describe, it, expect } from "vitest";
 import { Pipeline, Transformer, SimpleContextManager, ErrorHandler } from "../src";
 
 /** Run `input` through a real pipeline built on `transformer`, returning [results, contextSnapshot].
  * `Pipeline.toArray()` itself carries no context slot (#744) - this LOCAL helper builds its own
- * tuple from `.contextManager` afterward, so every call site below keeps reading `[results, ctx]`. */
+ * tuple from `.contextManager` afterward, so every call site below keeps reading `[results, ctx]`.
+ * `bufferSize`, when given, calls `.buffer()` before `.apply()` (#39). */
 async function run<I, O>(
   input: I[],
   transformer: Transformer<I, O>,
   context?: SimpleContextManager,
+  bufferSize?: number,
 ): Promise<[O[], Record<string, unknown>]> {
-  const pipeline = context ? new Pipeline(input, { context }) : new Pipeline(input);
+  let pipeline: Pipeline<I> = context ? new Pipeline(input, { context }) : new Pipeline(input);
+  if (bufferSize !== undefined) pipeline = pipeline.buffer(bufferSize);
   const applied = pipeline.apply(transformer);
   const results = await applied.toArray();
   return [results, applied.contextManager.toDict()];
 }
 
 const T = <I>() => new Transformer<I, I>({ transform: (chunk) => chunk });
-/** A chunk-sized transformer, so a run crosses chunk boundaries (chunk-level ops need this). */
-const chunked = <I>(chunkSize: number) =>
-  new Transformer<I, I>({ chunkSize, transform: (chunk) => chunk });
 
 describe("transforms e2e — element ops through a full pipeline run", () => {
   it("map transforms every item; the 2-arg form receives the run context", async () => {
@@ -122,35 +122,46 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
 });
 
 describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", () => {
-  it("reduce collapses each chunk; chunk size decides the grouping (observable in output)", async () => {
+  it("reduce collapses each chunk; the Pipeline's own .buffer() size decides the grouping (observable in output)", async () => {
     const sum = (a: number, b: number) => a + b;
-    expect((await run([1, 2, 3, 4, 5], chunked<number>(3).reduce(sum, 0)))[0]).toEqual([6, 9]);
-    // A different chunk size ⇒ different per-chunk grouping ⇒ different output: proves chunking.
-    expect((await run([1, 2, 3, 4, 5], chunked<number>(2).reduce(sum, 0)))[0]).toEqual([3, 7, 5]);
+    expect((await run([1, 2, 3, 4, 5], T<number>().reduce(sum, 0), undefined, 3))[0]).toEqual([
+      6, 9,
+    ]);
+    // A different buffer size ⇒ different per-chunk grouping ⇒ different output: proves chunking.
+    expect((await run([1, 2, 3, 4, 5], T<number>().reduce(sum, 0), undefined, 2))[0]).toEqual([
+      3, 7, 5,
+    ]);
     // Initial value applied per chunk.
-    expect((await run([1, 2, 3, 4], chunked<number>(2).reduce(sum, 100)))[0]).toEqual([103, 107]);
+    expect((await run([1, 2, 3, 4], T<number>().reduce(sum, 100), undefined, 2))[0]).toEqual([
+      103, 107,
+    ]);
   });
 
   it("reduce is context-aware and composes with map before/after", async () => {
     const [ctxOut] = await run(
       [1, 2, 3],
-      chunked<number>(3).reduce((acc, x, c) => acc + x * (c.getOrDefault("mult", 1) as number), 0),
+      T<number>().reduce((acc, x, c) => acc + x * (c.getOrDefault("mult", 1) as number), 0),
       new SimpleContextManager({ mult: 2 }),
+      3,
     );
     expect(ctxOut).toEqual([12]);
 
     const [chained] = await run(
       [1, 2, 3],
-      chunked<number>(3)
+      T<number>()
         .map((x) => x * 2)
         .reduce((a: number, b: number) => a + b, 0)
         .map((sum: number) => `sum:${sum}`),
+      undefined,
+      3,
     );
     expect(chained).toEqual(["sum:12"]);
   });
 
   it("terminal reduce (perChunk:false) folds the entire dataset to one value", async () => {
-    const terminal = chunked<number>(2).reduce((a: number, b: number) => a + b, 0, {
+    // Chunk size never matters here - a terminal reduce ignores boundaries entirely, hardcoding
+    // its own cut (#39: it has no Pipeline to own one).
+    const terminal = T<number>().reduce((a: number, b: number) => a + b, 0, {
       perChunk: false,
     });
     const collect = async (it: AsyncIterable<number>) => {
@@ -171,7 +182,9 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
       (
         await run(
           [1, 2, 3],
-          chunked<number>(5).loop(doubler, (c) => c.every((x) => x <= 10)),
+          T<number>().loop(doubler, (c) => c.every((x) => x <= 10)),
+          undefined,
+          5,
         )
       )[0],
     ).toEqual([4, 8, 12]);
@@ -182,7 +195,9 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
       (
         await run(
           [1, 2],
-          chunked<number>(5).loop(inc, () => true, 3),
+          T<number>().loop(inc, () => true, 3),
+          undefined,
+          5,
         )
       )[0],
     ).toEqual([4, 5]);
@@ -191,7 +206,9 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
       (
         await run(
           [1, 2, 3],
-          chunked<number>(5).loop(doubler, () => false),
+          T<number>().loop(doubler, () => false),
+          undefined,
+          5,
         )
       )[0],
     ).toEqual([1, 2, 3]);
@@ -203,7 +220,9 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
       (
         await run(
           [1, 2, 3],
-          chunked<number>(5).catch((t) => t.map((x) => x * 2)),
+          T<number>().catch((t) => t.map((x) => x * 2)),
+          undefined,
+          5,
         )
       )[0],
     ).toEqual([2, 4, 6]);
@@ -211,12 +230,14 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
     // A chunk that throws yields nothing; independent chunks still succeed.
     const [independent] = await run(
       [1, 2, 3, 4],
-      chunked<number>(2).catch((t) =>
+      T<number>().catch((t) =>
         t.map((x) => {
           if (x === 2) throw new Error("boom");
           return x * 10;
         }),
       ),
+      undefined,
+      2,
     );
     expect(independent).toEqual([30, 40]); // chunk [1,2] failed, chunk [3,4] survived
 
@@ -224,7 +245,7 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
     const errors: { chunk: number[]; message: string }[] = [];
     await run(
       [1, 2, 3],
-      chunked<number>(5).catch(
+      T<number>().catch(
         (t) =>
           t.map((x) => {
             if (x === 2) throw new Error("Test error");
@@ -234,6 +255,8 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
           errors.push({ chunk: [...chunk], message: error.message });
         },
       ),
+      undefined,
+      5,
     );
     expect(errors).toEqual([{ chunk: [1, 2, 3], message: "Test error" }]);
 
@@ -246,14 +269,18 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
       });
     const [replaced] = await run(
       ["a", "b", "3", "d", "5"],
-      chunked<string>(5).catch(parseChunk, () => [999]),
+      T<string>().catch(parseChunk, () => [999]),
+      undefined,
+      5,
     );
     expect(replaced).toEqual([999]);
 
     // A handler returning nothing still drops the chunk — the replacement is optional, not implied.
     const [dropped] = await run(
       ["a", "b", "3", "d", "5"],
-      chunked<string>(5).catch(parseChunk, () => undefined),
+      T<string>().catch(parseChunk, () => undefined),
+      undefined,
+      5,
     );
     expect(dropped).toEqual([]);
 
@@ -271,7 +298,9 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
       });
     const [chainedResult] = await run(
       ["a", "b", "3", "d", "5"],
-      chunked<string>(5).catch(parseChunk, chained.handle.bind(chained)),
+      T<string>().catch(parseChunk, chained.handle.bind(chained)),
+      undefined,
+      5,
     );
     expect(calls).toEqual(["second-registered", "first-registered"]);
     expect(chainedResult).toEqual([999]);
@@ -283,7 +312,9 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
       (
         await run(
           [1, 2, 3],
-          chunked<number>(5).shortCircuit(() => false),
+          T<number>().shortCircuit(() => false),
+          undefined,
+          5,
         )
       )[0],
     ).toEqual([1, 2, 3]);
@@ -292,7 +323,9 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
     await expect(
       run(
         [1, 2, 3],
-        chunked<number>(5).shortCircuit(() => true),
+        T<number>().shortCircuit(() => true),
+        undefined,
+        5,
       ),
     ).rejects.toThrow(new Error("Short-circuit condition met, stopping execution."));
 
@@ -301,38 +334,16 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
     await expect(
       run(
         [1, 2, 3],
-        chunked<number>(1)
+        T<number>()
           .tap((_, c) => {
             processed++;
             c.set("count", processed);
           })
           .shortCircuit((c) => (c.getOrDefault("count", 0) as number) >= 2),
         new SimpleContextManager(),
+        1,
       ),
     ).rejects.toThrow();
     expect(processed).toBe(2);
-  });
-
-  it("setChunker overrides chunk size; the custom boundaries are visible in the run output", async () => {
-    // Pair items into chunks of 2 regardless of chunkSize.
-    const pairs = async function* (data: AsyncIterable<number>) {
-      const buf: number[] = [];
-      for await (const item of data) {
-        buf.push(item);
-        if (buf.length === 2) {
-          yield [...buf];
-          buf.length = 0;
-        }
-      }
-      if (buf.length) yield buf;
-    };
-    // The base transform maps each chunk to its size, so the output stream IS the chunk boundaries.
-    const transformer = new Transformer<number, number>({
-      chunkSize: 100, // deliberately large — setChunker must win
-      transform: (chunk) => [chunk.length],
-    }).setChunker(pairs);
-
-    const [out] = await run([1, 2, 3, 4, 5], transformer);
-    expect(out).toEqual([2, 2, 1]); // pairs: [1,2], [3,4], [5]
   });
 });

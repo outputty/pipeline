@@ -99,3 +99,17 @@ export async function* normalize<T>(stream: AsyncIterable<T | T[]>): AsyncGenera
     yield buffer;
   }
 }
+
+/**
+ * Flattens a chunk stream into its items, in order (#39) - the one place a chunk becomes items
+ * again, shared by `Pipeline`'s own terminal ops/`.buffer()` re-cut fallback and
+ * `Transformer.reduce()`'s terminal (`perChunk: false`) form.
+ *
+ * @example
+ * `[...flattenChunks([[1, 2], [3]])]` → `[1, 2, 3]`.
+ */
+export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T> {
+  for await (const chunk of chunks) {
+    yield* chunk;
+  }
+}

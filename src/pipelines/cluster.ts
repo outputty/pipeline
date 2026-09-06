@@ -130,7 +130,7 @@ if (cluster.isWorker) {
   startWorkerServer();
 }
 
-/** A worker's own `dataSource` (constructor, below) - the worker exists to serve `.fetch()`
+/** A worker's own `_chunks` (constructor, below) - the worker exists to serve `.fetch()`
  * requests, never to drain a pipeline itself. */
 async function* emptyAsyncIterable(): AsyncGenerator<never> {}
 
@@ -161,11 +161,12 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
     // architecture.md's own constraint: a WORKER process's terminal op must resolve immediately
     // with an EMPTY result - the worker exists to hold the transforms (registered by the
     // .transform() calls below THIS constructor call, in the entry module the worker re-executes),
-    // never to orchestrate. Emptying `dataSource` here, once, propagates through every later
+    // never to orchestrate. Emptying `_chunks` here, once, propagates through every later
     // copy-on-write step automatically: a fan-out built over an empty source yields nothing, so
-    // the NEXT instance's own `dataSource` (that fan-out's generator) is empty too.
+    // the NEXT instance's own `_chunks` (that fan-out's generator) is empty too.
     if (cluster.isWorker) {
-      this.dataSource = emptyAsyncIterable();
+      this._chunks = emptyAsyncIterable();
+      this._preBufferItems = null;
     }
   }
 
@@ -176,11 +177,11 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
    * live does not reset it back to "").
    */
   protected override createPipeline<U>(
-    data: AsyncIterable<U>,
+    chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
   ): ClusterPipeline<U> {
     const Ctor = this.constructor as new (
-      data: AsyncIterable<U>,
+      data: PipelineSource<U>,
       options?: ClusterPipelineConstructorOptions & { url: string },
     ) => ClusterPipeline<U>;
     const merged = {
@@ -189,8 +190,9 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
       workers: this.workers,
       pipelineIndex: this.pipelineIndex,
       url: this._url,
+      chunks,
     };
-    return new Ctor(data, merged);
+    return new Ctor([], merged);
   }
 
   override transform<U>(

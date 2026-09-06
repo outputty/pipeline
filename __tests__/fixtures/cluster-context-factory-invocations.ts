@@ -34,7 +34,6 @@ const items = Array.from({ length: chunkCount }, (_, i) => i);
 const pipeline = new ClusterPipeline(items, {
   workers,
   maxConcurrency: workers,
-  chunkSize: 1,
   contextFactory: () => {
     factoryCalls++;
     return new CountingContext();
@@ -42,11 +41,12 @@ const pipeline = new ClusterPipeline(items, {
 });
 
 // Read right after construction, before any dispatch - the orchestrator's OWN process count,
-// never touched again by a later copy-on-write call (`.transform()` always passes the
+// never touched again by a later copy-on-write call (`.buffer()`/`.transform()` always pass the
 // already-built `context` forward, `src/pipeline.ts`'s own constructor).
 const primaryBuilt = factoryCalls;
 
 const out = await pipeline
+  .buffer(1)
   .transform((t) =>
     t.map((_x: number, _ctx) => ({ pid: process.pid, factoryCallsSoFar: factoryCalls })),
   )

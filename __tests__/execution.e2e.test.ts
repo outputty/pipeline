@@ -11,9 +11,17 @@ import { Pipeline, Transformer, createTransformer } from "../src";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Run `input` through a real pipeline built on `transformer`, returning the collected results. */
-async function run<I, O>(input: I[], transformer: Transformer<I, O>): Promise<O[]> {
-  return new Pipeline(input).apply(transformer).toArray();
+/** Run `input` through a real pipeline built on `transformer`, returning the collected results.
+ * `bufferSize`, when given, calls `.buffer()` before `.apply()` - chunking is a `Pipeline` decision
+ * now (#39), not the `Transformer`'s own. */
+async function run<I, O>(
+  input: I[],
+  transformer: Transformer<I, O>,
+  bufferSize?: number,
+): Promise<O[]> {
+  const pipeline =
+    bufferSize !== undefined ? new Pipeline(input).buffer(bufferSize) : new Pipeline(input);
+  return pipeline.apply(transformer).toArray();
 }
 
 describe("execution e2e — chunking through a full run", () => {
@@ -29,7 +37,8 @@ describe("execution e2e — chunking through a full run", () => {
     const input = Array.from({ length: 250 }, (_, i) => i);
     const out = await run(
       input,
-      new Transformer<number, number>({ chunkSize: 7 }).map((x) => x * 2),
+      new Transformer<number, number>().map((x) => x * 2),
+      7,
     );
     expect(out).toEqual(input.map((x) => x * 2));
   });
@@ -193,11 +202,12 @@ describe("execution e2e — streaming edge behaviors", () => {
     await expect(
       run(
         [1, 2, 3, 4],
-        new Transformer<number, number>({ chunkSize: 1 }).map((x) => {
+        new Transformer<number, number>().map((x) => {
           if (x === 3) throw itemThreeFailed;
           processed.push(x);
           return x * 2;
         }),
+        1,
       ),
     ).rejects.toThrow(itemThreeFailed);
     expect(processed).toEqual([1, 2]); // items 1 and 2 ran before the failure

@@ -160,9 +160,9 @@ describe("Pipeline", () => {
   });
 
   describe("buffer", () => {
-    it("buffers data while maintaining order", async () => {
+    it("cuts the chunk boundary while maintaining item order", async () => {
       const pipeline = new Pipeline([1, 2, 3, 4, 5]);
-      const results = await pipeline.buffer(2, 2).toArray();
+      const results = await pipeline.buffer(2).toArray();
 
       expect(results).toEqual([1, 2, 3, 4, 5]);
     });
@@ -477,7 +477,7 @@ describe("Pipeline", () => {
     });
   });
 
-  describe("onError wiring (Transformer.execute)", () => {
+  describe("onError wiring (Transformer.process)", () => {
     it("a registered onError handler fires on a chunk failure, and the error still propagates", async () => {
       const seen: Error[] = [];
       const boom = new Error("boom");
@@ -534,21 +534,26 @@ describe("Pipeline", () => {
     });
   });
 
-  describe("source-position knobs fail loud on async iteration", () => {
-    it("a pipeline carrying withHooks raises naming the knob when iterated directly (m.from position)", async () => {
+  describe("async iteration reads the same persisted chunk stream a terminal op does (#39)", () => {
+    // The source-position mechanism (a separate replay path that bypassed Transformer.execute(),
+    // and threw naming any knob it couldn't honor) is gone: `.apply()` already ran
+    // `Transformer.process()` when it built `_chunks`, so async iteration - reading that SAME
+    // persisted stream - sees every knob fire exactly like `.toArray()` does. No throw left.
+    it("withHooks fires identically whether consumed via .toArray() or async iteration", async () => {
+      const order: string[] = [];
       const transformer = new Transformer<number, number>()
         .map((x: number) => x * 2)
-        .withHooks({ onStart: () => {} });
+        .withHooks({ onStart: () => order.push("start") });
       const pipeline = new Pipeline([1, 2, 3]).apply(transformer);
 
-      await expect(async () => {
-        for await (const _chunk of pipeline) {
-          // never reached
-        }
-      }).rejects.toThrow(/withHooks.*not applied in source position/);
+      const chunks: number[][] = [];
+      for await (const chunk of pipeline) chunks.push(chunk);
+
+      expect(chunks.flat()).toEqual([2, 4, 6]);
+      expect(order).toEqual(["start"]);
     });
 
-    it("a plain pipeline (no inert knobs) iterates fine directly", async () => {
+    it("a plain pipeline (no hooks at all) iterates fine directly", async () => {
       const transformer = new Transformer<number, number>().map((x: number) => x * 2);
       const pipeline = new Pipeline([1, 2, 3]).apply(transformer);
 
@@ -557,7 +562,7 @@ describe("Pipeline", () => {
       expect(chunks.flat()).toEqual([2, 4, 6]);
     });
 
-    it("withHooks is NOT inert through a terminal op (.toArray() calls Transformer.execute)", async () => {
+    it("withHooks is not inert through a terminal op (.toArray() calls Transformer.process)", async () => {
       const order: string[] = [];
       const transformer = new Transformer<number, number>()
         .map((x: number) => x * 2)
@@ -565,28 +570,6 @@ describe("Pipeline", () => {
       const results = await new Pipeline([1, 2, 3]).apply(transformer).toArray();
       expect(results).toEqual([2, 4, 6]);
       expect(order).toEqual(["start"]);
-    });
-
-    it("a pipeline carrying setChunker raises naming the knob when iterated directly (m.from position)", async () => {
-      const pairs = async function* (data: AsyncIterable<number>) {
-        const buf: number[] = [];
-        for await (const item of data) {
-          buf.push(item);
-          if (buf.length === 2) {
-            yield [...buf];
-            buf.length = 0;
-          }
-        }
-        if (buf.length) yield buf;
-      };
-      const transformer = new Transformer<number, number>().setChunker(pairs);
-      const pipeline = new Pipeline([1, 2, 3]).apply(transformer);
-
-      await expect(async () => {
-        for await (const _chunk of pipeline) {
-          // never reached
-        }
-      }).rejects.toThrow(/setChunker.*not applied in source position/);
     });
   });
 });
