@@ -218,3 +218,63 @@ const data = await new Pipeline(["a", "b", "3", "d", "5"])
 ```json
 [999]
 ```
+
+### Reducing
+
+A reducer folds items into an accumulator, at two levels with one meaning. On a `Transformer` it
+folds the one chunk it receives and keeps nothing between chunks. On a `Pipeline` it folds
+everything it receives, which is the only place cross-chunk state lives. Both may produce more than
+one value, and the chain continues after either - downstream stages run over every value a reducer
+produced, never assuming there was one.
+
+> **`Transformer.reduce(fn, initial)`** - folds ONE chunk. Run once and forget: no state survives to
+> the next chunk.
+> **`Pipeline.reduce(fn, initial, options?)`** - folds EVERY chunk the pipeline produces. On a
+> dispatching class it runs remotely like any other stage, over one duplex connection whose
+> accumulator lives for the life of that connection; `{ local: true }` keeps it in the orchestrating
+> process.
+> **`emit`** - the reducer callback's fourth parameter, `(acc, item, ctx, emit)`. Calling it pushes
+> a value downstream mid-fold and lets the caller decide what a finished result is. The final
+> accumulator is emitted only if items were folded since the last `emit()`.
+
+```ts
+import { Pipeline } from "@outputty/pipeline";
+
+const data = await new Pipeline([1, 2, 3, 4, 5])
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .transform((t) => t.map((n: number) => n * 10))
+  .toArray();
+```
+
+```json
+[150]
+```
+
+A reducer that emits mid-fold turns one stream into a stream of finished results - a running total
+banked whenever it crosses a threshold, and no trailing value when the last item already banked one:
+
+```ts
+import { Pipeline } from "@outputty/pipeline";
+
+const data = await new Pipeline([1, 2, 3, 4, 5])
+  .reduce((acc: number, x: number, _ctx, emit) => {
+    acc += x;
+    if (acc >= 6) {
+      emit(acc);
+      return 0;
+    }
+    return acc;
+  }, 0)
+  .transform((t) => t.map((n: number) => n * 10))
+  .toArray();
+```
+
+```json
+[60, 90]
+```
+
+A reduce stage is a serialization point: one accumulator, and on a dispatching class one connection,
+so `maxConcurrency` does not apply to it. With `ordered: false` upstream the reducer folds in
+completion order, so the fold must be order-insensitive. And because a remote reducer's emits arrive
+while the input is still streaming, a failure mid-stream reaches the caller after values have
+already flowed downstream - the price of results that arrive as they happen.

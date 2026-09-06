@@ -150,6 +150,17 @@ none of it survived the hand-trim (#745).
   callbacks. Runs directly over any `AsyncIterable` via `.execute()`, independent of `Pipeline` -
   always sequentially, one chunk at a time (#17); wrap the chain in a `ConcurrentPipeline` for
   concurrency instead of configuring the `Transformer` that drives it.
+- **Reducer** - a fold, at two levels with ONE callback signature, `ReduceFunction<U, T> = (acc,
+  item, ctx, emit) => U | Promise<U>` (`emit` FOURTH, so `ctx` keeps arity 3 and
+  `isContextAwareReduce`'s `fn.length` check is untouched). `Transformer.reduce(fn, initial)` folds
+  the ONE chunk it receives and keeps no state between chunks; `Pipeline.reduce(fn, initial,
+  options?)` folds EVERY chunk the pipeline produces, the only place cross-chunk state lives (#45).
+  Both may produce several values and the chain continues after either, downstream running over
+  every value produced. `emit(value)` pushes one downstream mid-fold; the final accumulator is
+  emitted only if items were folded since the last `emit()`. A reduce stage dispatches like any
+  other stage, over ONE duplex POST to `/reduce/<n>` whose accumulator lives for the life of the
+  connection, so `maxConcurrency` is inert on it (#45, BREAKING: `ReduceOptions`/`perChunk` and the
+  standalone callable `reduce(fn, initial, { perChunk: false })` returned are deleted).
 - **Chunk** - the streaming unit a `Transformer` actually operates on: `In[]`/`Out[]`, sized by
   `TransformerOptions.chunkSize` (default `DEFAULT_CHUNK_SIZE = 1000`). A `ChunkerFunction<T>` breaks
   an `AsyncIterable<T>` into chunks; an `InternalTransformer<In, Out>` processes one chunk at a time.

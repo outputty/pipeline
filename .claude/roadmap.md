@@ -9,7 +9,18 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-None open right now - every ticket below is Built.
+- **A reducer on the `Pipeline`, folding every chunk it receives** (#45) - `reduce` only folds one
+  chunk today, and the whole-dataset form returns a standalone callable that is never a stage. So a
+  running total across a stream means draining the pipeline and folding outside it, giving up both
+  streaming and dispatch. `Pipeline.reduce` folds every chunk, `emit()` lets the caller decide what
+  a finished result is, and a reduce stage dispatches like any other - one duplex POST whose
+  accumulator lives for the life of the connection. Now, because it is the last operation that
+  cannot cross a process boundary. BREAKING: `perChunk` and `ReduceOptions` go.
+- **A conformance suite every `Pipeline` and Context class runs** (#37), **`EventEmitterPipeline`**
+  (#30), **the pipeline's own chunker extraction** (#39, `needs-planning`), **the pipeline's error
+  handlers** (#40), **instance `merge`** (#41), **a pipeline-level `chunkSize`** (#42,
+  `needs-planning`) and **cross-runtime benchmarks** (#11) are the other open tickets; each issue
+  carries its own detail.
 
 ### Later - not yet filed
 
