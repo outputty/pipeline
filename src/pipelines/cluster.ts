@@ -172,9 +172,9 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
 
   /**
    * Carries `workers`/`pipelineIndex` into the NEXT instance a copy-on-write call builds, alongside
-   * `maxConcurrency`/`ordered`/`chunkSize` (`concurrentOptions()`, inherited) and `url` (kept
-   * correct once a real dispatch has set it, so a `.context()` call after the pipeline is already
-   * live does not reset it back to "").
+   * `maxConcurrency`/`ordered` (`concurrentOptions()`, inherited) and `url` (kept correct once a
+   * real dispatch has set it, so a `.context()` call after the pipeline is already live does not
+   * reset it back to "").
    */
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,

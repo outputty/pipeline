@@ -95,8 +95,8 @@ export interface PipelineOptions {
   preBufferItems?: AsyncIterable<unknown> | null;
   /**
    * Internal: the chain of chunk-wise transforms accumulated via `.apply()`/`.transform()` -
-   * `HttpPipeline`'s own `.fetch()` (`src/pipelines/http.ts:170`) looks a stage up by index here
-   * to serve a dispatched request. Not intended for direct external use.
+   * `HttpPipeline`'s own `.fetch()` looks a stage up by index here to serve a dispatched request.
+   * Not intended for direct external use.
    */
   chunkTransforms?: ChunkTransform[];
 }

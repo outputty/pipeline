@@ -265,8 +265,8 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
   });
 });
 
-describe("#17 a knob that only takes effect via Transformer.execute() fails loud, not silent", () => {
-  // Regression: stageWork() never calls execute() on ANY consumption path (not just async
+describe("#17 a knob that only takes effect via Transformer.process() fails loud, not silent", () => {
+  // Regression: stageWork() never calls process() on ANY consumption path (not just async
   // iteration), so .withHooks()/.onError() on a dispatched stage used to run with the hook
   // silently never firing - no error, no warning. ConcurrentPipeline.apply() now throws instead.
   it("rejects .withHooks() on a non-local stage", () => {

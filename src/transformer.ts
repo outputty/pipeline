@@ -243,7 +243,7 @@ export class Transformer<In, Out> {
    * Build a transform that emits `onItemStart`/`onItemComplete`/`onItemError`
    * hooks around each item of a chunk, one item at a time.
    *
-   * Runs only when `execute()` detects at least one item-level hook attached.
+   * Runs only when `process()` detects at least one item-level hook attached.
    * Produces the same chunk output as `this.transform` would, but drives the
    * hooks as a side effect and advances `counter.index` per processed item.
    *
@@ -530,7 +530,7 @@ export class Transformer<In, Out> {
    * void` with its default `U`) — a union loses the void-return exemption TypeScript grants a
    * literal `void`, so an ordinary `(chunk, err) => arr.push(err)` would stop compiling
    * (`.claude/rules/typescript.md`, 2026-09-05). This handler's return is ignored regardless (see
-   * `execute()`'s own catch, above) - `.onError()` is a notification hook here, never `.catch()`'s
+   * `process()`'s own catch, above) - `.onError()` is a notification hook here, never `.catch()`'s
    * recovery path, so bare `void` also states that intent.
    *
    * Python equivalent:
