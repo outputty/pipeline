@@ -16,7 +16,6 @@ import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import type { PipelineOptions, PipelineSource } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type { InternalTransformer } from "@src/types";
-import { SimpleContextManager } from "@src/context/simple";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 /** `HttpPipeline`'s real constructor parameter type - see `ConcurrentPipelineConstructorOptions`
@@ -36,8 +35,8 @@ interface StageResponseBody<U> {
 
 /**
  * Parses and validates a stage POST body - malformed JSON, a missing `chunk` array, or a missing
- * `context` object all fail here rather than reaching `SimpleContextManager`/the stage's own
- * transform with a half-formed value (this repo's own Fail Loud rule: "External data missing an
+ * `context` object all fail here rather than reaching the worker's own context manager/the stage's
+ * own transform with a half-formed value (this repo's own Fail Loud rule: "External data missing an
  * expected field fails at the parse"). A discriminated result, not a throw - `.fetch()` (above)
  * turns a failure into a 400 response; a raw JSON parse exception left uncaught here previously
  * became an unhandled rejection inside `toNodeHandler`'s bridge, hanging the calling client
@@ -157,9 +156,17 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
       return Response.json({ error: body.error }, { status: 400 });
     }
 
-    const ctx = new SimpleContextManager(body.value.context);
-
     try {
+      // Reuses `this._context` - the SAME instance the constructor built (from `context` or
+      // `contextFactory`, `src/pipeline.ts`) - instead of building a fresh `SimpleContextManager`
+      // from the wire every request. A `contextFactory` is invoked once per process this way
+      // (#31, Done-when 6); the wire's own forward-looking values still land, via `.set()`, onto
+      // THIS manager, so a rejecting manager's throw reaches the same catch below as a stage's own
+      // transform error, rather than escaping uncaught to `toNodeHandler`'s bridge.
+      const ctx = this._context;
+      for (const [key, value] of Object.entries(body.value.context)) {
+        ctx.set(key, value);
+      }
       const result = await this._chunkTransforms[requested](body.value.chunk, ctx);
       return Response.json({ chunk: result } satisfies StageResponseBody<unknown>);
     } catch (error) {

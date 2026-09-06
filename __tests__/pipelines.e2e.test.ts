@@ -551,3 +551,53 @@ describe("#17 a stage's HTTP 500 throws from the terminal op, never reaches .cat
     HTTP_TIMEOUT,
   );
 });
+
+describe("#31 a ClusterPipeline worker builds the caller's own class via contextFactory (Done-when 5)", () => {
+  it(
+    "each worker builds its own PoolContext once, and forward context still crosses the wire",
+    async () => {
+      const fixture = await runFixture("__tests__/fixtures/cluster-context-factory.ts");
+      expectFixtureOk(fixture);
+      const result = lastJsonLine<{
+        orchestratorCtxClass: string;
+        ctxBuiltInOrchestrator: boolean;
+        workerCtxClasses: string[];
+        distinctWorkerCtxPids: number;
+        ctxBuiltInSamePidAsServer: boolean;
+        multiplierCrossedWire: number[];
+      }>(fixture);
+      // The orchestrator was given an already-built instance (`context`), so `contextFactory`
+      // never ran there - only every OTHER process (each worker) needed to build its own.
+      expect(result.orchestratorCtxClass).toBe("PoolContext");
+      expect(result.ctxBuiltInOrchestrator).toBe(false);
+      expect(result.workerCtxClasses).toEqual(["PoolContext"]);
+      expect(result.distinctWorkerCtxPids).toBe(3);
+      expect(result.ctxBuiltInSamePidAsServer).toBe(true);
+      expect(result.multiplierCrossedWire).toEqual(Array.from({ length: 30 }, (_, i) => i * 10));
+    },
+    FIXTURE_TIMEOUT,
+  );
+});
+
+describe("#31 contextFactory is invoked once per process, not per request (Done-when 6)", () => {
+  it(
+    "primary builds once for its own _context; each worker builds once and reuses it to serve",
+    async () => {
+      const fixture = await runFixture("__tests__/fixtures/cluster-context-factory-invocations.ts");
+      expectFixtureOk(fixture);
+      const result = lastJsonLine<{
+        primaryBuilt: number;
+        chunks: number;
+        maxBuiltPerWorkerPid: number[];
+        workerPids: number;
+      }>(fixture);
+      expect(result).toEqual({
+        primaryBuilt: 1,
+        chunks: 20,
+        maxBuiltPerWorkerPid: [1, 1],
+        workerPids: 2,
+      });
+    },
+    FIXTURE_TIMEOUT,
+  );
+});
