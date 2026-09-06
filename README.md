@@ -100,7 +100,7 @@ import { ConcurrentPipeline } from "@outputty/pipeline";
 // Up to 10 chunks in flight at once, in this process - Pipeline (one at a time) is the default
 const data = await new ConcurrentPipeline(["a", "b", "c"], { maxConcurrency: 10 })
   .transform((t) => t.map((s: string) => s.toUpperCase()))
-  .toArray();
+  .toArray(); // ["A", "B", "C"]
 ```
 
 `HttpPipeline` dispatches each chunk to another instance over HTTP; `ClusterPipeline` dispatches to
