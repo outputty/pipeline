@@ -3,7 +3,8 @@
  *
  * Chunking moves off `Transformer` entirely onto an explicit `Pipeline.buffer(size)` call: the
  * ONE place a cut ever happens, persisted through every later stage until called again. Every
- * case here is `it.fails` until L2 lands - flip to `it` there, per case.
+ * case here is `it.fails` until L2 lands - flip to `it` there, per case - except Done-when 2
+ * (already a plain `it`: it holds today, unlike the rest, so there is nothing to flip).
  */
 import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
@@ -91,7 +92,7 @@ describe("#39 two .buffer() calls back to back collapse to the last one (Done-wh
 
 describe("#39 lifecycle hooks fire identically everywhere (Done-when 4)", () => {
   it.fails(
-    "Pipeline, async iteration, and a ConcurrentPipeline local stage all see the same order",
+    "Pipeline, async iteration, and a ConcurrentPipeline local stage all see the same order and onError",
     async () => {
       async function orderFor(run: (hooked: Transformer<number, number>) => Promise<unknown>) {
         const order: string[] = [];
@@ -118,6 +119,40 @@ describe("#39 lifecycle hooks fire identically everywhere (Done-when 4)", () => 
       expect(viaToArray).toEqual(["start", "complete"]);
       expect(viaAsyncIteration).toEqual(["start", "complete"]);
       expect(viaLocalStage).toEqual(["start", "complete"]);
+
+      // Done-when 4 also names onError explicitly: a chunk-level throw must still notify it,
+      // on every one of the same three paths, before the error propagates.
+      async function errorSeenFor(run: (hooked: Transformer<number, number>) => Promise<unknown>) {
+        let seen: Error | undefined;
+        const hooked = new Transformer<number, number>()
+          .map((x: number) => {
+            if (x === 2) throw new Error("boom");
+            return x;
+          })
+          .withHooks({
+            onError: (e) => {
+              seen = e;
+            },
+          });
+        await expect(run(hooked)).rejects.toThrow("boom");
+        return seen;
+      }
+
+      const errViaToArray = await errorSeenFor((hooked) =>
+        new Pipeline([1, 2]).apply(hooked).toArray(),
+      );
+      const errViaAsyncIteration = await errorSeenFor(async (hooked) => {
+        for await (const _chunk of new Pipeline([1, 2]).apply(hooked)) {
+          // drain
+        }
+      });
+      const errViaLocalStage = await errorSeenFor((hooked) =>
+        new ConcurrentPipeline([1, 2]).apply(hooked, { local: true }).toArray(),
+      );
+
+      expect(errViaToArray?.message).toBe("boom");
+      expect(errViaAsyncIteration?.message).toBe("boom");
+      expect(errViaLocalStage?.message).toBe("boom");
     },
   );
 });
