@@ -269,37 +269,61 @@ export class Pipeline<T> {
   /**
    * Merge multiple pipelines into a single pipeline (fan-in pattern).
    *
-   * All items from all input pipelines are yielded in sequence.
-   * Context is merged from all pipelines, with later pipelines taking precedence.
+   * All items from all input pipelines are yielded in sequence. `options.context`, when given, is
+   * the SAME instance returned as `.contextManager` on the merged pipeline - mutated in place with
+   * every source pipeline's own context values, later pipelines taking precedence on a shared key
+   * (#31; the one place values flow BACKWARD across pipelines, which is why this is the one seam
+   * that takes a manager explicitly rather than only ever receiving one at construction). With no
+   * `options`, a fresh `SimpleContextManager` is built and populated the same way - today's
+   * behaviour, unchanged.
    *
    * Python equivalent:
    * ```python
    * @classmethod
-   * def merge(cls, *pipelines: "Pipeline[T]") -> "Pipeline[T]":
+   * def merge(cls, pipelines: list["Pipeline[T]"], *, context: IContextManager | None = None) -> "Pipeline[T]":
+   *   if not pipelines:
+   *     return cls([])
+   *   merged_context = context or SimpleContextManager()
+   *   for p in pipelines:
+   *     for key, value in p.context_manager.to_dict().items():
+   *       merged_context[key] = value
    *   async def merged_generator():
    *     for pipeline in pipelines:
    *       async for item in pipeline.dataSource:
    *         yield item
-   *   merged_context = {}
-   *   for p in pipelines:
-   *     merged_context.update(p.context_manager.to_dict())
    *   return cls(merged_generator(), context=merged_context)
    * ```
    *
-   * @param pipelines - Pipelines to merge
-   * @returns A new pipeline that yields all items from all input pipelines
+   * @param pipelines - Pipelines to merge, as an array - not a rest param (#31, BREAKING): an array
+   *   literal keeps `ElementOf<Ps[number]>` distributing over a UNION of differently-typed
+   *   pipelines, exactly as the old rest-param form did, while leaving a second parameter free for
+   *   `options`.
+   * @param options - `{ context }` to carry a caller's own manager through the merge; omitted, or
+   *   `{}`, keeps today's `SimpleContextManager` behaviour.
+   * @returns A new pipeline that yields all items from all input pipelines. `Pipeline.merge([])` →
+   *   an empty pipeline.
+   *
+   * @example
+   * `Pipeline.merge([p1, p2], { context: mine })` then `.contextManager === mine` → `true` (#31,
+   * Done-when 3) - verified live via `__tests__/fixtures/context-managers.ts`'s own `LoggingContext`.
    */
   static merge<Ps extends readonly Pipeline<any>[]>(
-    ...pipelines: Ps
+    pipelines: Ps,
+    options?: PipelineOptions,
   ): Pipeline<ElementOf<Ps[number]>> {
     type U = ElementOf<Ps[number]>;
 
+    // `options?.context` still honored on the zero-pipeline path (review: the fast return used to
+    // drop it, so `Pipeline.merge([], { context: mine }).contextManager` was a fresh
+    // SimpleContextManager instead of `mine`, breaking the same-instance contract every other path
+    // here keeps).
     if (pipelines.length === 0) {
-      return new Pipeline<U>([]);
+      return new Pipeline<U>([], { context: options?.context });
     }
 
-    // Merge contexts from all pipelines
-    const mergedContext = new SimpleContextManager();
+    // Merge contexts from all pipelines into the caller's own manager when given (#31) - never a
+    // fresh copy that would discard it, the same reason .context() (above) mutates in place.
+    const mergedContext = options?.context ?? new SimpleContextManager();
     for (const pipeline of pipelines) {
       const ctx = pipeline._context.toDict();
       for (const [key, value] of Object.entries(ctx)) {
@@ -339,7 +363,11 @@ export class Pipeline<T> {
    * `const a = base.context({m:"a"}); const b = base.context({m:"b"})` leaves `a`, `b` and `base`
    * all reading the ONE manager `base` started with, so `b`'s write is the value every one of them
    * sees - forking into independently-configured branches needs a caller-supplied manager per
-   * branch, never two `.context()` calls off the same parent.
+   * branch, never two `.context()` calls off the same parent. Per-key, not transactional: `ctx`'s
+   * entries are set one at a time in `Object.entries()` order, so a manager that throws partway
+   * through (a sealed manager rejecting one key among several) leaves every EARLIER key's write
+   * already applied - the same partial-application a caller looping `.set()` calls by hand would
+   * get, never rolled back.
    *
    * Python equivalent:
    * ```python
