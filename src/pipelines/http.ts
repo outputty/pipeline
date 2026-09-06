@@ -60,7 +60,7 @@ async function parseStageRequest(
   if (!Array.isArray(chunk)) {
     return { ok: false, error: "request body is missing a 'chunk' array" };
   }
-  if (typeof context !== "object" || context === null) {
+  if (typeof context !== "object" || context === null || Array.isArray(context)) {
     return { ok: false, error: "request body is missing a 'context' object" };
   }
   return { ok: true, value: { chunk, context } };
@@ -168,8 +168,16 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
     }
   };
 
+  /** The outgoing path for `stageIndex`, and (via `.fetch()`'s prefix-agnostic trailing-segment
+   * match) the incoming one too. `ClusterPipeline` overrides this alone to route several pipeline
+   * definitions through one shared worker server (`/pipeline/<i>/stage/<n>`) without touching
+   * `stageWork()`'s dispatch logic or `.fetch()`'s parsing at all. */
+  protected stagePath(stageIndex: number): string {
+    return `/stage/${stageIndex}`;
+  }
+
   /**
-   * POSTs the chunk to `${url}/stage/${stageIndex}` instead of running it in-process -
+   * POSTs the chunk to `${url}${stagePath(stageIndex)}` instead of running it in-process -
    * `ConcurrentPipeline`'s own `apply()` calls this for every non-local stage; the fan-out, the
    * `{ local: true }` check and the knob-violation check are otherwise unchanged, inherited as-is.
    *
@@ -182,7 +190,7 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
     stageIndex: number,
   ): InternalTransformer<T, U> {
     return async (chunk, ctx) => {
-      const response = await fetch(`${this._url}/stage/${stageIndex}`, {
+      const response = await fetch(`${this._url}${this.stagePath(stageIndex)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ chunk, context: ctx.toDict() } satisfies StageRequestBody),

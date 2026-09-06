@@ -91,26 +91,39 @@ function expectFixtureOk(result: FixtureResult): void {
   expect(result.code, `fixture exited ${result.code}; stderr:\n${result.stderr}`).toBe(0);
 }
 
+/** Parses a `ClusterPipeline` fixture's REAL result - its stdout's LAST line. Every worker also
+ * re-executes the entry module and prints its own empty placeholder first (architecture.md's own
+ * documented constraint: "a violation shows as duplicated output, never an error"), so only the
+ * final line - the primary's own, real result - is the one to assert on. */
+function lastJsonLine<T>(fixture: FixtureResult): T {
+  const lines = fixture.stdout.trim().split("\n");
+  return JSON.parse(lines.at(-1) ?? "") as T;
+}
+
 describe("#17 ClusterPipeline canonical program (Done-when 1, 3)", () => {
-  it.fails(
+  it(
     "prints [6,8,10] with no server/listen/fork/url in caller code, and exits on its own",
     async () => {
       const result = await runFixture("__tests__/fixtures/cluster-basic.ts");
       expect(result.stderr).toBe("");
       expectFixtureOk(result); // Done-when 3: exits cleanly on its own, no explicit teardown
-      expect(result.stdout.trim()).toBe("[6,8,10]"); // Done-when 1: the canonical result
+      // Done-when 1: the canonical result, the LAST line - every worker also re-executes the
+      // entry module and prints ITS OWN empty placeholder first (architecture.md's own documented
+      // constraint: "a violation shows as duplicated output, never an error").
+      const lines = result.stdout.trim().split("\n");
+      expect(lines.at(-1)).toBe("[6,8,10]");
     },
     FIXTURE_TIMEOUT,
   );
 });
 
 describe("#17 ClusterPipeline dispatches to real worker processes (Done-when 2)", () => {
-  it.fails(
+  it(
     "distinct process.pid values serve stage 0, count matches workers",
     async () => {
       const fixture = await runFixture("__tests__/fixtures/cluster-pids.ts");
       expectFixtureOk(fixture);
-      const result = JSON.parse(fixture.stdout.trim()) as { distinctPids: number; workers: number };
+      const result = lastJsonLine<{ distinctPids: number; workers: number }>(fixture);
       expect(result.distinctPids).toBe(result.workers);
     },
     FIXTURE_TIMEOUT,
@@ -118,12 +131,12 @@ describe("#17 ClusterPipeline dispatches to real worker processes (Done-when 2)"
 });
 
 describe("#17 three ClusterPipelines share one port and worker set (Done-when 4)", () => {
-  it.fails(
+  it(
     "every pipeline's url is identical",
     async () => {
       const fixture = await runFixture("__tests__/fixtures/cluster-shared-port.ts");
       expectFixtureOk(fixture);
-      const result = JSON.parse(fixture.stdout.trim()) as { ports: string[]; results: number[][] };
+      const result = lastJsonLine<{ ports: string[]; results: number[][] }>(fixture);
       expect(new Set(result.ports).size).toBe(1);
       expect(result.results).toEqual([[1], [2], [3]]);
     },
@@ -428,6 +441,20 @@ describe("#17 .fetch() fails loud on a malformed request, never hangs the client
     expect(await res.json()).toEqual({ error: "request body is missing a 'context' object" });
   });
 
+  it("400s when 'context' is an array, not an object", async () => {
+    // Regression: review found `typeof [] === "object"` let an array slip past the "is it an
+    // object" check, silently becoming a string-indexed context ({"0":1,"1":2}) instead of
+    // failing loud, inconsistent with the stricter Array.isArray check already used for 'chunk'.
+    const res = await worker.fetch(
+      new Request("http://x/stage/0", {
+        method: "POST",
+        body: JSON.stringify({ chunk: [1], context: [1, 2, 3] }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "request body is missing a 'context' object" });
+  });
+
   it("toNodeHandler's bridge itself never hangs, even for a handler that throws", async () => {
     const throwingHandler = (_request: Request): Promise<Response> => {
       throw new Error("handler blew up");
@@ -457,15 +484,12 @@ describe("#17 .context() propagates through the wire (Done-when 14)", () => {
     HTTP_TIMEOUT,
   );
 
-  it.fails(
+  it(
     "prints [10,20,30,40,50] through ClusterPipeline, still a ClusterPipeline after .context()",
     async () => {
       const fixture = await runFixture("__tests__/fixtures/cluster-context.ts");
       expectFixtureOk(fixture);
-      const result = JSON.parse(fixture.stdout.trim()) as {
-        out: number[];
-        ctorNameAfterContext: string;
-      };
+      const result = lastJsonLine<{ out: number[]; ctorNameAfterContext: string }>(fixture);
       expect(result.out).toEqual([10, 20, 30, 40, 50]);
       expect(result.ctorNameAfterContext).toBe("ClusterPipeline");
     },
