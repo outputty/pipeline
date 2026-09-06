@@ -28,7 +28,7 @@ import type {
   ChunkErrorHandler,
 } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
-import { buildChunkGenerator } from "./utils/chunk";
+import { buildChunkGenerator, lazyChunks } from "./utils/chunk";
 import { SimpleContextManager } from "./context/simple";
 import { ErrorHandler } from "./errors/handler";
 import { isContextAware, isContextAwareReduce } from "./utils/helpers";
@@ -44,10 +44,12 @@ type TransformerConstructorOptions<In, Out> = TransformerOptions<In, Out> & {
 };
 
 /**
- * The one chunk-draining order a standalone `Transformer.execute()` runs, one chunk at a time, in
- * order (#17: replaces the deleted `sequential` execution strategy, which had the identical body -
- * a `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` is the replacement for concurrency,
- * wrapping the chain rather than configuring the `Transformer` that drives it).
+ * The one chunk-draining order `Transformer.executeChunks()` runs, one chunk at a time, in order
+ * (#17: replaces the deleted `sequential` execution strategy, which had the identical body - a
+ * `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` is the replacement for concurrency, wrapping
+ * the chain rather than configuring the `Transformer` that drives it). `execute()` (#39) is sugar
+ * that cuts `data` with `this.chunkGenerator` and hands the chunks to `executeChunks()`, so this is
+ * still what a standalone caller's `.execute()` ultimately runs.
  *
  * `runSequentially(logic, chunks, ctx)` → each output chunk yielded in input order.
  */
@@ -90,8 +92,12 @@ export class Transformer<In, Out> {
    * custom chunker the async-iteration path can't honor, the same way it reads `hooks`. */
   readonly chunker?: ChunkerFunction<In>;
 
-  /** Function to break input into chunks — `chunker` if set, else built from `chunkSize` */
-  private chunkGenerator: ChunkerFunction<In>;
+  /** Function to break input into chunks — `chunker` if set, else built from `chunkSize`. Public
+   * (#39) so every `Pipeline` class can extract the cut and apply it themselves, the seam
+   * `executeChunks()` (below) and every `Pipeline.apply()`/`ConcurrentPipeline.apply()` now share
+   * — `ConcurrentPipeline` used to build its OWN chunker from `chunkSize` alone and never read
+   * this, refusing a custom `.setChunker()` chunker outright on a dispatched stage. */
+  readonly chunkGenerator: ChunkerFunction<In>;
 
   /** Default context to use when none provided */
   private defaultContext: IContextManager;
@@ -159,15 +165,18 @@ export class Transformer<In, Out> {
   }
 
   /**
-   * Execute the transformer on input data.
+   * Execute the transformer on input data — cuts it into chunks with `this.chunkGenerator` first,
+   * then runs `executeChunks()` (below). `Pipeline.apply()` calls THIS method unchanged (#39); only
+   * `ConcurrentPipeline.apply()` (`src/pipelines/concurrent.ts`) extracts `chunkGenerator` itself,
+   * since it bypasses hooks/error-handling entirely for its own fan-out and never reaches
+   * `executeChunks()` at all.
    *
-   * If hooks are attached, they will be called at appropriate lifecycle points:
-   * - onStart: Before processing begins
-   * - onItemStart: Before each item is processed
-   * - onItemComplete: After each item is successfully processed
-   * - onItemError: When an item fails to process
-   * - onComplete: After all items are processed
-   * - onError: When the transformer fails
+   * `lazyChunks()` (`utils/chunk.ts`) defers the actual `this.chunkGenerator(data)` call until
+   * `executeChunks()` starts draining chunks, inside its own `try` — a custom `.setChunker()`
+   * chunker that throws SYNCHRONOUSLY (`ChunkerFunction<T>`'s type only requires it to RETURN an
+   * `AsyncGenerator`, not to itself be one) still notifies `.onError()`/`errorHandler` and still
+   * propagates at consumption time, exactly like every other failure on this path, rather than
+   * throwing synchronously out of `.execute()` itself before any hook ever ran.
    *
    * Python equivalent:
    * ```python
@@ -178,10 +187,6 @@ export class Transformer<In, Out> {
    *     yield from self.transformer(chunk, run_context)
    * ```
    *
-   * On a chunk failure, `this.errorHandler.handle([], error, runContext)` fires (any
-   * handler registered via `.onError()`) BEFORE the error re-throws — a notification, not a
-   * recovery path, so the failure still propagates to the caller.
-   *
    * @param data - Async iterable of input items
    * @param context - Optional context manager for sharing state
    * @returns Async generator of output items
@@ -190,6 +195,44 @@ export class Transformer<In, Out> {
    * ```typescript
    * const t = new Transformer<number, number>().map((x) => x * 2);
    * for await (const item of t.execute(source([1, 2, 3]))) console.log(item); // 2, 4, 6
+   * ```
+   */
+  async *execute(data: AsyncIterable<In>, context?: IContextManager): AsyncGenerator<Out> {
+    yield* this.executeChunks(
+      lazyChunks(() => this.chunkGenerator(data)),
+      context,
+    );
+  }
+
+  /**
+   * Runs this transformer over chunks the CALLER already cut — the seam every `Pipeline` class uses
+   * (`Pipeline.apply()`, `ConcurrentPipeline.apply()`'s fan-out) so one declaration of the
+   * hooks/error-handling body serves all of them, instead of each rebuilding its own chunker from
+   * `chunkSize` alone and never reading a custom `.setChunker()` chunker (#39). A standalone caller
+   * wants `execute()` (above), which cuts `data` with `this.chunkGenerator` first — feeding
+   * `executeChunks()` chunks directly bypasses the declared chunker, which is accepted here.
+   *
+   * If hooks are attached, they will be called at appropriate lifecycle points:
+   * - onStart: Before processing begins
+   * - onItemStart: Before each item is processed
+   * - onItemComplete: After each item is successfully processed
+   * - onItemError: When an item fails to process
+   * - onComplete: After all items are processed
+   * - onError: When the transformer fails
+   *
+   * On a chunk failure, `this.errorHandler.handle([], error, runContext)` fires (any
+   * handler registered via `.onError()`) BEFORE the error re-throws — a notification, not a
+   * recovery path, so the failure still propagates to the caller.
+   *
+   * @param chunks - Async iterable of pre-cut input chunks
+   * @param context - Optional context manager for sharing state
+   * @returns Async generator of output items
+   *
+   * @example
+   * ```typescript
+   * const t = new Transformer<number, number>().map((x) => x * 2);
+   * const chunks = (async function* () { yield [1, 2]; yield [3]; })();
+   * for await (const item of t.executeChunks(chunks)) console.log(item); // 2, 4, 6
    *
    * // onError wiring: a throwing transform still propagates, but the handler sees it first.
    * let seen: Error | undefined;
@@ -200,7 +243,10 @@ export class Transformer<In, Out> {
    * // seen.message === "boom"
    * ```
    */
-  async *execute(data: AsyncIterable<In>, context?: IContextManager): AsyncGenerator<Out> {
+  async *executeChunks(
+    chunks: AsyncIterable<In[]>,
+    context?: IContextManager,
+  ): AsyncGenerator<Out> {
     const runContext = context ?? this.defaultContext;
     const startTime = Date.now();
     const itemCounter = { index: 0 };
@@ -210,7 +256,6 @@ export class Transformer<In, Out> {
 
       const hasItemHooks =
         this.hooks?.onItemStart ?? this.hooks?.onItemComplete ?? this.hooks?.onItemError;
-      const chunks = this.chunkGenerator(data);
 
       if (hasItemHooks) {
         const wrappedTransform = this.wrapTransformForItemHooks(itemCounter);

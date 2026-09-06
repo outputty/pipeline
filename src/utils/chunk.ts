@@ -56,6 +56,27 @@ export function buildChunkGenerator<T>(chunkSize: number): ChunkerFunction<T> {
 }
 
 /**
+ * Defers CALLING `build()` until the returned generator is actually iterated (#39), rather than
+ * eagerly when `lazyChunks()` itself is called. `ChunkerFunction<T>`'s type only requires the
+ * function to RETURN an `AsyncGenerator` - it does not require the function itself to be one, so a
+ * caller's own `.setChunker()` chunker can run synchronous work (validation, say) before returning
+ * one, and that work can throw. Wrapping the invocation this way keeps that throw where every other
+ * failure on this path surfaces - at consumption time, inside whichever `try` is already draining
+ * the chunks (`Transformer.executeChunks()`'s own, or a dispatching `Pipeline` class's fan-out) -
+ * instead of synchronously out of `.execute()`/`.apply()` itself, at chain-build time.
+ *
+ * @example
+ * ```typescript
+ * const brokenChunker: ChunkerFunction<number> = () => { throw new Error("boom"); };
+ * const chunks = lazyChunks(() => brokenChunker(source([1, 2])));
+ * // chunks itself never throws; chunks[Symbol.asyncIterator]().next() rejects with "boom"
+ * ```
+ */
+export async function* lazyChunks<T>(build: () => AsyncIterable<T[]>): AsyncGenerator<T[]> {
+  yield* build();
+}
+
+/**
  * Normalize a mixed stream of single items and pre-chunked arrays into chunks.
  *
  * Runs whenever a source stream mixes loose items with already-chunked arrays

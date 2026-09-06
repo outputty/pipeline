@@ -80,9 +80,10 @@ export class ErrorHandler<In, U = void> {
    * and does not stop a later (earlier-registered) handler from running or winning in its place.
    *
    * `Transformer.catch()` (`transformer.ts`) is the one caller that uses this return value, to
-   * replace or drop the failing chunk. `Transformer.execute()`'s own call, `handle([], error,
-   * ctx)` on a strategy-level failure, is a notification only and ignores it — `.onError()` is a
-   * hook, not a recovery path there.
+   * replace or drop the failing chunk. `Transformer.executeChunks()`'s own call (#39: moved out of
+   * `execute()` when the chunk cut split into its own method), `handle([], error, ctx)` on a
+   * strategy-level failure, is a notification only and ignores it — `.onError()` is a hook, not a
+   * recovery path there.
    *
    * @param chunk - The chunk that caused the error
    * @param error - The error that occurred

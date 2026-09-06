@@ -79,9 +79,13 @@ async function withServer<T>(
 }
 
 /** The "another instance" side of an `HttpPipeline` chain: an empty-source pipeline whose only
- * job is to hold the SAME stage definitions `builder` describes, so its `.fetch` can serve them. */
-function makeWorker<U>(builder: (t: HttpPipeline<number>) => HttpPipeline<U>): HttpPipeline<U> {
-  return builder(new HttpPipeline<number>([], { url: "" }));
+ * job is to hold the SAME stage definitions `builder` describes, so its `.fetch` can serve them.
+ * `T` defaults to `number` (every existing caller's item type) - #39's sensor-program case is the
+ * first to need a different one, passed explicitly as `makeWorker<Out, Reading>(...)`. */
+function makeWorker<U, T = number>(
+  builder: (t: HttpPipeline<T>) => HttpPipeline<U>,
+): HttpPipeline<U> {
+  return builder(new HttpPipeline<T>([], { url: "" }));
 }
 
 /** Asserts a fixture exited 0 - and, when it didn't, says whether that's because
@@ -300,6 +304,146 @@ describe("#17 a knob that only takes effect via Transformer.execute() fails loud
     expect(() => new ConcurrentPipeline([1, 2, 3]).apply(withHandler)).toThrow(
       /onError never take effect on a dispatched stage/,
     );
+  });
+});
+
+/** One sensor reading - #39's canonical example (`.claude/examples.md`). */
+interface Reading {
+  sensor: string;
+  value: number;
+}
+
+/** Groups CONSECUTIVE same-sensor readings into one chunk - the shape a fixed `chunkSize` can
+ * never produce, since the boundary a real sensor feed needs is the GROUP, not a batch size. */
+async function* bySensor(data: AsyncIterable<Reading>): AsyncGenerator<Reading[]> {
+  let current: Reading[] = [];
+  for await (const r of data) {
+    if (current.length > 0 && current[0].sensor !== r.sensor) {
+      yield current;
+      current = [];
+    }
+    current.push(r);
+  }
+  if (current.length > 0) yield current;
+}
+
+/** 9 readings in 3 groups of 3/2/4 (ticket #39's own numbers) - `a` sums to 6, `b` to 30, `c` to
+ * 1000. Sequential (not grouped by sensor) on purpose: this is what makes `chunkSize: 3`'s fixed
+ * cut land wrong (chunk 2 straddles `b`/`c`) while `bySensor` gets every sensor's true total. */
+const READINGS: Reading[] = [
+  { sensor: "a", value: 1 },
+  { sensor: "a", value: 2 },
+  { sensor: "a", value: 3 },
+  { sensor: "b", value: 15 },
+  { sensor: "b", value: 15 },
+  { sensor: "c", value: 100 },
+  { sensor: "c", value: 300 },
+  { sensor: "c", value: 300 },
+  { sensor: "c", value: 300 },
+];
+
+/** Totals each chunk `seed` cuts into one `{ sensor, total }`, labelling it by the chunk's FIRST
+ * reading - exactly what makes a wrong (non-`bySensor`) cut visibly wrong rather than
+ * coincidentally right. Built ON `seed` (never a fresh `Transformer`) so a chunker `seed` already
+ * carries via `.setChunker()` survives `.reduce()`'s own copy-on-write (`pipe()` forwards it). */
+function totalsFrom(
+  seed: Transformer<Reading, Reading>,
+): Transformer<Reading, { sensor: string; total: number }> {
+  return seed.reduce((acc, r) => ({ sensor: acc.sensor || r.sensor, total: acc.total + r.value }), {
+    sensor: "",
+    total: 0,
+  });
+}
+
+describe("#39 the pipeline extracts and applies the transformer's own chunker, per stage", () => {
+  const EXPECTED = [
+    { sensor: "a", total: 6 },
+    { sensor: "b", total: 30 },
+    { sensor: "c", total: 1000 },
+  ];
+
+  it("a fixed chunkSize:3 gets the grouping wrong - the control this feature exists to fix", async () => {
+    const t = totalsFrom(new Transformer<Reading, Reading>({ chunkSize: 3 }));
+    const out = await new Pipeline(READINGS).apply(t).toArray();
+    expect(out).toEqual([
+      { sensor: "a", total: 6 },
+      { sensor: "b", total: 130 }, // chunk 2 = [b,b,c]: 15 + 15 + 100
+      { sensor: "c", total: 900 }, // chunk 3 = [c,c,c]: 300 * 3
+    ]);
+  });
+
+  it(".setChunker(bySensor) through .apply() returns the same totals on Pipeline", async () => {
+    const t = totalsFrom(new Transformer<Reading, Reading>().setChunker(bySensor));
+    const out = await new Pipeline(READINGS).apply(t).toArray();
+    expect(out).toEqual(EXPECTED);
+  });
+
+  it(".setChunker(bySensor) through .apply() returns the same totals on ConcurrentPipeline", async () => {
+    const t = totalsFrom(new Transformer<Reading, Reading>().setChunker(bySensor));
+    const out = await new ConcurrentPipeline(READINGS).apply(t).toArray();
+    expect(out).toEqual(EXPECTED);
+  });
+
+  it(".setChunker(bySensor) through .apply() returns the same totals on HttpPipeline", async () => {
+    const t = totalsFrom(new Transformer<Reading, Reading>().setChunker(bySensor));
+    const worker = makeWorker<{ sensor: string; total: number }, Reading>((w) => w.apply(t));
+    await withServer(worker.fetch, async (url) => {
+      const out = await new HttpPipeline<Reading>(READINGS, { url }).apply(t).toArray();
+      expect(out).toEqual(EXPECTED);
+    });
+  });
+
+  it("setChunker no longer trips ConcurrentPipeline.apply()'s knob-violation filter", () => {
+    const t = new Transformer<Reading, Reading>().setChunker(bySensor);
+    expect(() => new ConcurrentPipeline(READINGS).apply(t)).not.toThrow();
+  });
+
+  it("a synchronously-throwing custom chunker still surfaces at consumption time, not from .apply()", async () => {
+    // Regression (review): ConcurrentPipeline.apply() reads transformer.chunkGenerator()
+    // synchronously to build the fan-out - an earlier version called it directly rather than
+    // through lazyChunks() (utils/chunk.ts), so a chunker throwing on CALL (not iteration) made
+    // .apply() itself throw at chain-build time instead of at .toArray().
+    const brokenChunker = (): AsyncGenerator<Reading[]> => {
+      throw new Error("chunker validation failed");
+    };
+    const t = new Transformer<Reading, Reading>().setChunker(brokenChunker);
+
+    let stage: ConcurrentPipeline<Reading> | undefined;
+    expect(() => {
+      stage = new ConcurrentPipeline(READINGS).apply(t);
+    }).not.toThrow();
+    await expect(stage!.toArray()).rejects.toThrow("chunker validation failed");
+  });
+
+  it("two stages re-chunk differently in one ConcurrentPipeline chain", async () => {
+    const stage1Saw: number[][] = [];
+    const stage2Saw: number[][] = [];
+    const recorder = (sink: number[][]) =>
+      new Transformer<number, unknown>({
+        transform: (chunk) => {
+          sink.push([...chunk]);
+          return chunk;
+        },
+      });
+
+    const stage1 = new Transformer<number, number>({ chunkSize: 2 }).tap(recorder(stage1Saw));
+    const stage2 = new Transformer<number, number>({ chunkSize: 4 }).tap(recorder(stage2Saw));
+    const out = await new ConcurrentPipeline([1, 2, 3, 4, 5, 6, 7, 8], { maxConcurrency: 8 })
+      .apply(stage1)
+      .apply(stage2)
+      .toArray();
+
+    expect(stage1Saw).toEqual([
+      [1, 2],
+      [3, 4],
+      [5, 6],
+      [7, 8],
+    ]);
+    expect(stage2Saw).toEqual([
+      [1, 2, 3, 4],
+      [5, 6, 7, 8],
+    ]);
+    expect(out).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 });
 

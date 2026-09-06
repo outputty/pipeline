@@ -148,6 +148,10 @@ export interface PipelineOptions {
  * (`sourcePositionViolations`). Review (#17) found `.onError()` missing here entirely - silently
  * inert on a dispatched stage (`stageWork()` never calls `execute()`, the only path that consults
  * it) with no fail-loud signal, unlike every other knob this function already covered.
+ *
+ * `"chunkSize"` and `"setChunker"` are genuinely inert only HERE, on the async-iteration path -
+ * `ConcurrentPipeline.apply()` (#39) now reads `transformer.chunkGenerator` itself, so it filters
+ * both out of the list this function returns before deciding whether a dispatched stage throws.
  */
 export function inertKnobsOf<In, Out>(transformer: Transformer<In, Out>): string[] {
   const violations: string[] = [];
@@ -465,6 +469,13 @@ export class Pipeline<T> {
    * (`sourcePositionViolations` picked it up here).
    */
   apply<U>(transformer: Transformer<T, U>): Pipeline<U> {
+    // Unchanged by #39: this already honored a custom .setChunker() chunker before that ticket -
+    // execute() itself extracts transformer.chunkGenerator and hands it to executeChunks(), fully
+    // lazily (an async generator function call runs nothing until iterated). Review (#39) found an
+    // earlier version of this line calling executeChunks(transformer.chunkGenerator(...), ...)
+    // directly - a synchronously-throwing custom chunker then threw OUT OF apply() itself, at
+    // chain-build time, instead of surfacing at consumption time the way every other failure here
+    // does; reverted rather than duplicating execute()'s own two-step for no consumer that needs it.
     const newData = transformer.execute(this.dataSource, this._context);
     return this.createPipeline<U>(newData, {
       context: this._context,

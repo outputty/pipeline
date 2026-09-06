@@ -4,17 +4,18 @@
  * configured a `Transformer`, this configures a `Pipeline` - the chain is identical, only the
  * class differs.
  *
- * `apply()` does NOT call `Transformer.execute()` the way the base class does - that bypass IS the
- * mechanism, since `execute()` is what runs the (deleted) strategy seam. Instead it chunks the
- * source itself and fans each chunk out through `stageWork()`, the one method a subclass overrides
- * to change WHERE a stage's work actually happens (`HttpPipeline`, #17 L4, overrides it to POST).
+ * `apply()` does NOT call `Transformer.execute()`/`executeChunks()` the way the base class does -
+ * that bypass IS the mechanism, since those are what run the (deleted) strategy seam's hooks/error
+ * handling. Instead it cuts the source with the transformer's OWN `chunkGenerator` (#39) and fans
+ * each chunk out through `stageWork()`, the one method a subclass overrides to change WHERE a
+ * stage's work actually happens (`HttpPipeline`, #17 L4, overrides it to POST).
  */
 
 import type { IContextManager, InternalTransformer } from "@src/types";
 import { Pipeline, type PipelineOptions, type PipelineSource, inertKnobsOf } from "@src/pipeline";
 import type { ChunkTransform } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
-import { buildChunkGenerator } from "@src/utils/chunk";
+import { lazyChunks } from "@src/utils/chunk";
 
 /** Construction-time knobs for `ConcurrentPipeline` and every class that extends it. */
 export interface ConcurrentPipelineOptions {
@@ -227,13 +228,16 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
       return super.apply(transformer) as ConcurrentPipeline<U>;
     }
 
-    // `chunkSize` is excluded: unlike the base class's own inertKnobsOf() use, THIS class always
-    // reads transformer.chunkSize (below) - it is never inert here. Every other knob
-    // (withHooks/setChunker) only ever takes effect through Transformer.execute(), which
-    // stageWork() (below) never calls on ANY consumption path - not just async-iteration, the way
-    // the base class's own terminal-op path is fine but its source-position path is not. Fail
-    // loud immediately rather than recording it for a check async-iteration alone runs.
-    const knobViolations = inertKnobsOf(transformer).filter((knob) => knob !== "chunkSize");
+    // `chunkSize` AND `setChunker` are excluded (#39): unlike the base class's own inertKnobsOf()
+    // use, THIS class reads transformer.chunkGenerator (below) - which chunkSize/setChunker both
+    // feed - so neither is inert here. `withHooks`/`onError` are still fatal: they only ever take
+    // effect through Transformer.execute()/executeChunks(), which stageWork() (below) never calls
+    // on ANY consumption path - not just async-iteration, the way the base class's own terminal-op
+    // path is fine but its source-position path is not. Fail loud immediately rather than
+    // recording it for a check async-iteration alone runs.
+    const knobViolations = inertKnobsOf(transformer).filter(
+      (knob) => knob !== "chunkSize" && knob !== "setChunker",
+    );
     if (knobViolations.length > 0) {
       throw new Error(
         `${this.constructor.name}: ${knobViolations.join("/")} never take effect on a dispatched ` +
@@ -244,7 +248,13 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
 
     const stageIndex = this._chunkTransforms.length;
     const work = this.stageWork(transformer, stageIndex);
-    const chunks = buildChunkGenerator<T>(transformer.chunkSize)(this.dataSource);
+    // Reads the transformer's OWN chunkGenerator (#39) - `chunker` if `.setChunker()` was called,
+    // else the default built from `chunkSize` - instead of rebuilding a chunkSize-only chunker
+    // here and never reading a custom chunker at all (the refusal this filter used to enforce).
+    // lazyChunks() defers the actual call to when `chunks` is first drained (below `apply()`'s own
+    // synchronous return) - a synchronously-throwing custom chunker then surfaces there, the same
+    // way every other stage failure does, instead of throwing out of `apply()` itself.
+    const chunks = lazyChunks<T>(() => transformer.chunkGenerator(this.dataSource));
     const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;
     const newData = fanOut(chunks, work, this._context, this.maxConcurrency);
 

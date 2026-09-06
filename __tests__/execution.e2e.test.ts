@@ -176,6 +176,62 @@ describe("execution e2e — lifecycle hooks fire during a run", () => {
   });
 });
 
+describe("execution e2e — #39 hooks and onError survive the chunk cut moving to executeChunks()", () => {
+  // Regression: execute() used to build chunks (this.chunkGenerator(data)) AND run the hooked/
+  // error-handled loop in one body. #39 splits the cut into a public chunkGenerator so a Pipeline
+  // class can apply it itself (executeChunks() runs the rest) - these two cases prove the split
+  // left the hook/error body, not just the cut, unchanged.
+  it("start/complete hooks fire once each, in order, over a run cut into real chunks", async () => {
+    const order: string[] = [];
+    const out = await run(
+      [1, 2, 3, 4],
+      new Transformer<number, number>({ chunkSize: 2 })
+        .map((x) => x * 2)
+        .withHooks({
+          onStart: () => order.push("start"),
+          onComplete: (count) => order.push(`complete:${count}`),
+        }),
+    );
+    expect(out).toEqual([2, 4, 6, 8]);
+    expect(order).toEqual(["start", "complete:4"]);
+  });
+
+  it("a registered .onError() handler still fires, and the error still propagates", async () => {
+    const seen: string[] = [];
+    const t = new Transformer<number, number>()
+      .map((x) => {
+        if (x === 2) throw new Error("boom on 2");
+        return x;
+      })
+      .onError((_chunk, error) => seen.push(error.message));
+    await expect(run([1, 2, 3], t)).rejects.toThrow("boom on 2");
+    expect(seen).toEqual(["boom on 2"]);
+  });
+
+  it("a synchronously-throwing custom chunker still notifies onError, and .apply() itself never throws", async () => {
+    // Regression (review, #39): ChunkerFunction<T>'s type only requires the function to RETURN an
+    // AsyncGenerator, not to itself be one - a plain function doing synchronous validation before
+    // delegating throws on CALL, not on iteration. An earlier version of execute() evaluated
+    // this.chunkGenerator(data) as a bare argument expression, outside executeChunks()'s own try,
+    // so this throw skipped onError/errorHandler entirely. lazyChunks() (utils/chunk.ts) defers the
+    // call into executeChunks()'s own try instead.
+    const brokenChunker = (): AsyncGenerator<number[]> => {
+      throw new Error("chunker validation failed");
+    };
+    const seen: string[] = [];
+    const t = new Transformer<number, number>()
+      .setChunker(brokenChunker)
+      .onError((_chunk, error) => seen.push(error.message));
+
+    let pipeline: Pipeline<number> | undefined;
+    expect(() => {
+      pipeline = new Pipeline([1, 2, 3]).apply(t);
+    }).not.toThrow();
+    await expect(pipeline!.toArray()).rejects.toThrow("chunker validation failed");
+    expect(seen).toEqual(["chunker validation failed"]);
+  });
+});
+
 describe("execution e2e — streaming edge behaviors", () => {
   it("passes null and undefined items through untouched", async () => {
     const out = await run(
