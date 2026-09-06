@@ -162,8 +162,6 @@ bounded and explicit.
 
 > **`.catch(build, onError?)`** - `build` is the sub-chain to guard; `onError` receives the failing
 > `chunk` and `Error`, and its return value (an array, or nothing) replaces or drops the chunk.
-> ⚠ `pending #15` - the shipped code discards that return value and always drops the chunk. #15 makes
-> the behaviour above true.
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
@@ -177,12 +175,12 @@ const data = await new Pipeline(["a", "b", "3", "d", "5"])
           if (isNaN(n)) throw new Error(`Invalid: ${s}`);
           return n;
         }),
-      (chunk, err) => undefined,
+      () => [999],
     ),
   )
   .toArray();
 ```
 
 ```json
-[]
+[999]
 ```

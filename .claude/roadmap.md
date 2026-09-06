@@ -9,8 +9,7 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **`.catch()` must honour `onError`'s replacement array** (#15) - the exported `ChunkErrorHandler`
-  promises a replacement and `.catch()` returns `[]`, so a caller's fallback silently drops rows.
+None open right now - every ticket below is Built.
 
 ### Later - not yet filed
 
@@ -40,6 +39,12 @@ The two older candidates, still not filed:
   `concurrent()` is deleted with the seam it belonged to. PRs #20 (L1, stubs and pinned cases), #21 (L2,
   polymorphic copy-on-write), #23 (L3, `ConcurrentPipeline`'s streaming fan-out), #24 (L4,
   `HttpPipeline`), #25 (L5, `ClusterPipeline`'s worker bootstrap), #26 (enable, the seam deleted).
+- **`.catch()` honours `onError`'s replacement array** (#15, PR #19) - the two disagreeing
+  `ChunkErrorHandler` declarations (`src/types.ts`, exported, promising a replacement;
+  `src/errors/handler.ts`, what `.catch()` actually ran, always dropping the chunk) are one
+  signature now. `ErrorHandler.handle()` runs its handlers LIFO and returns the first one's
+  replacement array, `undefined` if none replaced - `.catch()` substitutes on an array, drops on
+  `undefined`.
 - **Split from `outputty/laygo`** (`outputty/laygo` #743, #744, #745) - `@outputty/pipeline` moves from
   `packages/pipeline` inside the laygo monorepo to its own repository. #743 dropped the terminal ops'
   context-tuple return in favor of reading `.contextManager` directly off the `Pipeline` instance after

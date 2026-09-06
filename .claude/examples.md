@@ -148,9 +148,10 @@ const data = await merged.toArray();
 ## Case 6 - chunk-level error handling
 
 A throw inside `.catch()`'s sub-chain hands the whole failing chunk to the handler; a small enough
-input is one chunk, so one bad item drops or replaces the entire result.
+input is one chunk, so one bad item drops or replaces the entire result. The handler's returned
+array REPLACES the chunk; returning nothing DROPS it (#15).
 
-<!-- illustrative -->
+<!-- compiles -->
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
@@ -164,12 +165,12 @@ const data = await new Pipeline(["a", "b", "3", "d", "5"])
           if (isNaN(n)) throw new Error(`Invalid: ${s}`);
           return n;
         }),
-      (chunk, err) => undefined,
+      () => [999],
     ),
   )
   .toArray();
 ```
 
 ```json
-[]
+[999]
 ```
