@@ -7,6 +7,26 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-06 A handoff note's coined word framed a whole question round
+
+Planning #45, the primary session's notes called the thing to build a "producer". The word appears
+nowhere in `src/`, `__tests__/`, `.claude/`, `CLAUDE.md` or `README.md` - verified before any question
+was asked, and recorded as a premise. That verification was read as "settle what it names here"
+rather than "an intermediary coined this", so the first question round opened on the term and the
+user's first reply was to reject the frame: they had said reducer throughout.
+`~/.claude/rules/code.md` now says to use the user's own noun for any term that arrived through a
+handoff, a peer session or a summary and appears nowhere in the code.
+
+## 2026-09-06 A duplex probe's own ordering nearly confirmed a false claim
+
+The session carried in "Node's `fetch` is half-duplex", labelled unverified. The first probe awaited
+`fetch` before starting the loop that fed its request body, so the body was never pushed and the run
+ended `RESPONSE HEADERS AT +90011ms status 408` - indistinguishable from the response being withheld
+until the body completes, which is exactly the claim under test. Only the absurd 90-second timing
+prompted a second look; reordered, the real answer was `echoes received BEFORE the request body
+closed = 3 of 3`, and the whole remote-reducer design rests on it. `.claude/rules/code.md` (new, this
+repo) now says to feed a streaming probe's input before awaiting the call that consumes it.
+
 ## 2026-09-06 A review finding was framed as #31's own regression before checking `main`
 
 Building #31, code review found `HttpPipeline.fetch()` reusing `this._context` to serve concurrent

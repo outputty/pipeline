@@ -9,7 +9,18 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-None open right now - every ticket below is Built.
+- **A reducer on the `Pipeline`, folding every chunk it receives** (#45) - `reduce` only folds one
+  chunk today, and the whole-dataset form returns a standalone callable that is never a stage. So a
+  running total across a stream means draining the pipeline and folding outside it, giving up both
+  streaming and dispatch. `Pipeline.reduce` folds every chunk, `emit()` lets the caller decide what
+  a finished result is, and a reduce stage dispatches like any other - one duplex POST whose
+  accumulator lives for the life of the connection. Now, because it is the last operation that
+  cannot cross a process boundary. BREAKING: `perChunk` and `ReduceOptions` go.
+- **A conformance suite every `Pipeline` and Context class runs** (#37), **`EventEmitterPipeline`**
+  (#30), **the pipeline's own chunker extraction** (#39, `needs-planning`), **the pipeline's error
+  handlers** (#40), **instance `merge`** (#41), **a pipeline-level `chunkSize`** (#42,
+  `needs-planning`) and **cross-runtime benchmarks** (#11) are the other open tickets; each issue
+  carries its own detail.
 
 ### Later - not yet filed
 
@@ -75,6 +86,17 @@ The two older candidates, still not filed:
   `In`/`Out` with no `transform`. PRs #7, #8, #10, #12.
 
 ## Killed
+
+- **A forward-descending `Transformer` composition** (#45) - each link calling the NEXT one rather
+  than wrapping the previous one, so the stack descends in the order the caller wrote the chain.
+  Measured: today's composition enters last-link-first and produces data on the unwind (`enter
+  filterOp`, `enter mapOp`, `enter reduceOp`, then `exit reduceOp -> [10]`, `exit mapOp -> [100]`).
+  The forward form buys a stack trace in pipeline order and lets a link call its successor several
+  times or not at all - which would let a reducer push each emitted value downstream immediately
+  instead of returning them together at the end of the chunk. Killed by the user: it makes every
+  link a middleware that decides whether the rest of the chain runs, which is a larger contract than
+  `map`/`filter`/`reduce` need, and it would rewrite `pipe()` and every link including `.catch()`.
+  A reducer stays one ordinary `pipe()` link (`src/transformer.ts:717`, `:731`).
 
 Every row below was spiked and run while planning #17, not argued.
 
