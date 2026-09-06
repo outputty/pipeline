@@ -135,8 +135,13 @@ export interface PipelineOptions {
  * `inertKnobsOf(new Transformer().withExecutor(sequential))` → `[]`;
  * `inertKnobsOf(new Transformer().setChunker(custom))` → `["setChunker"]`;
  * `inertKnobsOf(new Transformer())` → `[]`.
+ *
+ * Exported (#17) so `ConcurrentPipeline.apply()` (`src/pipelines/concurrent.ts`) can report the
+ * SAME transformer-level violations alongside its own ("this stage was dispatched, not applied
+ * in-process") - the two lists have different sources but the same shape and the same consumer
+ * (`sourcePositionViolations`).
  */
-function inertKnobsOf<In, Out>(transformer: Transformer<In, Out>): string[] {
+export function inertKnobsOf<In, Out>(transformer: Transformer<In, Out>): string[] {
   const violations: string[] = [];
   if (transformer.strategy !== sequential) violations.push("withExecutor");
   if (transformer.hooks !== undefined) violations.push("withHooks");
@@ -475,7 +480,17 @@ export class Pipeline<T> {
       }
     }
 
-    return this.createPipeline<T>(bufferedStream(), { context: this._context }) as this;
+    // Carries rootSource/chunkTransforms/sourcePositionViolations forward unchanged (#17) - only
+    // the item stream itself is rebatched here. Dropping them (as this line used to) loses the
+    // async-iteration replay's own stage history AND silently erases any "not applied in source
+    // position" violation `.apply()` already recorded - review found `.buffer()` after a
+    // `ConcurrentPipeline` dispatch made the fail-loud guarantee vanish, verified live.
+    return this.createPipeline<T>(bufferedStream(), {
+      context: this._context,
+      rootSource: this._rootSource,
+      chunkTransforms: this._chunkTransforms,
+      sourcePositionViolations: this._sourcePositionViolations,
+    }) as this;
   }
 
   // ===== Terminal Operations =====

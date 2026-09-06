@@ -49,13 +49,7 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
       data: AsyncIterable<U>,
       options: HttpPipelineConstructorOptions,
     ) => HttpPipeline<U>;
-    return new Ctor(data, {
-      ...options,
-      url: this._url,
-      maxConcurrency: this.maxConcurrency,
-      ordered: this.ordered,
-      chunkSize: this.chunkSize,
-    });
+    return new Ctor(data, { ...options, ...this.concurrentOptions(), url: this._url });
   }
 
   /** Prefix-agnostic: a framework mount may rewrite the path before this sees it. */

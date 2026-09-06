@@ -37,8 +37,10 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
   }
 
   /**
-   * Carries `workers` into the NEXT instance a copy-on-write call builds, on top of what
-   * `HttpPipeline.createPipeline()` already carries forward - same reason, one more field.
+   * Carries `workers` into the NEXT instance a copy-on-write call builds, alongside
+   * `maxConcurrency`/`ordered`/`chunkSize` (`concurrentOptions()`, inherited) and `url` (currently
+   * inert here - the constructor below forces `url: ""` regardless of what it is given, until L5's
+   * bootstrap gives it a real one to forward).
    */
   protected override createPipeline<U>(
     data: AsyncIterable<U>,
@@ -46,15 +48,15 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
   ): ClusterPipeline<U> {
     const Ctor = this.constructor as new (
       data: AsyncIterable<U>,
-      options?: ClusterPipelineConstructorOptions,
+      options?: ClusterPipelineConstructorOptions & { url: string },
     ) => ClusterPipeline<U>;
-    return new Ctor(data, {
+    const merged = {
       ...options,
+      ...this.concurrentOptions(),
       workers: this.workers,
-      maxConcurrency: this.maxConcurrency,
-      ordered: this.ordered,
-      chunkSize: this.chunkSize,
-    });
+      url: this._url,
+    };
+    return new Ctor(data, merged);
   }
 
   override transform<U>(
