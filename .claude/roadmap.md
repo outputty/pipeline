@@ -87,6 +87,17 @@ The two older candidates, still not filed:
 
 ## Killed
 
+- **A forward-descending `Transformer` composition** (#45) - each link calling the NEXT one rather
+  than wrapping the previous one, so the stack descends in the order the caller wrote the chain.
+  Measured: today's composition enters last-link-first and produces data on the unwind (`enter
+  filterOp`, `enter mapOp`, `enter reduceOp`, then `exit reduceOp -> [10]`, `exit mapOp -> [100]`).
+  The forward form buys a stack trace in pipeline order and lets a link call its successor several
+  times or not at all - which would let a reducer push each emitted value downstream immediately
+  instead of returning them together at the end of the chunk. Killed by the user: it makes every
+  link a middleware that decides whether the rest of the chain runs, which is a larger contract than
+  `map`/`filter`/`reduce` need, and it would rewrite `pipe()` and every link including `.catch()`.
+  A reducer stays one ordinary `pipe()` link (`src/transformer.ts:717`, `:731`).
+
 Every row below was spiked and run while planning #17, not argued.
 
 - **A worker-thread pool** (#17) - Piscina 5.3.2 works: `workerEntry(stages)` ran the canonical program
