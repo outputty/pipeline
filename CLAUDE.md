@@ -141,8 +141,8 @@ none of it survived the hand-trim (#745).
 
 - **Pipeline** - the high-level API composing a data source with a `Transformer` chain: `new
   Pipeline(source, options?)`, `.context()`, `.apply()`/`.transform()`, the terminal ops
-  (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`), and the static `Pipeline.merge(...)`
-  concatenating several pipelines' sources and contexts into one.
+  (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`), and the static
+  `Pipeline.merge(pipelines, options?)` concatenating several pipelines' sources and contexts into one.
 - **Transformer** - the chainable chunk-transformation builder: `new Transformer<In, Out>(options?)`,
   `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.catch()`, `.withHooks()` for lifecycle
   callbacks. Runs directly over any `AsyncIterable` via `.execute()`, independent of `Pipeline` -
@@ -180,7 +180,18 @@ none of it survived the hand-trim (#745).
   Every `PipelineFunction`/`PipelineReduceFunction` callback receives it as an optional second
   parameter - one signature, not a union of arities, so an un-annotated callback still infers its item
   type (`types.ts`'s own docstring on `PipelineFunction` records why the union form was rejected).
-  `Pipeline.merge()` merges every source pipeline's context into the merged pipeline's own.
+  `Pipeline.merge(pipelines, options?)` merges every source pipeline's context into the manager
+  `options.context` names, or into a fresh `SimpleContextManager` when it names none - the ONE place
+  values flow backward, which is why it takes the manager explicitly.
+- **`context` / `contextFactory`** - the two ways a caller supplies a manager (`PipelineOptions`).
+  `context` is an instance for THIS process, kept by every operation, writes included; `.context()`
+  merges into it rather than replacing it. `contextFactory` is how to BUILD one, for a process that
+  cannot receive an instance - a dispatching class's own serving side calls it ONCE per process and
+  reuses the result, so a manager owning a connection opens one pool per worker, not one per chunk.
+  Both together mean "this instance here, a fresh one there". No registry and no serialization: a
+  worker already re-runs the entry module, so it holds the factory's own construction code. Context
+  is forward-looking - the wire carries `{ chunk, context }` out and `{ chunk }` back, so a worker's
+  `ctx.set()` reaches other processes only through the caller's own manager class and its store.
 - **Branch** - `Pipeline.branch(definitions)` routing items to one or more named sub-pipelines by
   predicate: `BranchDefinition<T, U>` pairs a `predicate` with a `Transformer`; `BranchOptions.firstMatch`
   (default `true`) sends an item to only the first matching branch, `false` broadcasts it to every

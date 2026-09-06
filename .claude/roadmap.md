@@ -9,14 +9,20 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-None open right now - every ticket below is Built.
+- **A caller's own `IContextManager` survives every operation** (#31) - `.context()` and
+  `Pipeline.merge()` discard the caller's manager for a fresh `SimpleContextManager`, and a worker
+  never gets one at all. Now, because the knob (`PipelineOptions.context`) already ships with zero
+  tests and zero documentation, so every use of it is silently wrong. `.context()` merges into the
+  caller's instance; `Pipeline.merge(pipelines, options?)` takes the manager explicitly, breaking the
+  variadic signature; `contextFactory` builds one per process for a worker that cannot receive an
+  instance.
 
 ### Later - not yet filed
 
-- **A `ContextManager` class passed to a pipeline.** Today a remote stage's `ctx.set()` never reaches
-  the caller - measured: the orchestrator's context stayed `{"multiplier":10}` after three remote
-  `ctx.set()` calls. The shape agreed while planning #17: a dedicated `ContextManager` class the caller
-  passes in, with a plain object meaning a local, one-way context that propagates to every worker.
+- **A remote stage's `ctx.set()` reaching the orchestrator.** Measured: the orchestrator's context
+  stayed `{"multiplier":10}` after three remote `ctx.set()` calls. #31 settles WHICH manager a worker
+  builds (`contextFactory`) and deliberately leaves the wire one-way - a worker publishes through its
+  own manager's backing store instead. What stays open is an in-memory manager with no such store.
 - **A retry policy for a failed remote chunk.** Measured while planning #17: retrying one chunk on
   another instance ran that chunk twice (`runs per chunk {"[1,2]":1,"[5]":2,"[3,4]":1}`) - at-least-once,
   with no de-duplication surface.

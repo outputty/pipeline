@@ -115,6 +115,10 @@ value an upstream stage - or the caller - set, without it becoming an explicit c
 > **Context / `IContextManager`** - `.get()`/`.set()`/`.getOrDefault()`/`.toDict()`. Every callback
 > receives it as an optional second parameter, so an un-annotated `(x) => …` still infers `x`'s type
 > from the source - `types.ts`'s own docstring records why a two-arity union signature was rejected.
+> **`context`** - an instance the caller supplies for THIS process. Every operation keeps it, writes
+> included; `.context()` merges into it rather than replacing it.
+> **`contextFactory`** - how to BUILD a manager, for a process that cannot receive an instance. Each
+> worker calls it once and reuses the result, so a manager owning a connection opens one per process.
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
@@ -129,6 +133,30 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 [10, 20, 30, 40, 50]
 ```
 
+The caller's own manager class decides whether state crosses a process. The pipeline ships one
+mechanism and makes no other distinction: it seeds every worker forward, and never carries a
+worker's writes back.
+
+```ts
+import { ClusterPipeline } from "@outputty/pipeline";
+
+const data = await new ClusterPipeline([1, 2, 3, 4, 5], {
+  workers: 3,
+  contextFactory: () => new PgContext(pool),
+})
+  .context({ multiplier: 10 })
+  .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))
+  .toArray();
+```
+
+```json
+[10, 20, 30, 40, 50]
+```
+
+A `SimpleContextManager` keeps a worker's `ctx.set()` inside that worker. A manager backed by an
+external store publishes it to every process through that store. `Pipeline.merge()` is the one place
+values flow the other way, which is why it takes the manager explicitly.
+
 ### Branching and merging
 
 A single source splits into several named sub-chains by predicate, and several sources concatenate back
@@ -137,8 +165,10 @@ into one - the two directions of composing whole pipelines rather than chaining 
 > **Branch** - `Pipeline.branch(definitions)`: each `BranchDefinition` pairs a `predicate` with a
 > `Transformer`; `BranchOptions.firstMatch` (default `true`) sends an item to the first matching branch
 > only, `false` broadcasts it to every match.
-> **Merge** - the static `Pipeline.merge(...pipelines)`: concatenates every source pipeline's data and
-> merges their contexts into one new `Pipeline`. Each pipeline's item type is inferred on its own, so
+> **Merge** - the static `Pipeline.merge(pipelines, options?)`: concatenates every source pipeline's
+> data and merges their contexts into one new `Pipeline`, later pipelines winning on a shared key.
+> `options.context` names the manager that receives them; with none, the merged pipeline gets a fresh
+> `SimpleContextManager`. Each pipeline's item type is inferred on its own, so
 > merging a `Pipeline<"a"|"b">` with a `Pipeline<"c"|"d">` gives a `Pipeline<"a"|"b"|"c"|"d">`.
 
 ```ts

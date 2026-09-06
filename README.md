@@ -164,6 +164,33 @@ Operations can access shared context:
 The `ctx` parameter is optional: omit it and the item type is still inferred from the source, so a
 callback never needs an explicit annotation.
 
+### Supplying Your Own Context Manager
+
+Pass `context` to use your own `IContextManager` instance in this process. Every operation keeps it,
+writes included, and `.context()` merges into it rather than replacing it.
+
+<!-- illustrative -->
+
+```typescript
+const pipeline = new Pipeline([1, 2, 3], { context: myContextManager });
+```
+
+Pass `contextFactory` when a manager cannot travel - a `ClusterPipeline` worker or a separate
+`HttpPipeline` instance runs in another process. Each process calls the factory once and reuses the
+result, so a manager owning a connection opens one pool per worker rather than one per chunk.
+
+<!-- illustrative -->
+
+```typescript
+const pipeline = new ClusterPipeline([1, 2, 3], {
+  workers: 3,
+  contextFactory: () => new PgContext(pool),
+});
+```
+
+Your manager's class decides whether state crosses a process. The pipeline seeds every worker forward
+and never carries a worker's writes back, so a worker publishes through its own manager's store.
+
 <!-- compiles -->
 
 ```typescript
