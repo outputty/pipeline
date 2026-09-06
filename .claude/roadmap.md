@@ -9,16 +9,8 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **Distributed and concurrent execution as `Pipeline` subclasses** (#17) - `ConcurrentPipeline`,
-  `HttpPipeline` and `ClusterPipeline`, each overriding one thing, replace `ExecutionStrategy` and
-  `.withExecutor()` entirely. A stage is its position in the chain, so a chunk crosses a boundary with
-  an index instead of a function. Now, because the package cannot run CPU-bound work at all today: a
-  chain finishes no faster on ten cores than on one, whatever `maxConcurrency` says.
 - **`.catch()` must honour `onError`'s replacement array** (#15) - the exported `ChunkErrorHandler`
   promises a replacement and `.catch()` returns `[]`, so a caller's fallback silently drops rows.
-- **`concurrent()` leaks unhandled rejections** (#16) - one chunk failure leaves every other in-flight
-  rejection unhandled, which crashes the process under Node's defaults. #17 deletes `concurrent()`; if
-  it lands first, #16 closes as moot.
 
 ### Later - not yet filed
 
@@ -29,8 +21,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 - **A retry policy for a failed remote chunk.** Measured while planning #17: retrying one chunk on
   another instance ran that chunk twice (`runs per chunk {"[1,2]":1,"[5]":2,"[3,4]":1}`) - at-least-once,
   with no de-duplication surface.
-- **Streaming `ordered: false`.** `unorderedExecution` drains the whole source before dispatching
-  anything. #17 fixes this inside `ConcurrentPipeline`; the shipped strategy is deleted with the seam.
 
 The two older candidates, still not filed:
 
@@ -43,6 +33,13 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **Distributed and concurrent execution as `Pipeline` subclasses** (#17) - `ConcurrentPipeline`,
+  `HttpPipeline` and `ClusterPipeline`, each overriding one thing, replace `ExecutionStrategy` and
+  `.withExecutor()` entirely. A stage is its position in the chain, so a chunk crosses a boundary with
+  an index instead of a function. Also closes #16 (`concurrent()`'s unhandled-rejection leak) as moot -
+  `concurrent()` is deleted with the seam it belonged to. PRs #20 (L1, stubs and pinned cases), #21 (L2,
+  polymorphic copy-on-write), #23 (L3, `ConcurrentPipeline`'s streaming fan-out), #24 (L4,
+  `HttpPipeline`), #25 (L5, `ClusterPipeline`'s worker bootstrap), #26 (enable, the seam deleted).
 - **Split from `outputty/laygo`** (`outputty/laygo` #743, #744, #745) - `@outputty/pipeline` moves from
   `packages/pipeline` inside the laygo monorepo to its own repository. #743 dropped the terminal ops'
   context-tuple return in favor of reading `.contextManager` directly off the `Pipeline` instance after

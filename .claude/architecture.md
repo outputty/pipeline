@@ -14,32 +14,35 @@ restricts it.
 ┌─────────────────────────────────────────────────────────┐
 │ App code — TypeScript, tsc-checked                       │
 ├─────────────────────────────────────────────────────────┤
-│ @outputty/pipeline — Pipeline · Transformer · strategies  │
+│ @outputty/pipeline — Pipeline family · Transformer        │
 ├─────────────────────────────────────────────────────────┤
-│ p-limit — the concurrency gate inside concurrent()        │
+│ node:cluster / node:http — ClusterPipeline/HttpPipeline   │
+│ only; a plain Pipeline/ConcurrentPipeline needs neither   │
 ├─────────────────────────────────────────────────────────┤
 │ the caller's own AsyncIterable source                    │
 └─────────────────────────────────────────────────────────┘
 ```
 
 Nothing below the caller's source is this package's concern - no DB driver, no file I/O, no network
-client. A `Pipeline` accepts an array, an `AsyncIterable`, or any object shaped as one; a laygo `Model`
-reaches a `Pipeline` the same way, structurally (`outputty/laygo`'s `Source` accepts any
-`AsyncIterable`), with no import edge in either direction (#743, #745).
+client of its own beyond what dispatching a stage requires. A `Pipeline` accepts an array, an
+`AsyncIterable`, or any object shaped as one; a laygo `Model` reaches a `Pipeline` the same way,
+structurally (`outputty/laygo`'s `Source` accepts any `AsyncIterable`), with no import edge in either
+direction (#743, #745).
 
 ## Module layout
 
 ```text
 src/
-  types.ts              PipelineFunction, IContextManager, ExecutionStrategy, every options interface
-  pipeline.ts            Pipeline: source + context + terminal ops + Pipeline.merge
-  transformer.ts          Transformer: the chainable map/filter/reduce/tap/catch/withExecutor chain
+  types.ts              PipelineFunction, IContextManager, InternalTransformer, every options interface
+  pipeline.ts            Pipeline: source + context + terminal ops + Pipeline.merge + createPipeline()
+  transformer.ts          Transformer: the chainable map/filter/reduce/tap/catch chain
+  pipelines/
+    concurrent.ts          ConcurrentPipeline - the fan-out (fanOutOrdered/fanOutUnordered), stageWork()
+    http.ts                 HttpPipeline - stageWork() override (POST), .fetch(), toNodeHandler
+    cluster.ts               ClusterPipeline - worker bootstrap, the shared pipeline registry
   context/
     types.ts              re-exported IContextManager shape
     simple.ts              SimpleContextManager - the one shipped IContextManager
-  strategies/
-    sequential.ts          sequential - the default, one bare async generator function
-    concurrent.ts           concurrent(options) - a closure over {maxConcurrency, ordered}, on p-limit
   errors/
     handler.ts              ErrorHandler - runs a ChunkErrorHandler, used by Transformer.catch()
   utils/
@@ -55,78 +58,69 @@ src/
 Pipeline.toArray() (or any terminal op)
 	buildChunkGenerator(source, chunkSize)      splits the AsyncIterable into In[] chunks
 	Transformer.execute(chunks, context)
-		for each chunk:
-			strategy(internalTransformer, chunks, context)
-				sequential: await one chunk at a time, in order
-				concurrent(opts): p-limit(maxConcurrency) chunks in flight, re-ordered if `ordered`
+		runSequentially(internalTransformer, chunks, context)   one chunk at a time, in order
 			internalTransformer(chunk, ctx)          one map/filter/flatMap/reduce/tap link, chained
 				isContextAware(fn) ? fn(item, ctx) : fn(item)      arity-checked once per link, not per item
 	collect Out[] chunks into the terminal op's own shape
 ```
+
+A `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` stage bypasses this path entirely - see "The
+pipeline family", below - `Transformer.execute()` itself is always sequential now, one chunk at a
+time; wrap the chain in one of those classes for concurrency instead of configuring the `Transformer`.
 
 `.catch(build, onError)` wraps one internal transformer function in a try/catch at the CHUNK boundary:
 a throw inside `build`'s chain hands the whole failing chunk to `onError`, whose return value (an
 array, or nothing) replaces or drops it. The unit of failure is the chunk, never the row - there is no
 per-item try/catch anywhere in the chain.
 
-## The pipeline family - `pending #17`
+## The pipeline family
 
-⚠ `pending #17` replaces the whole strategy family below with a class hierarchy. `ExecutionStrategy`,
-`.withExecutor()`, `sequential`, `concurrent` and `ConcurrentStrategyOptions` are deleted, and
-`src/strategies/` goes with them. What replaces them:
+Where a chain's chunks run is chosen by CONSTRUCTING A CLASS, not by configuring a `Transformer`
+(#17 - replaced the `ExecutionStrategy`/`.withExecutor()` seam entirely):
 
 ```text
-Pipeline                one chunk at a time, in process              src/pipeline.ts (unchanged)
+Pipeline                one chunk at a time, in process              src/pipeline.ts
   ConcurrentPipeline      N chunks in flight; owns the fan-out         src/pipelines/concurrent.ts
     HttpPipeline            a chunk POSTed to another instance         src/pipelines/http.ts
       ClusterPipeline         a chunk sent to another local process    src/pipelines/cluster.ts
 ```
 
-Each level overrides ONE thing. `ConcurrentPipeline` owns the fan-out window, the reorder buffer and
-failure containment; `HttpPipeline` overrides `stageWork()` alone to return a POST and adds a `.fetch`
-handler; `ClusterPipeline` adds the worker bootstrap and a localhost url. `{ local: true }` on
-`.transform()`/`.apply()` is `super.apply(transformer)` at every level, so it needs no per-level code.
+Each level overrides ONE thing. `ConcurrentPipeline` owns the fan-out window (`fanOutOrdered`/
+`fanOutUnordered`) and the default in-process `stageWork()`; `HttpPipeline` overrides `stageWork()`
+alone to POST instead, adds `.fetch()`/`stagePath()`/`toNodeHandler`; `ClusterPipeline` adds the
+worker bootstrap, wraps `stageWork()` to lazily bootstrap on first dispatch, and overrides
+`stagePath()` to route several pipeline definitions through one shared worker server
+(`/pipeline/<i>/stage/<n>`, `<i>` a construction-order index reproduced identically by every worker).
+`{ local: true }` on `.transform()`/`.apply()` is `super.apply(transformer)` at every level - a
+plain `Pipeline`'s own sequential, in-process `apply()`, needing no per-level code.
 
-Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via `this.constructor` rather
-than a hard-coded `new Pipeline<U>`, so a subclass survives a `.transform()` chain. And a stage's
-identity is its INDEX in `_chunkTransforms` - the table `apply()` already maintains - so a dispatching
-class sends a chunk plus an index, never a function. Every instance runs the same code, so index N
-means the same transform on both sides; a mixed-version fleet breaks that assumption silently, which
-is why atomic deploys are a documented requirement rather than a check.
+Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
+createPipeline()` calling `this.constructor` rather than a hard-coded `new Pipeline<U>`, so a
+subclass survives a `.transform()`/`.context()`/`.buffer()` chain; each level overrides
+`createPipeline()` again to carry its OWN extra knobs forward (`ConcurrentPipeline`'s own
+`concurrentOptions()` helper is the one place `maxConcurrency`/`ordered`/`chunkSize` are listed, so
+`HttpPipeline`/`ClusterPipeline` only add their own field). And a stage's identity is its INDEX in
+`_chunkTransforms` - the table `apply()` already maintains - so a dispatching class sends a chunk
+plus an index, never a function. Every instance runs the same code, so index N means the same
+transform on both sides; a mixed-version fleet breaks that assumption silently, which is why atomic
+deploys are a documented requirement rather than a check.
 
-`ConcurrentPipeline.apply()` does NOT call `transformer.execute()`. That bypass is the mechanism: the
-base class's `apply()` calls `execute()`, which is what runs the strategy being deleted.
+`ConcurrentPipeline.apply()` does NOT call `transformer.execute()` for a non-local stage - that
+bypass IS the mechanism, since `execute()` runs a chain sequentially, one chunk at a time. It builds
+its own chunker from `transformer.chunkSize` and fans chunks out through `stageWork()`'s return
+value directly. A knob that only ever takes effect via `execute()` (`.withHooks()`, `.onError()`, a
+custom `.setChunker()` chunker) THROWS immediately on a non-local stage instead of silently never
+firing - `inertKnobsOf` (`pipeline.ts`) is the same check the async-iteration source-position path
+(below) already used, reused rather than duplicated; `{ local: true }` is the escape hatch.
 
-## The strategy family
-
-`ExecutionStrategy<In, Out>` is the one pluggable seam, and it is a plain FUNCTION TYPE, not an
-interface a class implements: `(transformerLogic, chunks, context) => AsyncGenerator<Out[]>`. It joins
-the five other pluggable seams in `types.ts`, which are all function types too: `PipelineFunction`,
-`PipelineReduceFunction`, `ChunkErrorHandler`, `InternalTransformer` and `ChunkerFunction`.
-`ChunkerFunction` is its direct shape sibling - an iterable in, an `AsyncGenerator<T[]>` out.
-`.withExecutor(strategy)` takes the function directly - a built-in or a caller's own, same shape, no
-registry or name lookup between them, and an arrow function can never be a generator so a caller's own
-inline strategy is always `async function*`. `sequential` (`strategies/sequential.ts`) is the default:
-one chunk at a time, in order, no concurrency or reordering machinery of its own. `concurrent(options?)`
-(`strategies/concurrent.ts`) is a factory - it validates `maxConcurrency` eagerly and returns a fresh
-strategy function backed by `p-limit`.
-
-`Pipeline` has two drain paths, and only one runs the strategy. A terminal op goes through
-`Transformer.execute()`, which calls it. The async-iteration path (`[Symbol.asyncIterator]`,
-`pipeline.ts`) - reached when a caller uses a `Pipeline` directly as an `AsyncIterable` rather than
-through a terminal op - replays each transform's plain function from `_chunkTransforms` and never
-calls `Transformer.execute()`, so the strategy never runs there. A plain function carries no capability
-flag of its own the way the prior class-based strategy interface's own source-position flag did, so
-`inertKnobsOf` (`pipeline.ts`) decides whether `.withExecutor()` is source-position-safe by comparing
-`transformer.strategy` against the built-in `sequential` BY REFERENCE - `.withExecutor(sequential)`
-reads as safe (same as never calling `.withExecutor()`), any other function (`concurrent(...)`, a
-caller's own) is flagged, whether or not it happens to behave like `sequential`. This mirrors the old
-design's own default: a strategy there was flagged unsafe unless it explicitly declared otherwise too.
+A worker process (`ClusterPipeline`'s own bootstrap; `HttpPipeline`'s own `.fetch()`-side instance
+in general) never orchestrates: its `dataSource` is an empty async iterable set at construction, so
+every terminal op resolves immediately with an EMPTY result - the worker exists only to hold the
+transforms (`_chunkTransforms`, registered by running the same entry module the primary runs) and
+serve `.fetch()` requests against them.
 
 ## Constraints in dependencies
 
-- `p-limit` gates `concurrent()`'s in-flight chunk count. A `maxConcurrency` above the number of
-  chunks in flight is a no-op ceiling, never a floor - `p-limit` never spawns work ahead of demand.
 - TypeScript removed `baseUrl` at 7.0; a tsconfig that sets it fails with `TS5102`.
 - A conditional type distributes only over a naked type parameter. `Ps[number] extends Pipeline<infer
   U> ? U : never` is an indexed access, so it compiles and evaluates to `never`; `Pipeline.merge`
@@ -157,3 +151,19 @@ design's own default: a strategy there was flagged unsafe unless it explicitly d
   one payload size on Node 26 with socket reuse confirmed on both (0 new TCP connections per 100
   requests). Runtime neutrality was chosen over that cost (#17); Bun and Deno ship their own `fetch`,
   so the number is Node-specific.
+- A `ClusterPipeline` context mutation (`ctx.set()` inside a dispatched stage's own transform) never
+  reaches the orchestrator - each `.fetch()` call builds a fresh `SimpleContextManager` from the
+  wire's own `context` field and returns only `{ chunk }`, never the mutated context. Measured: the
+  orchestrator's context stayed `{"multiplier":10}` after three remote `ctx.set()` calls. Tracked as
+  a roadmap item (`.claude/roadmap.md`, "A `ContextManager` class passed to a pipeline"), not fixed
+  here - `.context()`'s own one-way propagation (orchestrator → every stage) is unaffected.
+- `ClusterPipeline`'s module-level pipeline registry (`cluster.ts`) never evicts an entry - every
+  distinct `ClusterPipeline` constructed in a process stays reachable for that process's life. Sound
+  for the documented construction pattern (one `ClusterPipeline` per logical chain, built once at
+  module scope, the same "no top-level side effects beyond registering transforms" rule above already
+  assumes); a caller constructing a fresh `ClusterPipeline` per request grows the registry unbounded.
+- The idle-kill window between a `ClusterPipeline`'s last dispatch and its workers being killed
+  (`cluster.ts`'s `IDLE_KILL_MS`) is `500`ms - a chosen value, not a tuned or caller-facing one. Long
+  enough that back-to-back dispatches in a real workload never trigger a re-fork (~50-60ms per the
+  measurement above); short enough that a script holding only the canonical `ClusterPipeline`
+  example exits on its own well inside a normal test timeout.
