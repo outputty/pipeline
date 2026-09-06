@@ -48,6 +48,28 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 [10, 20, 30, 40, 50]
 ```
 
+The caller supplies their own manager as an instance for this process, or as a factory for every
+other one. `contextFactory` runs once per process, so a manager owning a connection opens one pool
+per worker rather than one per chunk.
+
+<!-- illustrative -->
+
+```ts
+import { ClusterPipeline } from "@outputty/pipeline";
+
+const data = await new ClusterPipeline([1, 2, 3, 4, 5], {
+  workers: 3,
+  contextFactory: () => new PgContext(pool),
+})
+  .context({ multiplier: 10 })
+  .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))
+  .toArray();
+```
+
+```json
+[10, 20, 30, 40, 50]
+```
+
 ## Case 2 - concurrent execution
 
 The same chain shape, run with a bounded concurrency instead of sequentially - the class changes,
@@ -127,7 +149,8 @@ const data = await new Pipeline([1, 2, 3, 4, 5]).branch({
 
 ## Case 5 - merging
 
-Several pipelines' data and contexts concatenate into one.
+Several pipelines' data and contexts concatenate into one. `options.context` names the manager that
+receives the merged values; with none, the merged pipeline gets a fresh `SimpleContextManager`.
 
 <!-- illustrative -->
 
@@ -137,7 +160,7 @@ import { Pipeline } from "@outputty/pipeline";
 const pipeline1 = new Pipeline([1, 2, 3]);
 const pipeline2 = new Pipeline([4, 5, 6]);
 
-const merged = Pipeline.merge(pipeline1, pipeline2);
+const merged = Pipeline.merge([pipeline1, pipeline2]);
 const data = await merged.toArray();
 ```
 
