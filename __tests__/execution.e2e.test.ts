@@ -1,18 +1,13 @@
 /**
- * execution.e2e.test.ts — execution strategy, concurrency, custom executors, lifecycle hooks and the
- * factory helpers, each proven through an ENTIRE PIPELINE RUN rather than by calling a strategy /
- * function in isolation. Concurrency and chunking are observed the only way a caller can: output
- * order, item presence, a live concurrency counter, and correct results across many chunks.
+ * execution.e2e.test.ts — lifecycle hooks, streaming edge behaviors and the factory helpers, each
+ * proven through an ENTIRE PIPELINE RUN rather than by calling a function in isolation.
+ *
+ * Concurrency used to be a `Transformer`-level pluggable seam here, before #17 deleted it - a
+ * caller now wraps the chain in `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`
+ * (`__tests__/pipelines.e2e.test.ts`) instead of configuring the `Transformer` that drives it.
  */
 import { describe, it, expect, vi } from "vitest";
-import {
-  Pipeline,
-  Transformer,
-  createTransformer,
-  sequential,
-  concurrent,
-  type ExecutionStrategy,
-} from "../src";
+import { Pipeline, Transformer, createTransformer } from "../src";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -21,69 +16,13 @@ async function run<I, O>(input: I[], transformer: Transformer<I, O>): Promise<O[
   return new Pipeline(input).apply(transformer).toArray();
 }
 
-describe("execution e2e — sequential vs concurrent through a full run", () => {
-  it("the default (sequential) executor preserves input order", async () => {
+describe("execution e2e — chunking through a full run", () => {
+  it("preserves input order", async () => {
     const out = await run(
       [1, 2, 3, 4, 5],
       new Transformer<number, number>().map((x) => x * 2),
     );
     expect(out).toEqual([2, 4, 6, 8, 10]);
-  });
-
-  it("ordered concurrency preserves order even when later items finish first", async () => {
-    const out = await run(
-      [1, 2, 3, 4, 5],
-      new Transformer<number, number>({ chunkSize: 1 })
-        .withExecutor(concurrent({ maxConcurrency: 4, ordered: true }))
-        .map(async (x) => {
-          await delay(10 - x); // reverse delay: item 5 finishes first
-          return x * 2;
-        }),
-    );
-    expect(out).toEqual([2, 4, 6, 8, 10]);
-  });
-
-  it("unordered concurrency yields every result (order may vary)", async () => {
-    const out = await run(
-      [1, 2, 3, 4],
-      new Transformer<number, number>({ chunkSize: 1 })
-        .withExecutor(concurrent({ maxConcurrency: 4, ordered: false }))
-        .map((x) => x * 2),
-    );
-    expect(out.slice().sort((a, b) => a - b)).toEqual([2, 4, 6, 8]);
-  });
-
-  it("never exceeds maxConcurrency in flight", async () => {
-    let active = 0;
-    let peak = 0;
-    await run(
-      [1, 2, 3, 4, 5, 6],
-      new Transformer<number, number>({ chunkSize: 1 })
-        .withExecutor(concurrent({ maxConcurrency: 2, ordered: true }))
-        .map(async (x) => {
-          active++;
-          peak = Math.max(peak, active);
-          await delay(10);
-          active--;
-          return x;
-        }),
-    );
-    expect(peak).toBeLessThanOrEqual(2);
-  });
-
-  it("maxConcurrency=1 behaves sequentially (order preserved despite reverse delays)", async () => {
-    const finished: number[] = [];
-    await run(
-      [1, 2, 3],
-      new Transformer<number, number>({ chunkSize: 1 })
-        .withExecutor(concurrent({ maxConcurrency: 1, ordered: true }))
-        .map(async (x) => {
-          await delay(10 - x);
-          finished.push(x);
-          return x;
-        }),
-    );
-    expect(finished).toEqual([1, 2, 3]);
   });
 
   it("chunking is correct across many chunks — every item survives regardless of chunk size", async () => {
@@ -93,87 +32,6 @@ describe("execution e2e — sequential vs concurrent through a full run", () => 
       new Transformer<number, number>({ chunkSize: 7 }).map((x) => x * 2),
     );
     expect(out).toEqual(input.map((x) => x * 2));
-  });
-});
-
-describe("execution e2e — switching executors + custom strategies mid-run", () => {
-  it("withExecutor switches strategy while preserving the transform chain", async () => {
-    const concurrentOut = await run(
-      [1, 2, 3, 4, 5],
-      createTransformer<number>()
-        .map((x) => x * 2)
-        .filter((x) => x > 4)
-        .withExecutor(concurrent({ maxConcurrency: 2 })),
-    );
-    expect(concurrentOut.slice().sort((a, b) => a - b)).toEqual([6, 8, 10]);
-
-    // Multiple switches in one chain still compute correctly: (x+1)*2-1
-    const switched = await run(
-      [1, 2, 3],
-      createTransformer<number>()
-        .map((x) => x + 1)
-        .withExecutor(concurrent())
-        .map((x) => x * 2)
-        .withExecutor(sequential)
-        .map((x) => x - 1),
-    );
-    expect(switched).toEqual([3, 5, 7]);
-  });
-
-  it("withExecutor(sequential) runs, and withExecutor(concurrent(...)) uppercases every item", async () => {
-    const seqOut = await run(
-      ["a", "b", "c"],
-      new Transformer<string, string>().withExecutor(sequential).map((s) => s.toUpperCase()),
-    );
-    expect(seqOut).toEqual(["A", "B", "C"]);
-
-    const concurrentOut = await run(
-      ["a", "b", "c"],
-      new Transformer<string, string>()
-        .withExecutor(concurrent({ maxConcurrency: 10 }))
-        .map((s) => s.toUpperCase()),
-    );
-    expect(concurrentOut).toEqual(["A", "B", "C"]);
-  });
-
-  it("a user-supplied custom strategy runs the whole pipeline and sees every chunk", async () => {
-    const processedChunks: number[][] = [];
-    const custom: ExecutionStrategy<number, number> = async function* (logic, chunks, ctx) {
-      for await (const chunk of chunks) {
-        processedChunks.push([...chunk]);
-        yield logic(chunk, ctx);
-      }
-    };
-    const out = await run(
-      [1, 2, 3],
-      createTransformer<number>()
-        .map((x) => x * 2)
-        .withExecutor(custom),
-    );
-    expect(out).toEqual([2, 4, 6]);
-    expect(processedChunks).toEqual([[1, 2, 3]]);
-  });
-
-  it("withExecutor accepts an inline async function* with un-annotated params (the Interface example, verbatim)", async () => {
-    const out = await run(
-      [1, 2, 3, 4, 5],
-      new Transformer<number, number>()
-        .withExecutor(async function* (logic, chunks, ctx) {
-          for await (const chunk of chunks) yield logic(chunk, ctx);
-        })
-        .map((x) => x * 2),
-    );
-    expect(out).toEqual([2, 4, 6, 8, 10]);
-  });
-
-  it("chunk.map((n) => n * 2) typechecks inside a custom async function* strategy body", async () => {
-    const out = await run(
-      [1, 2, 3],
-      new Transformer<number, number>().withExecutor(async function* (_logic, chunks, _ctx) {
-        for await (const chunk of chunks) yield chunk.map((n) => n * 2);
-      }),
-    );
-    expect(out).toEqual([2, 4, 6]);
   });
 });
 
@@ -194,16 +52,6 @@ describe("execution e2e — async I/O work through a run", () => {
       { id: 2, name: "user-2" },
       { id: 3, name: "user-3" },
     ]);
-  });
-
-  it("concurrent async work returns every result", async () => {
-    const out = await run(
-      [1, 2, 3, 4],
-      new Transformer<number, number>({ chunkSize: 1 })
-        .withExecutor(concurrent({ maxConcurrency: 4 }))
-        .map((id) => fetchUser(id)),
-    );
-    expect(out.map((u) => u.id).sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
   });
 
   it("an error in async work is turned into a value by the mapping fn, not thrown", async () => {
@@ -357,7 +205,7 @@ describe("execution e2e — streaming edge behaviors", () => {
 });
 
 describe("execution e2e — factory helpers produce working pipelines", () => {
-  it("createTransformer builds a sequential run", async () => {
+  it("createTransformer builds a working chain", async () => {
     const out = await run(
       [1, 2, 3],
       createTransformer<number>()
@@ -365,25 +213,5 @@ describe("execution e2e — factory helpers produce working pipelines", () => {
         .filter((x) => x > 2),
     );
     expect(out).toEqual([4, 6]);
-  });
-
-  it("createTransformer + withExecutor(concurrent(...)) builds an ordered concurrent run honoring its options", async () => {
-    const out = await run(
-      [1, 2, 3],
-      createTransformer<number>(1)
-        .withExecutor(concurrent({ maxConcurrency: 8, ordered: true }))
-        .map(async (x) => {
-          await delay(10 - x);
-          return x * 2;
-        }),
-    );
-    expect(out).toEqual([2, 4, 6]);
-  });
-
-  it("concurrent() rejects a maxConcurrency below 1, accepts the default and a positive value", () => {
-    expect(() => concurrent({ maxConcurrency: 0 })).toThrow("maxConcurrency must be at least 1");
-    expect(() => concurrent({ maxConcurrency: -3 })).toThrow("maxConcurrency must be at least 1");
-    expect(() => concurrent()).not.toThrow();
-    expect(() => concurrent({ maxConcurrency: 8 })).not.toThrow();
   });
 });

@@ -7,6 +7,38 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-05 A copy-on-write base method dropped a subclass's own knob
+
+Building #17, `Pipeline`'s `createPipeline()` used `this.constructor` so a subclass survived
+`.transform()`/`.context()`/`.buffer()`, but the base implementation only carried the FIELDS `Pipeline`
+itself knows about. A probe showed `new ConcurrentPipeline([1], {maxConcurrency: 8}).context({}).maxConcurrency`
+returning `4`, the default, not `8` - every subclass had to override `createPipeline()` again to carry
+its own knobs forward. `~/.claude/rules/code.md`'s Shape section now says so.
+
+## 2026-09-05 `HttpPipeline`/`ClusterPipeline` needed their inherited methods re-declared after all
+
+Building #17, `.transform()`/`.apply()` were deleted from both subclasses reading the ticket's Interface
+literally - the runtime call is an unchanged `super.apply()`. Typecheck broke against the canonical
+example (`new HttpPipeline(...).transform(...).transform(...).fetch`): TypeScript does not narrow an
+inherited method's declared return type to the subclass on its own. Re-added as thin delegations.
+`~/.claude/rules/typescript.md` now says a subclass re-declares a method for return-type narrowing
+alone, whatever its body does.
+
+## 2026-09-05 A ramp-up loop leaked a promise before any race began
+
+Building #17, `fanOutUnordered`'s ramp-up `for` loop could throw (a failing `iterator.next()`) before
+any promise it had already created reached `Promise.race()`, leaving those promises with no rejection
+handler - reproduced live, 3 of 3 runs leaked. Fixed by attaching a throwaway `.catch(() => {})` the
+moment each promise is created, matching `fanOutOrdered`'s own pattern. `~/.claude/rules/code.md`'s
+Fail loud section now covers it.
+
+## 2026-09-05 An HTTP bridge left a client with no response on a bad body
+
+Building #17, `toNodeHandler`'s call to `request.json()` was uncaught: a bodyless or malformed POST to
+a stage endpoint never got a response, verified live. Fixed with a validating `parseStageRequest()`
+plus a last-resort `.catch()` around the whole bridge, writing a 500 if headers were not yet sent.
+`~/.claude/rules/code.md`'s Fail loud section now covers async-to-callback bridges generally.
+
 ## 2026-09-05 A background code-review agent was polled with a /loop-mode scheduling tool
 
 Waiting on the #15 `/code-review medium` subagent, `ScheduleWakeup` was called to "check back in 3

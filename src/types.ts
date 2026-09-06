@@ -113,22 +113,6 @@ export interface IContextManager {
 }
 
 /**
- * Execution strategy — a chunk stream in, a transformed chunk stream out. HOW a chunk stream is
- * processed (one at a time, or several in flight at once) is entirely this function's call: the
- * built-in `sequential`/`concurrent` (`./strategies/`) and any caller-supplied function all share
- * this one shape, so `.withExecutor()` never distinguishes a "built-in" from a "custom" strategy.
- *
- * `sequential` — one chunk at a time, in order. A custom strategy: `async function* (logic, chunks,
- * ctx) { for await (const chunk of chunks) yield logic(chunk, ctx); }` (the same body `sequential`
- * itself has).
- */
-export type ExecutionStrategy<In, Out> = (
-  transformerLogic: InternalTransformer<In, Out>,
-  chunks: AsyncIterable<In[]>,
-  context: IContextManager,
-) => AsyncGenerator<Out[]>;
-
-/**
  * Branch definition for Pipeline.branch() routing.
  *
  * Python equivalent:
@@ -156,11 +140,6 @@ export interface BranchDefinition<T, _U, TTransformer = unknown> {
  */
 export interface TransformerOptions<In, Out> {
   /**
-   * Execution strategy for processing chunks.
-   */
-  strategy?: ExecutionStrategy<In, Out>;
-
-  /**
    * Number of items per chunk.
    */
   chunkSize?: number;
@@ -169,21 +148,6 @@ export interface TransformerOptions<In, Out> {
    * Initial transformer function.
    */
   transform?: InternalTransformer<In, Out>;
-}
-
-/**
- * Options for concurrent execution strategy.
- */
-export interface ConcurrentStrategyOptions {
-  /**
-   * Maximum number of concurrent chunk operations.
-   */
-  maxConcurrency?: number;
-
-  /**
-   * Whether to maintain input order in output.
-   */
-  ordered?: boolean;
 }
 
 /**
