@@ -119,9 +119,24 @@ above.
 new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 ```
 
+- **`options.context`** - an already-built `IContextManager`, for THIS process. Optional; survives
+  every `.context()`/`.transform()`/`.buffer()` call as the SAME instance.
+- **`options.contextFactory`** - builds an `IContextManager`, for any OTHER process (a
+  `ClusterPipeline` worker re-executing the entry module has no way to receive an already-built
+  instance across the process boundary). Optional; invoked at most once per process, only when
+  `context` is absent.
+
+#### Static Methods
+
+- **`Pipeline.merge(pipelines, options?)`** - concatenate several pipelines' data and contexts into
+  one. `pipelines` is an array. `options.context`, when given, is the SAME instance returned as the
+  merged pipeline's `.contextManager`, with later pipelines still winning on a shared key; with no
+  `options`, a fresh manager is built the same way. `Pipeline.merge([])` returns an empty pipeline.
+
 #### Instance Methods
 
-- **`.context(obj)`** - set context values for downstream operations.
+- **`.context(obj)`** - merge values into the pipeline's OWN context manager, mutating it in place;
+  a manager that rejects an unknown key propagates that error instead of being bypassed.
 - **`.apply(transformer)`** - apply a pre-built transformer.
 - **`.transform(fn)`** - build and apply a transformer inline.
 - **`.buffer(size)`** - collect items and re-chunk.

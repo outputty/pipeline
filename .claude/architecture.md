@@ -156,21 +156,34 @@ serve `.fetch()` requests against them.
   one payload size on Node 26 with socket reuse confirmed on both (0 new TCP connections per 100
   requests). Runtime neutrality was chosen over that cost (#17); Bun and Deno ship their own `fetch`,
   so the number is Node-specific.
-- A `ClusterPipeline` context mutation (`ctx.set()` inside a dispatched stage's own transform) never
-  reaches the orchestrator - each `.fetch()` call builds its own manager from the wire's own
-  `context` field and returns only `{ chunk }`, never the mutated context. Measured: the
-  orchestrator's context stayed `{"multiplier":10}` after three remote `ctx.set()` calls. The wire
-  stays one-way by decision: a worker publishes through its own manager's backing store instead.
+- A `ClusterPipeline` context mutation (`ctx.set()` inside a dispatched stage's own transform) still
+  never reaches the orchestrator - `.fetch()` returns only `{ chunk }`, never the mutated context
+  (#31 leaves the wire unchanged). What changed under #31: `.fetch()` no longer builds a fresh
+  `SimpleContextManager` from the wire per request - it reuses `this._context`, the SAME instance
+  `PipelineOptions.context`/`contextFactory` built at construction, applying the wire's own forward
+  values onto it via `.set()`. A worker's `ctx.set()` mutates that instance for the rest of its
+  process's life, but the mutation still never crosses back over the wire to the orchestrator.
+  Measured (pre-#31): the orchestrator's context stayed `{"multiplier":10}` after three remote
+  `ctx.set()` calls - the write-back direction is unaffected by #31 and stays a roadmap item
+  (`.claude/roadmap.md`, "A `ContextManager`'s write-back to the orchestrator"), not fixed here.
   `.context()`'s own forward propagation (orchestrator → every stage) is unaffected.
 - WHICH manager a process uses is the caller's choice, and the caller's class alone decides whether
-  state crosses a process (`pending #31`). `PipelineOptions.context` is an instance for THIS process,
-  kept by every operation - `.context()` merges into it. `PipelineOptions.contextFactory` is how to
-  build one where an instance cannot travel; a dispatching class's serving side calls it once per
-  process and reuses the result, so a manager owning a connection opens one pool per worker. No
-  registry and no serialization are needed: `cluster.fork()` re-execs the entry module, so a worker
-  already holds the factory's own construction code. Measured with `workers: 3` - three worker
-  processes, three distinct manager instances, each built in the pid that served the chunk, and
-  `.context({multiplier:10})` still crossing.
+  state crosses a process (#31). `PipelineOptions.context` is an instance for THIS process, kept by
+  every operation - `.context()` merges into it. `PipelineOptions.contextFactory` is how to build one
+  where an instance cannot travel; the constructor calls it at most once per process, only when
+  `context` is absent, and `.fetch()` (above) reuses the built instance rather than calling it again.
+  No registry and no serialization are needed: `cluster.fork()` re-execs the entry module, so a
+  worker already holds the factory's own construction code. Measured with `workers: 3`
+  (`__tests__/fixtures/cluster-context-factory.ts`): three worker processes, three distinct manager
+  instances, each built in the pid that served the chunk, and `.context({multiplier:10})` still
+  crossing.
+- Two concurrent requests on the SAME worker share that one reused `this._context` (#31) - a
+  transform that `.set()`s a key, awaits, then reads it back can see a sibling request's write
+  instead of its own. Not new: the identical pattern reproduces on a plain `ConcurrentPipeline` with
+  no HTTP or cluster involved at all, since `concurrent.ts`'s own `fanOut*` functions have always
+  passed ONE `this._context` to every concurrently in-flight chunk. #31 carries that pre-existing
+  sharing across a process boundary; it neither introduces nor worsens it, and no fix landed in that
+  ticket by explicit decision.
 - `ClusterPipeline`'s module-level pipeline registry (`cluster.ts`) never evicts an entry - every
   distinct `ClusterPipeline` constructed in a process stays reachable for that process's life. Sound
   for the documented construction pattern (one `ClusterPipeline` per logical chain, built once at
