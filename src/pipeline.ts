@@ -269,29 +269,6 @@ export class Pipeline<T> {
   /**
    * Merge multiple pipelines into a single pipeline (fan-in pattern).
    *
-   * All items from all input pipelines are yielded in sequence.
-   * Context is merged from all pipelines, with later pipelines taking precedence.
-   *
-   * Python equivalent:
-   * ```python
-   * @classmethod
-   * def merge(cls, *pipelines: "Pipeline[T]") -> "Pipeline[T]":
-   *   async def merged_generator():
-   *     for pipeline in pipelines:
-   *       async for item in pipeline.dataSource:
-   *         yield item
-   *   merged_context = {}
-   *   for p in pipelines:
-   *     merged_context.update(p.context_manager.to_dict())
-   *   return cls(merged_generator(), context=merged_context)
-   * ```
-   *
-   * @param pipelines - Pipelines to merge
-   * @returns A new pipeline that yields all items from all input pipelines
-   */
-  /**
-   * Merge multiple pipelines into a single pipeline (fan-in pattern).
-   *
    * All items from all input pipelines are yielded in sequence. `options.context`, when given, is
    * the SAME instance returned as `.contextManager` on the merged pipeline - mutated in place with
    * every source pipeline's own context values, later pipelines taking precedence on a shared key
@@ -336,8 +313,12 @@ export class Pipeline<T> {
   ): Pipeline<ElementOf<Ps[number]>> {
     type U = ElementOf<Ps[number]>;
 
+    // `options?.context` still honored on the zero-pipeline path (review: the fast return used to
+    // drop it, so `Pipeline.merge([], { context: mine }).contextManager` was a fresh
+    // SimpleContextManager instead of `mine`, breaking the same-instance contract every other path
+    // here keeps).
     if (pipelines.length === 0) {
-      return new Pipeline<U>([]);
+      return new Pipeline<U>([], { context: options?.context });
     }
 
     // Merge contexts from all pipelines into the caller's own manager when given (#31) - never a
@@ -382,7 +363,11 @@ export class Pipeline<T> {
    * `const a = base.context({m:"a"}); const b = base.context({m:"b"})` leaves `a`, `b` and `base`
    * all reading the ONE manager `base` started with, so `b`'s write is the value every one of them
    * sees - forking into independently-configured branches needs a caller-supplied manager per
-   * branch, never two `.context()` calls off the same parent.
+   * branch, never two `.context()` calls off the same parent. Per-key, not transactional: `ctx`'s
+   * entries are set one at a time in `Object.entries()` order, so a manager that throws partway
+   * through (a sealed manager rejecting one key among several) leaves every EARLIER key's write
+   * already applied - the same partial-application a caller looping `.set()` calls by hand would
+   * get, never rolled back.
    *
    * Python equivalent:
    * ```python

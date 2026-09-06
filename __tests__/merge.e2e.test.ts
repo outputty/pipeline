@@ -54,6 +54,13 @@ describe("Pipeline.merge", () => {
 
       expect(results).toEqual([]);
     });
+
+    it("still honors options.context with zero pipelines (review regression)", () => {
+      const mine = new LoggingContext();
+      const merged = Pipeline.merge([], { context: mine });
+
+      expect(merged.contextManager).toBe(mine);
+    });
   });
 
   describe("empty pipeline handling", () => {
