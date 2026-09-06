@@ -289,20 +289,43 @@ describe("#17 a knob that only takes effect via Transformer.execute() fails loud
     expect(out).toEqual([2, 4, 6]);
     expect(order).toEqual(["start", "complete"]);
   });
+
+  it("rejects .onError() on a non-local stage", () => {
+    // Regression: review found inertKnobsOf() checking withHooks/chunkSize/setChunker but omitting
+    // errorHandler entirely - an .onError() handler silently never fired on a dispatched stage,
+    // with none of the fail-loud protection every OTHER inert knob already had.
+    const withHandler = new Transformer<number, number>()
+      .map((x: number) => x * 2)
+      .onError(() => {});
+    expect(() => new ConcurrentPipeline([1, 2, 3]).apply(withHandler)).toThrow(
+      /onError never take effect on a dispatched stage/,
+    );
+  });
+});
+
+describe("#17 ConcurrentPipeline validates maxConcurrency eagerly", () => {
+  // Regression: the deleted concurrent() strategy threw "maxConcurrency must be at least 1"
+  // eagerly; ConcurrentPipeline's own constructor dropped that check, so maxConcurrency <= 0 made
+  // fanOutUnordered's ramp-up loop never run at all - silently [] instead of an error.
+  it("throws on a non-positive maxConcurrency", () => {
+    expect(() => new ConcurrentPipeline([1], { maxConcurrency: 0 })).toThrow(
+      "maxConcurrency must be at least 1",
+    );
+    expect(() => new ConcurrentPipeline([1], { maxConcurrency: -3 })).toThrow(
+      "maxConcurrency must be at least 1",
+    );
+  });
+
+  it("accepts the default and a positive value", () => {
+    expect(() => new ConcurrentPipeline([1])).not.toThrow();
+    expect(() => new ConcurrentPipeline([1], { maxConcurrency: 8 })).not.toThrow();
+  });
 });
 
 describe("#17 a chunk failure never leaks an unhandled rejection (Done-when 8)", () => {
-  it(
-    "control: the shipped concurrent() strategy DOES leak, on this chain",
-    async () => {
-      const fixture = await runFixture("__tests__/fixtures/concurrent-unhandled-control.ts");
-      expectFixtureOk(fixture);
-      const result = JSON.parse(fixture.stdout.trim()) as { control: string[] };
-      expect(result.control.length).toBeGreaterThan(0);
-    },
-    FIXTURE_TIMEOUT,
-  );
-
+  // The shipped-concurrent() control (proving the OLD strategy leaked, on the identical chain)
+  // lived here through L3 - deleted now that concurrent() itself is gone with the seam, per the
+  // ticket's own Done-when 8: "after removal only the [] assertion remains".
   it(
     "ConcurrentPipeline leaves UNHANDLED [] at both ordered: true and ordered: false",
     async () => {

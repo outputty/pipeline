@@ -168,7 +168,7 @@ none of it survived the hand-trim (#745).
   another instance and adds a `.fetch` handler; `ClusterPipeline` adds the worker bootstrap and a
   localhost url. Each level overrides ONE thing, and the chain is identical in all four.
 - **Stage** - `pending #17`. One `.apply()` call, and therefore one `.transform()` call, since
-  `transform()` is `return this.apply(transformer)` (`pipeline.ts:391-394`). A stage's identity is its
+  `transform()` is `return this.apply(transformer)` (`pipeline.ts:429-432`). A stage's identity is its
   INDEX in `_chunkTransforms`, so a dispatching class sends a chunk plus an index and never a function.
   `.transform((t) => t.map(f).filter(g))` is ONE stage; two chained `.transform()` calls are TWO, and
   on a dispatching class that is two network hops.

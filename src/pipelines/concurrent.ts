@@ -160,6 +160,12 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
   constructor(source: PipelineSource<T>, options?: ConcurrentPipelineConstructorOptions) {
     super(source, options);
     this.maxConcurrency = options?.maxConcurrency ?? 4;
+    // Validated eagerly, at construction - the deleted concurrent() strategy did the same (review
+    // found this dropped: maxConcurrency <= 0 made fanOutUnordered's ramp-up loop never run at
+    // all, silently returning [] without ever touching the source).
+    if (this.maxConcurrency < 1) {
+      throw new Error("maxConcurrency must be at least 1");
+    }
     this.ordered = options?.ordered ?? true;
     this.chunkSize = options?.chunkSize;
   }
@@ -223,10 +229,10 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
 
     // `chunkSize` is excluded: unlike the base class's own inertKnobsOf() use, THIS class always
     // reads transformer.chunkSize (below) - it is never inert here. Every other knob
-    // (withExecutor/withHooks/setChunker) only ever takes effect through Transformer.execute(),
-    // which stageWork() (below) never calls on ANY consumption path - not just async-iteration,
-    // the way the base class's own terminal-op path is fine but its source-position path is not.
-    // Fail loud immediately rather than recording it for a check async-iteration alone runs.
+    // (withHooks/setChunker) only ever takes effect through Transformer.execute(), which
+    // stageWork() (below) never calls on ANY consumption path - not just async-iteration, the way
+    // the base class's own terminal-op path is fine but its source-position path is not. Fail
+    // loud immediately rather than recording it for a check async-iteration alone runs.
     const knobViolations = inertKnobsOf(transformer).filter((knob) => knob !== "chunkSize");
     if (knobViolations.length > 0) {
       throw new Error(

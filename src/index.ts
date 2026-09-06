@@ -14,11 +14,9 @@ export type {
   InternalTransformer,
   ChunkerFunction,
   IContextManager,
-  ExecutionStrategy,
   BranchDefinition,
   BranchOptions,
   TransformerOptions,
-  ConcurrentStrategyOptions,
   ReduceOptions,
   TransformerLifecycleHooks,
 } from "./types";
@@ -32,10 +30,6 @@ export { ErrorHandler } from "./errors/handler";
 
 // Utils
 export { buildChunkGenerator, normalize, isContextAware, isContextAwareReduce } from "./utils";
-
-// Strategies
-export { sequential } from "./strategies/sequential";
-export { concurrent } from "./strategies/concurrent";
 
 // Transformer
 export { Transformer } from "./transformer";
