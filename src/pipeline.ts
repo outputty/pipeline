@@ -289,8 +289,50 @@ export class Pipeline<T> {
    * @param pipelines - Pipelines to merge
    * @returns A new pipeline that yields all items from all input pipelines
    */
+  /**
+   * Merge multiple pipelines into a single pipeline (fan-in pattern).
+   *
+   * All items from all input pipelines are yielded in sequence. `options.context`, when given, is
+   * the SAME instance returned as `.contextManager` on the merged pipeline - mutated in place with
+   * every source pipeline's own context values, later pipelines taking precedence on a shared key
+   * (#31; the one place values flow BACKWARD across pipelines, which is why this is the one seam
+   * that takes a manager explicitly rather than only ever receiving one at construction). With no
+   * `options`, a fresh `SimpleContextManager` is built and populated the same way - today's
+   * behaviour, unchanged.
+   *
+   * Python equivalent:
+   * ```python
+   * @classmethod
+   * def merge(cls, pipelines: list["Pipeline[T]"], *, context: IContextManager | None = None) -> "Pipeline[T]":
+   *   if not pipelines:
+   *     return cls([])
+   *   merged_context = context or SimpleContextManager()
+   *   for p in pipelines:
+   *     for key, value in p.context_manager.to_dict().items():
+   *       merged_context[key] = value
+   *   async def merged_generator():
+   *     for pipeline in pipelines:
+   *       async for item in pipeline.dataSource:
+   *         yield item
+   *   return cls(merged_generator(), context=merged_context)
+   * ```
+   *
+   * @param pipelines - Pipelines to merge, as an array - not a rest param (#31, BREAKING): an array
+   *   literal keeps `ElementOf<Ps[number]>` distributing over a UNION of differently-typed
+   *   pipelines, exactly as the old rest-param form did, while leaving a second parameter free for
+   *   `options`.
+   * @param options - `{ context }` to carry a caller's own manager through the merge; omitted, or
+   *   `{}`, keeps today's `SimpleContextManager` behaviour.
+   * @returns A new pipeline that yields all items from all input pipelines. `Pipeline.merge([])` →
+   *   an empty pipeline.
+   *
+   * @example
+   * `Pipeline.merge([p1, p2], { context: mine })` then `.contextManager === mine` → `true` (#31,
+   * Done-when 3) - verified live via `__tests__/fixtures/context-managers.ts`'s own `LoggingContext`.
+   */
   static merge<Ps extends readonly Pipeline<any>[]>(
-    ...pipelines: Ps
+    pipelines: Ps,
+    options?: PipelineOptions,
   ): Pipeline<ElementOf<Ps[number]>> {
     type U = ElementOf<Ps[number]>;
 
@@ -298,8 +340,9 @@ export class Pipeline<T> {
       return new Pipeline<U>([]);
     }
 
-    // Merge contexts from all pipelines
-    const mergedContext = new SimpleContextManager();
+    // Merge contexts from all pipelines into the caller's own manager when given (#31) - never a
+    // fresh copy that would discard it, the same reason .context() (above) mutates in place.
+    const mergedContext = options?.context ?? new SimpleContextManager();
     for (const pipeline of pipelines) {
       const ctx = pipeline._context.toDict();
       for (const [key, value] of Object.entries(ctx)) {
