@@ -9,8 +9,13 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **A conformance suite every `Pipeline` and Context class runs** (#37) and **cross-runtime
-  benchmarks** (#11) are the other open tickets; each issue carries its own detail.
+- **A conformance suite every `Pipeline` and Context class runs** (#37) - one set of behaviour
+  cases, defined once in `__tests__/conformance/cases.ts`, run by thin wrapper files, one per class.
+  `product.md` promises the chain "is identical in all four" and only the base class was ever tested
+  against it. Now, because planning found four separate reasons a case could not run everywhere, and
+  each turned out to be a defect rather than a boundary - three of them since fixed by #39
+  (chunking), #40 (error handlers) and #41 (`merge` keeping its class).
+- **Cross-runtime benchmarks** (#11) - the other open ticket; the issue carries its own detail.
 - **Error handling moves onto the function that failed** (#78, `feat!`). `Transformer.onError(fn)`
   becomes the ROW handler - return a value to replace the row, the exported `DROP` sentinel to
   remove it, or throw to escalate - reaching every element-wise call and `Transformer.reduce()`'s
