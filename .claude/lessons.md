@@ -7,6 +7,23 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-06 A review finding was framed as #31's own regression before checking `main`
+
+Building #31, code review found `HttpPipeline.fetch()` reusing `this._context` to serve concurrent
+requests, and it was escalated to the user as a new race #31 introduces - a stack-splitting decision
+was proposed and an `AskUserQuestion` fired before the base commit was ever checked. Reproducing the
+identical probe against `main` (909ea41, zero relation to #31's diff) showed the SAME race on a plain
+`ConcurrentPipeline`, pre-existing since #17. `~/.claude/rules/code.md`'s Prove it section now says to
+check the base commit before treating a finding as a stop condition.
+
+## 2026-09-06 `replace_symbol_body` left a stale docstring above the new one, twice
+
+Building #31, `mcp__serena__replace_symbol_body` on `Pipeline.context()` and `Pipeline.merge()` each
+left the OLD docstring sitting directly above the newly-written one - the tool's own body parameter
+doesn't include a preceding JSDoc block, so writing a new docstring inside `body` adds a second one
+rather than replacing the first. Code review caught both. `~/.claude/rules/code.md`'s While you work
+section now says to re-read after every such call.
+
 ## 2026-09-06 A probe counted instances and the ticket claimed invocations
 
 Planning #31 measured `contextFactory` with a spike that counted distinct manager instances SERVING

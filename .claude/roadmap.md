@@ -9,20 +9,17 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **A caller's own `IContextManager` survives every operation** (#31) - `.context()` and
-  `Pipeline.merge()` discard the caller's manager for a fresh `SimpleContextManager`, and a worker
-  never gets one at all. Now, because the knob (`PipelineOptions.context`) already ships with zero
-  tests and zero documentation, so every use of it is silently wrong. `.context()` merges into the
-  caller's instance; `Pipeline.merge(pipelines, options?)` takes the manager explicitly, breaking the
-  variadic signature; `contextFactory` builds one per process for a worker that cannot receive an
-  instance.
+None open right now - every ticket below is Built.
 
 ### Later - not yet filed
 
-- **A remote stage's `ctx.set()` reaching the orchestrator.** Measured: the orchestrator's context
-  stayed `{"multiplier":10}` after three remote `ctx.set()` calls. #31 settles WHICH manager a worker
-  builds (`contextFactory`) and deliberately leaves the wire one-way - a worker publishes through its
-  own manager's backing store instead. What stays open is an in-memory manager with no such store.
+- **A `ContextManager`'s write-back to the orchestrator.** #31 closed "which manager" - a caller's
+  own `IContextManager` now survives `.context()`, `Pipeline.merge()`, and a `ClusterPipeline`
+  worker's process boundary as the SAME instance. The write-back half stays unbuilt by decision, not
+  omission: a remote stage's `ctx.set()` still never reaches the orchestrator - measured, still true
+  post-#31: the orchestrator's context stayed `{"multiplier":10}` after three remote `ctx.set()`
+  calls (`.claude/architecture.md`'s own constraint). What stays open is an in-memory manager with no
+  backing store of its own to publish through.
 - **A retry policy for a failed remote chunk.** Measured while planning #17: retrying one chunk on
   another instance ran that chunk twice (`runs per chunk {"[1,2]":1,"[5]":2,"[3,4]":1}`) - at-least-once,
   with no de-duplication surface.
@@ -38,6 +35,14 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **A caller's own `IContextManager` survives `.context()`, `merge()` and a process boundary** (#31)
+  - `.context()` mutates the caller's OWN manager in place instead of copying into a fresh
+    `SimpleContextManager`, so a custom class keeps receiving writes and a rejected write propagates
+    instead of being bypassed. `Pipeline.merge(pipelines, options?)` takes the pipelines as an array
+    (BREAKING) and an optional `options.context`, the same instance later pipelines still win on a
+    shared key against. `PipelineOptions.contextFactory` builds a `ClusterPipeline` worker's own
+    class once per process; `.fetch()` reuses that instance to serve, instead of rebuilding one from
+    the wire per request. PRs #33 (L1), #34 (L2), #36 (L3), #38 (docs).
 - **Distributed and concurrent execution as `Pipeline` subclasses** (#17) - `ConcurrentPipeline`,
   `HttpPipeline` and `ClusterPipeline`, each overriding one thing, replace `ExecutionStrategy` and
   `.withExecutor()` entirely. A stage is its position in the chain, so a chunk crosses a boundary with

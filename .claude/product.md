@@ -110,15 +110,18 @@ Two rules follow from a stage being a position rather than a name, and both are 
 ### Context
 
 A shared key-value store threads through every stage of a chain, so a downstream `map` can read a
-value an upstream stage - or the caller - set, without it becoming an explicit chain parameter.
+value an upstream stage - or the caller - set, without it becoming an explicit chain parameter. A
+caller's own `IContextManager` class - a Postgres-backed pool, a manager that rejects an unknown
+key - survives as the SAME instance through `.context()`, keeps receiving every write, and a
+rejected write propagates instead of being silently bypassed (#31).
 
 > **Context / `IContextManager`** - `.get()`/`.set()`/`.getOrDefault()`/`.toDict()`. Every callback
 > receives it as an optional second parameter, so an un-annotated `(x) => …` still infers `x`'s type
 > from the source - `types.ts`'s own docstring records why a two-arity union signature was rejected.
-> **`context`** - an instance the caller supplies for THIS process. Every operation keeps it, writes
-> included; `.context()` merges into it rather than replacing it.
-> **`contextFactory`** - how to BUILD a manager, for a process that cannot receive an instance. Each
-> worker calls it once and reuses the result, so a manager owning a connection opens one per process.
+> **`PipelineOptions.context`** - an already-built manager, for THIS process.
+> **`PipelineOptions.contextFactory`** - how to build one, for any OTHER process (a
+> `ClusterPipeline` worker re-executing the entry module has no way to receive an already-built
+> instance across the process boundary); invoked at most once per process (#31).
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
@@ -166,10 +169,11 @@ into one - the two directions of composing whole pipelines rather than chaining 
 > `Transformer`; `BranchOptions.firstMatch` (default `true`) sends an item to the first matching branch
 > only, `false` broadcasts it to every match.
 > **Merge** - the static `Pipeline.merge(pipelines, options?)`: concatenates every source pipeline's
-> data and merges their contexts into one new `Pipeline`, later pipelines winning on a shared key.
-> `options.context` names the manager that receives them; with none, the merged pipeline gets a fresh
-> `SimpleContextManager`. Each pipeline's item type is inferred on its own, so
-> merging a `Pipeline<"a"|"b">` with a `Pipeline<"c"|"d">` gives a `Pipeline<"a"|"b"|"c"|"d">`.
+> data and merges their contexts into one new `Pipeline`. Each pipeline's item type is inferred on
+> its own, so merging a `Pipeline<"a"|"b">` with a `Pipeline<"c"|"d">` gives a
+> `Pipeline<"a"|"b"|"c"|"d">`. `options.context`, when given, is the SAME instance returned as the
+> merged pipeline's `.contextManager` (#31) - later pipelines still win on a shared key; with no
+> `options`, a fresh manager is built the same way. `Pipeline.merge([])` returns an empty pipeline.
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";

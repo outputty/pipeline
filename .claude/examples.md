@@ -149,10 +149,12 @@ const data = await new Pipeline([1, 2, 3, 4, 5]).branch({
 
 ## Case 5 - merging
 
-Several pipelines' data and contexts concatenate into one. `options.context` names the manager that
-receives the merged values; with none, the merged pipeline gets a fresh `SimpleContextManager`.
+Several pipelines' data and contexts concatenate into one. `pipelines` is an array, not a rest
+param (#31, BREAKING) - room for an optional second `options` argument, `{ context: mine }`, to
+carry a caller's own manager through the merge as the SAME instance; with none, the merged pipeline
+gets a fresh `SimpleContextManager`.
 
-<!-- illustrative -->
+<!-- compiles -->
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
@@ -161,7 +163,7 @@ const pipeline1 = new Pipeline([1, 2, 3]);
 const pipeline2 = new Pipeline([4, 5, 6]);
 
 const merged = Pipeline.merge([pipeline1, pipeline2]);
-const data = await merged.toArray();
+const data = await merged.toArray(); // [1,2,3,4,5,6]
 ```
 
 ```json
