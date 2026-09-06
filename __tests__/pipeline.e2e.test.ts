@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { SimpleContextManager } from "@src/context/simple";
+import { LoggingContext, SealedContext } from "./fixtures/context-managers";
 
 describe("Pipeline", () => {
   describe("constructor", () => {
@@ -74,6 +75,28 @@ describe("Pipeline", () => {
       const pipeline = new Pipeline([1, 2, 3]).context({ key: "value" });
 
       expect(pipeline.contextManager.get("key")).toBe("value");
+    });
+
+    it("survives .context() as the SAME instance and receives its writes (#31, Done-when 1)", async () => {
+      const mine = new LoggingContext();
+      const afterContext = new Pipeline([1, 2], { context: mine }).context({ multiplier: 10 });
+
+      expect(afterContext.contextManager).toBe(mine);
+
+      await afterContext
+        .transform((t) => t.map((x: number, ctx) => (ctx.set("k", x), x)))
+        .toArray();
+
+      expect(mine.constructor.name).toBe("LoggingContext");
+      expect(mine.writes).toEqual(["multiplier", "k", "k"]);
+    });
+
+    it("propagates a manager's own rejection instead of bypassing it (#31, Done-when 2)", () => {
+      const sealed = new SealedContext({ known: 1 });
+
+      expect(() => new Pipeline([1], { context: sealed }).context({ unknown: 2 })).toThrow(
+        "SealedContext: unknown key 'unknown'",
+      );
     });
   });
 

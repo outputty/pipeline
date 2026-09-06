@@ -149,7 +149,8 @@ export function inertKnobsOf<In, Out>(transformer: Transformer<In, Out>): string
  * you, and a chunk's items flow to the next stage as a group. The whole chain shares one context
  * manager, so a context-aware transformer can read and write state across stages — `.context()`
  * itself still returns a NEW `Pipeline` (copy-on-write, like `.apply()`/`.transform()`/`.buffer()`),
- * carrying a context manager seeded from the current one forward.
+ * carrying the SAME context manager forward, mutated in place (#31) — a caller's own
+ * `IContextManager` class is never copied into a fresh `SimpleContextManager` and discarded.
  *
  * `await new Pipeline([1, 2, 3]).transform((t) => t.map((x) => x * 2)).toArray()` →
  * `[2, 4, 6]`. A terminal op's return carries no context snapshot (#744) - read `.contextManager`
@@ -326,38 +327,46 @@ export class Pipeline<T> {
   }
 
   /**
-   * Merge values into the pipeline's context, returning a NEW Pipeline that carries the merged
-   * context forward — copy-on-write, like `.apply()`/`.transform()`/`.buffer()`; `this` is never
-   * mutated. A later chained call (`.apply()`, `.transform()`, …) reads the RETURNED Pipeline's own
-   * `_context`, so the merge is visible downstream exactly as before; only a caller still holding
-   * the pre-`.context()` reference sees the old, un-merged context, the same as any other operation
-   * here.
+   * Merges values into the caller's OWN context manager, MUTATING it in place, then returns a NEW
+   * `Pipeline` carrying that SAME instance forward - copy-on-write for the pipeline itself, but the
+   * manager it carries is never replaced or copied. `this._context.set()` runs for every key in
+   * `ctx`, so a manager that refuses an unknown key (a sealed manager, `#31`) throws HERE,
+   * propagating to the caller, instead of being silently bypassed by a copy step that never called
+   * its `.set()` at all. A caller still holding the pre-`.context()` reference sees every later
+   * write too - both references alias the SAME manager (#31; this used to build a fresh
+   * `SimpleContextManager` and copy values into it, which is why a caller's own class went deaf the
+   * moment `.context()` ran). The same aliasing applies to TWO SIBLINGS built off one shared base:
+   * `const a = base.context({m:"a"}); const b = base.context({m:"b"})` leaves `a`, `b` and `base`
+   * all reading the ONE manager `base` started with, so `b`'s write is the value every one of them
+   * sees - forking into independently-configured branches needs a caller-supplied manager per
+   * branch, never two `.context()` calls off the same parent.
    *
    * Python equivalent:
    * ```python
    * def context(self, ctx: dict[str, Any]) -> "Pipeline[T]":
-   *   merged = {**self.context_manager.to_dict(), **ctx}
-   *   return Pipeline(self.data_source, context=merged)
+   *   for key, value in ctx.items():
+   *     self.context_manager[key] = value
+   *   return Pipeline(self.data_source, context=self.context_manager)
    * ```
    *
    * @param ctx - Dictionary of context values to merge in
-   * @returns A new instance of THIS pipeline's own class, carrying the merged context. Typed
-   *   `this` (#17), not `Pipeline<T>` - `T` never changes here, so a dispatching subclass's own
-   *   `.transform(fn, { local: true })` still typechecks after a `.context()` call, the same as it
-   *   would directly off the constructor. The cast below is honest only because `createPipeline()`
-   *   is the one seam every subclass overrides to return its own class (verified: `new
-   *   ConcurrentPipeline([1], { maxConcurrency: 8 }).context({}).maxConcurrency` → `8`).
+   * @returns A new instance of THIS pipeline's own class, carrying the SAME (now-mutated) context
+   *   manager forward. Typed `this` (#17), not `Pipeline<T>` - `T` never changes here, so a
+   *   dispatching subclass's own `.transform(fn, { local: true })` still typechecks after a
+   *   `.context()` call, the same as it would directly off the constructor.
+   *
+   * @example
+   * A manager that records every key written (`__tests__/fixtures/context-managers.ts`'s own
+   * `LoggingContext`), handed in at construction: `new Pipeline([1, 2], { context: mine }).context({
+   * multiplier: 10 }).transform((t) => t.map((x, ctx) => (ctx.set("k", x), x))).toArray()` then
+   * `mine.writes` → `["multiplier", "k", "k"]` - `mine` itself received every write (#31).
    */
   context(ctx: Record<string, unknown>): this {
-    const newContext = new SimpleContextManager();
-    for (const [key, value] of Object.entries(this._context.toDict())) {
-      newContext.set(key, value);
-    }
     for (const [key, value] of Object.entries(ctx)) {
-      newContext.set(key, value);
+      this._context.set(key, value);
     }
     return this.createPipeline<T>(this.dataSource, {
-      context: newContext,
+      context: this._context,
       rootSource: this._rootSource,
       chunkTransforms: this._chunkTransforms,
       sourcePositionViolations: this._sourcePositionViolations,
