@@ -7,6 +7,26 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-06 A base-class fix was priced without ever reaching a subclass
+
+Planning #31, `.context()`'s mutate-in-place fix was patched into `src/pipeline.ts`, the full suite
+run, and "122 passed, zero broken" put to the user as the price. None of it had touched
+`ConcurrentPipeline`, `HttpPipeline` or `ClusterPipeline` - the classes where a context actually
+crosses a process. The user had to ask for that verification, and it changed the design: a real
+three-worker `cluster` run produced `contextFactory` and the per-process-versus-per-request question
+the base class could never have surfaced. `~/.claude/rules/code.md`'s Prove it section now says to
+price a base-class change against the leaf furthest from the base.
+
+## 2026-09-06 Two questions in one round presumed each other's answers
+
+Planning #31 asked "does F3 land in this ticket?" and "does this ticket commit to `IContextManager`
+as the seam?" in the same `AskUserQuestion` round. The answers - F3 included, and don't settle the
+seam here - contradicted, because the second question's options had presumed the first was answered
+"sever". A turn was then spent reconciling them. The `plan` skill already says a question resting on
+an open decision waits for a later round; nothing said it about two questions inside one round.
+`~/.claude/rules/docs.md` now carries both that line and the user's extension: prefer more rounds,
+and grill an answer whose grounding does not hold rather than building on it.
+
 ## 2026-09-05 A copy-on-write base method dropped a subclass's own knob
 
 Building #17, `Pipeline`'s `createPipeline()` used `this.constructor` so a subclass survived
