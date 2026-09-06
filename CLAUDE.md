@@ -147,9 +147,11 @@ none of it survived the hand-trim (#745).
   caller's own manager through the merge as the SAME instance.
 - **Transformer** - the chainable chunk-transformation builder: `new Transformer<In, Out>(options?)`,
   `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.catch()`, `.withHooks()` for lifecycle
-  callbacks. Runs directly over any `AsyncIterable` via `.execute()`, independent of `Pipeline` -
-  always sequentially, one chunk at a time (#17); wrap the chain in a `ConcurrentPipeline` for
-  concurrency instead of configuring the `Transformer` that drives it.
+  callbacks. Chunk-agnostic (#39, pending) - it never decides how its own input was cut, only
+  processes whatever chunk it is handed. `.process(chunks, context?)` runs it directly over an
+  `AsyncIterable` of already-cut chunks, independent of `Pipeline` - always sequentially, one chunk
+  at a time (#17); wrap the chain in a `ConcurrentPipeline` for concurrency instead of configuring
+  the `Transformer` that drives it.
 - **Reducer** - a fold, at two levels with ONE callback signature, `ReduceFunction<U, T> = (acc,
   item, ctx, emit) => U | Promise<U>` (`emit` FOURTH, so `ctx` keeps arity 3 and
   `isContextAwareReduce`'s `fn.length` check is untouched). `Transformer.reduce(fn, initial)` folds
@@ -161,33 +163,38 @@ none of it survived the hand-trim (#745).
   other stage, over ONE duplex POST to `/reduce/<n>` whose accumulator lives for the life of the
   connection, so `maxConcurrency` is inert on it (#45, BREAKING: `ReduceOptions`/`perChunk` and the
   standalone callable `reduce(fn, initial, { perChunk: false })` returned are deleted).
-- **Chunk** - the streaming unit a `Transformer` actually operates on: `In[]`/`Out[]`, sized by
-  `TransformerOptions.chunkSize` (default `DEFAULT_CHUNK_SIZE = 1000`). A `ChunkerFunction<T>` breaks
-  an `AsyncIterable<T>` into chunks; an `InternalTransformer<In, Out>` processes one chunk at a time.
+- **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`
+  decision, not a `Transformer` one (#39, pending) - `.buffer(size)` sets it explicitly, defaulting
+  to `DEFAULT_CHUNK_SIZE = 1000` when never called; every later stage sees the same chunks unchanged
+  until another `.buffer()` call declares a new one. Two `.buffer()` calls back to back, with no
+  stage between them, collapse to the last - only it is ever actually applied. An
+  `InternalTransformer<In, Out>` processes one chunk at a time.
 - **Pipeline family** - WHERE a chain's chunks run is chosen by CONSTRUCTING A CLASS, not by
   configuring a `Transformer` (#17 - replaced `ExecutionStrategy`, `.withExecutor()`, `sequential`,
   `concurrent()` and `ConcurrentStrategyOptions` entirely, deleted with `src/strategies/`).
-  `Pipeline` runs one chunk at a time in this process, and `Transformer.execute()` itself is always
+  `Pipeline` runs one chunk at a time in this process, and `Transformer.process()` itself is always
   sequential now too; `ConcurrentPipeline` keeps `maxConcurrency` chunks in flight and owns the
-  fan-out window (`fanOutOrdered`/`fanOutUnordered`), the reorder buffer and failure containment;
-  `HttpPipeline` overrides `stageWork()` alone to POST a chunk to another instance and adds a
-  `.fetch` handler; `ClusterPipeline` adds the worker bootstrap, brought up lazily on the first
+  fan-out window (`fanOutOrdered`/`fanOutUnordered`), the reorder buffer and failure containment -
+  fanning out the pipeline's OWN already-cut chunk stream, never cutting one of its own (#39,
+  pending); `HttpPipeline` overrides `stageWork()` alone to POST a chunk to another instance and adds
+  a `.fetch` handler; `ClusterPipeline` adds the worker bootstrap, brought up lazily on the first
   chunk actually dispatched. Each level overrides ONE thing, and the chain is identical in all four.
 - **Stage** - One `.apply()` call, and therefore one `.transform()` call, since `transform()` is
   `return this.apply(transformer)` (`pipeline.ts:429-432`). A stage's identity is its INDEX in
   `_chunkTransforms`, so a dispatching class sends a chunk plus an index and never a function.
   `.transform((t) => t.map(f).filter(g))` is ONE stage; two chained `.transform()` calls are TWO, and
-  on a dispatching class that is two network hops.
+  on a dispatching class that is two network hops. `_chunkTransforms` is `HttpPipeline`/
+  `ClusterPipeline`'s own worker-side stage registry (`this._chunkTransforms[requested]`,
+  `src/pipelines/http.ts:170`) - unrelated to chunking and untouched by #39.
 - **`{ local: true }`** - The optional SECOND argument to a dispatching subclass's own
   `transform()`/`apply()`, keeping that stage in the orchestrating process. It is `super.apply()` at
   every level, and the base `Pipeline` never gains it.
-- **Source position** - the `Pipeline` drain path that does NOT run `Transformer.execute()`: async
-  iteration (`[Symbol.asyncIterator]`, reached when a caller uses a `Pipeline` directly as an
-  `AsyncIterable` rather than through a terminal op) replays each transform's plain function from
-  `_chunkTransforms` instead. `inertKnobsOf` (`pipeline.ts`) throws there instead of running silently
-  in-process, for `.withHooks()`, `.onError()`, a custom `.setChunker()` chunker, or (on a
-  `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`) a dispatched stage - none of those take
-  effect outside `Transformer.execute()`/the fan-out, which this path never calls. (#5, #17)
+- **Source position** (killed, #39 pending) - was the `Pipeline` drain path that did NOT run
+  `Transformer.execute()`: async iteration (`[Symbol.asyncIterator]`) replayed each transform's plain
+  function instead of running the real chain, and `inertKnobsOf` threw there for any knob that only
+  ever took effect through `execute()`/the fan-out. Once every `Pipeline` class shares one persisted
+  chunk stream, hooks/onError included, there is nothing left for a separate replay path to protect
+  against - `[Symbol.asyncIterator]` reads that SAME stream directly, the same as every terminal op.
 - **Context / `IContextManager`** - the shared key-value store threading through a pipeline run:
   `.get()`/`.set()`/`.getOrDefault()`/`.toDict()`. `SimpleContext` is the one shipped implementation.
   Every `PipelineFunction`/`PipelineReduceFunction` callback receives it as an optional second

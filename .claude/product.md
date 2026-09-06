@@ -19,16 +19,19 @@ transforming and controlling concurrency over data already in flight is the whol
 ### Pipeline and Transformer
 
 A `Pipeline` wraps a data source and composes a `Transformer` chain over it; a `Transformer` is the
-chain itself, usable standalone against any `AsyncIterable`. Splitting the two means a transform chain
-tested once (`Transformer.execute()`) reruns unchanged inside a `Pipeline`, over an HTTP paginator, or
-inside a laygo `Source`.
+chain itself, chunk-agnostic - it processes whatever chunk it is handed and never decides how its
+input was cut. Splitting the two means a transform chain tested once (`Transformer.process()`) reruns
+unchanged inside a `Pipeline`, over an HTTP paginator, or inside a laygo `Source`; a caller running a
+`Transformer` standalone supplies its own already-cut chunks.
 
 > **Pipeline** - the high-level API: `new Pipeline(source, options?)`, `.context()` to seed shared
-> state, `.apply()`/`.transform()` to run a `Transformer`, and one of five terminal ops
-> (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`) to drain it.
+> state, `.buffer(size)` to set the chunk boundary, `.apply()`/`.transform()` to run a `Transformer`,
+> and one of five terminal ops (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`) to
+> drain it.
 > **Transformer** - the chainable, reusable chunk-transform: `new Transformer<In, Out>(options?)`,
-> `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.catch()`. `.execute(source)` runs it directly
-> over any `AsyncIterable`, independent of `Pipeline`.
+> `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.catch()`. `.process(chunks, context?)` runs
+> it directly over an `AsyncIterable` of already-cut chunks, independent of `Pipeline` - it takes no
+> chunk size or chunker of its own.
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
@@ -44,17 +47,28 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 
 ### Chunking
 
-Rows move through a `Transformer` in chunks, not one at a time: every `.map`/`.filter`/`.reduce` call
-processes a chunk-sized batch before the next chunk starts, which is what makes a concurrent execution
-strategy (below) a batch of parallel work rather than one promise per row.
+Rows move through a `Pipeline` in chunks, not one at a time: every `.map`/`.filter`/`.reduce` call
+processes a chunk at a time, which is what makes a concurrent execution strategy (below) a batch of
+parallel work rather than one promise per row. The boundary is the `Pipeline`'s own decision, not a
+`Transformer`'s: `.buffer(size)` sets it explicitly, and every later stage sees those same chunks
+unchanged until another `.buffer()` call declares a new one - a `Transformer` never knows how its own
+input was cut, and just processes whatever chunk arrives.
 
-> **Chunk** - the streaming unit a `Transformer` operates on: `In[]`/`Out[]`, sized by
-> `TransformerOptions.chunkSize` (default `DEFAULT_CHUNK_SIZE = 1000`).
+> **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. **`.buffer(size)`** - the
+> explicit chunk boundary; defaults to `1000` when never called. Two `.buffer()` calls back to back,
+> with no stage between them, collapse to the last one - only it is ever actually applied.
 
 ```ts
-import { Transformer } from "@outputty/pipeline";
+import { Pipeline } from "@outputty/pipeline";
 
-const t = new Transformer<number, number>({ chunkSize: 100 }).map((x: number) => x * 2);
+const data = await new Pipeline([1, 2, 3, 4, 5])
+  .buffer(2)
+  .transform((t) => t.map((x: number) => x * 2))
+  .toArray();
+```
+
+```json
+[2, 4, 6, 8, 10]
 ```
 
 ### Where the work runs
@@ -92,7 +106,7 @@ orchestrating process - useful when a stage is cheap, or touches something only 
 ```ts
 import { HttpPipeline } from "@outputty/pipeline";
 
-const pipeline = new HttpPipeline(rows, { url: process.env.SELF_URL!, chunkSize: 1000 })
+const pipeline = new HttpPipeline(rows, { url: process.env.SELF_URL! })
   .transform((t) => t.map(expensiveScore))
   .transform((t) => t.filter((r) => r.ok), { local: true });
 
