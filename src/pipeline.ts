@@ -83,9 +83,24 @@ export type PipelineSource<T> = AsyncIterable<T | T[]> | Iterable<T | T[]>;
 /** Construction-time knobs for a `Pipeline` — every field optional. */
 export interface PipelineOptions {
   /**
-   * Optional context manager for sharing state across operations.
+   * An already-built context manager, for THIS process. Takes precedence over `contextFactory`
+   * (#31) - a caller who already holds the instance they want (the orchestrating process,
+   * typically) passes it here; a process that must build its OWN instance (a `ClusterPipeline`
+   * worker, re-executing the same entry module with no way to receive an already-built instance
+   * across the process boundary) uses `contextFactory` instead.
    */
   context?: IContextManager;
+  /**
+   * How to build a context manager, for any OTHER process than the one that already has `context`.
+   * Invoked at most ONCE per process - in the constructor, only when `context` is absent - and the
+   * built instance is then carried forward through every copy-on-write call
+   * (`.context()`/`.transform()`/`.buffer()`) the same way an explicit `context` would be, so a
+   * `ClusterPipeline` worker's own `.fetch()` (`src/pipelines/http.ts`) serves every request off
+   * the SAME instance the constructor built, never a second one (#31). `context` and
+   * `contextFactory` together is not an error: the instance serves this process, the factory
+   * serves every other one.
+   */
+  contextFactory?: () => IContextManager;
   /**
    * Internal: the original, untransformed source used to derive chunk
    * boundaries for async iteration. Not intended for direct external use.
@@ -178,7 +193,11 @@ export class Pipeline<T> {
     // reads `_rootSource` through `normalize` (Array.isArray at runtime), so the
     // compile-time narrowing to `AsyncIterable<T>` here is safe for its callers.
     this.dataSource = this.toAsyncIterable(data) as AsyncIterable<T>;
-    this._context = options?.context ?? new SimpleContextManager();
+    // `contextFactory` runs ONLY when `context` is absent, and only HERE - every copy-on-write
+    // call below (`.context()`, `.apply()`, `.buffer()`) always passes an already-resolved
+    // `context`, so a `ClusterPipeline` chain's later `.transform()` calls never re-invoke it
+    // (#31, Done-when 6: once per process, not once per stage or per request).
+    this._context = options?.context ?? options?.contextFactory?.() ?? new SimpleContextManager();
     this._rootSource = options?.rootSource ?? (this.dataSource as AsyncIterable<unknown>);
     this._chunkTransforms = options?.chunkTransforms ?? [];
     this._sourcePositionViolations = options?.sourcePositionViolations ?? [];
@@ -298,8 +317,11 @@ export class Pipeline<T> {
    *   literal keeps `ElementOf<Ps[number]>` distributing over a UNION of differently-typed
    *   pipelines, exactly as the old rest-param form did, while leaving a second parameter free for
    *   `options`.
-   * @param options - `{ context }` to carry a caller's own manager through the merge; omitted, or
-   *   `{}`, keeps today's `SimpleContextManager` behaviour.
+   * @param options - `{ context }` to carry a caller's own manager through the merge, or
+   *   `{ contextFactory }` to build one (review: `options` is typed as the full `PipelineOptions` -
+   *   the same type `contextFactory` lives on - so both are honored the same way the constructor
+   *   does, `context ?? contextFactory() ?? a fresh SimpleContextManager`; omitted, or `{}`, keeps
+   *   today's `SimpleContextManager` behaviour.
    * @returns A new pipeline that yields all items from all input pipelines. `Pipeline.merge([])` →
    *   an empty pipeline.
    *
@@ -313,17 +335,18 @@ export class Pipeline<T> {
   ): Pipeline<ElementOf<Ps[number]>> {
     type U = ElementOf<Ps[number]>;
 
-    // `options?.context` still honored on the zero-pipeline path (review: the fast return used to
-    // drop it, so `Pipeline.merge([], { context: mine }).contextManager` was a fresh
-    // SimpleContextManager instead of `mine`, breaking the same-instance contract every other path
-    // here keeps).
+    // `options?.context`/`contextFactory` both honored on the zero-pipeline path too (review: the
+    // fast return used to drop context entirely, and contextFactory was never read at all - a
+    // caller passing either got a fresh SimpleContextManager instead, breaking the same-instance
+    // contract every other path here keeps).
     if (pipelines.length === 0) {
-      return new Pipeline<U>([], { context: options?.context });
+      return new Pipeline<U>([], { context: options?.context ?? options?.contextFactory?.() });
     }
 
     // Merge contexts from all pipelines into the caller's own manager when given (#31) - never a
     // fresh copy that would discard it, the same reason .context() (above) mutates in place.
-    const mergedContext = options?.context ?? new SimpleContextManager();
+    const mergedContext =
+      options?.context ?? options?.contextFactory?.() ?? new SimpleContextManager();
     for (const pipeline of pipelines) {
       const ctx = pipeline._context.toDict();
       for (const [key, value] of Object.entries(ctx)) {

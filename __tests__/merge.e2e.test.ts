@@ -130,6 +130,21 @@ describe("Pipeline.merge", () => {
         only2: "b",
       });
     });
+
+    it("honors options.contextFactory too, not just options.context (review regression)", () => {
+      const pipeline1 = new Pipeline([1]).context({ key: "value" });
+
+      const merged = Pipeline.merge([pipeline1], { contextFactory: () => new LoggingContext() });
+
+      expect(merged.contextManager.constructor.name).toBe("LoggingContext");
+      expect(merged.contextManager.toDict()).toEqual({ key: "value" });
+    });
+
+    it("honors options.contextFactory with zero pipelines too (review regression)", () => {
+      const merged = Pipeline.merge([], { contextFactory: () => new LoggingContext() });
+
+      expect(merged.contextManager.constructor.name).toBe("LoggingContext");
+    });
   });
 
   describe("async data sources", () => {
