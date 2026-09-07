@@ -19,6 +19,11 @@ import {
   expectFixtureOk,
   lastJsonLine,
 } from "./helpers/fixtures";
+// The SAME parser the client (HttpPipeline.reduceWork) and server (.fetch's /reduce/<n> handling)
+// use - review found this test hand-rolling its own copy, missing the shared one's trailing-buffer
+// flush (a final unterminated frame silently dropped), so a wire-format bug there would be
+// invisible here. Reusing it also means a fix to the shared parser IS exercised by this test.
+import { readNdjsonLines } from "../src/utils/ndjson";
 
 /** The emit-at-6 reducer the ticket's own Done-when 2 and 4 both use: banks a running total once it
  * reaches 6, resetting to 0 - no trailing value when the last item already banked one. */
@@ -34,26 +39,6 @@ function emitAtSix(
     return 0;
   }
   return acc;
-}
-
-/** Decodes a byte stream into NDJSON lines as they arrive - the same framing both the reduce wire
- * (Done-when 4) and a raw duplex echo handler (Done-when 5) use, on both the reading side here and
- * (for Done-when 5) the server's own reading side. */
-async function* readNdjsonLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let newlineIndex: number;
-    while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
-      const line = buffer.slice(0, newlineIndex);
-      buffer = buffer.slice(newlineIndex + 1);
-      if (line.length > 0) yield line;
-    }
-  }
 }
 
 describe("#45 the whole dataset folds and the chain continues (Done-when 1)", () => {
@@ -87,7 +72,7 @@ describe("#45 Transformer.reduce still folds ONE chunk and still chains (Done-wh
 });
 
 describe("#45 a real duplex connection streams emits before the request body closes (Done-when 4)", () => {
-  test.fails(
+  test(
     "emits [6,9], at least one arriving before the request body closes",
     async () => {
       const worker = new HttpPipeline<number>([], { url: "" }).reduce(emitAtSix, 0);
@@ -209,7 +194,7 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
   // its OWN real request regardless, so a bare count passes even when .reduce() itself silently
   // fell back to ConcurrentPipeline's in-process fold (real regression found running this test:
   // it passed at L3, before HttpPipeline.reduceWork() existed, on the transform's request alone).
-  test.fails(
+  test(
     "HttpPipeline, the reduce stage itself dispatched over /reduce/<n>",
     async () => {
       const requestPaths: string[] = [];
@@ -233,7 +218,7 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
   );
 
   // Cluster-context.ts's own pid-tagging technique - real subprocess fixture, see its own docstring.
-  test.fails(
+  test(
     "ClusterPipeline, dispatched to a real worker process",
     async () => {
       const fixture = await runFixture("__tests__/fixtures/cluster-reduce.ts");

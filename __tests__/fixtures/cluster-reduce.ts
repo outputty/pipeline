@@ -4,6 +4,12 @@
  * forked worker: the primary process never nulls its own `_chunks` (only a worker does,
  * `ClusterPipeline`'s constructor), so a `.reduce()` that silently fell back to the base `Pipeline`'s
  * in-process fold would print the right sum without ever dispatching - this catches that.
+ *
+ * A WORKER's own run of this same script resolves `.toArray()` to `[]` (architecture.md's own
+ * documented constraint) - it prints NOTHING (review: `cluster.fork()`'s shared stdout pipe gives
+ * no cross-process write-ordering guarantee, so relying on "the worker's line always lands first"
+ * the way `cluster-basic.ts` does would be flaky here; skipping the print entirely means only the
+ * PRIMARY ever writes a line, so `lastJsonLine` has nothing to race against).
  */
 import { ClusterPipeline } from "../../src";
 
@@ -16,4 +22,6 @@ const [folded] = await new ClusterPipeline([1, 2, 3, 4, 5])
   )
   .toArray();
 
-console.log(JSON.stringify({ sum: folded.sum, dispatchedToWorker: folded.pid !== primaryPid }));
+if (folded) {
+  console.log(JSON.stringify({ sum: folded.sum, dispatchedToWorker: folded.pid !== primaryPid }));
+}

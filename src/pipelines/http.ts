@@ -13,9 +13,11 @@
 
 import type { ConcurrentPipelineOptions, StageOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
-import type { PipelineOptions, PipelineSource } from "@src/pipeline";
+import type { PipelineOptions, PipelineSource, ReduceStage } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import type { InternalTransformer, ReduceFunction } from "@src/types";
+import type { IContextManager, InternalTransformer, ReduceFunction } from "@src/types";
+import { Reducer } from "@src/utils/reduce";
+import { ndjsonFrame, readNdjsonLines } from "@src/utils/ndjson";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 
@@ -64,6 +66,85 @@ async function parseStageRequest(
     return { ok: false, error: "request body is missing a 'context' object" };
   }
   return { ok: true, value: { chunk, context } };
+}
+
+/**
+ * Runs one reduce stage's whole stream against `request.body`'s NDJSON frames, writing `{"emit":…}`
+ * frames to `writer` as they happen and `{"error":…}` on a mid-stream failure - `serveReduceRequest`
+ * (below) is the one caller, kicking this off unawaited so the `Response` it returns starts
+ * streaming immediately. Split into the small helpers below purely to stay within this repo's own
+ * `max-depth: 2` rule - a `try` around a `for await` around a conditional write is already 3 deep.
+ */
+async function runReduceStage(
+  stage: ReduceStage,
+  request: Request,
+  ctx: IContextManager,
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+): Promise<void> {
+  try {
+    const reducer = new Reducer(stage.fn, stage.initial);
+    const lines = readNdjsonLines(request.body!);
+    applyContextFrame(await lines.next(), ctx);
+    for await (const line of lines) {
+      await foldChunkFrame(line, reducer, ctx, writer);
+    }
+    await flushTrailing(reducer, writer);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await writer.write(ndjsonFrame({ error: message }));
+  } finally {
+    await writer.close();
+  }
+}
+
+/** The wire's own FIRST frame, `{"context":{…}}`, sent exactly once - applies its values onto `ctx`
+ * via `.set()`, same as a `/stage/<n>` request's own context merge. */
+function applyContextFrame(first: IteratorResult<string>, ctx: IContextManager): void {
+  // Fails loud (this repo's own rule: "External data missing an expected field fails at the
+  // parse") rather than silently dropping the frame - review found the OLD version no-opping
+  // here, discarding a malformed or absent first frame with no diagnostic. Thrown here, inside
+  // `runReduceStage`'s own try, so it reaches the caller as a normal `{"error":…}` frame.
+  if (first.done) {
+    throw new Error("reduce stream ended before a context frame was sent");
+  }
+  const frame = JSON.parse(first.value) as { context?: unknown };
+  if (typeof frame.context !== "object" || frame.context === null || Array.isArray(frame.context)) {
+    throw new Error("first reduce frame is missing a 'context' object");
+  }
+  for (const [key, value] of Object.entries(frame.context as Record<string, unknown>)) {
+    ctx.set(key, value);
+  }
+}
+
+/** One `{"chunk":[…]}` frame's worth of folding - every value `reducer.fold()` emits while folding
+ * this chunk is batched into ONE `{"emit":…}` frame, sent once the whole chunk is folded. */
+async function foldChunkFrame(
+  line: string,
+  reducer: Reducer<unknown, unknown>,
+  ctx: IContextManager,
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+): Promise<void> {
+  const frame = JSON.parse(line) as { chunk?: unknown[] };
+  if (!frame.chunk) return;
+  const emitted: unknown[] = [];
+  for (const item of frame.chunk) {
+    emitted.push(...(await reducer.fold(item, ctx)));
+  }
+  if (emitted.length > 0) {
+    await writer.write(ndjsonFrame({ emit: emitted }));
+  }
+}
+
+/** The final accumulator, sent as its own `{"emit":…}` frame only if items were folded since the
+ * last emit - `Reducer.final()`'s own contract, same as every other reducer in the package. */
+async function flushTrailing(
+  reducer: Reducer<unknown, unknown>,
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+): Promise<void> {
+  const trailing = reducer.final();
+  if (trailing.length > 0) {
+    await writer.write(ndjsonFrame({ emit: trailing }));
+  }
 }
 
 /**
@@ -152,10 +233,15 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
    */
   readonly fetch = async (request: Request): Promise<Response> => {
     const { pathname } = new URL(request.url);
-    const match = /\/stage\/(\d+)$/.exec(pathname);
-    const maxIndex = this._chunkTransforms.length - 1;
-    const requested = match ? Number(match[1]) : NaN;
+    const match = /\/(stage|reduce)\/(\d+)$/.exec(pathname);
+    const verb = match?.[1] as "stage" | "reduce" | undefined;
+    const requested = match ? Number(match[2]) : NaN;
 
+    if (verb === "reduce") {
+      return this.serveReduceRequest(requested, request);
+    }
+
+    const maxIndex = this._chunkTransforms.length - 1;
     if (!match || requested > maxIndex) {
       return Response.json(
         {
@@ -189,16 +275,51 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
     }
   };
 
-  /** The outgoing path for `stageIndex`, and (via `.fetch()`'s prefix-agnostic trailing-segment
-   * match) the incoming one too. `ClusterPipeline` overrides this alone to route several pipeline
-   * definitions through one shared worker server (`/pipeline/<i>/stage/<n>`) without touching
-   * `stageWork()`'s dispatch logic or `.fetch()`'s parsing at all. */
-  protected stagePath(stageIndex: number): string {
-    return `/stage/${stageIndex}`;
+  /**
+   * Serves one reduce stage's WHOLE stream over one duplex connection - `_reduceStages` (#45,
+   * `src/pipeline.ts`) is the registry `.reduce()` populated at the SAME index `_chunkTransforms`'s
+   * own placeholder occupies, so an unknown index here means the stack was never given one, never a
+   * stage that just isn't a reducer (that case 404s above, on the `stage` verb's own range check).
+   * The response streams (`TransformStream`) so an emit reaches the caller as it happens - the
+   * whole point of `toNodeHandler` (L4) actually delivering bytes before the handler returns.
+   */
+  private async serveReduceRequest(index: number, request: Request): Promise<Response> {
+    const stage = this._reduceStages.get(index);
+    if (!stage) {
+      const known = [...this._reduceStages.keys()].join(",") || "none";
+      return Response.json(
+        { error: `unknown reduce stage ${index}; this deployment serves ${known}` },
+        { status: 404 },
+      );
+    }
+    // A registered stage with no body is a DIFFERENT problem than an unknown one (review: the OLD
+    // message said "unknown reduce stage N" even when N was real) - reported as its own 400, the
+    // same shape /stage/<n>'s own parseStageRequest() uses for a missing body.
+    if (!request.body) {
+      return Response.json({ error: "request body is missing" }, { status: 400 });
+    }
+
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = writable.getWriter();
+    // Not awaited: the Response below must return immediately so the client starts receiving
+    // frames as `runReduceStage` writes them, rather than after the whole fold finishes.
+    runReduceStage(stage, request, this._context, writer).catch(() => writer.abort());
+
+    return new Response(readable, { headers: { "content-type": "application/x-ndjson" } });
+  }
+
+  /** The outgoing path for `verb`/`index`, and (via `.fetch()`'s prefix-agnostic trailing-segment
+   * match) the incoming one too - one shared stage-index space for both `/stage/<n>` and
+   * `/reduce/<n>` (#45; replaces `stagePath(stageIndex)`, `/stage/<n>` only). `ClusterPipeline`
+   * overrides this alone to route several pipeline definitions through one shared worker server
+   * (`/pipeline/<i>/<verb>/<n>`) without touching `stageWork()`/`reduceWork()`'s own dispatch logic
+   * or `.fetch()`'s parsing at all. */
+  protected routePath(verb: "stage" | "reduce", index: number): string {
+    return `/${verb}/${index}`;
   }
 
   /**
-   * POSTs the chunk to `${url}${stagePath(stageIndex)}` instead of running it in-process -
+   * POSTs the chunk to `${url}${routePath("stage", stageIndex)}` instead of running it in-process -
    * `ConcurrentPipeline`'s own `apply()` calls this for every non-local stage; the fan-out, the
    * `{ local: true }` check and the knob-violation check are otherwise unchanged, inherited as-is.
    *
@@ -211,7 +332,7 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
     stageIndex: number,
   ): InternalTransformer<T, U> {
     return async (chunk, ctx) => {
-      const response = await fetch(`${this._url}${this.stagePath(stageIndex)}`, {
+      const response = await fetch(`${this._url}${this.routePath("stage", stageIndex)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ chunk, context: ctx.toDict() } satisfies StageRequestBody),
@@ -224,6 +345,72 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
 
       const body = (await response.json()) as StageResponseBody<U>;
       return body.chunk;
+    };
+  }
+
+  /**
+   * Opens ONE duplex POST to `${url}${routePath("reduce", stageIndex)}` for the WHOLE stream -
+   * `stageWork()`'s sibling, `ConcurrentPipeline`'s own default (one method above the class
+   * hierarchy) folds in-process instead. The accumulator lives in the connection for its life:
+   * `{"context":{…}}` once, then `{"chunk":[…]}` per upstream chunk going out; `{"emit":[…]}`
+   * frames come back as they happen, `{"error":"…"}` on a mid-stream failure - arriving AFTER the
+   * 200, so values already emitted have already entered downstream stages (the ticket's own
+   * Constraints, the same trade the killed pull topology was rejected for, accepted here
+   * deliberately: emits arrive as they happen rather than after the whole fold completes).
+   */
+  protected override reduceWork<U>(
+    _fn: ReduceFunction<U, T>,
+    _initial: U,
+    stageIndex: number,
+  ): (chunks: AsyncIterable<T[]>, ctx: IContextManager) => AsyncGenerator<U[]> {
+    const self = this;
+
+    return async function* dispatchReduce(chunks, ctx) {
+      // `self._url`/`routePath()` are read HERE, at dispatch time, not captured before this
+      // function returns - `ClusterPipeline.reduceWork()`'s own wrap (below) sets `self._url` to
+      // the bootstrapped port AFTER this method returns but BEFORE this generator actually runs
+      // (same reason `HttpPipeline.stageWork()`'s own returned closure reads `this._url` fresh
+      // each call, never captured at construction time).
+      const url = self._url;
+      const path = self.routePath("reduce", stageIndex);
+
+      // Feeds the request body as chunks arrive, one NDJSON frame per upstream chunk - started
+      // before the `fetch()` call below is awaited (`.claude/rules/code.md`: a streaming/duplex
+      // probe's input starts before the call that consumes it), so the connection is genuinely
+      // duplex rather than the request finishing before the response starts.
+      const requestBody = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(ndjsonFrame({ context: ctx.toDict() }));
+          for await (const chunk of chunks) {
+            controller.enqueue(ndjsonFrame({ chunk }));
+          }
+          controller.close();
+        },
+      });
+
+      const response = await fetch(`${url}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/x-ndjson" },
+        body: requestBody,
+        // Required by Node's undici Request whenever a streaming body is passed - same reason
+        // `handleOverBridge` (`toNodeHandler`) sets it unconditionally on the server side.
+        duplex: "half",
+      } as RequestInit);
+
+      if (!response.ok || !response.body) {
+        const detail = await errorDetailOf(response);
+        throw new Error(`reduce stage ${stageIndex} at ${url} failed: ${detail}`);
+      }
+
+      for await (const line of readNdjsonLines(response.body)) {
+        const frame = JSON.parse(line) as { emit?: U[]; error?: string };
+        if (frame.error !== undefined) {
+          throw new Error(`reduce stage ${stageIndex} at ${url} failed: ${frame.error}`);
+        }
+        if (frame.emit !== undefined && frame.emit.length > 0) {
+          yield frame.emit;
+        }
+      }
     };
   }
 }
