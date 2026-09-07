@@ -20,10 +20,10 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   Blocked by #40: a fixed `.onError()` must ship before `hooks.onError`, today's only
   failure-observation surface, is removed.
 
-  #37's own conformance case for `.reduce()` must be written in the combined form
-  (`.reduce(fn, initial).local((p) => p.reduce(combine, initial))`) to run identically on all four
-  `Pipeline` classes now (#62) - a bare `.reduce()` with no combine prints `[15]` on `Pipeline` and
-  throws on `ConcurrentPipeline`.
+  #37's own conformance case for `.reduce()` needs its `ConcurrentPipeline` branch rewritten now
+  (#62): a bare `.reduce()` prints `[15]` on `Pipeline` but N values summing to 15 on
+  `ConcurrentPipeline` (partition count is a ceiling, timing-dependent) - the conformance case
+  either sums the array or adds `.local((p) => p.reduce(mergeFn, initial))` to compare one value.
 
 ### Later - not yet filed
 
@@ -49,24 +49,26 @@ The two older candidates, still not filed:
 
 ## Built
 
-- **A dispatched reduce partitions across `maxConcurrency` accumulators, the caller combines** (#62,
-  `feat!`) - #45 shipped a reduce stage as a serialization point, one accumulator whatever
-  `maxConcurrency` said, so a `ConcurrentPipeline` fanning a `.map` out four ways collapsed to a
-  single fold the moment `.reduce()` appeared. Measured during planning: an arbitrary
-  `ReduceFunction<U, T>` does not compose across partitions - the count case's own fold,
-  `(acc, _x) => acc + 1`, typechecks perfectly as its own combine and silently returns the number of
-  partitions instead of the count. `ConcurrentPipeline.reduce()` now folds `maxConcurrency`
-  independent accumulators: `reduceWork()` is still called once, but the closure it returns is
-  called `maxConcurrency` times, each its own `share()` view (`src/utils/chunk.ts`, free-slot
-  dealing over one shared iterator) of the ONE chunk stream, merged
-  in completion order by `mergeUnordered()`; `HttpPipeline`/`ClusterPipeline` inherit partitioning
-  with no new code, since `reduceWork()`'s existing per-request `Reducer` already means N concurrent
-  dispatches fold N independent accumulators. The result owes a combine (`owesCombine`,
-  `src/pipeline.ts`) - every terminal op throws, naming the stage, until `.local(build)` (#61) folds
-  the partials into one via a second `.reduce()`, the caller's own next stage: no combine parameter,
-  no associativity marker, since a combine is an ordinary `ReduceFunction`. BREAKING, no deprecation
-  period: every existing `ConcurrentPipeline.reduce()` call now partitions and owes a combine.
-  PRs #68 (L1, pinned cases), #69 (L2, partitioning + the combine debt), #71 (enable), #74 (docs).
+- **A dispatched reduce really partitions across `maxConcurrency` accumulators** (#62, `feat!`) -
+  #45 shipped a reduce stage as a serialization point, one accumulator whatever `maxConcurrency`
+  said, so a `ConcurrentPipeline` fanning a `.map` out four ways collapsed to a single fold the
+  moment `.reduce()` appeared. `ConcurrentPipeline.reduce()` now folds `maxConcurrency` independent
+  accumulators: `reduceWork()` is still called once, but the closure it returns is called
+  `maxConcurrency` times, each its own `share()` view (`src/utils/chunk.ts`, free-slot dealing over
+  one shared iterator) of the ONE chunk stream, merged in completion order by `mergeUnordered()`;
+  `HttpPipeline`/`ClusterPipeline` inherit partitioning with no new code, since `reduceWork()`'s
+  existing per-request `Reducer` already means N concurrent dispatches fold N independent
+  accumulators. Each partition's own result - an `emit()` mid-fold, or its trailing accumulator once
+  its share of the stream ends - flows downstream as an ordinary value, the same way a
+  non-partitioned reduce's own `emit()` output already does: no forced merge, no thrown error. A
+  caller who wants ONE final value writes an ordinary second reduce as the next stage -
+  `.local((p) => p.reduce(mergeFn, initial))` (#61) - the same pattern used to fold down any other
+  multi-value reduce output; reusing the fold itself as that merge is silently wrong in general (the
+  count case's own fold, `(acc, _x) => acc + 1`, typechecks perfectly as its own merge and returns
+  the number of partitions instead of the count), which is exactly why nothing is derived
+  automatically. BREAKING, no deprecation period: every existing `ConcurrentPipeline.reduce()` call
+  now returns as many values as there are partitions instead of one.
+  PRs #68 (L1, pinned cases), #69 (L2, partitioning), #71 (enable), #74 (docs).
 - **`.local(build)` runs a whole region in the orchestrating process** (#61, `feat!`) - the per-stage
   flag it replaces had to be repeated on every stage of a region that must stay put, and lived only
   on the dispatching subclasses, so a chain using it never typechecked on a base `Pipeline`.
@@ -95,9 +97,9 @@ The two older candidates, still not filed:
   `stageWork()`'s sibling (at the time this shipped, keeping a fold in-process was a per-stage flag;
   #61 later replaced it with the region combinator `.local(build)`); `HttpPipeline.reduceWork()`
   opens one duplex POST to `/reduce/<n>` (NDJSON both ways), `maxConcurrency` inert on it at the
-  time (#62 later partitioned it into `maxConcurrency` independent accumulators, owing a combine via
-  `.local(build)`); `ClusterPipeline`'s own bootstrap/`inFlight` bracket wraps the WHOLE connection instead of one
-  chunk. `emit()`, the reducer callback's fourth argument, banks a value downstream mid-fold and
+  time (#62 later partitioned it into `maxConcurrency` independent accumulators, each flowing
+  downstream on its own); `ClusterPipeline`'s own bootstrap/`inFlight` bracket wraps the WHOLE
+  connection instead of one chunk. `emit()`, the reducer callback's fourth argument, banks a value downstream mid-fold and
   resets the accumulator; the trailing accumulator is only emitted if items were folded since the
   last `emit()`. `toNodeHandler` streams both directions now instead of buffering them whole,
   unblocking the duplex response every Node consumer gets, one-shot routes included. BREAKING:

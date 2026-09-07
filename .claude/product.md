@@ -295,9 +295,8 @@ produced, never assuming there was one.
 > the next chunk.
 > **`Pipeline.reduce(fn, initial)`** - folds EVERY chunk the pipeline produces. On a dispatching
 > class (`ConcurrentPipeline.reduce(fn, initial)`, an override the base `Pipeline` never gains) it
-> partitions the stream into `maxConcurrency` independent accumulators and owes a combine: every
-> terminal op throws until `.local(build)` folds the partials into one, in the orchestrating
-> process.
+> partitions the stream into `maxConcurrency` independent accumulators; each partition's own result
+> flows downstream as an ordinary value, the same as any other multi-value reducer output.
 > **`emit`** - the reducer callback's fourth parameter, `(acc, item, ctx, emit)`. Calling it pushes
 > a value downstream mid-fold and lets the caller decide what a finished result is. The final
 > accumulator is emitted only if items were folded since the last `emit()`.
@@ -338,9 +337,25 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 [60, 90]
 ```
 
-On a dispatching class, `.reduce()` partitions across `maxConcurrency` independent accumulators -
-combining them is the caller's own next stage, written with `.local(build)`, the one serialization
-point now:
+On a dispatching class, `.reduce()` partitions across `maxConcurrency` independent accumulators.
+Nothing merges them automatically - each partition's own result flows downstream as its own value:
+
+```ts
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .toArray();
+```
+
+```json
+[7, 8]
+```
+
+(two numbers summing to 15 - the split is timing-dependent). A caller who wants ONE value writes an
+ordinary second reduce as the next stage, the same pattern used to fold down any other multi-value
+reducer output:
 
 ```ts
 import { ConcurrentPipeline } from "@outputty/pipeline";
@@ -356,7 +371,9 @@ const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 }
 [15]
 ```
 
-There is no order between partitions, so the caller's own combine must be order-insensitive
+Reusing the fold itself as that second reduce is silently wrong in general: a count folds
+`(acc, _x) => acc + 1`, and folding ITS OWN partials with the same function counts the partials, not
+the items. There is no order between partitions, so a caller's own merge must be order-insensitive
 regardless of `ordered` upstream - `ordered: false` upstream already required an order-insensitive
 fold before partitioning existed, for the same reason. And because a remote reducer's emits arrive
 while the input is still streaming, a failure mid-stream reaches the caller after values have

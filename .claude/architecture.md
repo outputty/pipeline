@@ -321,13 +321,15 @@ independent accumulator over its own `share()` view (`src/utils/chunk.ts`) of th
 stream - free-slot dealing, no dealer, no per-partition queues, a slow partition simply calls
 `.next()` less often, so the others pick up its slack. `mergeUnordered()`
 (`src/pipelines/concurrent.ts`) merges the partitions' own output in completion order, since there is
-no order between them. The result owes a combine (`owesCombine`, `src/pipeline.ts`): every terminal
-op throws until `.local(build)` folds the partials into one via a second `.reduce()`, which the
-caller writes as the next stage - there is no combine parameter and no associativity marker, since a
-combine is an ordinary `ReduceFunction` and the package already has exactly one way to spell one.
-`HttpPipeline`/`ClusterPipeline` inherit partitioning with no new code of their own: `reduceWork()`'s
-existing per-request `Reducer` construction (`runReduceStage`, `src/pipelines/http.ts:86`) already
-means N concurrent duplex POSTs to the SAME `/reduce/<n>` fold N independent accumulators.
+no order between them. Each partition's own result - an `emit()` mid-fold, or its trailing
+accumulator once its share of the stream ends - flows downstream as an ordinary value, the same way
+a non-partitioned reduce's own `emit()` output already does: no forced merge, no thrown error, no
+`combine` parameter. A caller who wants ONE final value writes an ordinary second reduce as the next
+stage - `.local((p) => p.reduce(mergeFn, initial))` - the same pattern used to fold down any other
+multi-value reduce output. `HttpPipeline`/`ClusterPipeline` inherit partitioning with no new code of
+their own: `reduceWork()`'s existing per-request `Reducer` construction (`runReduceStage`,
+`src/pipelines/http.ts:86`) already means N concurrent duplex POSTs to the SAME `/reduce/<n>` fold N
+independent accumulators.
 
 `ReduceFunction<U, T> = (acc, item, ctx, emit) => U | Promise<U>` puts `emit` FOURTH so `ctx` keeps
 arity 3. Every reduce path (`Transformer.reduce`, the shared `Reducer`/`foldChunk`/`foldChunkStream`

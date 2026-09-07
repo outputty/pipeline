@@ -54,13 +54,24 @@ have settled the "keep or remove the throw" question immediately. The build skil
 authored mid-build by a sibling session is invisible to a check that already happened. `retro`
 carries this forward.
 
-## 2026-09-07 A test's own tolerant `.local()` call masked test-isolation leakage that a stricter `.combine()` surfaced
+## 2026-09-07 A test's own tolerant `.local()` call masked test-isolation leakage that a stricter check surfaced
 
 Several `reduce.e2e.test.ts` cases relied on `PIPELINE_PARTITIONED_REDUCE=1` still being set from a
-sibling test's own setup rather than setting it themselves - harmless under `.local()`, which never
-checked `owesCombine` and just re-folded regardless of which code path ran. Converting those same
-calls to the new, stricter `.combine()` (which throws when nothing is owed) turned two of them into
-real failures. The bug was already there; the looser call had been silently absorbing it.
+sibling test's own setup rather than setting it themselves - harmless under a hand-written
+`.local()` fold, which never checked anything and just re-folded regardless of which code path ran.
+A stricter combine-debt check (since deleted, see the next entry) turned two of them into real
+failures the moment it was tried. The bug was already there; the looser call had been silently
+absorbing it - every affected test now sets its own flag rather than relying on ambient state.
+
+## 2026-09-07 The same combine-debt mechanism was reopened three times in one session before it was deleted outright
+
+The shipped throw (Done-when 4/6) became a `.combine()` sugar method, then a phantom compile-time
+type layer (mid-build, never committed), then was deleted entirely - three real reversals of the
+same mechanism, each time after fresh research (an expert skill, an independent multi-agent verdict)
+recommended KEEPING some form of it. The user's own direction won every round; the research was not
+wrong, it was answering a question the user had already closed differently. Past the second reversal
+of the identical mechanism, re-litigating it with new evidence costs a round-trip the user's own
+repeated, consistent statement had already settled - confirm the new shape once and build it instead.
 
 ## 2026-09-07 #61's Done-when 7 silently contradicted Done-when 5 and its own Constraints
 

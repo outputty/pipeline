@@ -171,11 +171,14 @@ none of it survived the hand-trim (#745).
   independent accumulators now (#62): `reduceWork()` is still called ONCE, but the closure it returns
   is called `maxConcurrency` times, each its own `share()` view of the one shared chunk stream - on
   `HttpPipeline` that is `maxConcurrency` concurrent duplex
-  POSTs to the SAME `/reduce/<n>`, each with its own accumulator server-side. The result owes a
-  combine (`owesCombine`): every terminal op refuses to drain it until `.local(build)` (#61) folds
-  the partials into one via a second `.reduce()`, which the caller writes as the very next stage -
-  there is no combine parameter and no associativity marker, since a combine is an ordinary
-  `ReduceFunction` (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
+  POSTs to the SAME `/reduce/<n>`, each with its own accumulator server-side. Each partition's own
+  result flows downstream as an ordinary value - no forced merge, no thrown error, same as a
+  non-partitioned reduce's own `emit()` output. A caller who wants ONE final value writes an
+  ordinary second reduce as the next stage, `.local((p) => p.reduce(mergeFn, initial))` (#61) - the
+  same pattern used to fold down any other multi-value reduce output; reusing the fold itself as
+  that merge is silently wrong in general (a count's own fold, `(acc, _x) => acc + 1`, folded again
+  over its own partials counts the partials, not the items), which is why nothing merges
+  automatically (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
   callable `Transformer.reduce`'s old per-chunk-toggle overload are deleted -
   `ReduceFunction` is the one type, `Pipeline.reduce` the whole-dataset replacement).
 - **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`
