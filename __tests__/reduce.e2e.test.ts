@@ -193,7 +193,7 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
     expect(data).toEqual([150]);
   });
 
-  test.fails("ConcurrentPipeline", async () => {
+  test("ConcurrentPipeline", async () => {
     const data = await new ConcurrentPipeline([1, 2, 3, 4, 5])
       .reduce((acc: number, x: number) => acc + x, 0)
       .transform((t) => t.map((n: number) => n * 10))
@@ -201,26 +201,28 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
     expect(data).toEqual([150]);
   });
 
-  // Counts real requests, so a `.reduce()` that silently fell back to the base class's in-process
-  // fold (never touching the wire) fails this even if the sum happens to come out right.
+  // Tracks request PATHS, not just a raw count - the chained .transform() after .reduce() makes
+  // its OWN real request regardless, so a bare count passes even when .reduce() itself silently
+  // fell back to ConcurrentPipeline's in-process fold (real regression found running this test:
+  // it passed at L3, before HttpPipeline.reduceWork() existed, on the transform's request alone).
   test.fails(
-    "HttpPipeline, dispatched over the wire",
+    "HttpPipeline, the reduce stage itself dispatched over /reduce/<n>",
     async () => {
-      let requests = 0;
+      const requestPaths: string[] = [];
       const worker = new HttpPipeline<number>([], { url: "" })
         .reduce((acc: number, x: number) => acc + x, 0)
         .transform((t) => t.map((n: number) => n * 10));
-      const countingHandler = async (request: Request): Promise<Response> => {
-        requests++;
+      const trackingHandler = async (request: Request): Promise<Response> => {
+        requestPaths.push(new URL(request.url).pathname);
         return worker.fetch(request);
       };
-      await withServer(countingHandler, async (url) => {
+      await withServer(trackingHandler, async (url) => {
         const data = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url })
           .reduce((acc: number, x: number) => acc + x, 0)
           .transform((t) => t.map((n: number) => n * 10))
           .toArray();
         expect(data).toEqual([150]);
-        expect(requests).toBeGreaterThan(0);
+        expect(requestPaths.some((p) => p.includes("/reduce/"))).toBe(true);
       });
     },
     HTTP_TIMEOUT,
