@@ -304,6 +304,17 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
   }
 
   /**
+   * Narrows `Pipeline.local()`'s return type only (#61, `~/.claude/rules/typescript.md`) - the body
+   * is an unchanged `super()` call, since `local()`'s own base implementation already builds a
+   * plain `Pipeline` for the region and carries the result back through THIS class's own
+   * `createPipeline()` override, which is what keeps `maxConcurrency`/`ordered` alive for whatever
+   * comes after the region.
+   */
+  override local<U>(build: (p: Pipeline<T>) => Pipeline<U>): ConcurrentPipeline<U> {
+    return super.local(build) as ConcurrentPipeline<U>;
+  }
+
+  /**
    * The one method a subclass overrides to change WHERE a reducer runs (#45). `stageWork()`'s
    * sibling: a reducer streams in and out (it emits fewer or more values than it consumes), so this
    * returns a generator over OUTPUT CHUNKS rather than an `InternalTransformer`. This class's own

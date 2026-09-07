@@ -13,7 +13,7 @@
 
 import type { ConcurrentPipelineOptions, StageOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
-import type { PipelineOptions, PipelineSource, ReduceStage } from "@src/pipeline";
+import type { Pipeline, PipelineOptions, PipelineSource, ReduceStage } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type { IContextManager, InternalTransformer, ReduceFunction } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
@@ -203,6 +203,17 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
     options?: StageOptions,
   ): HttpPipeline<U> {
     return super.reduce(fn, initial, options) as HttpPipeline<U>;
+  }
+
+  /**
+   * Re-declared ONLY to narrow `Pipeline.local()`'s return type (#61,
+   * `~/.claude/rules/typescript.md`) - the body is an unchanged `super()` call, since `local()`'s
+   * own base implementation already builds a plain `Pipeline` for the region and carries the
+   * result back through THIS class's own `createPipeline()`, which is what keeps `url` alive for
+   * whatever comes after the region.
+   */
+  override local<U>(build: (p: Pipeline<T>) => Pipeline<U>): HttpPipeline<U> {
+    return super.local(build) as HttpPipeline<U>;
   }
 
   /**
