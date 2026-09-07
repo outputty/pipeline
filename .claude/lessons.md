@@ -47,11 +47,12 @@ is pending) is now named as the trigger, not the specific tool or argument shape
 ## 2026-09-07 #62's own shipped combine-debt throw was reopened mid-review without checking for prior art
 
 The user's plain rejection of the throw ("I don't want it to throw") led straight into redesigning
-it, before a check of `~/.claude/skills/partitioned-folds/` - a domain skill that existed two hours
-before this build's own L1 commit, named the shipped shape as its own recommended pattern, and would
-have settled the "keep or remove the throw" question immediately. The build skill's own step 3.2
-("load the expert skill for the ticket's domain") only runs once, at build start; a domain skill
-authored mid-build by a sibling session is invisible to a check that already happened.
+it from scratch, without re-checking `~/.claude/skills/partitioned-folds/` - a domain skill that
+existed two hours before this build's own L1 commit (so it was present at build start, when Orient
+step 2 says to load it) and already named "a combine expressed as a second reduce stage" as its own
+recommended pattern, which would have settled the "keep or remove the throw" question immediately.
+Unverified whether the skill was loaded and its Patterns list skimmed past, or not loaded at all -
+either way, the pattern it already recorded wasn't applied at the point the throw was reopened.
 `~/.claude/skills/build/SKILL.md`'s Orient step 2 is sharpened to name reading the skill's own
 `## Patterns` list as part of loading it, not just skimming it once; `partitioned-folds/SKILL.md`'s
 own Pattern and Rule entries are marked with which one #62 shipped, so the next session's load finds
