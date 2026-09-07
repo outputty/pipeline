@@ -7,6 +7,24 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-07 A "runs in the worker" claim reached four files before anything measured it
+
+Planning #72 measured that `Pipeline.tap` runs in the orchestrator, over a real loopback
+`HttpPipeline`. The sibling claim - that `Transformer.tap` inside a dispatched `.transform()` runs in
+the WORKER - was derived by reading how `HttpPipeline.fetch` serves `_chunkTransforms[requested]`,
+and written as fact into `product.md`, `CLAUDE.md`, `README.md` and the ticket body. It held when
+finally measured (`callerSaw []`, `workerSaw [2,4,6,8,10]`), but it was unverified through the whole
+docs pass. `~/.claude/rules/code.md` gains a rule: measure where code runs, never derive it from the
+dispatch path, and one caller's measured placement settles that caller alone.
+
+## 2026-09-07 A spike declared a base method on subclasses and blamed the design for the errors
+
+The `Pipeline.tap` spike put `tap` on `TappableConcurrent`/`TappableHttp` while the design puts it on
+the base `Pipeline`. `tsc` returned six errors - three `TS2339: Property 'tap' does not exist on type
+'ConcurrentPipeline<number>'` plus knock-on inference failures - all artifacts of the stand-in. Every
+one vanished when the method moved to `Pipeline.prototype`. `~/.claude/rules/code.md`'s probe-shape
+rule gains its inverse: declare the member at the level the design puts it.
+
 ## 2026-09-07 #61's Done-when 7 silently contradicted Done-when 5 and its own Constraints
 
 Done-when 7 said "no file outside `src/`, `__tests__/` and `.claude/` changed"; Done-when 5 and the

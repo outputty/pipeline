@@ -265,3 +265,38 @@ const data = await merged.toArray();
 ```json
 [200, 300, 400, 500, 1500, 2500]
 ```
+
+## Case 9 - observing without changing the data
+
+`.tap()` watches items go past and passes them through untouched. Called on the `Pipeline` (#72) it
+always runs in the orchestrating process, so its context writes reach the caller whichever class the
+chain was built on; called inside a `.transform()` it travels with the stage and runs wherever that
+stage runs. Everything else here is the base program with `.buffer(2)` and a fan-out added.
+
+<!-- illustrative -->
+
+```ts
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+  .tap((x: number, ctx) => {
+    ctx.set("seen", (ctx.getOrDefault("seen", 0) as number) + 1);
+  });
+
+const data = await pipeline.toArray();
+const context = pipeline.contextManager.toDict();
+```
+
+```json
+[6, 8, 10]
+```
+
+```json
+{ "seen": 3 }
+```
+
+A tap's context write is per chunk, never per item: the whole chunk is tapped before the next stage
+sees any of it. Over `[1, 2, 3]`, a tap writing `last` followed by a map reading it gives `["1:3",
+"2:3", "3:3"]`, not `["1:1", "2:2", "3:3"]`.

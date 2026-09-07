@@ -26,7 +26,7 @@ unchanged inside a `Pipeline`, over an HTTP paginator, or inside a laygo `Source
 
 > **Pipeline** - the high-level API: `new Pipeline(source, options?)`, `.context()` to seed shared
 > state, `.buffer(size)` to set the chunk boundary, `.apply()`/`.transform()` to run a `Transformer`,
-> and one of five terminal ops (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`) to
+> `.tap()` to observe without changing the data, and one of five terminal ops (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`) to
 > drain it.
 > **Transformer** - the chainable, reusable chunk-transform: `new Transformer<In, Out>(options?)`,
 > `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.catch()`. `.process(chunks, context?)` runs
@@ -215,6 +215,41 @@ const data = await new Pipeline([1, 2, 3, 4, 5]).branch({
 
 ```json
 { "evens": [2, 4], "odds": [1, 3, 5] }
+```
+
+### Observing
+
+`.tap()` watches data move without changing it. It receives each item, or a whole chunk, together
+with the shared context, and passes the data through untouched. It exists at both levels, and the
+level decides where the callback runs: on a `Transformer`, inside a `.transform()`, it travels with
+the stage and runs wherever that stage runs; on a `Pipeline` it always runs in the orchestrating
+process, so its output and its context writes land where the caller can see them, whichever class
+the chain was built on.
+
+Context is writable from a tap. A whole chunk is tapped before the next stage sees any of it, and an
+async callback finishes in whatever order its work completes, so a tap that writes context writes it
+per chunk and not per item.
+
+> **`Transformer.tap(fn | transformer)`** - an observation point inside a chain. `fn` receives each
+> item and the context; the `transformer` form receives the whole chunk.
+> **`Pipeline.tap(fn | transformer)`** - the same observation point, run in the orchestrating
+> process on every class.
+
+```ts
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+  .tap((x: number, ctx) => {
+    ctx.set("seen", (ctx.getOrDefault("seen", 0) as number) + 1);
+  });
+
+console.log(await pipeline.toArray(), pipeline.contextManager.toDict());
+```
+
+```text
+[ 6, 8, 10 ] { seen: 3 }
 ```
 
 ### Error handling
