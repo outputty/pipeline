@@ -112,14 +112,14 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
    * `ConcurrentPipeline.createPipeline()` already carries forward - same reason, one more field.
    */
   protected override createPipeline<U>(
-    data: AsyncIterable<U>,
+    chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
   ): HttpPipeline<U> {
     const Ctor = this.constructor as new (
-      data: AsyncIterable<U>,
+      data: PipelineSource<U>,
       options: HttpPipelineConstructorOptions,
     ) => HttpPipeline<U>;
-    return new Ctor(data, { ...options, ...this.concurrentOptions(), url: this._url });
+    return new Ctor([], { ...options, ...this.concurrentOptions(), url: this._url, chunks });
   }
 
   /**

@@ -6,12 +6,11 @@
  * class Transformer[In, Out](BaseTransformer[In, Out]):
  *   def __init__(
  *     self,
- *     chunk_size: int | None = DEFAULT_CHUNK_SIZE,
  *     transformer: InternalTransformer[In, Out] | None = None,
  *   ) -> None:
  *     ...
  *
- *   def __call__(self, data: Iterable[In], context: IContextManager | None = None) -> Iterator[Out]:
+ *   def __call__(self, chunks: Iterable[list[In]], context: IContextManager | None = None) -> Iterator[list[Out]]:
  *     ...
  * ```
  */
@@ -24,11 +23,10 @@ import type {
   PipelineReduceFunction,
   ReduceOptions,
   TransformerLifecycleHooks,
-  ChunkerFunction,
   ChunkErrorHandler,
 } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
-import { buildChunkGenerator } from "./utils/chunk";
+import { buildChunkGenerator, flattenChunks } from "./utils/chunk";
 import { SimpleContextManager } from "./context/simple";
 import { ErrorHandler } from "./errors/handler";
 import { isContextAware, isContextAwareReduce } from "./utils/helpers";
@@ -40,11 +38,10 @@ import { isContextAware, isContextAwareReduce } from "./utils/helpers";
 type TransformerConstructorOptions<In, Out> = TransformerOptions<In, Out> & {
   hooks?: TransformerLifecycleHooks<In, Out>;
   errorHandler?: ErrorHandler<In>;
-  chunker?: ChunkerFunction<In>;
 };
 
 /**
- * The one chunk-draining order a standalone `Transformer.execute()` runs, one chunk at a time, in
+ * The one chunk-draining order a standalone `Transformer.process()` runs, one chunk at a time, in
  * order (#17: replaces the deleted `sequential` execution strategy, which had the identical body -
  * a `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` is the replacement for concurrency,
  * wrapping the chain rather than configuring the `Transformer` that drives it).
@@ -62,20 +59,18 @@ async function* runSequentially<In, Out>(
 }
 
 /**
- * A reusable, composable stage: `In` items in, `Out` items out, applied chunk by chunk. Built by
- * chaining (`.map()`, `.filter()`, `.reduce()`, …), each call returning a NEW `Transformer` so one
- * can be shared across pipelines without aliasing. It carries its own chunk size and error
+ * A reusable, composable stage: `In` chunks in, `Out` chunks out, applied chunk by chunk - it never
+ * decides how its own input was cut (#39: chunking lives on `Pipeline`'s `.buffer()` alone, never
+ * here). Built by chaining (`.map()`, `.filter()`, `.reduce()`, …), each call returning a NEW
+ * `Transformer` so one can be shared across pipelines without aliasing. It carries its own error
  * handling, which is what lets `pipeline.apply(t)` stay a one-liner. Every configuration method
- * (`.onError()`, `.setChunker()`, `.withHooks()`) is copy-on-write like `.map()`/`.filter()`: it
- * returns a NEW `Transformer` carrying every other knob forward, never mutates `this` — the shape
+ * (`.onError()`, `.withHooks()`) is copy-on-write like `.map()`/`.filter()`: it returns a NEW
+ * `Transformer` carrying every other knob forward, never mutates `this` — the shape
  * `@outputty/laygo`'s own `Model#named` follows.
  *
  * `new Transformer<number, number>().map((n) => n * 2)` → a transformer a pipeline can `.apply()`.
  */
 export class Transformer<In, Out> {
-  /** Number of items per chunk */
-  readonly chunkSize: number;
-
   /** The internal transform function */
   readonly transform: InternalTransformer<In, Out>;
 
@@ -85,14 +80,6 @@ export class Transformer<In, Out> {
   /** Lifecycle hooks for monitoring execution progress */
   readonly hooks?: TransformerLifecycleHooks<In, Out>;
 
-  /** Custom chunk generator, when `.setChunker()` was called — undefined means the default,
-   * chunkSize-driven generator built below. Public so `inertKnobsOf` (`pipeline.ts`) can detect a
-   * custom chunker the async-iteration path can't honor, the same way it reads `hooks`. */
-  readonly chunker?: ChunkerFunction<In>;
-
-  /** Function to break input into chunks — `chunker` if set, else built from `chunkSize` */
-  private chunkGenerator: ChunkerFunction<In>;
-
   /** Default context to use when none provided */
   private defaultContext: IContextManager;
 
@@ -100,8 +87,8 @@ export class Transformer<In, Out> {
    * Overload 1 — a real `transform` in hand. Not conditional on `In extends Out`, so it resolves
    * (and is preferred) even from inside this class's OWN generic methods, where `In`/`Out` are
    * still abstract type parameters a deferred conditional can never distribute over. Every
-   * copy-on-write rebuild site below (`.pipe()`, `.withHooks()`, `.onError()`, `.setChunker()`)
-   * already carries a real `transform` forward, so all of them land here.
+   * copy-on-write rebuild site below (`.pipe()`, `.withHooks()`, `.onError()`) already carries a
+   * real `transform` forward, so all of them land here.
    */
   constructor(
     options: TransformerConstructorOptions<In, Out> & { transform: InternalTransformer<In, Out> },
@@ -118,12 +105,9 @@ export class Transformer<In, Out> {
    */
   constructor(...args: In extends Out ? [options?: TransformerConstructorOptions<In, Out>] : never);
   constructor(options?: TransformerConstructorOptions<In, Out>) {
-    this.chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
     // Reachable only via overload 2's `In extends Out` branch — a real conversion there, not a lie.
     this.transform = options?.transform ?? ((chunk, _ctx) => chunk as unknown as Out[]);
     this.errorHandler = options?.errorHandler ?? new ErrorHandler<In>();
-    this.chunker = options?.chunker;
-    this.chunkGenerator = this.chunker ?? buildChunkGenerator(this.chunkSize);
     this.defaultContext = new SimpleContextManager();
     this.hooks = options?.hooks;
   }
@@ -150,16 +134,17 @@ export class Transformer<In, Out> {
    */
   withHooks(hooks: TransformerLifecycleHooks<In, Out>): Transformer<In, Out> {
     return new Transformer<In, Out>({
-      chunkSize: this.chunkSize,
       transform: this.transform,
       errorHandler: this.errorHandler,
-      chunker: this.chunker,
       hooks,
     });
   }
 
   /**
-   * Execute the transformer on input data.
+   * Run this transformer over chunks the CALLER already cut - chunk in, chunk out, no chunking
+   * knowledge of its own (#39). The one seam every `Pipeline` class drives it through:
+   * `Pipeline.apply()` hands it `this._chunks` directly, and a caller running a `Transformer`
+   * standalone supplies its own already-cut `AsyncIterable<In[]>`.
    *
    * If hooks are attached, they will be called at appropriate lifecycle points:
    * - onStart: Before processing begins
@@ -171,36 +156,35 @@ export class Transformer<In, Out> {
    *
    * Python equivalent:
    * ```python
-   * def __call__(self, data: Iterable[In], context: IContextManager | None = None) -> Iterator[Out]:
+   * def __call__(self, chunks: Iterable[list[In]], context: IContextManager | None = None) -> Iterator[list[Out]]:
    *   run_context = context if context is not None else self._default_context
-   *   chunks = self._chunk_generator(data)
    *   for chunk in chunks:
-   *     yield from self.transformer(chunk, run_context)
+   *     yield self.transformer(chunk, run_context)
    * ```
    *
    * On a chunk failure, `this.errorHandler.handle([], error, runContext)` fires (any
    * handler registered via `.onError()`) BEFORE the error re-throws — a notification, not a
    * recovery path, so the failure still propagates to the caller.
    *
-   * @param data - Async iterable of input items
+   * @param chunks - Async iterable of already-cut input chunks
    * @param context - Optional context manager for sharing state
-   * @returns Async generator of output items
+   * @returns Async generator of output chunks
    *
    * @example
    * ```typescript
    * const t = new Transformer<number, number>().map((x) => x * 2);
-   * for await (const item of t.execute(source([1, 2, 3]))) console.log(item); // 2, 4, 6
+   * for await (const chunk of t.process(chunksOf([1, 2, 3]))) console.log(chunk); // [2, 4, 6]
    *
    * // onError wiring: a throwing transform still propagates, but the handler sees it first.
    * let seen: Error | undefined;
    * const failing = new Transformer<number, number>()
    *   .map(() => { throw new Error("boom"); })
    *   .onError((e) => { seen = e; });
-   * await expect(failing.execute(source([1])).next()).rejects.toThrow("boom");
+   * await expect(failing.process(chunksOf([1])).next()).rejects.toThrow("boom");
    * // seen.message === "boom"
    * ```
    */
-  async *execute(data: AsyncIterable<In>, context?: IContextManager): AsyncGenerator<Out> {
+  async *process(chunks: AsyncIterable<In[]>, context?: IContextManager): AsyncGenerator<Out[]> {
     const runContext = context ?? this.defaultContext;
     const startTime = Date.now();
     const itemCounter = { index: 0 };
@@ -210,15 +194,15 @@ export class Transformer<In, Out> {
 
       const hasItemHooks =
         this.hooks?.onItemStart ?? this.hooks?.onItemComplete ?? this.hooks?.onItemError;
-      const chunks = this.chunkGenerator(data);
 
       if (hasItemHooks) {
         const wrappedTransform = this.wrapTransformForItemHooks(itemCounter);
-        const transformedChunks = runSequentially(wrappedTransform, chunks, runContext);
-        yield* this.drainChunks(transformedChunks);
+        yield* runSequentially(wrappedTransform, chunks, runContext);
       } else {
-        const transformedChunks = runSequentially(this.transform, chunks, runContext);
-        yield* this.drainChunks(transformedChunks, () => itemCounter.index++);
+        yield* this.countOutputItems(
+          runSequentially(this.transform, chunks, runContext),
+          itemCounter,
+        );
       }
 
       const totalDurationMs = Date.now() - startTime;
@@ -228,7 +212,7 @@ export class Transformer<In, Out> {
       // Registered via `.onError()` (above) — fires on any chunk failure, THEN the error still
       // propagates (`.onError()` is a notification hook, not a recovery path; `.catch()` is the
       // sub-pipeline that actually recovers). The offending chunk is not tracked at this scope, so
-      // handlers see `[]` — same as every OTHER caller of this `execute()` catch, letting a
+      // handlers see `[]` — same as every OTHER caller of this `process()` catch, letting a
       // handler tell error-occurred from error-details.
       this.errorHandler.handle([], error as Error, runContext);
       throw error;
@@ -236,10 +220,30 @@ export class Transformer<In, Out> {
   }
 
   /**
+   * Yields each chunk unchanged, advancing `counter.index` by its OUTPUT length first - the
+   * no-item-hooks fast path's own item count for `onComplete` (a filter can shrink a chunk, so the
+   * count is read from what is actually yielded, not the input). Its own method purely to keep
+   * `process()` within this repo's own `max-depth: 2` rule.
+   *
+   * @example
+   * `countOutputItems([[1, 2], [3]], counter)` yields `[1, 2]` then `[3]`, leaving
+   * `counter.index` at `3`.
+   */
+  private async *countOutputItems(
+    chunks: AsyncIterable<Out[]>,
+    counter: { index: number },
+  ): AsyncGenerator<Out[]> {
+    for await (const chunk of chunks) {
+      counter.index += chunk.length;
+      yield chunk;
+    }
+  }
+
+  /**
    * Build a transform that emits `onItemStart`/`onItemComplete`/`onItemError`
    * hooks around each item of a chunk, one item at a time.
    *
-   * Runs only when `execute()` detects at least one item-level hook attached.
+   * Runs only when `process()` detects at least one item-level hook attached.
    * Produces the same chunk output as `this.transform` would, but drives the
    * hooks as a side effect and advances `counter.index` per processed item.
    *
@@ -294,29 +298,6 @@ export class Transformer<In, Out> {
   }
 
   /**
-   * Flatten transformed chunks into a single item stream.
-   *
-   * Runs at the tail of `execute()` to drain whichever chunk stream the
-   * strategy produced. When `onItem` is supplied, it is invoked once per
-   * item just before that item is yielded (used to advance the item
-   * counter on the no-hooks fast path).
-   *
-   * @example
-   * `drainChunks([[1, 2], [3]])` yields `1`, `2`, `3` in order.
-   */
-  private async *drainChunks(
-    chunks: AsyncIterable<Out[]>,
-    onItem?: () => void,
-  ): AsyncGenerator<Out> {
-    for await (const chunk of chunks) {
-      for (const item of chunk) {
-        onItem?.();
-        yield item;
-      }
-    }
-  }
-
-  /**
    * Chain a new operation onto this transformer.
    *
    * This is the core internal method for building transformation chains.
@@ -352,13 +333,11 @@ export class Transformer<In, Out> {
     };
 
     return new Transformer<In, U>({
-      chunkSize: this.chunkSize,
       transform: newTransform,
-      // errorHandler/chunker are keyed on `In`, unaffected by the Out -> U change, so both carry
-      // forward — this is what keeps `.onError(fn).map(g)` and `.setChunker(c).map(g)` from
-      // silently dropping the configuration this pipe() call would otherwise discard.
+      // errorHandler is keyed on `In`, unaffected by the Out -> U change, so it carries forward -
+      // this is what keeps `.onError(fn).map(g)` from silently dropping the configuration this
+      // pipe() call would otherwise discard.
       errorHandler: this.errorHandler,
-      chunker: this.chunker,
       // Note: hooks are NOT preserved through pipe() since types change Out -> U
       // Use withHooks() at the end of the chain
     });
@@ -551,7 +530,7 @@ export class Transformer<In, Out> {
    * void` with its default `U`) — a union loses the void-return exemption TypeScript grants a
    * literal `void`, so an ordinary `(chunk, err) => arr.push(err)` would stop compiling
    * (`.claude/rules/typescript.md`, 2026-09-05). This handler's return is ignored regardless (see
-   * `execute()`'s own catch, above) - `.onError()` is a notification hook here, never `.catch()`'s
+   * `process()`'s own catch, above) - `.onError()` is a notification hook here, never `.catch()`'s
    * recovery path, so bare `void` also states that intent.
    *
    * Python equivalent:
@@ -574,42 +553,9 @@ export class Transformer<In, Out> {
     const errorHandler =
       handler instanceof ErrorHandler ? handler : this.errorHandler.clone().onError(handler);
     return new Transformer<In, Out>({
-      chunkSize: this.chunkSize,
       transform: this.transform,
       hooks: this.hooks,
-      chunker: this.chunker,
       errorHandler,
-    });
-  }
-
-  /**
-   * Set a custom chunk generator, returning a NEW transformer that carries it forward.
-   *
-   * The chunk generator controls how input data is batched for processing.
-   * By default, uses the chunkSize to create fixed-size chunks.
-   *
-   * Copy-on-write, like `.onError()`. The declared `chunker` also makes this knob VISIBLE to
-   * `Pipeline`'s `inertKnobsOf` (`pipeline.ts`) the same way `.withHooks()`/a non-default
-   * `chunkSize` already are — a `Pipeline` carrying this transformer now throws naming
-   * `"setChunker"` if iterated directly (`for await`) instead of through a terminal op, rather
-   * than silently running with the default chunker.
-   *
-   * Python equivalent:
-   * ```python
-   * def set_chunker(self, chunker: ChunkGenerator[In]) -> "Transformer[In, Out]":
-   *   return Transformer(..., chunker=chunker)
-   * ```
-   *
-   * @param chunker - Function that takes an async iterable and yields chunks
-   * @returns A new Transformer carrying the custom chunker
-   */
-  setChunker(chunker: ChunkerFunction<In>): Transformer<In, Out> {
-    return new Transformer<In, Out>({
-      chunkSize: this.chunkSize,
-      transform: this.transform,
-      hooks: this.hooks,
-      errorHandler: this.errorHandler,
-      chunker,
     });
   }
 
@@ -747,14 +693,18 @@ export class Transformer<In, Out> {
     ): AsyncGenerator<U> {
       const runContext = context ?? new SimpleContextManager();
 
-      // Execute the transformer to get all processed items
+      // Run the transformer to get all processed chunks - `perChunk: false` is the one caller
+      // left with no `Pipeline` to own the cut, so it hardcodes the default chunk size (#39).
+      // Flattened back to items here (`flattenChunks`) so the reduce loop below stays within
+      // this repo's own `max-depth: 2` rule.
       const asyncData = self.toAsyncIterable(data);
-      const processedItems = self.execute(asyncData, runContext);
+      const chunks = buildChunkGenerator<In>(DEFAULT_CHUNK_SIZE)(asyncData);
+      const items = flattenChunks(self.process(chunks, runContext));
 
       // Reduce all items to a single value - awaited per item, same reason as the per-chunk arms
       // above: an async `fn` must resolve before the next call sees the accumulator.
       let accumulator = initial;
-      for await (const item of processedItems) {
+      for await (const item of items) {
         if (isContextAware) {
           accumulator = await (fn as (acc: U, item: Out, ctx: IContextManager) => U | Promise<U>)(
             accumulator,
@@ -821,7 +771,6 @@ export class Transformer<In, Out> {
     }
 
     const tempTransformer = new Transformer<Out, Out>({
-      chunkSize: this.chunkSize,
       transform: (chunk) => chunk,
     });
     const subPipeline = subPipelineBuilder(tempTransformer);

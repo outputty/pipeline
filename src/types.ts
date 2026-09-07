@@ -140,11 +140,6 @@ export interface BranchDefinition<T, _U, TTransformer = unknown> {
  */
 export interface TransformerOptions<In, Out> {
   /**
-   * Number of items per chunk.
-   */
-  chunkSize?: number;
-
-  /**
    * Initial transformer function.
    */
   transform?: InternalTransformer<In, Out>;

@@ -49,7 +49,6 @@ const items = Array.from({ length: 30 }, (_, i) => i);
 const pipeline = new ClusterPipeline(items, {
   workers,
   maxConcurrency: workers,
-  chunkSize: 1,
   context: orchestratorInstance,
   contextFactory: () => {
     factoryCalls++;
@@ -59,6 +58,7 @@ const pipeline = new ClusterPipeline(items, {
 
 const out = await pipeline
   .context({ multiplier: 10 })
+  .buffer(1)
   .transform((t) =>
     t.map((x: number, ctx) => ({
       value: x * (ctx.get("multiplier") as number),
