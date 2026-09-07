@@ -17,7 +17,7 @@ import cluster from "node:cluster";
 import { createServer } from "node:http";
 import { availableParallelism } from "node:os";
 import type { AddressInfo } from "node:net";
-import type { ConcurrentPipelineOptions, StageOptions } from "@src/pipelines/concurrent";
+import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
 import type { Pipeline, PipelineOptions, PipelineSource } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
@@ -197,25 +197,18 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
     return new Ctor([], merged);
   }
 
-  override transform<U>(
-    builder: (t: Transformer<T, T>) => Transformer<T, U>,
-    options?: StageOptions,
-  ): ClusterPipeline<U> {
-    return super.transform(builder, options) as ClusterPipeline<U>;
+  override transform<U>(builder: (t: Transformer<T, T>) => Transformer<T, U>): ClusterPipeline<U> {
+    return super.transform(builder) as ClusterPipeline<U>;
   }
 
-  override apply<U>(transformer: Transformer<T, U>, options?: StageOptions): ClusterPipeline<U> {
-    return super.apply(transformer, options) as ClusterPipeline<U>;
+  override apply<U>(transformer: Transformer<T, U>): ClusterPipeline<U> {
+    return super.apply(transformer) as ClusterPipeline<U>;
   }
 
   /** Re-declared ONLY to narrow the static return type back to `ClusterPipeline<U>` - same reason
    * as `.transform()`/`.apply()` above. `HttpPipeline.reduce()`'s own logic runs unchanged. */
-  override reduce<U>(
-    fn: ReduceFunction<U, T>,
-    initial: U,
-    options?: StageOptions,
-  ): ClusterPipeline<U> {
-    return super.reduce(fn, initial, options) as ClusterPipeline<U>;
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ClusterPipeline<U> {
+    return super.reduce(fn, initial) as ClusterPipeline<U>;
   }
 
   /**

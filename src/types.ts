@@ -34,9 +34,9 @@ export type PipelineFunction<Out, T> = (item: Out, ctx: IContextManager) => T | 
  *
  * `Transformer.reduce(fn, initial)` folds the ONE chunk it receives and keeps no state between
  * chunks; `Pipeline.reduce(fn, initial)` folds EVERY chunk the pipeline produces, the only place
- * cross-chunk state lives (`ConcurrentPipeline.reduce(fn, initial, options?)` is the one override
- * adding `{ local: true }`, the base `Pipeline` never gains it). Both call `fn` with all four
- * arguments regardless of its declared
+ * cross-chunk state lives (`ConcurrentPipeline.reduce(fn, initial)` is the one override that always
+ * dispatches it - `.local(build)` (#61) is what keeps it in-process instead, the base `Pipeline`
+ * never gains that override). Both call `fn` with all four arguments regardless of its declared
  * arity — JS ignores the extras, so `(acc, x, emit) => …` silently receives `ctx` in `emit`'s slot and
  * throws "emit is not a function" on the first call; write `(acc, x, _ctx, emit)`.
  *
