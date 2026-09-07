@@ -53,7 +53,7 @@ The two older candidates, still not filed:
   The "source position" mechanism (a separate async-iteration replay path, and the throw it needed
   for a knob it couldn't honor) is deleted with it: every consumption path now reads the same
   persisted chunk stream. PRs #48 (L1, pinned cases), #50 (L2, the seam, also enable - no flag was
-  possible for an API removal), #PENDING-DOCS-PR (docs).
+  possible for an API removal), #51 (docs).
 - **A caller's own `IContextManager` survives `.context()`, `merge()` and a process boundary** (#31)
   - `.context()` mutates the caller's OWN manager in place instead of copying into a fresh
     `SimpleContextManager`, so a custom class keeps receiving writes and a rejected write propagates
