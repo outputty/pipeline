@@ -25,10 +25,12 @@ export type PipelineFunction<Out, T> = (item: Out, ctx: IContextManager) => T | 
 
 /**
  * A pipeline reduce callback: folds `item` into `acc`, with an optional shared `ctx`, and can push a
- * value downstream mid-fold via `emit` (#45) — `emit` is FOURTH, so `ctx` keeps arity 3 and
- * `isContextAwareReduce`'s `fn.length` check is untouched. ONE signature for the same reason as
- * `PipelineFunction` above — a union of arities would block contextual inference and make `acc`/`item`
- * implicit `any` in an un-annotated `.reduce((acc, x) => …)`.
+ * value downstream mid-fold via `emit` (#45) — `emit` is FOURTH, so `ctx` keeps arity 3, matching
+ * `PipelineFunction`'s own `ctx` slot (the arity-sniffing `isContextAwareReduce` this comment used to
+ * reference is gone: every caller now always passes all four arguments, so no branch on `fn.length`
+ * is needed). ONE signature for the same reason as `PipelineFunction` above — a union of arities
+ * would block contextual inference and make `acc`/`item` implicit `any` in an un-annotated
+ * `.reduce((acc, x) => …)`.
  *
  * `Transformer.reduce(fn, initial)` folds the ONE chunk it receives and keeps no state between
  * chunks; `Pipeline.reduce(fn, initial, options?)` folds EVERY chunk the pipeline produces, the only
@@ -45,10 +47,6 @@ export type ReduceFunction<U, Out> = (
   ctx: IContextManager,
   emit: (value: U) => void,
 ) => U | Promise<U>;
-
-/** @deprecated Use {@link ReduceFunction} - kept only until the `perChunk` removal (enable layer,
- * #45) so the old name still resolves for any straggling import during the stack. */
-export type PipelineReduceFunction<U, Out> = ReduceFunction<U, Out>;
 
 /**
  * Error handler for chunk processing errors.
@@ -155,25 +153,6 @@ export interface TransformerOptions<In, Out> {
    * Initial transformer function.
    */
   transform?: InternalTransformer<In, Out>;
-}
-
-/**
- * Options for the reduce operation.
- *
- * Python equivalent:
- * ```python
- * def reduce(self, function, initial, *, per_chunk: bool = False):
- *   ...
- * ```
- */
-export interface ReduceOptions {
-  /**
-   * When true (default), reduce is applied per-chunk and returns a chainable Transformer.
-   * When false, reduce becomes a terminal operation that reduces the ENTIRE dataset.
-   *
-   * Python equivalent: `per_chunk` parameter (inverted logic - `per_chunk=True` == `perChunk: true`)
-   */
-  perChunk?: boolean;
 }
 
 /**

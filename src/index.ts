@@ -9,7 +9,7 @@
 // Types
 export type {
   PipelineFunction,
-  PipelineReduceFunction,
+  ReduceFunction,
   ChunkErrorHandler,
   InternalTransformer,
   ChunkerFunction,
@@ -17,7 +17,6 @@ export type {
   BranchDefinition,
   BranchOptions,
   TransformerOptions,
-  ReduceOptions,
   TransformerLifecycleHooks,
 } from "./types";
 export { DEFAULT_CHUNK_SIZE } from "./types";
@@ -29,7 +28,7 @@ export { SimpleContextManager } from "./context/simple";
 export { ErrorHandler } from "./errors/handler";
 
 // Utils
-export { buildChunkGenerator, normalize, isContextAware, isContextAwareReduce } from "./utils";
+export { buildChunkGenerator, normalize, isContextAware } from "./utils";
 
 // Transformer
 export { Transformer } from "./transformer";
