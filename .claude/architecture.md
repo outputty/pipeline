@@ -131,8 +131,15 @@ alone to POST instead, adds `.fetch()`/`stagePath()`/`toNodeHandler`; `ClusterPi
 worker bootstrap, wraps `stageWork()` to lazily bootstrap on first dispatch, and overrides
 `stagePath()` to route several pipeline definitions through one shared worker server
 (`/pipeline/<i>/stage/<n>`, `<i>` a construction-order index reproduced identically by every worker).
-`{ local: true }` on `.transform()`/`.apply()` is `super.apply(transformer)` at every level - a
-plain `Pipeline`'s own sequential, in-process `apply()`, needing no per-level code.
+`.local(build)` (#61) is the one way to keep a whole region in-process: it builds a bare `Pipeline`
+over `this._chunks`/`this._context` (never `this.constructor` - the region must never be able to
+dispatch, whatever class called it), runs `build` against that bare pipeline, and carries the built
+region's `_chunks`/`_context`/`_chunkTransforms`/`_reduceStages` back through `this.createPipeline()`
+- the SAME seam every other copy-on-write method uses to resume the caller's own class. Each
+dispatching subclass re-declares `local()` to narrow its return type only
+(`~/.claude/rules/typescript.md`); the body is an unchanged `super.local(build)` call at every
+level, needing no per-level code - the base implementation is already correct everywhere because a
+bare `Pipeline`'s own `.transform()`/`.reduce()` never fan out or POST.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
 createPipeline()` calling `this.constructor` rather than a hard-coded `new Pipeline<U>`, so a
@@ -161,10 +168,11 @@ bypass IS the mechanism, since `process()` runs a chain sequentially, one chunk 
 own RESULT ARRAY rather than flattening it: the fanned-out output IS itself a real `_chunks`
 boundary, so a later `.buffer()` recuts from it exactly like any other stage's output. A knob that
 only ever takes effect via `process()` (`.withHooks()`, `.onError()`) THROWS immediately on a
-non-local stage instead of silently never firing (`dispatchKnobViolations`, `concurrent.ts`); `{
-local: true }` is the escape hatch. `.buffer()` reaches a dispatched stage exactly like a local one,
-since `Pipeline` owns the cut, not `Transformer` - the refusal this used to need for a custom
-chunker (`setChunker`, deleted with `Transformer`'s own chunking fields) has nothing left to refuse.
+non-local stage instead of silently never firing (`dispatchKnobViolations`, `concurrent.ts`); wrapping
+the stage in `.local(build)` is the escape hatch (#61 deleted the old per-stage `StageOptions` flag
+this used to name). `.buffer()` reaches a dispatched stage exactly like a local one, since
+`Pipeline` owns the cut, not `Transformer` - the refusal this used to need for a custom chunker
+(`setChunker`, deleted with `Transformer`'s own chunking fields) has nothing left to refuse.
 
 A worker process (`ClusterPipeline`'s own bootstrap; `HttpPipeline`'s own `.fetch()`-side instance
 in general) never orchestrates: its chunk stream is empty, set at construction, so every terminal op
@@ -271,12 +279,13 @@ resolves immediately with an EMPTY result - the worker exists only to hold the t
 A reducer is a fold with cross-chunk state, so it does not fit `InternalTransformer` (`chunk` in,
 `Out[]` out, one output chunk per input chunk). Its shape is a stream operator: `Pipeline.reduce()`
 folds `this._chunks` directly (in-process, sequential, no `reduceWork()` indirection - the base class
-never dispatches); `ConcurrentPipeline.reduce()` overrides it, adding `StageOptions` (`{ local: true
-}` runs `super.reduce()`, the base's own fold) and, dispatched, delegating to `reduceWork()` -
-`stageWork()`'s sibling, the one method a subclass overrides to change WHERE a reducer runs:
+never dispatches); `ConcurrentPipeline.reduce()` overrides it to always delegate to `reduceWork()` -
+`stageWork()`'s sibling, the one method a subclass overrides to change WHERE a reducer runs.
+Wrapping the call in `.local(build)` (#61) runs `build`'s own `.reduce()` against a bare `Pipeline`
+instead, the base class's own fold:
 
 ```text
-ConcurrentPipeline.reduce(fn, initial, options?)
+ConcurrentPipeline.reduce(fn, initial)
 	reduceWork(fn, initial, stageIndex)            the per-class override
 		ConcurrentPipeline    fold in-process, sequentially     maxConcurrency inert: one accumulator
 		HttpPipeline          one duplex POST /reduce/<n>       accumulator lives in the connection

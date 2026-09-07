@@ -161,8 +161,10 @@ none of it survived the hand-trim (#745).
   `isContextAwareReduce`, dead once this shipped). `Transformer.reduce(fn, initial)` folds the ONE
   chunk it receives and keeps no state between chunks; `Pipeline.reduce(fn, initial)` folds EVERY
   chunk the pipeline produces, the only place cross-chunk state lives -
-  `ConcurrentPipeline.reduce(fn, initial, options?)` is the one override adding `{ local: true }`,
-  the base `Pipeline` never gains it, same as `.transform()`/`.apply()`. Both may produce several
+  `ConcurrentPipeline.reduce(fn, initial)` is the one override that always dispatches it, an
+  override the base `Pipeline` never gains, same as `.transform()`/`.apply()`'s own dispatch
+  overrides - `.local(build)` (#61) is the one way to keep any of the three in-process now. Both
+  may produce several
   values and the chain continues after either, downstream running over every value produced.
   `emit(value)` pushes one downstream mid-fold; the final accumulator is emitted only if items were
   folded since the last `emit()`. A reduce stage dispatches like any other stage, over ONE duplex
@@ -191,13 +193,20 @@ none of it survived the hand-trim (#745).
   `_chunkTransforms`, so a dispatching class sends a chunk plus an index and never a function.
   `.transform((t) => t.map(f).filter(g))` is ONE stage; two chained `.transform()` calls are TWO, and
   on a dispatching class that is two network hops. `_chunkTransforms` is `HttpPipeline`/
-  `ClusterPipeline`'s own worker-side stage registry (`this._chunkTransforms[requested]`,
-  `src/pipelines/http.ts:273`) - unrelated to chunking and untouched by #39. A reduce stage occupies
+  `ClusterPipeline`'s own worker-side stage registry (`this._chunkTransforms[requested]` in
+  `HttpPipeline.fetch`, `src/pipelines/http.ts`) - unrelated to chunking and untouched by #39. A
+  reduce stage occupies
   the SAME index space with its own registry, `_reduceStages` (#45) - its `_chunkTransforms` slot
   holds a placeholder that throws if ever invoked as a per-chunk transform.
-- **`{ local: true }`** - The optional SECOND argument to a dispatching subclass's own
-  `transform()`/`apply()`, keeping that stage in the orchestrating process. It is `super.apply()` at
-  every level, and the base `Pipeline` never gains it.
+- **`.local(build)`** (#61) - Runs a whole region of the chain in the orchestrating process: builds
+  a bare `Pipeline` over the caller's own chunk stream, runs `build` against it (nothing inside can
+  dispatch), and carries the result back through `createPipeline()` so the caller's own class
+  resumes afterward. One implementation on the base `Pipeline`; each dispatching subclass
+  re-declares it only to narrow its return type (`~/.claude/rules/typescript.md`) - the body is an
+  unchanged `super.local(build)` call at every level. Replaces `StageOptions`/`{ local: true }`, the
+  per-stage flag #61 deleted (BREAKING, no deprecation period): that flag had to be repeated on
+  every stage of a region that must stay put, and lived only on the dispatching subclasses, so it
+  never typechecked on a base `Pipeline`.
 - **Source position** (killed, #39) - was the `Pipeline` drain path that did NOT run
   `Transformer.execute()`: async iteration (`[Symbol.asyncIterator]`) replayed each transform's plain
   function instead of running the real chain, and `inertKnobsOf` threw there for any knob that only

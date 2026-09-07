@@ -144,6 +144,8 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
   a manager that rejects an unknown key propagates that error instead of being bypassed.
 - **`.apply(transformer)`** - apply a pre-built transformer.
 - **`.transform(fn)`** - build and apply a transformer inline.
+- **`.local(build)`** - run a whole region of the chain in the orchestrating process; on
+  `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, nothing `build` does can dispatch.
 - **`.buffer(size)`** - collect items and re-chunk.
 - **`.toArray()`** - collect all results into an array. Read `.contextManager` afterward for context.
 - **`.first(n)`** - take first n items.
@@ -309,7 +311,7 @@ console.log(data); // [60, 90]
 
 On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, `.reduce()` runs remotely like any other
 stage - one accumulator over one connection for the whole stream, so `maxConcurrency` is inert on
-it. `{ local: true }` keeps it in the orchestrating process instead.
+it. `.local((p) => p.reduce(...))` keeps it in the orchestrating process instead.
 
 ## Error Handling
 

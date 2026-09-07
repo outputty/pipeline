@@ -120,7 +120,7 @@ import { HttpPipeline } from "@outputty/pipeline";
 const pipeline = new HttpPipeline([1, 2, 3, 4, 5], { url: process.env.SELF_URL! })
   .buffer(2)
   .transform((t) => t.map((x: number) => x * 2))
-  .transform((t) => t.filter((x: number) => x > 4), { local: true });
+  .local((p) => p.transform((t) => t.filter((x: number) => x > 4)));
 
 app.mount("/pipeline", pipeline.fetch);
 ```
