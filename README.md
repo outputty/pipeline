@@ -156,7 +156,8 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.map(fn)`** - transform each element.
 - **`.flatMap(fn)`** - transform and flatten results.
 - **`.filter(fn)`** - keep elements matching predicate.
-- **`.reduce(fn, initial)`** - reduce to single value.
+- **`.reduce(fn, initial)`** - fold this ONE chunk; `fn` is `(acc, item, ctx, emit) => acc`, called
+  with all four arguments regardless of its own declared arity. See [Reducing](#reducing).
 - **`.tap(fn)`** - execute side-effect without changing data.
 - **`.catch(build, onError?)`** - run a sub-chain, handling its errors.
 
@@ -254,6 +255,54 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 
 console.log(data); // [2, 4, 6, 8, 10]
 ```
+
+## Reducing
+
+A reducer folds items into an accumulator, at two levels with one meaning: `Transformer.reduce`
+folds the ONE chunk it receives and keeps nothing between chunks; `Pipeline.reduce` folds EVERY
+chunk the pipeline produces, the only place cross-chunk state lives. The chain continues after
+either - downstream stages run over every value a reducer produced.
+
+<!-- compiles -->
+
+```typescript
+import { Pipeline } from "@outputty/pipeline";
+
+const data = await new Pipeline([1, 2, 3, 4, 5])
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .transform((t) => t.map((n: number) => n * 10))
+  .toArray();
+
+console.log(data); // [150]
+```
+
+`emit`, the reducer callback's fourth parameter (`(acc, item, ctx, emit) => acc`), pushes a value
+downstream mid-fold and resets the accumulator - a running total banked whenever it crosses a
+threshold, with no trailing value when the last item already banked one:
+
+<!-- compiles -->
+
+```typescript
+import { Pipeline } from "@outputty/pipeline";
+
+const data = await new Pipeline([1, 2, 3, 4, 5])
+  .reduce((acc: number, x: number, _ctx, emit: (v: number) => void) => {
+    acc += x;
+    if (acc >= 6) {
+      emit(acc);
+      return 0;
+    }
+    return acc;
+  }, 0)
+  .transform((t) => t.map((n: number) => n * 10))
+  .toArray();
+
+console.log(data); // [60, 90]
+```
+
+On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, `.reduce()` runs remotely like any other
+stage - one accumulator over one connection for the whole stream, so `maxConcurrency` is inert on
+it. `{ local: true }` keeps it in the orchestrating process instead.
 
 ## Error Handling
 

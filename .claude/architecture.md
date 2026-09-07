@@ -37,9 +37,12 @@ src/
   pipeline.ts            Pipeline: source + context + terminal ops + Pipeline.merge + createPipeline()
   transformer.ts          Transformer: the chainable map/filter/reduce/tap/catch chain
   pipelines/
-    concurrent.ts          ConcurrentPipeline - the fan-out (fanOutOrdered/fanOutUnordered), stageWork()
-    http.ts                 HttpPipeline - stageWork() override (POST), .fetch(), toNodeHandler
-    cluster.ts               ClusterPipeline - worker bootstrap, the shared pipeline registry
+    concurrent.ts          ConcurrentPipeline - the fan-out (fanOutOrdered/fanOutUnordered),
+                             stageWork()/reduceWork()
+    http.ts                 HttpPipeline - stageWork()/reduceWork() overrides, routePath(verb,
+                             index), .fetch() (/stage/<n> and /reduce/<n>), toNodeHandler
+    cluster.ts               ClusterPipeline - worker bootstrap, the shared pipeline registry,
+                             bootstrapAndSetUrl() shared by stageWork()/reduceWork()
   context/
     types.ts              re-exported IContextManager shape
     simple.ts              SimpleContextManager - the one shipped IContextManager
@@ -48,7 +51,13 @@ src/
   utils/
     chunk.ts                buildChunkGenerator (cuts) / flattenChunks (undoes) / normalize (dead
                              in production code post-#39, kept as public API)
-    helpers.ts               isContextAware / isContextAwareReduce - fn.length arity checks
+    helpers.ts               isContextAware - fn.length arity check (isContextAwareReduce, its
+                             reduce-side twin, is gone: every reduce path always passes all four
+                             ReduceFunction arguments, #45)
+    reduce.ts                Reducer/foldChunk/foldChunkStream - the shared fold, used by
+                             Transformer.reduce, Pipeline.reduce and http.ts's own frame folding
+    ndjson.ts                readNdjsonLines/ndjsonFrame - the reduce wire's framing, shared by
+                             the client (reduceWork) and the server (.fetch's /reduce/<n>)
   factories.ts             createTransformer - Transformer construction sugar, no chunk-size
                              parameter (#39: chunking lives on Pipeline, not Transformer)
   index.ts                 barrel - the only export surface
@@ -232,45 +241,64 @@ resolves immediately with an EMPTY result - the worker exists only to hold the t
   body closed = 3 of 3`. So a streaming reducer needs no SSE, no long polling, no WebSocket and no
   session id. Verified on Node against `node:http` ONLY - Bun, Deno, Cloudflare and any buffering
   intermediary are unverified (#45).
-- `toNodeHandler` buffers BOTH directions today, defeating that duplex capability for every Node
-  consumer. `handleOverBridge` collects `req` into a `Buffer` before building the `Request` and ends
-  with `res.end(Buffer.from(await response.arrayBuffer()))`. Measured: a handler echoing per item saw
-  nothing until the client closed its body at +457ms, then the client received all three replies in
-  ONE frame at +477ms. No data is lost - it is purely a streaming defect, invisible to the one-shot
-  `/stage/<n>` route. `Readable.toWeb(req)` as the request body plus a `for await` pipe of the
-  response into `res` fixes it: first reply back at +163ms, `frames delivered BEFORE the request body
-  closed = 2 of 3` (#45). Bun and Deno mount `.fetch` directly and already stream.
+- `toNodeHandler` used to buffer BOTH directions, defeating that duplex capability for every Node
+  consumer: `handleOverBridge` collected `req` into a `Buffer` before building the `Request` and
+  ended with `res.end(Buffer.from(await response.arrayBuffer()))`. Measured (pre-#45): a handler
+  echoing per item saw nothing until the client closed its body at +457ms, then the client received
+  all three replies in ONE frame at +477ms - no data lost, purely a streaming defect, invisible to
+  the one-shot `/stage/<n>` route. `Readable.toWeb(req)` as the request body plus `writeStreamedBody`
+  (a `for await` pipe of the response into `res`, stopping once `res.destroyed`, awaiting `'drain'`
+  on backpressure) fixes it (#45): first reply back at +163ms, `frames delivered BEFORE the request
+  body closed = 2 of 3`. A response-body failure after bytes are already flushed destroys the
+  connection instead of hanging the client, since headers already sent rules out a fresh error
+  response. Bun and Deno mount `.fetch` directly and already stream.
 - One long-lived HTTP request stays inside ONE `node:cluster` worker for its whole life, so a
   streaming reducer's accumulator lives in the connection rather than in a session store. Measured
   with 4 workers on the shared port and 5 chunks fed 100ms apart: `DISTINCT PIDS THAT SERVED THIS ONE
   STREAM = 1`, all 9 items folded there. No separate reducer worker and no affinity mechanism is
   needed (#45).
 
-## The reduce stage (pending #45)
+## The reduce stage
 
 A reducer is a fold with cross-chunk state, so it does not fit `InternalTransformer` (`chunk` in,
-`Out[]` out, one output chunk per input chunk). Its shape is a stream operator, and `reduceWork()` is
-the one method a subclass overrides, mirroring `stageWork()`:
+`Out[]` out, one output chunk per input chunk). Its shape is a stream operator: `Pipeline.reduce()`
+folds `this._chunks` directly (in-process, sequential, no `reduceWork()` indirection - the base class
+never dispatches); `ConcurrentPipeline.reduce()` overrides it, adding `StageOptions` (`{ local: true
+}` runs `super.reduce()`, the base's own fold) and, dispatched, delegating to `reduceWork()` -
+`stageWork()`'s sibling, the one method a subclass overrides to change WHERE a reducer runs:
 
 ```text
-Pipeline.reduce(fn, initial, options?)
+ConcurrentPipeline.reduce(fn, initial, options?)
 	reduceWork(fn, initial, stageIndex)            the per-class override
 		ConcurrentPipeline    fold in-process, sequentially     maxConcurrency inert: one accumulator
 		HttpPipeline          one duplex POST /reduce/<n>       accumulator lives in the connection
-		ClusterPipeline       inherits it, via routePath()      one worker serves the whole stream
-	emit(value)                                     buffered, yielded as its chunk
+		ClusterPipeline       bootstrap + inFlight around the   one worker serves the whole stream
+		                      WHOLE connection (stageWork()'s
+		                      own bracket wraps one CHUNK)
+	emit(value)                                     buffered per input chunk, yielded as its own chunk
 	final accumulator                               only if items were folded since the last emit
 ```
 
 `ReduceFunction<U, T> = (acc, item, ctx, emit) => U | Promise<U>` puts `emit` FOURTH so `ctx` keeps
-arity 3 and `isContextAwareReduce`'s `fn.length` check is untouched. A reduce stage takes the next
-index in the SHARED stage-index space, so `/stage/<n>` and `/reduce/<n>` never collide; the reducers
-live in `_reduceStages` keyed by that index, the `_chunkTransforms` slot holds a placeholder that
-throws if replayed, and the index enters `sourcePositionViolations` so async iteration fails loud
-rather than folding silently in-process.
+arity 3. Every reduce path (`Transformer.reduce`, the shared `Reducer`/`foldChunk`/`foldChunkStream`
+helpers in `src/utils/reduce.ts`, `http.ts`'s own frame folding) calls `fn` with all four arguments
+unconditionally - JS ignores the extras a shorter callback never declared, so no `fn.length` arity
+check is needed anywhere in the reduce path (unlike `map`/`filter`'s own `isContextAware`, which
+still branches on arity to decide whether to pass `ctx` at all).
 
-The wire is NDJSON both ways over one POST: `{"context":{…}}` once, then `{"chunk":[…]}` per upstream
-chunk, with `{"emit":[…]}` frames coming back as they happen and `{"error":"…"}` for a mid-stream
-failure. That failure arrives AFTER the 200, so values already emitted have already entered
-downstream stages - the price paid for results that arrive as they happen, and the same property
-that killed the pull topology (`.claude/roadmap.md`) accepted deliberately here.
+A reduce stage takes the next index in the SHARED stage-index space `_chunkTransforms` already uses,
+so `/stage/<n>` and `/reduce/<n>` never collide: `pushReduceStage()` (`src/pipeline.ts`, shared by
+base `Pipeline.reduce()` and `ConcurrentPipeline.reduce()`) registers the stage in `_reduceStages`
+and writes a placeholder into the SAME `_chunkTransforms` index that throws if ever invoked as a
+plain per-chunk transform - the fail-loud guard, and the only one needed: #39 already deleted the
+whole source-position/replay mechanism a reduce-specific `sourcePositionViolations` list would have
+needed to hook into, since async iteration reads the exact same persisted `_chunks` every terminal
+op reads.
+
+The wire is NDJSON both ways over one POST, `HttpPipeline.routePath("reduce", index)` (`routePath`
+takes a verb, `stage` or `reduce`, replacing the old `stagePath(index)`): `{"context":{…}}` once,
+then `{"chunk":[…]}` per upstream chunk, with `{"emit":[…]}` frames coming back as they happen and
+`{"error":"…"}` for a mid-stream failure. That failure arrives AFTER the 200, so values already
+emitted have already entered downstream stages - the price paid for results that arrive as they
+happen, and the same property that killed the pull topology (`.claude/roadmap.md`) accepted
+deliberately here.

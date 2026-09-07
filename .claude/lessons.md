@@ -7,6 +7,48 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-07 #45's L2 commit landed on L1's own branch, again
+
+Straight after L1's commit and PR went out clean, L2's `Reducer` helper, `Pipeline.reduce()` and the
+`_reduceStages` bookkeeping were written, reviewed and committed - all still on `worktree-ticket-45`,
+PR #52's own branch - before `gh stack add feature/pipeline-reduce-45-l2` ever ran. The commit had not
+reached the remote yet, so recovery was a plain `git branch feature/pipeline-reduce-45-l2 eb327ea` +
+`git reset --hard cb69cc6` on the worktree branch, then `gh stack add` adopted the pre-built branch
+cleanly. `~/.claude/rules/issues.md`'s `gh stack add` rule is sharpened again (fourth violation): the
+trap is the previous layer's own clean landing feeling like license to keep moving in the same flow,
+not a fresh context losing track of the step - the rule now names that continuity itself as the
+trigger to run `gh stack add` first, on every layer, not only the first one after a break.
+
+## 2026-09-07 A `ScheduleWakeup` call justified as "a long fallback" was still outside any `/loop`
+
+Waiting on a backgrounded `/code-review` subagent mid-build, `ScheduleWakeup` was called with a 1200s
+delay and `noop: true`, reasoned as "not polling, a long fallback" per the tool's own guidance for
+surviving a hung subagent. But this session was a `/goal`-driven build with no `/loop` running at all -
+the tool is gated to `/loop` dynamic mode specifically, and the delay chosen does not change that. Self-
+caught one tool call later and stopped. `~/.claude/rules/code.md`'s existing rule (already re-violated
+five times) is sharpened to name the rationalization itself: framing a call as a "long fallback" does
+not exempt it from the `/loop`-only gate.
+
+## 2026-09-07 A hand-built JSON string as a `Read` call's whole input hit `__unparsedToolInput`
+
+A `Read` call was made with a hand-assembled JSON-looking string (a stray trailing comma after the
+`offset` field) instead of separate `file_path`/`offset` parameters, and the harness reported it as
+`__unparsedToolInput`, refusing to parse it as the declared schema. Caught immediately and re-issued
+with real parameters. `~/.claude/rules/code.md`'s existing `__unparsedToolInput` rule is sharpened: the
+trap is not limited to AskUserQuestion's multi-question array (its one prior example) - any tool call
+built by hand-assembling a JSON-shaped string instead of using the declared fields directly can fall
+into the same failure.
+
+## 2026-09-07 `insert_before_symbol` orphaned `HttpPipeline`'s own class docstring
+
+Inserting `runReduceStage` and its helpers before the `HttpPipeline` class symbol landed the new
+content BETWEEN the class's own preceding docstring and the class itself, since the docstring was not
+treated as part of the symbol's leading trivia the way `insert_before_symbol` reasons about it. The
+docstring stayed intact but now floated above unrelated helper functions, describing a class two
+screens below it. Found on a routine re-read after the edit, not by any tool error. `~/.claude/rules
+/code.md`'s existing lesson (about `replace_symbol_body` duplicating a docstring) is broadened to cover
+`insert_before_symbol`/`insert_after_symbol`'s own inverse failure - orphaning rather than duplicating.
+
 ## 2026-09-07 #39's real L1 layer landed its first two commits on the ticket's own worktree branch
 
 Rebuilding #39 after the replan, L1's test file was written, tested, reviewed and committed twice -

@@ -243,10 +243,11 @@ produced, never assuming there was one.
 
 > **`Transformer.reduce(fn, initial)`** - folds ONE chunk. Run once and forget: no state survives to
 > the next chunk.
-> **`Pipeline.reduce(fn, initial, options?)`** - folds EVERY chunk the pipeline produces. On a
-> dispatching class it runs remotely like any other stage, over one duplex connection whose
-> accumulator lives for the life of that connection; `{ local: true }` keeps it in the orchestrating
-> process.
+> **`Pipeline.reduce(fn, initial)`** - folds EVERY chunk the pipeline produces. On a dispatching
+> class (`ConcurrentPipeline.reduce(fn, initial, options?)`, `{ local: true }` its own addition, the
+> base `Pipeline` never gains it) it runs remotely like any other stage, over one duplex connection
+> whose accumulator lives for the life of that connection; `{ local: true }` keeps it in the
+> orchestrating process instead.
 > **`emit`** - the reducer callback's fourth parameter, `(acc, item, ctx, emit)`. Calling it pushes
 > a value downstream mid-fold and lets the caller decide what a finished result is. The final
 > accumulator is emitted only if items were folded since the last `emit()`.
