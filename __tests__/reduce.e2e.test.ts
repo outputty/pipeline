@@ -36,6 +36,26 @@ function emitAtSix(
   return acc;
 }
 
+/** Decodes a byte stream into NDJSON lines as they arrive - the same framing both the reduce wire
+ * (Done-when 4) and a raw duplex echo handler (Done-when 5) use, on both the reading side here and
+ * (for Done-when 5) the server's own reading side. */
+async function* readNdjsonLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex: number;
+    while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line.length > 0) yield line;
+    }
+  }
+}
+
 describe("#45 the whole dataset folds and the chain continues (Done-when 1)", () => {
   test("prints [150]", async () => {
     const data = await new Pipeline([1, 2, 3, 4, 5])
@@ -97,21 +117,9 @@ describe("#45 a real duplex connection streams emits before the request body clo
         } as RequestInit);
 
         const receipts: { emit: number[]; bodyClosedAtReceipt: boolean }[] = [];
-        const reader = response.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let newlineIndex: number;
-          while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
-            const line = buffer.slice(0, newlineIndex);
-            buffer = buffer.slice(newlineIndex + 1);
-            if (line.length === 0) continue;
-            const frame = JSON.parse(line) as { emit: number[] };
-            receipts.push({ emit: frame.emit, bodyClosedAtReceipt: bodyClosed });
-          }
+        for await (const line of readNdjsonLines(response.body!)) {
+          const frame = JSON.parse(line) as { emit: number[] };
+          receipts.push({ emit: frame.emit, bodyClosedAtReceipt: bodyClosed });
         }
 
         expect(receipts.map((r) => r.emit[0])).toEqual([6, 9]);
@@ -123,34 +131,42 @@ describe("#45 a real duplex connection streams emits before the request body clo
 });
 
 describe("#45 toNodeHandler streams both directions (Done-when 5)", () => {
-  test.fails(
+  // Independent of HttpPipeline/reduce (L5's own /reduce/<n> route doesn't exist yet at this
+  // layer) - a raw duplex echo handler, so this pins toNodeHandler's OWN bridge behavior alone.
+  // Real, before this layer: all replies arrived in ONE frame after the request body closed
+  // (architecture.md's own measurement, `handleOverBridge` buffering both directions whole).
+  const echoHandler = async (request: Request): Promise<Response> => {
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = writable.getWriter();
+    const encoder = new TextEncoder();
+    (async () => {
+      for await (const line of readNdjsonLines(request.body!)) {
+        await writer.write(encoder.encode(`${line}\n`));
+      }
+      await writer.close();
+    })().catch(() => writer.abort());
+    return new Response(readable, { headers: { "content-type": "application/x-ndjson" } });
+  };
+
+  test(
     "at least 2 of 3 response frames arrive before the request body closes",
     async () => {
-      const worker = new HttpPipeline<number>([], { url: "" }).reduce(
-        (acc: number, x: number, _ctx: IContextManager, emit: (v: number) => void): number => {
-          emit(x);
-          return acc;
-        },
-        0,
-      );
-
-      await withServer(worker.fetch, async (url) => {
+      await withServer(echoHandler, async (url) => {
         let bodyClosed = false;
         const encoder = new TextEncoder();
 
         const requestBody = new ReadableStream<Uint8Array>({
           async start(controller) {
-            controller.enqueue(encoder.encode(`${JSON.stringify({ context: {} })}\n`));
             for (const item of [1, 2, 3]) {
               await new Promise((resolve) => setTimeout(resolve, 60));
-              controller.enqueue(encoder.encode(`${JSON.stringify({ chunk: [item] })}\n`));
+              controller.enqueue(encoder.encode(`${JSON.stringify({ item })}\n`));
             }
             controller.close();
             bodyClosed = true;
           },
         });
 
-        const response = await fetch(`${url}/reduce/0`, {
+        const response = await fetch(url, {
           method: "POST",
           headers: { "content-type": "application/x-ndjson" },
           body: requestBody,
@@ -159,21 +175,9 @@ describe("#45 toNodeHandler streams both directions (Done-when 5)", () => {
 
         let totalFrames = 0;
         let framesBeforeClose = 0;
-        const reader = response.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let newlineIndex: number;
-          while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
-            const line = buffer.slice(0, newlineIndex);
-            buffer = buffer.slice(newlineIndex + 1);
-            if (line.length === 0) continue;
-            totalFrames++;
-            if (!bodyClosed) framesBeforeClose++;
-          }
+        for await (const _line of readNdjsonLines(response.body!)) {
+          totalFrames++;
+          if (!bodyClosed) framesBeforeClose++;
         }
 
         expect(totalFrames).toBe(3);

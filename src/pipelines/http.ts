@@ -17,6 +17,7 @@ import type { PipelineOptions, PipelineSource } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type { InternalTransformer, ReduceFunction } from "@src/types";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { Readable } from "node:stream";
 
 /** `HttpPipeline`'s real constructor parameter type - see `ConcurrentPipelineConstructorOptions`
  * (`pipelines/concurrent.ts`) for why the base `Pipeline` internals must be included here too. */
@@ -270,29 +271,41 @@ export function toNodeHandler(
 /** Reads the Node request into a real `Request`, runs `handler`, writes the resulting `Response`
  * back - `toNodeHandler()`'s own body, pulled out so that function stays a one-line dispatch to
  * this plus its safety net (above). */
+/** Writes `bodyStream` to `res` chunk by chunk, stopping early once the client has gone
+ * (`res.destroyed`) instead of pulling from `bodyStream` forever against a dead socket. Its own
+ * function, not inlined into `handleOverBridge`'s try block, to keep that block within this
+ * repo's own `max-depth: 2` rule (the same reason `errorDetailOf`, above, is its own function). */
+async function writeStreamedBody(res: ServerResponse, bodyStream: Readable): Promise<void> {
+  for await (const chunk of bodyStream) {
+    if (res.destroyed) break;
+    res.write(chunk as Buffer);
+  }
+  res.end();
+}
+
 async function handleOverBridge(
   req: IncomingMessage,
   res: ServerResponse,
   handler: (request: Request) => Promise<Response>,
 ): Promise<void> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(chunk as Buffer);
-  }
-  const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
-
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;
     for (const v of Array.isArray(value) ? value : [value]) headers.append(key, v);
   }
 
+  // GET/HEAD forbid a body entirely (the Fetch spec throws on the Request constructor otherwise) -
+  // gating on method, not on whether anything was ever read, is what streaming needs: buffering
+  // used to decide this from the collected length, which streaming has no equivalent of upfront.
+  const hasBody = req.method !== "GET" && req.method !== "HEAD";
   const request = new Request(
     new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`),
     {
       method: req.method,
       headers,
-      body,
+      // Streams the request body in as it arrives (#45) - `handler` (a reduce stage's `.fetch()`,
+      // for one) can start folding an early chunk before a later one has even been sent.
+      body: hasBody ? (Readable.toWeb(req) as ReadableStream<Uint8Array>) : undefined,
       // Required by Node's undici Request whenever a body is passed - harmless when body is
       // undefined, so set unconditionally rather than branching on it.
       duplex: "half",
@@ -302,6 +315,33 @@ async function handleOverBridge(
   const response = await handler(request);
   res.statusCode = response.status;
   response.headers.forEach((value, key) => res.setHeader(key, value));
-  const responseBody = Buffer.from(await response.arrayBuffer());
-  res.end(responseBody);
+
+  if (!response.body) {
+    res.end();
+    return;
+  }
+
+  // Streams the response body out as it arrives, instead of buffering it whole first (#45) - a
+  // one-shot handler (`/stage/<n>`) still works identically, since its body is one chunk either
+  // way; a reduce stage's duplex response (`/reduce/<n>`, L5) is what this actually unblocks.
+  const bodyStream = Readable.fromWeb(response.body as ReadableStream<Uint8Array>);
+  // A client that disconnects mid-stream must stop this loop pulling from `handler`'s own
+  // generator, not run it to completion against a dead socket (review, verified live: without
+  // this, the loop kept writing to a destroyed response every tick for the rest of the process).
+  res.once("close", () => bodyStream.destroy());
+
+  try {
+    await writeStreamedBody(res, bodyStream);
+  } catch (error) {
+    // A failure reading `response.body` AFTER at least one chunk was already written can't become
+    // a fresh error response - the client already has a 200 - so the connection is destroyed
+    // instead (review, verified live: leaving this uncaught hung the client forever, since
+    // `toNodeHandler`'s own outer catch only acts `if (!res.headersSent)`).
+    if (res.headersSent) {
+      res.destroy(error instanceof Error ? error : new Error(String(error)));
+    } else {
+      res.statusCode = 500;
+      res.end(error instanceof Error ? error.message : String(error));
+    }
+  }
 }
