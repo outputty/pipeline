@@ -24,19 +24,31 @@ export const DEFAULT_CHUNK_SIZE = 1000;
 export type PipelineFunction<Out, T> = (item: Out, ctx: IContextManager) => T | Promise<T>;
 
 /**
- * A pipeline reduce callback: folds `item` into `acc`, with an optional shared `ctx`.
+ * A pipeline reduce callback: folds `item` into `acc`, with an optional shared `ctx`, and can push a
+ * value downstream mid-fold via `emit` (#45) — `emit` is FOURTH, so `ctx` keeps arity 3 and
+ * `isContextAwareReduce`'s `fn.length` check is untouched. ONE signature for the same reason as
+ * `PipelineFunction` above — a union of arities would block contextual inference and make `acc`/`item`
+ * implicit `any` in an un-annotated `.reduce((acc, x) => …)`.
  *
- * ONE signature for the same reason as `PipelineFunction` above — a union of `(acc, item)` /
- * `(acc, item, ctx)` arms would block contextual inference and make `acc`/`item` implicit `any` in an
- * un-annotated `.reduce((acc, x) => …)`. `isContextAwareReduce` reads `fn.length` at runtime.
+ * `Transformer.reduce(fn, initial)` folds the ONE chunk it receives and keeps no state between
+ * chunks; `Pipeline.reduce(fn, initial, options?)` folds EVERY chunk the pipeline produces, the only
+ * place cross-chunk state lives. Both call `fn` with all four arguments regardless of its declared
+ * arity — JS ignores the extras, so `(acc, x, emit) => …` silently receives `ctx` in `emit`'s slot and
+ * throws "emit is not a function" on the first call; write `(acc, x, _ctx, emit)`.
  *
- * `(acc, x) => acc + x` and `(acc, x, ctx) => acc + x * ctx.get("w")` both satisfy it.
+ * `(acc, x) => acc + x` and `(acc, x, ctx, emit) => { acc += x; if (acc >= 6) { emit(acc); return 0;
+ * } return acc; }` both satisfy it.
  */
-export type PipelineReduceFunction<U, Out> = (
+export type ReduceFunction<U, Out> = (
   acc: U,
   item: Out,
   ctx: IContextManager,
+  emit: (value: U) => void,
 ) => U | Promise<U>;
+
+/** @deprecated Use {@link ReduceFunction} - kept only until the `perChunk` removal (enable layer,
+ * #45) so the old name still resolves for any straggling import during the stack. */
+export type PipelineReduceFunction<U, Out> = ReduceFunction<U, Out>;
 
 /**
  * Error handler for chunk processing errors.
