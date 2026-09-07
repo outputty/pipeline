@@ -65,7 +65,8 @@ console.log(data); // [10, 20, 30, 40, 50]
 
 ### Transformer
 
-Chainable chunk transformation operations:
+Chainable chunk transformation operations - chunk-agnostic: it never decides how its own input was
+cut, only processes whatever chunk it is handed.
 
 <!-- compiles -->
 
@@ -77,14 +78,16 @@ const transformer = new Transformer<number, number>()
   .filter((x: number) => x > 5)
   .map((x: number) => `Value: ${x}`);
 
-// Execute directly over any async iterable
-async function* source() {
-  yield* [1, 2, 3, 4, 5];
+// Run directly over already-cut chunks, independent of Pipeline.
+async function* chunks() {
+  yield [1, 2, 3];
+  yield [4, 5];
 }
-const results: string[] = [];
-for await (const item of transformer.execute(source())) {
-  results.push(item);
+const results: string[][] = [];
+for await (const chunk of transformer.process(chunks())) {
+  results.push(chunk);
 }
+console.log(results); // [["Value: 6"], ["Value: 8", "Value: 10"]]
 ```
 
 ### Where the work runs
@@ -234,21 +237,22 @@ const totals = await new Pipeline(orders)
 
 ## Chunking
 
-This library processes data in chunks for efficiency:
+Rows move through a `Pipeline` in chunks, not one at a time. The boundary is the `Pipeline`'s own
+decision, not the `Transformer`'s: `.buffer(size)` sets it explicitly, defaulting to `1000` when
+never called, and every later stage sees those same chunks unchanged until another `.buffer()`
+call declares a new one.
 
 <!-- compiles -->
 
 ```typescript
-import { Transformer } from "@outputty/pipeline";
+import { Pipeline } from "@outputty/pipeline";
 
-// Default chunk size is 1000
-const t1 = new Transformer<number, number>();
+const data = await new Pipeline([1, 2, 3, 4, 5])
+  .buffer(2)
+  .transform((t) => t.map((x: number) => x * 2))
+  .toArray();
 
-// Custom chunk size
-const t2 = new Transformer<number, number>({ chunkSize: 100 });
-
-// Chunk size combines with any chain
-const t3 = new Transformer<number, number>({ chunkSize: 100 }).map((x: number) => x * 2);
+console.log(data); // [2, 4, 6, 8, 10]
 ```
 
 ## Error Handling

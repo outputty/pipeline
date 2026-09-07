@@ -16,12 +16,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   a finished result is, and a reduce stage dispatches like any other - one duplex POST whose
   accumulator lives for the life of the connection. Now, because it is the last operation that
   cannot cross a process boundary. BREAKING: `perChunk` and `ReduceOptions` go.
-- **Chunking becomes an explicit `Pipeline.buffer()` boundary, off `Transformer` entirely** (#39,
-  `feat!`) - `ConcurrentPipeline.apply()` refuses a custom chunker outright today, and
-  `ConcurrentPipelineOptions.chunkSize`/`Transformer.chunkSize` can already disagree (#42) - both are
-  symptoms of chunking being an inferred, per-stage property of `Transformer` rather than one
-  explicit decision `Pipeline` owns. `.buffer(size)` replaces both, persisted across every later
-  stage until called again; #42 closes as superseded once this ships.
 - **A conformance suite every `Pipeline` and Context class runs** (#37), **`EventEmitterPipeline`**
   (#30), **the pipeline's error handlers** (#40), **instance `merge`** (#41) and **cross-runtime
   benchmarks** (#11) are the other open tickets; each issue carries its own detail.
@@ -50,6 +44,16 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **Chunking becomes an explicit `Pipeline.buffer()` boundary, off `Transformer` entirely** (#39,
+  `feat!`) - `ConcurrentPipeline.apply()` used to refuse a custom chunker outright and re-derive its
+  own cut from `transformer.chunkSize`, disagreeing with `.transform()`'s own seeding (#42, closed as
+  superseded). `.buffer(size)` replaces both: the ONE place a cut happens, persisted across every
+  later stage until called again, uniform across every `Pipeline` class - `Transformer` loses all
+  chunking knowledge (`chunkSize`/`.setChunker()`/`execute()`), replaced by `.process(chunks, ctx?)`.
+  The "source position" mechanism (a separate async-iteration replay path, and the throw it needed
+  for a knob it couldn't honor) is deleted with it: every consumption path now reads the same
+  persisted chunk stream. PRs #48 (L1, pinned cases), #50 (L2, the seam, also enable - no flag was
+  possible for an API removal), #51 (docs).
 - **A caller's own `IContextManager` survives `.context()`, `merge()` and a process boundary** (#31)
   - `.context()` mutates the caller's OWN manager in place instead of copying into a fresh
     `SimpleContextManager`, so a custom class keeps receiving writes and a rejected write propagates

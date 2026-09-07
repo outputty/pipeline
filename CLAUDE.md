@@ -147,7 +147,7 @@ none of it survived the hand-trim (#745).
   caller's own manager through the merge as the SAME instance.
 - **Transformer** - the chainable chunk-transformation builder: `new Transformer<In, Out>(options?)`,
   `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.catch()`, `.withHooks()` for lifecycle
-  callbacks. Chunk-agnostic (#39, pending) - it never decides how its own input was cut, only
+  callbacks. Chunk-agnostic (#39) - it never decides how its own input was cut, only
   processes whatever chunk it is handed. `.process(chunks, context?)` runs it directly over an
   `AsyncIterable` of already-cut chunks, independent of `Pipeline` - always sequentially, one chunk
   at a time (#17); wrap the chain in a `ConcurrentPipeline` for concurrency instead of configuring
@@ -164,7 +164,7 @@ none of it survived the hand-trim (#745).
   connection, so `maxConcurrency` is inert on it (#45, BREAKING: `ReduceOptions`/`perChunk` and the
   standalone callable `reduce(fn, initial, { perChunk: false })` returned are deleted).
 - **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`
-  decision, not a `Transformer` one (#39, pending) - `.buffer(size)` sets it explicitly, defaulting
+  decision, not a `Transformer` one (#39) - `.buffer(size)` sets it explicitly, defaulting
   to `DEFAULT_CHUNK_SIZE = 1000` when never called; every later stage sees the same chunks unchanged
   until another `.buffer()` call declares a new one. Two `.buffer()` calls back to back, with no
   stage between them, collapse to the last - only it is ever actually applied. An
@@ -175,8 +175,8 @@ none of it survived the hand-trim (#745).
   `Pipeline` runs one chunk at a time in this process, and `Transformer.process()` itself is always
   sequential now too; `ConcurrentPipeline` keeps `maxConcurrency` chunks in flight and owns the
   fan-out window (`fanOutOrdered`/`fanOutUnordered`), the reorder buffer and failure containment -
-  fanning out the pipeline's OWN already-cut chunk stream, never cutting one of its own (#39,
-  pending); `HttpPipeline` overrides `stageWork()` alone to POST a chunk to another instance and adds
+  fanning out the pipeline's OWN already-cut chunk stream, never cutting one of its own (#39);
+  `HttpPipeline` overrides `stageWork()` alone to POST a chunk to another instance and adds
   a `.fetch` handler; `ClusterPipeline` adds the worker bootstrap, brought up lazily on the first
   chunk actually dispatched. Each level overrides ONE thing, and the chain is identical in all four.
 - **Stage** - One `.apply()` call, and therefore one `.transform()` call, since `transform()` is
@@ -189,12 +189,13 @@ none of it survived the hand-trim (#745).
 - **`{ local: true }`** - The optional SECOND argument to a dispatching subclass's own
   `transform()`/`apply()`, keeping that stage in the orchestrating process. It is `super.apply()` at
   every level, and the base `Pipeline` never gains it.
-- **Source position** (killed, #39 pending) - was the `Pipeline` drain path that did NOT run
+- **Source position** (killed, #39) - was the `Pipeline` drain path that did NOT run
   `Transformer.execute()`: async iteration (`[Symbol.asyncIterator]`) replayed each transform's plain
   function instead of running the real chain, and `inertKnobsOf` threw there for any knob that only
-  ever took effect through `execute()`/the fan-out. Once every `Pipeline` class shares one persisted
-  chunk stream, hooks/onError included, there is nothing left for a separate replay path to protect
-  against - `[Symbol.asyncIterator]` reads that SAME stream directly, the same as every terminal op.
+  ever took effect through `execute()`/the fan-out. Every `Pipeline` class shares one persisted
+  chunk stream now, hooks/onError included, so there is nothing left for a separate replay path to
+  protect against - `[Symbol.asyncIterator]` reads that SAME stream directly, the same as every
+  terminal op.
 - **Context / `IContextManager`** - the shared key-value store threading through a pipeline run:
   `.get()`/`.set()`/`.getOrDefault()`/`.toDict()`. `SimpleContext` is the one shipped implementation.
   Every `PipelineFunction`/`PipelineReduceFunction` callback receives it as an optional second
