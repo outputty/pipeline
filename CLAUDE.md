@@ -166,7 +166,7 @@ none of it survived the hand-trim (#745).
   folded since the last `emit()`. A reduce stage dispatches like any other stage, over ONE duplex
   POST to `/reduce/<n>` whose accumulator lives for the life of the connection, so `maxConcurrency`
   is inert on it (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
-  callable `Transformer.reduce(fn, initial, { perChunk: false })` returned are deleted -
+  callable `Transformer.reduce`'s old per-chunk-toggle overload are deleted -
   `ReduceFunction` is the one type, `Pipeline.reduce` the whole-dataset replacement).
 - **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`
   decision, not a `Transformer` one (#39) - `.buffer(size)` sets it explicitly, defaulting

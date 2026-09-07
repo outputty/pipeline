@@ -48,8 +48,8 @@ The two older candidates, still not filed:
   callback's fourth argument, banks a value downstream mid-fold and resets the accumulator; the
   trailing accumulator is only emitted if items were folded since the last `emit()`. `toNodeHandler`
   streams both directions now instead of buffering them whole, unblocking the duplex response every
-  Node consumer gets, one-shot routes included. BREAKING: `Transformer.reduce`'s `perChunk: false`
-  terminal form and `ReduceOptions` are deleted; `PipelineReduceFunction` is `ReduceFunction`.
+  Node consumer gets, one-shot routes included. BREAKING: `Transformer.reduce`'s old per-chunk-toggle
+  overload and `ReduceOptions` are deleted; `PipelineReduceFunction` is `ReduceFunction`.
   PRs #52 (L1, pinned cases), #53 (L2, the fold + `emit`), #55 (L3, `ConcurrentPipeline`), #56 (L4,
   `toNodeHandler` streaming), #57 (L5, `HttpPipeline`/`ClusterPipeline` duplex dispatch), #58
   (enable), #59 (docs).
@@ -113,7 +113,7 @@ The two older candidates, still not filed:
   instead of returning them together at the end of the chunk. Killed by the user: it makes every
   link a middleware that decides whether the rest of the chain runs, which is a larger contract than
   `map`/`filter`/`reduce` need, and it would rewrite `pipe()` and every link including `.catch()`.
-  A reducer stays one ordinary `pipe()` link (`src/transformer.ts:717`, `:731`).
+  A reducer stays one ordinary `pipe()` link (`Transformer.reduce`, `src/transformer.ts:626-634`).
 
 Every row below was spiked and run while planning #17, not argued.
 
