@@ -7,6 +7,48 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-07 Planning #62 took a reuse premise as grounded because the code existed
+
+The idea arrived saying `ConcurrentPipeline` "already owns the fan-out machinery
+(`fanOutOrdered`/`fanOutUnordered`), just never wired to reduce". Both were found at
+`concurrent.ts:83`/`:123`, called only from `apply()`, and the premise went into the scratch file as
+GROUNDED. It is not: those functions fan ONE chunk out to per-chunk work and yield per-chunk results,
+where a partitioned reduce holds N long-lived `reduceWork` generators open, deals each chunk to one,
+and merges N output streams. Nothing in the file deals or merges. Finding the functions confirmed
+they exist; the premise claimed they FIT. `~/.claude/rules/code.md` gains a line: a premise of the
+form "X already exists, it is just not wired to Y" is verified by checking X's shape against what Y
+needs, never by finding X.
+
+## 2026-09-07 A per-connection affinity measurement was read as a per-worker distribution claim
+
+The same premise list recorded "N workers" as found, citing `architecture.md`'s measured constraint
+that one long-lived HTTP request stays inside one `node:cluster` worker for its life (`DISTINCT PIDS
+THAT SERVED THIS ONE STREAM = 1`). That measurement is about one connection. Whether N concurrent
+connections land on N distinct pids is `cluster`'s scheduling policy and was never measured here.
+#62's contract was rewritten as "N concurrent connections", leaving which processes serve them to the
+deployment. `~/.claude/rules/code.md`'s "count the quantity the CLAIM is about" line gains a
+sub-bullet: a measurement taken at N=1 settles nothing about N>1.
+
+## 2026-09-07 A question's worked example stated an output its library default made impossible
+
+Round 1's option preview showed `.reduce(sum, 0, { partitions: 2 })` over `[1,2,3,4,5]` yielding
+partials `[6,9]`. The user asked whether the default chunk size was not 1000. It is
+(`src/types.ts:10`, applied at `src/pipeline.ts:190`), so those five items are ONE chunk, and
+whole-chunk dealing gives one partition and one partial, `[15]`. Every example in the ticket needs a
+`.buffer()` call to partition at all, and the partition count is a ceiling rather than a promise -
+both facts came out of the correction, not out of the design. `~/.claude/rules/code.md` gains a line:
+run an example before stating its output whenever any value in it flows through a library default, or
+read that default in the source and state it beside the example.
+
+## 2026-09-07 Three shell calls were refused before a file got written with `Write`
+
+Writing the ticket bodies and the scratch file started as `mkdir -p tmp && cat > tmp/issue.md
+<<'EOF'`, refused by the worktree-isolation guard, as was the same shape a second time and a
+`basename "$(git rev-parse --show-toplevel)"` before them. The existing rule already names compound
+commands and command substitution; what it did not say is that writing a file needs no shell at all.
+`~/.claude/rules/code.md`'s worktree-guard line gains a sub-bullet: writing a file is a `Write` call,
+never a heredoc or redirect.
+
 ## 2026-09-07 #45's L2 commit landed on L1's own branch, again
 
 Straight after L1's commit and PR went out clean, L2's `Reducer` helper, `Pipeline.reduce()` and the
