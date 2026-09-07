@@ -621,11 +621,10 @@ export class Pipeline<T> {
     results: Record<string, U[]>,
     key: string,
   ): Promise<void> {
-    const singleItemChunk = {
-      [Symbol.asyncIterator]: async function* () {
-        yield [item];
-      },
-    };
+    async function* oneItem() {
+      yield item;
+    }
+    const singleItemChunk = buildChunkGenerator<T>(1)(oneItem());
 
     for await (const chunk of transformer.process(singleItemChunk, this._context)) {
       results[key].push(...chunk);
