@@ -91,6 +91,64 @@ describe("#17 HttpPipeline across two real instances (Done-when 5)", () => {
   );
 });
 
+describe("#61 .local(build) prints the ticket's own canonical program on every class (Done-when 1-3)", () => {
+  it("ConcurrentPipeline.buffer(2).local((p) => p.reduce(...)).toArray() prints [15]", async () => {
+    const out = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+      .buffer(2)
+      .local((p) => p.reduce((a: number, x: number) => a + x, 0))
+      .toArray();
+    expect(out).toEqual([15]);
+  });
+
+  it("the same chain over a base Pipeline prints [15]", async () => {
+    const out = await new Pipeline([1, 2, 3, 4, 5])
+      .buffer(2)
+      .local((p) => p.reduce((a: number, x: number) => a + x, 0))
+      .toArray();
+    expect(out).toEqual([15]);
+  });
+
+  it("the same chain over an HttpPipeline prints [15], with no HTTP request ever sent", async () => {
+    let requests = 0;
+    const worker = makeWorker((t) => t);
+    const countingHandler = async (request: Request): Promise<Response> => {
+      requests++;
+      return worker.fetch(request);
+    };
+    await withServer(countingHandler, async (url) => {
+      const out = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url, maxConcurrency: 2 })
+        .buffer(2)
+        .local((p) => p.reduce((a: number, x: number) => a + x, 0))
+        .toArray();
+      expect(out).toEqual([15]);
+      expect(requests).toBe(0); // a region with no dispatched stage never crosses the wire
+    });
+  });
+
+  it(
+    "the same chain over a real ClusterPipeline prints [15], folded in the primary process",
+    async () => {
+      const fixture = await runFixture("__tests__/fixtures/cluster-local.ts");
+      expectFixtureOk(fixture);
+      const result = lastJsonLine<{ sum: number; stayedInPrimary: boolean }>(fixture);
+      expect(result.sum).toBe(15);
+      expect(result.stayedInPrimary).toBe(true);
+    },
+    FIXTURE_TIMEOUT,
+  );
+
+  it("a multi-stage region runs entirely in the orchestrating process and prints [30]", async () => {
+    const out = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+      .local((p) =>
+        p
+          .transform((t) => t.map((x: number) => x * 2))
+          .reduce((acc: number, x: number) => acc + x, 0),
+      )
+      .toArray();
+    expect(out).toEqual([30]);
+  });
+});
+
 describe("#17 { local: true } keeps a stage in-process (Done-when 6)", () => {
   it(
     "makes ZERO HTTP requests for the local stage",

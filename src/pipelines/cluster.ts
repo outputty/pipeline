@@ -19,7 +19,7 @@ import { availableParallelism } from "node:os";
 import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions, StageOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
-import type { PipelineOptions, PipelineSource } from "@src/pipeline";
+import type { Pipeline, PipelineOptions, PipelineSource } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type { IContextManager, InternalTransformer, ReduceFunction } from "@src/types";
 
@@ -216,6 +216,15 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
     options?: StageOptions,
   ): ClusterPipeline<U> {
     return super.reduce(fn, initial, options) as ClusterPipeline<U>;
+  }
+
+  /**
+   * Re-declared ONLY to narrow `Pipeline.local()`'s return type (#61,
+   * `~/.claude/rules/typescript.md`) - same reason as `.transform()`/`.apply()`/`.reduce()` above.
+   * `HttpPipeline.local()`'s own logic runs unchanged via `super`.
+   */
+  override local<U>(build: (p: Pipeline<T>) => Pipeline<U>): ClusterPipeline<U> {
+    return super.local(build) as ClusterPipeline<U>;
   }
 
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain

@@ -584,6 +584,45 @@ export class Pipeline<T> {
   }
 
   /**
+   * Runs `build`'s whole region against a base `Pipeline` over this pipeline's own chunk stream and
+   * context (#61) - a region, not a per-stage flag, so several consecutive stages that must stay in
+   * the orchestrating process are written once instead of repeated on every one of them. Nothing
+   * `build` does can dispatch: the pipeline it receives IS a base `Pipeline`, so "local" is a
+   * property of the region's class rather than a knob checked per call. The built region's chunks,
+   * context, chunk transforms and reduce stages carry back through `this.createPipeline()`, which a
+   * dispatching subclass overrides to resume ITS OWN class for whatever comes after the region; on
+   * the base class that carry-back is an identity, which is what lets one `.local(build)` call run
+   * unchanged on every `Pipeline` subclass.
+   *
+   * @param build - Runs against a base `Pipeline` seeded from this pipeline's own state; its
+   *   returned `Pipeline<U>` becomes the region's output.
+   * @returns A new instance of THIS pipeline's own class (or `Pipeline<U>` on the base class
+   *   itself), continuing to dispatch normally for whatever comes after the region.
+   *
+   * @example
+   * `new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 }).buffer(2).local((p) =>
+   * p.transform((t) => t.map((x: number) => x * 2)).reduce((acc: number, x: number) => acc + x,
+   * 0)).toArray()` → `[30]` - the map and the fold both run in-process, in one region, instead of
+   * dispatching two separate stages.
+   */
+  local<U>(build: (p: Pipeline<T>) => Pipeline<U>): Pipeline<U> {
+    const region = new Pipeline<T>([], {
+      context: this._context,
+      chunkTransforms: this._chunkTransforms,
+      reduceStages: this._reduceStages,
+      chunks: this._chunks,
+      preBufferItems: this._preBufferItems,
+    });
+    const built = build(region);
+    return this.createPipeline<U>(built._chunks, {
+      context: built._context,
+      chunkTransforms: built._chunkTransforms,
+      reduceStages: built._reduceStages,
+      preBufferItems: built._preBufferItems,
+    });
+  }
+
+  /**
    * Registers a new reduce stage at the next index in the shared stage-index space
    * `_chunkTransforms` already uses (#45) - `ConcurrentPipeline.reduce()`'s own override calls this
    * too, so both share one bookkeeping seam rather than two copies that could drift apart.
