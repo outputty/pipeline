@@ -268,29 +268,25 @@ describe("#62 a dispatched reduce partitions and owes a combine (Done-when 1, 2,
     expect(data).toEqual([5]);
   });
 
-  // L2 will gate the actual partitioning behind PIPELINE_PARTITIONED_REDUCE=1 - the two throw
-  // cases set it themselves, since they're the only cases here that discriminate the old
-  // single-accumulator fold from the new one (every other case in this block already holds true on
-  // the pre-#62 fold too: a single global accumulator IS "one partition", so combining it is a
-  // harmless no-op). `test.fails` here, at L1: nothing throws yet, so this is genuinely expected to
-  // fail - L2 flips both to a plain `test` once the mechanism lands.
-  test.fails(
-    "Done-when 4: never combined - throws at the terminal op, naming the fix",
-    async () => {
-      process.env.PIPELINE_PARTITIONED_REDUCE = "1";
-      try {
-        const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
-          .buffer(2)
-          .reduce((acc: number, x: number) => acc + x, 0);
-        await expect(pipeline.toArray()).rejects.toThrow(
-          "stage 0 is a partitioned reduce whose partials were never combined - follow it with " +
-            ".local((p) => p.reduce(...))",
-        );
-      } finally {
-        delete process.env.PIPELINE_PARTITIONED_REDUCE;
-      }
-    },
-  );
+  // L2 gates the actual partitioning behind PIPELINE_PARTITIONED_REDUCE=1 (deleted at the enable
+  // layer, once this holds live with no flag) - the two throw cases set it themselves, since
+  // they're the only cases here that discriminate the old single-accumulator fold from the new one
+  // (every other case in this block already holds true on the pre-#62 fold too: a single global
+  // accumulator IS "one partition", so combining it is a harmless no-op).
+  test("Done-when 4: never combined - throws at the terminal op, naming the fix", async () => {
+    process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+    try {
+      const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+        .buffer(2)
+        .reduce((acc: number, x: number) => acc + x, 0);
+      await expect(pipeline.toArray()).rejects.toThrow(
+        "stage 0 is a partitioned reduce whose partials were never combined - follow it with " +
+          ".local((p) => p.reduce(...))",
+      );
+    } finally {
+      delete process.env.PIPELINE_PARTITIONED_REDUCE;
+    }
+  });
 
   test("Done-when 5: the base Pipeline is untouched - no combine owed, prints [15]", async () => {
     const data = await new Pipeline([1, 2, 3, 4, 5])
@@ -300,22 +296,19 @@ describe("#62 a dispatched reduce partitions and owes a combine (Done-when 1, 2,
     expect(data).toEqual([15]);
   });
 
-  test.fails(
-    "Done-when 6: maxConcurrency 1 yields one partition and still owes a combine",
-    async () => {
-      process.env.PIPELINE_PARTITIONED_REDUCE = "1";
-      try {
-        const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 1 })
-          .buffer(2)
-          .reduce((acc: number, x: number) => acc + x, 0);
-        await expect(pipeline.toArray()).rejects.toThrow(
-          /stage 0 is a partitioned reduce whose partials were never combined/,
-        );
-      } finally {
-        delete process.env.PIPELINE_PARTITIONED_REDUCE;
-      }
-    },
-  );
+  test("Done-when 6: maxConcurrency 1 yields one partition and still owes a combine", async () => {
+    process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+    try {
+      const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 1 })
+        .buffer(2)
+        .reduce((acc: number, x: number) => acc + x, 0);
+      await expect(pipeline.toArray()).rejects.toThrow(
+        /stage 0 is a partitioned reduce whose partials were never combined/,
+      );
+    } finally {
+      delete process.env.PIPELINE_PARTITIONED_REDUCE;
+    }
+  });
 
   test("Done-when 7: no .buffer() is one chunk, one partial - combining it still prints [15]", async () => {
     const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
@@ -397,4 +390,53 @@ describe("#62 the same two chains print [15] and [5] over HttpPipeline and Clust
     },
     FIXTURE_TIMEOUT,
   );
+});
+
+// Review findings on #62's own combine debt (`_owesCombine`): three ways it could otherwise be
+// silently bypassed or lost, each closed with its own guard - regression-tested here rather than
+// left to the ticket's own Done-when list, which never named these seams.
+describe("#62 the combine debt survives merge and stacked reduces, never silently bypassed", () => {
+  test("static Pipeline.merge() refuses a source that still owes a combine", async () => {
+    process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+    try {
+      const uncombined = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+        .buffer(2)
+        .reduce((acc: number, x: number) => acc + x, 0);
+      expect(() => Pipeline.merge([uncombined])).toThrow(
+        /partitioned reduce whose partials were never combined/,
+      );
+    } finally {
+      delete process.env.PIPELINE_PARTITIONED_REDUCE;
+    }
+  });
+
+  test("instance .merge() refuses an OTHER pipeline that still owes a combine", async () => {
+    process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+    try {
+      const a = new ConcurrentPipeline([1]);
+      const uncombined = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+        .buffer(2)
+        .reduce((acc: number, x: number) => acc + x, 0);
+      expect(() => a.merge(uncombined)).toThrow(
+        /partitioned reduce whose partials were never combined/,
+      );
+    } finally {
+      delete process.env.PIPELINE_PARTITIONED_REDUCE;
+    }
+  });
+
+  test("a second .reduce() stacked on an un-combined one refuses immediately, naming the first stage", async () => {
+    process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+    try {
+      const first = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+        .buffer(2)
+        .reduce((acc: number, x: number) => acc + x, 0);
+      expect(() => first.reduce((acc: number, v: number) => acc + v, 0)).toThrow(
+        "stage 0 is a partitioned reduce whose partials were never combined - follow it with " +
+          ".local((p) => p.reduce(...))",
+      );
+    } finally {
+      delete process.env.PIPELINE_PARTITIONED_REDUCE;
+    }
+  });
 });

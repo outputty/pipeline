@@ -112,3 +112,26 @@ export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenera
     yield* chunk;
   }
 }
+
+/**
+ * Wraps an existing iterator as an `AsyncIterable` that pulls from that SAME iterator on every
+ * `.next()` call. Calling `share()` N times over one iterator and handing each result to its own
+ * consumer is free-slot dealing (`ConcurrentPipeline.reduce()`, #62, fans one chunk stream out to
+ * `maxConcurrency` independent partitions this way): whichever consumer calls `.next()` next gets
+ * the next item, with no dealer, no per-consumer queue and no backpressure mechanism of its own - a
+ * slow consumer simply calls `.next()` less often, so the other consumers pick up its slack.
+ * Deliberately never delegates `.return()`/`.throw()`: one consumer stopping early (a `for await`
+ * `break`) must not close the shared iterator out from under every other consumer still pulling
+ * from it.
+ *
+ * @example
+ * 3 consumers sharing one iterator over `[0..8]`, consumer 0 made 30x slower than the other two ->
+ * per-consumer `[[0],[1,3,5,7],[2,4,6,8]]`, union 9 of 9 distinct, 0 duplicates.
+ */
+export function share<T>(iterator: AsyncIterator<T>): AsyncIterable<T> {
+  return {
+    [Symbol.asyncIterator]() {
+      return { next: () => iterator.next() };
+    },
+  };
+}

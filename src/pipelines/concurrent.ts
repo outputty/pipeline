@@ -16,6 +16,7 @@ import { Pipeline, type PipelineOptions, type PipelineSource } from "@src/pipeli
 import type { ChunkTransform } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
+import { share } from "@src/utils/chunk";
 
 /** Construction-time knobs for `ConcurrentPipeline` and every class that extends it. */
 export interface ConcurrentPipelineOptions {
@@ -155,6 +156,41 @@ async function* fanOutUnordered<T, U>(
 }
 
 /**
+ * Merges N partitions' own reduceWork generators (`ConcurrentPipeline.reduce()`, #62) into one, in
+ * COMPLETION order - the same pull-next-per-slot shape as `fanOutUnordered` above, but merging
+ * whole generators rather than one promise per chunk: there is no order between partitions (a
+ * partitioned reduce's own Constraints), so whichever partition's next output chunk is ready first
+ * is yielded first. A partition dropping out (its own `share()` view of the shared source ran dry)
+ * is simply removed from the race; the merge itself ends once every partition has.
+ *
+ * @example
+ * two partitions, `[[8],[7]]` (fast) and `[[15]]` (slower) -> yields `[8]`, `[7]`, then `[15]` once
+ * it arrives - completion order, never partition order.
+ */
+async function* mergeUnordered<U>(sources: AsyncGenerator<U[]>[]): AsyncGenerator<U[]> {
+  const inFlight = new Map<number, Promise<{ id: number; result: IteratorResult<U[]> }>>();
+
+  function pull(id: number): void {
+    const tagged = sources[id]!.next().then((result) => ({ id, result }));
+    // Handled-marker only, the same reason `fanOutUnordered`'s own tagged promises get one: a
+    // partition that loses the race - or resolves after some OTHER partition already threw and
+    // this generator stopped consuming - must never surface as an unhandled rejection.
+    tagged.catch(() => {});
+    inFlight.set(id, tagged);
+  }
+
+  for (let id = 0; id < sources.length; id++) pull(id);
+
+  while (inFlight.size > 0) {
+    const { id, result } = await Promise.race(inFlight.values());
+    inFlight.delete(id);
+    if (result.done) continue;
+    yield result.value;
+    pull(id);
+  }
+}
+
+/**
  * Runs up to `maxConcurrency` chunks of one stage at once, in this process. Replaces the deleted
  * `concurrent()` execution strategy (#17): where `concurrent()` configured a `Transformer`, this
  * configures a `Pipeline` — the chain is identical, only the class differs.
@@ -261,24 +297,69 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
       // A dispatched stage's own output IS a real chunk stream now (#39) - a later `.buffer()`
       // flattens it like any other stage's output, so no pre-buffer item view survives this call.
       preBufferItems: null,
+      owesCombine: this._owesCombine,
     });
   }
 
   /**
-   * Fold every chunk this pipeline produces (#45), always dispatched via `reduceWork()` - this
-   * class's own override point, `stageWork()`'s sibling. `.local(build)` (#61) is what keeps a
-   * reduce stage's fold in-process now.
+   * Folds every chunk this pipeline produces (#45) by PARTITIONING it (#62): `maxConcurrency`
+   * independent accumulators, each its own `reduceWork()` call over its own `share()` view of the
+   * ONE underlying chunk stream (free-slot dealing, `src/utils/chunk.ts` - a slow partition simply
+   * calls `.next()` less often, so the others pick up its slack), merged in completion order since
+   * there is no order between partitions. Returns with the combine debt still owed
+   * (`owesCombine`, `src/pipeline.ts`) - every draining path throws until `.local(build)` (#61)
+   * folds the partials into one via a second `.reduce()`, which the caller writes as the very next
+   * stage: there is no combine parameter here, and no associativity marker - a combine is an
+   * ordinary `ReduceFunction`, and the package already has exactly one way to spell one. Gated on
+   * `PIPELINE_PARTITIONED_REDUCE=1` until the enable layer (#62's own stack); the pre-#62
+   * single-accumulator fold runs otherwise.
+   *
+   * `PIPELINE_PARTITIONED_REDUCE=1`:
+   * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0)
+   * .local((p)=>p.reduce((a,v)=>a+v,0)).toArray()` → `[15]`.
    */
   override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U> {
+    // Fail loud rather than silently compounding: a second dispatched reduce stacked on an
+    // already-un-combined one would fold raw, still-partitioned partials as if they were plain
+    // items, and overwrite `owesCombine` with its OWN stage index, permanently losing the first
+    // one's debt with no diagnostic ever naming it (review finding) - refused here instead.
+    this.assertCombined();
+
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
-    const newChunks = work(this._chunks, this._context);
+
+    if (process.env.PIPELINE_PARTITIONED_REDUCE !== "1") {
+      // TEMPORARY (#62 L2, deleted at the enable layer): the pre-#62 single-accumulator fold, one
+      // `reduceWork()` call over the WHOLE chunk stream - kept until every caller of this method
+      // (including the tests this stack ships) has moved onto the combined form. Carries
+      // `owesCombine` forward like every other copy-on-write call (review finding: this branch
+      // used to omit it, silently clearing a debt owed from an earlier, flag-on `.reduce()` call).
+      const newChunks = work(this._chunks, this._context);
+      return this.createPipeline<U>(newChunks, {
+        context: this._context,
+        chunkTransforms,
+        reduceStages,
+        preBufferItems: null,
+        owesCombine: this._owesCombine,
+      });
+    }
+
+    // ONE shared iterator over `this._chunks` - `maxConcurrency` partitions each get their own
+    // `share()` view of it, never their own slice: the partition count is a CEILING, not a
+    // promise, since a partition whose view never sees a chunk (fewer chunks than partitions)
+    // simply yields nothing.
+    const iterator = this._chunks[Symbol.asyncIterator]();
+    const partitions = Array.from({ length: this.maxConcurrency }, () =>
+      work(share(iterator), this._context),
+    );
+    const newChunks = mergeUnordered(partitions);
 
     return this.createPipeline<U>(newChunks, {
       context: this._context,
       chunkTransforms,
       reduceStages,
       preBufferItems: null,
+      owesCombine: stageIndex,
     });
   }
 
@@ -296,10 +377,13 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
   /**
    * The one method a subclass overrides to change WHERE a reducer runs (#45). `stageWork()`'s
    * sibling: a reducer streams in and out (it emits fewer or more values than it consumes), so this
-   * returns a generator over OUTPUT CHUNKS rather than an `InternalTransformer`. This class's own
-   * implementation (below) folds in-process and sequentially - `maxConcurrency` is inert on a
-   * reduce stage, one accumulator, one connection; `HttpPipeline` overrides it to open one duplex
-   * POST instead.
+   * returns a generator over OUTPUT CHUNKS rather than an `InternalTransformer`. `.reduce()` (#62)
+   * calls this ONE closure `maxConcurrency` times, once per partition, each over its own `share()`
+   * view of the shared chunk stream - this class's own implementation (below) folds one partition
+   * in-process and sequentially, one accumulator PER PARTITION now, not one for the whole stage;
+   * `HttpPipeline` overrides it to open one duplex POST per partition instead, so N partitions are N
+   * concurrent POSTs to the SAME `/reduce/<n>`, each with its own accumulator server-side
+   * (`runReduceStage` builds a fresh `Reducer` per request already, unchanged by #62).
    */
   protected reduceWork<U>(
     fn: ReduceFunction<U, T>,
