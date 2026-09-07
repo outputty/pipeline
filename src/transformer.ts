@@ -20,17 +20,14 @@ import type {
   IContextManager,
   TransformerOptions,
   PipelineFunction,
-  PipelineReduceFunction,
-  ReduceOptions,
+  ReduceFunction,
   TransformerLifecycleHooks,
   ChunkErrorHandler,
 } from "./types";
-import { DEFAULT_CHUNK_SIZE } from "./types";
-import { buildChunkGenerator, flattenChunks } from "./utils/chunk";
 import { SimpleContextManager } from "./context/simple";
 import { ErrorHandler } from "./errors/handler";
-import { isContextAware, isContextAwareReduce } from "./utils/helpers";
-import { Reducer } from "./utils/reduce";
+import { isContextAware } from "./utils/helpers";
+import { Reducer, foldChunk } from "./utils/reduce";
 
 /**
  * Construction-time knobs shared by every `Transformer<In, Out>` constructor overload below —
@@ -610,105 +607,30 @@ export class Transformer<In, Out> {
   }
 
   /**
-   * Reduce data to a single accumulated value.
+   * Folds this ONE chunk into one or more values via `emit` - no state survives to the next chunk,
+   * `Pipeline.reduce()`'s the only place cross-chunk state lives (#45; replaces the deleted
+   * whole-dataset terminal form entirely - `Pipeline.reduce()`, run over an actual `Pipeline`, is
+   * its replacement).
    *
-   * With `perChunk: true` (default): Each chunk is reduced independently.
-   * With `perChunk: false`: Terminal operation that reduces the ENTIRE dataset.
+   * @param fn - `(acc, item, ctx, emit) => acc` - called with all four arguments regardless of its
+   *   own declared arity (JS ignores extras), so `(acc, item) => acc` and `(acc, item, ctx, emit) =>
+   *   …` both work.
+   * @param initial - Initial accumulator value, reset for every chunk.
+   * @returns A new `Transformer` whose output is whatever `emit()` pushed plus the trailing
+   *   accumulator (only if items were folded since the last emit).
    *
-   * Python equivalent:
-   * ```python
-   * @overload
-   * def reduce[U](self, function, initial, *, per_chunk: Literal[True]) -> "Transformer[In, U]": ...
-   *
-   * @overload
-   * def reduce[U](self, function, initial, *, per_chunk: Literal[False] = False)
-   *   -> Callable[[Iterable[In], IContextManager | None], Iterator[U]]: ...
-   * ```
-   *
-   * @param fn - Reduce function: (acc, item) => acc or (acc, item, ctx) => acc
-   * @param initial - Initial accumulator value
-   * @param options - Optional settings: perChunk (default true)
-   * @returns Transformer (perChunk=true) or terminal function (perChunk=false)
+   * @example
+   * `new Transformer<number, number>().reduce((acc, x) => acc + x, 0)` over chunks `[[1,2],[3]]` →
+   * `[3]` then `[3]` (each chunk's own independent sum).
    */
-
-  // Overload: per-chunk reduce returns a chainable Transformer
-  reduce<U>(fn: PipelineReduceFunction<U, Out>, initial: U): Transformer<In, U>;
-  reduce<U>(
-    fn: PipelineReduceFunction<U, Out>,
-    initial: U,
-    options: { perChunk: true },
-  ): Transformer<In, U>;
-
-  // Overload: terminal reduce returns a callable function
-  reduce<U>(
-    fn: PipelineReduceFunction<U, Out>,
-    initial: U,
-    options: { perChunk: false },
-  ): (data: AsyncIterable<In> | Iterable<In>, context?: IContextManager) => AsyncGenerator<U>;
-
-  // Implementation
-  reduce<U>(
-    fn: PipelineReduceFunction<U, Out>,
-    initial: U,
-    options?: ReduceOptions,
-  ):
-    | Transformer<In, U>
-    | ((data: AsyncIterable<In> | Iterable<In>, context?: IContextManager) => AsyncGenerator<U>) {
-    const perChunk = options?.perChunk !== false; // Default to true
-
-    if (perChunk) {
-      // Per-chunk reduce: chainable operation, folding this ONE chunk via the shared `Reducer`
-      // (#45) - it calls `fn` with the full `(acc, item, ctx, emit)` signature regardless of `fn`'s
-      // own declared arity (JS ignores extra arguments), so no `isContextAwareReduce` branch is
-      // needed here any more; that check still guards the terminal branch below, untouched.
-      return this.pipe(async (chunk, ctx) => {
-        if (chunk.length === 0) return [];
-        const reducer = new Reducer<U, Out>(fn, initial);
-        const values: U[] = [];
-        for (const item of chunk) {
-          values.push(...(await reducer.fold(item, ctx)));
-        }
-        values.push(...reducer.final());
-        return values;
-      });
-    }
-
-    // Terminal reduce: returns a callable that processes entire dataset
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
-    const self = this;
-    const isContextAware = isContextAwareReduce(fn);
-
-    return async function* terminalReduce(
-      data: AsyncIterable<In> | Iterable<In>,
-      context?: IContextManager,
-    ): AsyncGenerator<U> {
-      const runContext = context ?? new SimpleContextManager();
-
-      // Run the transformer to get all processed chunks - `perChunk: false` is the one caller
-      // left with no `Pipeline` to own the cut, so it hardcodes the default chunk size (#39).
-      // Flattened back to items here (`flattenChunks`) so the reduce loop below stays within
-      // this repo's own `max-depth: 2` rule.
-      const asyncData = self.toAsyncIterable(data);
-      const chunks = buildChunkGenerator<In>(DEFAULT_CHUNK_SIZE)(asyncData);
-      const items = flattenChunks(self.process(chunks, runContext));
-
-      // Reduce all items to a single value - awaited per item, same reason as the per-chunk arms
-      // above: an async `fn` must resolve before the next call sees the accumulator.
-      let accumulator = initial;
-      for await (const item of items) {
-        if (isContextAware) {
-          accumulator = await (fn as (acc: U, item: Out, ctx: IContextManager) => U | Promise<U>)(
-            accumulator,
-            item,
-            runContext,
-          );
-        } else {
-          accumulator = await (fn as (acc: U, item: Out) => U | Promise<U>)(accumulator, item);
-        }
-      }
-
-      yield accumulator;
-    };
+  reduce<U>(fn: ReduceFunction<U, Out>, initial: U): Transformer<In, U> {
+    return this.pipe(async (chunk, ctx) => {
+      if (chunk.length === 0) return [];
+      const reducer = new Reducer<U, Out>(fn, initial);
+      const values = await foldChunk(reducer, chunk, ctx);
+      values.push(...reducer.final());
+      return values;
+    });
   }
 
   /**

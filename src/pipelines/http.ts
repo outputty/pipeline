@@ -16,7 +16,7 @@ import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import type { PipelineOptions, PipelineSource, ReduceStage } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type { IContextManager, InternalTransformer, ReduceFunction } from "@src/types";
-import { Reducer } from "@src/utils/reduce";
+import { Reducer, foldChunk } from "@src/utils/reduce";
 import { ndjsonFrame, readNdjsonLines } from "@src/utils/ndjson";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
@@ -117,19 +117,22 @@ function applyContextFrame(first: IteratorResult<string>, ctx: IContextManager):
 }
 
 /** One `{"chunk":[…]}` frame's worth of folding - every value `reducer.fold()` emits while folding
- * this chunk is batched into ONE `{"emit":…}` frame, sent once the whole chunk is folded. */
+ * this chunk is batched into ONE `{"emit":…}` frame, sent once the whole chunk is folded. Fails
+ * loud on a missing/non-array `chunk` (this repo's own rule: "External data missing an expected
+ * field fails at the parse") - review found this previously accepting any truthy `chunk`, so a
+ * truthy non-array (e.g. a string) was silently iterated character-by-character instead of
+ * rejected, the same bug class `applyContextFrame` (above) was already hardened against. */
 async function foldChunkFrame(
   line: string,
   reducer: Reducer<unknown, unknown>,
   ctx: IContextManager,
   writer: WritableStreamDefaultWriter<Uint8Array>,
 ): Promise<void> {
-  const frame = JSON.parse(line) as { chunk?: unknown[] };
-  if (!frame.chunk) return;
-  const emitted: unknown[] = [];
-  for (const item of frame.chunk) {
-    emitted.push(...(await reducer.fold(item, ctx)));
+  const frame = JSON.parse(line) as { chunk?: unknown };
+  if (!Array.isArray(frame.chunk)) {
+    throw new Error("reduce frame is missing a 'chunk' array");
   }
+  const emitted = await foldChunk(reducer, frame.chunk, ctx);
   if (emitted.length > 0) {
     await writer.write(ndjsonFrame({ emit: emitted }));
   }
@@ -459,13 +462,24 @@ export function toNodeHandler(
  * back - `toNodeHandler()`'s own body, pulled out so that function stays a one-line dispatch to
  * this plus its safety net (above). */
 /** Writes `bodyStream` to `res` chunk by chunk, stopping early once the client has gone
- * (`res.destroyed`) instead of pulling from `bodyStream` forever against a dead socket. Its own
+ * (`res.destroyed`) instead of pulling from `bodyStream` forever against a dead socket. Waits for
+ * `'drain'` whenever `res.write()` reports the socket is backed up (review: an unchecked write let
+ * a fast producer - a reduce stage's own emits - pile up unboundedly in Node's internal write
+ * buffer against a slow client) rather than pulling the next chunk immediately regardless. Its own
  * function, not inlined into `handleOverBridge`'s try block, to keep that block within this
  * repo's own `max-depth: 2` rule (the same reason `errorDetailOf`, above, is its own function). */
 async function writeStreamedBody(res: ServerResponse, bodyStream: Readable): Promise<void> {
   for await (const chunk of bodyStream) {
     if (res.destroyed) break;
-    res.write(chunk as Buffer);
+    const ok = res.write(chunk as Buffer);
+    if (!ok && !res.destroyed) {
+      // Races 'close' alongside 'drain' - a client that disconnects while backed up never fires
+      // 'drain' on a destroyed socket, which would otherwise hang this wait forever.
+      await new Promise<void>((resolve) => {
+        res.once("drain", resolve);
+        res.once("close", resolve);
+      });
+    }
   }
   res.end();
 }

@@ -11,7 +11,9 @@ import type { IContextManager, ReduceFunction } from "@src/types";
 /**
  * Folds items one at a time into `U`, buffering values `emit()` pushes and tracking whether the
  * trailing accumulator is still owed. `new Reducer(fn, 0).fold(x, ctx)` per item, `.final()` once -
- * `Transformer.reduce`'s per-chunk branch and `foldChunkStream` (below) are its only two callers.
+ * `Transformer.reduce`'s per-chunk branch, `foldChunk`/`foldChunkStream` (below), and
+ * `HttpPipeline`'s own server-side `runReduceStage` (`src/pipelines/http.ts`, one instance per
+ * duplex connection) are its callers.
  */
 export class Reducer<U, T> {
   private acc: U;
@@ -51,6 +53,29 @@ export class Reducer<U, T> {
 }
 
 /**
+ * Folds one chunk's items through an already-constructed `reducer`, collecting whatever `.fold()`
+ * emits across every item into one array, in order - the one loop shape every reducer caller
+ * shares (`foldChunkStream` below, `Transformer.reduce`'s per-chunk pipe callback, and
+ * `HttpPipeline`'s server-side `foldChunkFrame`, `src/pipelines/http.ts`), pulled out so a fix to
+ * the fold-accumulation loop itself (review: `itemsSinceEmit`'s own ordering subtlety) lands once
+ * rather than in three copies that could drift apart.
+ *
+ * `foldChunk(new Reducer((acc, x) => acc + x, 0), [1, 2, 3], ctx)` → `[]` (nothing emitted
+ * mid-fold; the accumulator itself only ever surfaces via `.final()`).
+ */
+export async function foldChunk<U, T>(
+  reducer: Reducer<U, T>,
+  chunk: Iterable<T>,
+  ctx: IContextManager,
+): Promise<U[]> {
+  const emitted: U[] = [];
+  for (const item of chunk) {
+    emitted.push(...(await reducer.fold(item, ctx)));
+  }
+  return emitted;
+}
+
+/**
  * Folds an entire chunk stream into emitted-value chunks, in-process and sequentially - the shared
  * body behind base `Pipeline.reduce()` and `ConcurrentPipeline.reduceWork()`'s own default
  * (`maxConcurrency` is inert on a reduce stage: one accumulator). Streams: yields whatever a given
@@ -67,10 +92,7 @@ export async function* foldChunkStream<U, T>(
 ): AsyncGenerator<U[]> {
   const reducer = new Reducer<U, T>(fn, initial);
   for await (const chunk of chunks) {
-    const out: U[] = [];
-    for (const item of chunk) {
-      out.push(...(await reducer.fold(item, ctx)));
-    }
+    const out = await foldChunk(reducer, chunk, ctx);
     if (out.length > 0) yield out;
   }
   const trailing = reducer.final();

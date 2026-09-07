@@ -158,23 +158,6 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
     expect(chained).toEqual(["sum:12"]);
   });
 
-  it("terminal reduce (perChunk:false) folds the entire dataset to one value", async () => {
-    // Chunk size never matters here - a terminal reduce ignores boundaries entirely, hardcoding
-    // its own cut (#39: it has no Pipeline to own one).
-    const terminal = T<number>().reduce((a: number, b: number) => a + b, 0, {
-      perChunk: false,
-    });
-    const collect = async (it: AsyncIterable<number>) => {
-      const out: number[] = [];
-      for await (const v of it) out.push(v);
-      return out;
-    };
-    expect(await collect(terminal([1, 2, 3, 4, 5]))).toEqual([15]);
-    expect(await collect(terminal([]))).toEqual([0]); // empty ⇒ initial value
-    // Reusable across invocations.
-    expect(await collect(terminal([10, 20, 30]))).toEqual([60]);
-  });
-
   it("loop re-applies a sub-transformer per chunk until the condition fails or maxIterations", async () => {
     const doubler = new Transformer<number, number>({ transform: (c) => c.map((x) => x * 2) });
     // [1,2,3] -> [2,4,6] (all <=10) -> [4,8,12] (12>10, stop)

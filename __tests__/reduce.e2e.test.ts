@@ -5,8 +5,9 @@
  * Every case #45 hasn't yet built is `test.fails`. Done-when 3 (`Transformer.reduce`, unchanged,
  * still per-chunk) already holds today and is a normal, passing `test`, kept here as a regression
  * guard once #45 lands alongside it. As each layer lands, its case flips from `test.fails` to
- * `test`. Done-when 7 (a repo-wide `perChunk` grep) and 8 (`pnpm check`) are shell gates run at the
- * enable layer, not vitest cases - neither has an "expected failure" a test runner can pin.
+ * `test`. Done-when 7 (a repo-wide grep for the deleted terminal-reduce option) and 8 (`pnpm check`)
+ * are shell gates run at the enable layer, not vitest cases - neither has an "expected failure" a
+ * test runner can pin.
  */
 import { describe, test, expect } from "vitest";
 import type { IContextManager } from "../src";
