@@ -348,6 +348,15 @@ describe("#62 the same chains behave identically over HttpPipeline and ClusterPi
           .reduce((acc: number, x: number) => acc + x, 0)
           .toArray();
         expect(sum.reduce((a, b) => a + b, 0)).toBe(15);
+
+        // Same chain, merged by hand via .local() - the mechanism a caller reaches for, not just a
+        // JS-side sum of the raw partials above.
+        const merged = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url, maxConcurrency: 2 })
+          .buffer(2)
+          .reduce((acc: number, x: number) => acc + x, 0)
+          .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
+          .toArray();
+        expect(merged).toEqual([15]);
       });
 
       const countWorker = new HttpPipeline<number>([], { url: "" }).reduce(
@@ -360,6 +369,16 @@ describe("#62 the same chains behave identically over HttpPipeline and ClusterPi
           .reduce((acc: number, _x: number) => acc + 1, 0)
           .toArray();
         expect(count.reduce((a, b) => a + b, 0)).toBe(5);
+
+        const countMerged = await new HttpPipeline<number>([1, 2, 3, 4, 5], {
+          url,
+          maxConcurrency: 2,
+        })
+          .buffer(2)
+          .reduce((acc: number, _x: number) => acc + 1, 0)
+          .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
+          .toArray();
+        expect(countMerged).toEqual([5]);
       });
     },
     HTTP_TIMEOUT,
@@ -374,10 +393,12 @@ describe("#62 the same chains behave identically over HttpPipeline and ClusterPi
         sumTotal: number;
         countTotal: number;
         merged: number[];
+        countMerged: number[];
       }>(fixture);
       expect(result.sumTotal).toBe(15);
       expect(result.countTotal).toBe(5);
       expect(result.merged).toEqual([15]);
+      expect(result.countMerged).toEqual([5]);
     },
     FIXTURE_TIMEOUT,
   );

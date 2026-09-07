@@ -23,7 +23,15 @@ const merged = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
   .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
   .toArray();
 
-if (sum.length > 0 || count.length > 0 || merged.length > 0) {
+// The count case merged, too - proves .local() isn't just adding numbers back together, it runs
+// the CALLER's own merge function, which here still sums (partial counts), not counts-of-counts.
+const countMerged = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, _x: number) => acc + 1, 0)
+  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
+  .toArray();
+
+if (sum.length > 0 || count.length > 0 || merged.length > 0 || countMerged.length > 0) {
   console.log(
     JSON.stringify({
       sumTotal: sum.reduce((a, b) => a + b, 0),
@@ -31,6 +39,7 @@ if (sum.length > 0 || count.length > 0 || merged.length > 0) {
       countTotal: count.reduce((a, b) => a + b, 0),
       countPartitions: count.length,
       merged,
+      countMerged,
     }),
   );
 }
