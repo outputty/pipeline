@@ -249,15 +249,15 @@ import { HttpPipeline, ConcurrentPipeline } from "@outputty/pipeline";
 
 const remote = new HttpPipeline([1, 2, 3, 4], { url: process.env.WORKER_URL! })
   .buffer(1)
-  .transform((t) => t.map((x: number) => x * 100)); // stage 0, dispatched over HTTP
+  .transform((t) => t.map((x: number) => x + 1)); // stage 0, dispatched over HTTP
 
-const local = new ConcurrentPipeline([1400, 2400])
+const local = new ConcurrentPipeline([10, 20])
   .buffer(1)
-  .transform((t) => t.map((x: number) => x)); // its own in-process fan-out, never the wire
+  .transform((t) => t.map((x: number) => x + 5)); // its own in-process fan-out, never the wire
 
 const merged = remote
   .merge(local)
-  .transform((t) => t.map((x: number) => x + 100)); // stage 1 - THIS pipeline's own next index
+  .transform((t) => t.map((x: number) => x * 100)); // stage 1 - THIS pipeline's own next index
 
 const data = await merged.toArray();
 ```

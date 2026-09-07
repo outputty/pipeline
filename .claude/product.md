@@ -171,8 +171,10 @@ const data = await new ClusterPipeline([1, 2, 3, 4, 5], {
 ```
 
 A `SimpleContextManager` keeps a worker's `ctx.set()` inside that worker. A manager backed by an
-external store publishes it to every process through that store. `Pipeline.merge()` is the one place
-values flow the other way, which is why it takes the manager explicitly.
+external store publishes it to every process through that store. `Pipeline.merge()`, static and
+instance both, are the two places values flow the other way - the static into `options.context` (or
+a fresh manager), the instance into the receiving pipeline's own - which is why each takes or
+already holds the manager explicitly.
 
 ### Branching and merging
 

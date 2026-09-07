@@ -270,16 +270,20 @@ export class Pipeline<T> {
   // ===== Static Factory Methods =====
 
   /**
-   * Merge multiple pipelines into a single pipeline (fan-in pattern).
+   * Merge multiple pipelines into a single pipeline (fan-in pattern), always a FRESH, plain
+   * `Pipeline` - for a caller who holds no pipeline of its own to continue. See the instance
+   * `.merge(...others)` (#41, below `.context()`) to merge onto a pipeline already held instead,
+   * keeping its own class, knobs and stage numbering.
    *
    * All items from all input pipelines are yielded in sequence, each source pipeline's OWN
    * already-cut `_chunks` boundary preserved rather than re-derived - merging never re-chunks
    * (#39). `options.context`, when given, is the SAME instance returned as `.contextManager` on
    * the merged pipeline - mutated in place with every source pipeline's own context values, later
-   * pipelines taking precedence on a shared key (#31; the one place values flow BACKWARD across
-   * pipelines, which is why this is the one seam that takes a manager explicitly rather than only
-   * ever receiving one at construction). With no `options`, a fresh `SimpleContextManager` is
-   * built and populated the same way - today's behaviour, unchanged.
+   * pipelines taking precedence on a shared key (#31; one of the TWO seams where values flow
+   * BACKWARD across pipelines - the instance `.merge()` is the other - which is why both take or
+   * already hold a manager explicitly rather than only ever receiving one at construction). With
+   * no `options`, a fresh `SimpleContextManager` is built and populated the same way - today's
+   * behaviour, unchanged.
    *
    * Python equivalent:
    * ```python
@@ -431,11 +435,13 @@ export class Pipeline<T> {
    *   pipeline of the same class with nothing appended.
    *
    * @example
-   * `new HttpPipeline([1,2,3,4], { url }).transform((t) => t.map((x) => x * 100))` (stage 0) `.merge(new
-   * ConcurrentPipeline([1400, 2400]).transform((t) => t.map((x) => x)))` `.transform((t) => t.map((x)
-   * => x + 100))` (stage 1, continuing THIS pipeline's own index, never restarting at 0) →
-   * `.toArray()` → `[200,300,400,500,1500,2500]`, real: `#41`'s own planning spike, reproduced in
-   * `__tests__/merge-instance.e2e.test.ts`.
+   * The ticket's own planning spike (`#41`'s `## Interface`), reproduced live in
+   * `__tests__/merge-instance.e2e.test.ts`: `new HttpPipeline([1,2,3,4], { url })
+   * .transform((t) => t.map((x) => x + 1))` (stage 0, dispatched) `.merge(new
+   * ConcurrentPipeline([10, 20]).transform((t) => t.map((x) => x + 5)))` (the
+   * `ConcurrentPipeline`'s own items, through its own in-process fan-out) `.transform((t) =>
+   * t.map((x) => x * 100))` (stage 1, continuing THIS pipeline's own index, never restarting at
+   * 0) → `.toArray()` → `[200,300,400,500,1500,2500]`.
    */
   merge(...others: Pipeline<T>[]): this {
     mergeContextsInto(

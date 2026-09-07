@@ -141,10 +141,12 @@ none of it survived the hand-trim (#745).
 
 - **Pipeline** - the high-level API composing a data source with a `Transformer` chain: `new
   Pipeline(source, options?)`, `.context()`, `.apply()`/`.transform()`, the terminal ops
-  (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`), and the static
-  `Pipeline.merge(pipelines, options?)` concatenating several pipelines' sources and contexts into
-  one - `pipelines` is an array, not a rest param (#31, BREAKING), and `options.context` carries a
-  caller's own manager through the merge as the SAME instance.
+  (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`), the static
+  `Pipeline.merge(pipelines, options?)` concatenating several pipelines' sources and contexts into a
+  FRESH plain `Pipeline` - `pipelines` is an array, not a rest param (#31, BREAKING), and
+  `options.context` carries a caller's own manager through the merge as the SAME instance - and the
+  instance `.merge(...others)` (#41), concatenating other pipelines onto ONE already held, keeping
+  its own class, knobs and stage numbering instead of building a stranger.
 - **Transformer** - the chainable chunk-transformation builder: `new Transformer<In, Out>(options?)`,
   `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.catch()`, `.withHooks()` for lifecycle
   callbacks. Chunk-agnostic (#39) - it never decides how its own input was cut, only
@@ -209,10 +211,12 @@ none of it survived the hand-trim (#745).
   parameter - one signature, not a union of arities, so an un-annotated callback still infers its item
   type (`types.ts`'s own docstring on `PipelineFunction` records why the union form was rejected).
   `.context()` mutates a caller's OWN manager in place and carries the SAME instance forward, never
-  a copy (#31) - a rejected write propagates instead of being bypassed. `Pipeline.merge(pipelines,
-  options?)` merges every source pipeline's context into the manager `options.context` names, or
-  into a fresh `SimpleContextManager` when it names none - the ONE place values flow backward, which
-  is why it takes the manager explicitly.
+  a copy (#31) - a rejected write propagates instead of being bypassed. The static
+  `Pipeline.merge(pipelines, options?)` merges every source pipeline's context into the manager
+  `options.context` names, or into a fresh `SimpleContextManager` when it names none; the instance
+  `.merge(...others)` (#41) merges every `other`'s context into THIS pipeline's own manager instead -
+  the TWO places values flow backward across pipelines, which is why both take (or already hold) the
+  manager explicitly rather than only ever receiving one at construction.
 - **`context` / `contextFactory`** - the two ways a caller supplies a manager (`PipelineOptions`).
   `context` is an instance for THIS process, kept by every operation, writes included; `.context()`
   merges into it rather than replacing it. `contextFactory` is how to BUILD one, for a process that
