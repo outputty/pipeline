@@ -7,6 +7,20 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-07 #39's real L1 layer landed its first two commits on the ticket's own worktree branch
+
+Rebuilding #39 after the replan, L1's test file was written, tested, reviewed and committed twice -
+all on `worktree-ticket-39` itself, PR #47's own branch - before `gh stack add feature/buffer-39-l1`
+ever ran. `gh stack add` then refused outright (a stale local `gh stack` entry, `feature/chunker-seam-
+39-l2`, left over from the earlier aborted L1 attempt, made the tool think `worktree-ticket-39` was
+not "the top of the stack"). Recovered with `gh stack unstack --local` + `gh stack init` to rebuild
+clean tracking, `gh stack add` for the real branch, then `git branch -f worktree-ticket-39 bc5a048`
+to move the two stray commits off the base branch (safe only because nothing had been pushed yet -
+`git log origin/worktree-ticket-39` was checked first). `~/.claude/rules/issues.md`'s `gh stack add`
+rule (already re-violated once before, 2026-09-04) is sharpened again: run it as the layer's FIRST
+action, before any file touch, and its own new bullet documents the stale-entry recovery so the next
+session doesn't spend ten tool calls hunting for where `gh stack` stores the phantom branch.
+
 ## 2026-09-06 A handoff note's coined word framed a whole question round
 
 Planning #45, the primary session's notes called the thing to build a "producer". The word appears
