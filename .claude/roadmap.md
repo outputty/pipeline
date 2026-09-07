@@ -10,8 +10,8 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 ## Building - open tickets, detail in each issue
 
 - **A conformance suite every `Pipeline` and Context class runs** (#37), **`EventEmitterPipeline`**
-  (#30), **the pipeline's error handlers** (#40), **instance `merge`** (#41) and **cross-runtime
-  benchmarks** (#11) are the other open tickets; each issue carries its own detail.
+  (#30), **the pipeline's error handlers** (#40) and **cross-runtime benchmarks** (#11) are the
+  other open tickets; each issue carries its own detail.
 
 ### Later - not yet filed
 
@@ -37,6 +37,15 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`Pipeline.prototype.merge()` continues a pipeline already held, keeping its class** (#41) - the
+  static `Pipeline.merge()` always builds a plain `Pipeline` and always restarts `_chunkTransforms`
+  at 0, so a merged dispatching pipeline gaining one more stage collides with its own first stage on
+  `/stage/0`. Two spiked static designs both produced this exact collision (`out
+  [100000,200000,300000,400000]` instead of `[1100,2100,3100,4100]`; a mixed-class refusal wrong too:
+  `[3,4,4,5]` instead of `[3,5,4,5]`). `pipeline.merge(...others)` has no such problem - there is no
+  stranger, it continues an instance that already has its own class, knobs and stage table via
+  `createPipeline()`. `mergeContextsInto()`/`concatChunks()` are the one shared implementation the
+  static and the instance method both call, rather than two copies of the same loop. PR #60.
 - **A reducer on the `Pipeline`, folding every chunk it receives** (#45, `feat!`) - `reduce` only
   folded one chunk before, and the whole-dataset form returned a standalone callable that was never
   a stage, so a running total across a stream meant draining the pipeline and folding outside it,

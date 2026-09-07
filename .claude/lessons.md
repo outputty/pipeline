@@ -7,6 +7,16 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-07 #41's instance `merge()` copied the static `merge()`'s own loop instead of sharing it
+
+Writing `Pipeline.prototype.merge()` right below the static `Pipeline.merge()`, the same
+context-merge loop and chunk-concatenation generator were typed out a second time - the new
+method's own docstring even called it "the static's own semantics, unchanged," naming the
+duplication without acting on it. `/code-review medium` caught it as a reuse finding; the fix
+extracted `mergeContextsInto()`/`concatChunks()` as the one shared implementation both methods call.
+`~/.claude/rules/code.md`'s Reuse ladder gains a line: a new method's own docstring calling itself
+"the same semantics" as an adjacent sibling is the cue to extract before writing, not after review.
+
 ## 2026-09-07 #45's L2 commit landed on L1's own branch, again
 
 Straight after L1's commit and PR went out clean, L2's `Reducer` helper, `Pipeline.reduce()` and the

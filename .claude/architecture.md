@@ -136,7 +136,7 @@ plain `Pipeline`'s own sequential, in-process `apply()`, needing no per-level co
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
 createPipeline()` calling `this.constructor` rather than a hard-coded `new Pipeline<U>`, so a
-subclass survives a `.transform()`/`.context()`/`.buffer()` chain; each level overrides
+subclass survives a `.transform()`/`.context()`/`.buffer()`/`.merge()` chain; each level overrides
 `createPipeline()` again to carry its OWN extra knobs forward (`ConcurrentPipeline`'s own
 `concurrentOptions()` helper is the one place `maxConcurrency`/`ordered` are listed - `chunkSize`
 dropped out of it (#39), since `.buffer()` is `Pipeline`'s own knob now, not
@@ -145,6 +145,14 @@ stage's identity is its INDEX in `_chunkTransforms` - the table `apply()` alread
 dispatching class sends a chunk plus an index, never a function. Every instance runs the same code,
 so index N means the same transform on both sides; a mixed-version fleet breaks that assumption
 silently, which is why atomic deploys are a documented requirement rather than a check.
+
+`pipeline.merge(...others)` (#41) is the instance-method sibling of the static `Pipeline.merge()`,
+and goes through the SAME `createPipeline()` seam - the reason it never restarts `_chunkTransforms`
+at 0 the way the static's own hard-coded `new Pipeline(...)` does. The static builds a fresh, class-
+less pipeline because it has no instance of its own to continue; the instance method has one, so it
+carries THIS pipeline's own class, knobs and stage table forward instead of starting over. Both
+share one context-merge loop and one chunk-concatenation generator (`mergeContextsInto()`/
+`concatChunks()`, `src/pipeline.ts`) rather than two independent copies of the same logic.
 
 `ConcurrentPipeline.apply()` does NOT call `transformer.process()` for a non-local stage - that
 bypass IS the mechanism, since `process()` runs a chain sequentially, one chunk at a time. It fans
