@@ -159,6 +159,22 @@ The two older candidates, still not filed:
 
 ## Killed
 
+- **The combine debt** (#62, built and shipped on L1/L2, then deleted before merge) - `owesCombine`, a
+  tracked flag every copy-on-write `Pipeline` method carried forward, and `assertCombined()`, throwing
+  at every terminal op until a `.combine()` stage ran. Reused an ordinary `ReduceFunction` under a
+  dedicated name and made every partitioned reduce a two-step ritual whether or not the caller wanted
+  one final value. Killed by the user: "I don't see much value for it... run multiple reducers that
+  emit their individual results... it's up to the user to decide." Shipped instead: each partition's
+  result flows downstream as an ordinary value, same as any non-partitioned reduce's own `emit()`
+  output; a caller who wants one value writes `.local((p) => p.reduce(mergeFn, initial))` by hand.
+
+- **A phantom-type compile-time guard for the combine debt** (#62, spiked, never committed) - a second
+  type parameter tracking whether a `Pipeline`'s pending reduce had been combined, so a forgotten
+  `.combine()` failed `tsc` instead of throwing at runtime. Verified working end to end with real
+  `tsc --strict` probes, including a property-name trick to shape the compiler's own error message.
+  Killed alongside the mechanism it protected: once the combine debt itself was deleted, there was
+  nothing left for a compile-time guard to guard.
+
 - **`EventEmitterPipeline`** (#30, closed unbuilt) - a fourth `Pipeline` subclass publishing five
   chunk-level lifecycle events per dispatched stage, on a `PipelineEmitter` the caller passes in.
   Killed on its own opening premise, re-run while planning #72: `.withHooks()` was never the only
