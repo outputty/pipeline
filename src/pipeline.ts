@@ -22,7 +22,7 @@
  * ```
  */
 
-import type { IContextManager, BranchDefinition, BranchOptions } from "./types";
+import type { IContextManager, BranchDefinition, BranchOptions, ReduceFunction } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
 import { SimpleContextManager } from "./context/simple";
 import { Transformer } from "./transformer";
@@ -449,6 +449,20 @@ export class Pipeline<T> {
       chunkTransforms: this._chunkTransforms,
       preBufferItems: items,
     }) as this;
+  }
+
+  /**
+   * Fold every chunk this pipeline produces into one or more values (#45) — STUB (L1): the real,
+   * settled signature, body throwing. `Transformer.reduce` folds ONE chunk and keeps nothing between
+   * chunks; this folds EVERYTHING the pipeline produces, which is the only place cross-chunk state
+   * lives (L2 fills the fold in, sequential and in-process — `ConcurrentPipeline` (L3) overrides this
+   * to add `StageOptions`, mirroring `apply()`/`transform()`'s own base-vs-`{ local: true }` split).
+   *
+   * `new Pipeline([1,2,3,4,5]).reduce((acc, x) => acc + x, 0).transform((t) => t.map((n) => n *
+   * 10)).toArray()` → `[150]` (L2).
+   */
+  reduce<U>(_fn: ReduceFunction<U, T>, _initial: U): Pipeline<U> {
+    throw new Error("Pipeline.reduce: not implemented (#45 L2)");
   }
 
   // ===== Terminal Operations =====

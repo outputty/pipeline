@@ -15,7 +15,7 @@ import type { ConcurrentPipelineOptions, StageOptions } from "@src/pipelines/con
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import type { PipelineOptions, PipelineSource } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import type { InternalTransformer } from "@src/types";
+import type { InternalTransformer, ReduceFunction } from "@src/types";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 /** `HttpPipeline`'s real constructor parameter type - see `ConcurrentPipelineConstructorOptions`
@@ -105,6 +105,19 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
 
   override apply<U>(transformer: Transformer<T, U>, options?: StageOptions): HttpPipeline<U> {
     return super.apply(transformer, options) as HttpPipeline<U>;
+  }
+
+  /**
+   * Re-declared ONLY to narrow the static return type back to `HttpPipeline<U>` - same reason as
+   * `.transform()`/`.apply()` above. `ConcurrentPipeline.reduce()`'s own logic runs unchanged via
+   * `super`.
+   */
+  override reduce<U>(
+    fn: ReduceFunction<U, T>,
+    initial: U,
+    options?: StageOptions,
+  ): HttpPipeline<U> {
+    return super.reduce(fn, initial, options) as HttpPipeline<U>;
   }
 
   /**

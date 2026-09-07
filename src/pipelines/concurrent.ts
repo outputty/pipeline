@@ -11,7 +11,7 @@
  * actually happens (`HttpPipeline`, #17 L4, overrides it to POST).
  */
 
-import type { IContextManager, InternalTransformer } from "@src/types";
+import type { IContextManager, InternalTransformer, ReduceFunction } from "@src/types";
 import { Pipeline, type PipelineOptions, type PipelineSource } from "@src/pipeline";
 import type { ChunkTransform } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
@@ -268,6 +268,36 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
       // flattens it like any other stage's output, so no pre-buffer item view survives this call.
       preBufferItems: null,
     });
+  }
+
+  /**
+   * Fold every chunk this pipeline produces (#45) — STUB (L1): the real signature, body throwing.
+   * Adds `StageOptions` on top of the base `Pipeline.reduce(fn, initial)` signature, mirroring
+   * `apply()`/`transform()`'s own base-vs-`{ local: true }` split (L3 fills in the fold via
+   * `reduceWork()`, this class's own override point, `stageWork()`'s sibling).
+   */
+  override reduce<U>(
+    _fn: ReduceFunction<U, T>,
+    _initial: U,
+    _options?: StageOptions,
+  ): ConcurrentPipeline<U> {
+    throw new Error("ConcurrentPipeline.reduce: not implemented (#45 L3)");
+  }
+
+  /**
+   * The one method a subclass overrides to change WHERE a reducer runs (#45) — STUB (L1): the real
+   * signature, body throwing. `stageWork()`'s sibling: a reducer streams in and out (it emits fewer
+   * or more values than it consumes), so this returns a generator over OUTPUT CHUNKS rather than an
+   * `InternalTransformer`. `ConcurrentPipeline` (L3) folds in-process and sequentially -
+   * `maxConcurrency` is inert on a reduce stage, one accumulator, one connection; `HttpPipeline` (L5)
+   * overrides it to open one duplex POST instead.
+   */
+  protected reduceWork<U>(
+    _fn: ReduceFunction<U, T>,
+    _initial: U,
+    _stageIndex: number,
+  ): (chunks: AsyncIterable<T[]>, ctx: IContextManager) => AsyncGenerator<U[]> {
+    throw new Error("ConcurrentPipeline.reduceWork: not implemented (#45 L3)");
   }
 
   /**

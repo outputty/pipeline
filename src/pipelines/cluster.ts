@@ -19,7 +19,7 @@ import type { ConcurrentPipelineOptions, StageOptions } from "@src/pipelines/con
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
 import type { PipelineOptions, PipelineSource } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import type { InternalTransformer } from "@src/types";
+import type { InternalTransformer, ReduceFunction } from "@src/types";
 
 /** Construction-time knobs for `ClusterPipeline`. */
 export type ClusterPipelineOptions = { workers?: number } & ConcurrentPipelineOptions;
@@ -204,6 +204,16 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
 
   override apply<U>(transformer: Transformer<T, U>, options?: StageOptions): ClusterPipeline<U> {
     return super.apply(transformer, options) as ClusterPipeline<U>;
+  }
+
+  /** Re-declared ONLY to narrow the static return type back to `ClusterPipeline<U>` - same reason
+   * as `.transform()`/`.apply()` above. `HttpPipeline.reduce()`'s own logic runs unchanged. */
+  override reduce<U>(
+    fn: ReduceFunction<U, T>,
+    initial: U,
+    options?: StageOptions,
+  ): ClusterPipeline<U> {
+    return super.reduce(fn, initial, options) as ClusterPipeline<U>;
   }
 
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/stage/<n>` instead of plain
