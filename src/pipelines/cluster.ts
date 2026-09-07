@@ -220,6 +220,14 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
     return super.local(build) as ClusterPipeline<U>;
   }
 
+  /**
+   * Narrows `Pipeline.combine()`'s return type only (#62, `~/.claude/rules/typescript.md`) - same
+   * reason as `.local()`/`.reduce()` above. `HttpPipeline.combine()`'s logic runs unchanged.
+   */
+  override combine(fn: ReduceFunction<T, T>): ClusterPipeline<T> {
+    return super.combine(fn) as ClusterPipeline<T>;
+  }
+
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain
    * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`http.ts`) exists for, so several
    * `ClusterPipeline`s can share one worker server without colliding on stage 0. */

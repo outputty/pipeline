@@ -32,15 +32,10 @@ const [folded] = await new ClusterPipeline([1, 2, 3, 4, 5])
     (acc: Tagged, x: number): Tagged => ({ sum: acc.sum + x, pids: [...acc.pids, process.pid] }),
     { sum: 0, pids: [] },
   )
-  .local((p) =>
-    p.reduce(
-      (acc: Tagged, v: Tagged): Tagged => ({
-        sum: acc.sum + v.sum,
-        pids: [...acc.pids, ...v.pids, process.pid],
-      }),
-      { sum: 0, pids: [] },
-    ),
-  )
+  .combine((acc: Tagged, v: Tagged): Tagged => ({
+    sum: acc.sum + v.sum,
+    pids: [...acc.pids, ...v.pids, process.pid],
+  }))
   .toArray();
 
 if (folded) {

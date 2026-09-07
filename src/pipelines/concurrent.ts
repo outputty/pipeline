@@ -306,17 +306,19 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
    * independent accumulators, each its own `reduceWork()` call over its own `share()` view of the
    * ONE underlying chunk stream (free-slot dealing, `src/utils/chunk.ts` - a slow partition simply
    * calls `.next()` less often, so the others pick up its slack), merged in completion order since
-   * there is no order between partitions. Returns with the combine debt still owed
-   * (`owesCombine`, `src/pipeline.ts`) - every draining path throws until `.local(build)` (#61)
-   * folds the partials into one via a second `.reduce()`, which the caller writes as the very next
-   * stage: there is no combine parameter here, and no associativity marker - a combine is an
-   * ordinary `ReduceFunction`, and the package already has exactly one way to spell one. Gated on
-   * `PIPELINE_PARTITIONED_REDUCE=1` until the enable layer (#62's own stack); the pre-#62
-   * single-accumulator fold runs otherwise.
+   * there is no order between partitions. `fn` declaring no 4th (`emit`) parameter means it means to
+   * fold to ONE value per partition - the result then owes a combine (`owesCombine`,
+   * `src/pipeline.ts`), and every draining path throws until `.combine(fn)` (sugar for
+   * `.local(build)`, #61) folds the partials into one. `fn` declaring `emit` already means to
+   * produce several values on purpose; nothing is ever owed for that case, and the emitted chunks
+   * pass straight through. There is no combine parameter on `.reduce()` itself, and no associativity
+   * marker - a combine is an ordinary `ReduceFunction`, and the package already has exactly one way
+   * to spell one. Gated on `PIPELINE_PARTITIONED_REDUCE=1` until the enable layer (#62's own stack);
+   * the pre-#62 single-accumulator fold runs otherwise.
    *
    * `PIPELINE_PARTITIONED_REDUCE=1`:
    * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0)
-   * .local((p)=>p.reduce((a,v)=>a+v,0)).toArray()` → `[15]`.
+   * .combine((a,v)=>a+v).toArray()` → `[15]`.
    */
   override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U> {
     // Fail loud rather than silently compounding: a second dispatched reduce stacked on an
@@ -327,6 +329,13 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
 
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
+    // `fn.length < 4` means `fn` declares no `emit` parameter - it means to fold to ONE value per
+    // partition, which is exactly what a caller can forget to merge back into one (`owesCombine`
+    // below). A `fn` that DOES declare `emit` already means to produce several values on purpose;
+    // nothing is ever owed for it - see `PipelineOptions.owesCombine`'s own docstring. A default
+    // value or rest param on `emit` drops it out of `.length` (`~/.claude/rules/typescript.md`) -
+    // TypeScript cannot catch that here, so a fold meaning to use `emit` must declare it plain.
+    const intendsOneValue = fn.length < 4;
 
     if (process.env.PIPELINE_PARTITIONED_REDUCE !== "1") {
       // TEMPORARY (#62 L2, deleted at the enable layer): the pre-#62 single-accumulator fold, one
@@ -359,7 +368,7 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
       chunkTransforms,
       reduceStages,
       preBufferItems: null,
-      owesCombine: stageIndex,
+      owesCombine: intendsOneValue ? stageIndex : undefined,
     });
   }
 
@@ -372,6 +381,14 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
    */
   override local<U>(build: (p: Pipeline<T>) => Pipeline<U>): ConcurrentPipeline<U> {
     return super.local(build) as ConcurrentPipeline<U>;
+  }
+
+  /**
+   * Narrows `Pipeline.combine()`'s return type only (#62, `~/.claude/rules/typescript.md`) - the
+   * body is an unchanged `super()` call, same reason as `.local()` just above.
+   */
+  override combine(fn: ReduceFunction<T, T>): ConcurrentPipeline<T> {
+    return super.combine(fn) as ConcurrentPipeline<T>;
   }
 
   /**

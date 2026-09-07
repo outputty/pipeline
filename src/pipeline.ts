@@ -108,10 +108,14 @@ export interface PipelineOptions {
   reduceStages?: Map<number, ReduceStage>;
   /**
    * Internal: the STAGE INDEX of the most recent partitioned reduce (`ConcurrentPipeline.reduce()`,
-   * #62) whose partials were never combined, or `undefined` when nothing is owed. Set by
-   * `ConcurrentPipeline.reduce()` to the stage it just registered; cleared back to `undefined` by
-   * `.local(build)` when `build` itself registers a reduce stage (the combine) - any OTHER
-   * copy-on-write call (`.apply()`/`.buffer()`/`.context()`/`.merge()`) just carries it forward
+   * #62) whose partials were never combined, or `undefined` when nothing is owed. Set ONLY when the
+   * fold function declares no 4th (`emit`) parameter (`fn.length < 4`) - that arity is the fold's
+   * own declaration of intent: no `emit` means it means to produce ONE value per partition, which is
+   * exactly the case a caller can forget to merge back into one; a fold that DOES declare `emit`
+   * already means to produce several values on purpose; nothing is ever owed for it, the same as a
+   * non-partitioned reduce's own `emit()` output today. Cleared back to `undefined` by `.local(build)`
+   * (or its sugar, `.combine()`) when `build` itself registers a reduce stage (the combine) - any
+   * OTHER copy-on-write call (`.apply()`/`.buffer()`/`.context()`/`.merge()`) just carries it forward
    * unchanged, the same as `reduceStages`. Every one of the 5 TERMINAL ops (`toArray`/`first`/
    * `consume`/`forEach`/`branch`) throws while this is set - `assertCombined()`, below - but async
    * iteration does NOT: it exposes chunk structure rather than flattening it into one scalar
@@ -119,6 +123,13 @@ export interface PipelineOptions {
    * lower-level use, not the mistake this guard exists to catch. A stage index rather than a plain
    * boolean so the thrown error can name the actual offending stage, the same way
    * `reduceStagePlaceholder()`'s own message does. Not intended for direct external use.
+   *
+   * The `fn.length < 4` check is a RUNTIME opt-in on the fold's exact literal shape - TypeScript
+   * cannot catch a caller who misses it (`~/.claude/rules/typescript.md`). A default value on the
+   * 4th parameter (`(acc, x, ctx, emit = () => {}) => …`) or a rest parameter drops it out of
+   * `.length` entirely, so a fold that MEANS to use `emit` but writes either of those is silently
+   * read as arity-3 and gets a combine debt it never intended. Declare `emit` as a plain, undefaulted
+   * positional parameter to opt out of the debt.
    */
   owesCombine?: number;
 }
@@ -676,6 +687,31 @@ export class Pipeline<T> {
   }
 
   /**
+   * Pays off a partitioned reduce's combine debt (#62) - sugar for
+   * `.local((p) => p.reduce(fn, initial))` that reuses the owed stage's OWN `initial` from
+   * `_reduceStages` rather than asking the caller to repeat it: the fold's `initial` must already
+   * be `fn`'s identity for the merge to be correct (`partitioned-folds` skill,
+   * `initial-value-trap`), so a caller who already got that right gets it for free instead of
+   * typing it twice and risking the two copies drift apart. `fn` is deliberately a DIFFERENT
+   * function than the fold's own in general - reusing the fold as its own combine typechecks
+   * whenever the accumulator type happens to equal the item type and is silently wrong otherwise (a
+   * count folds `(acc,_x) => acc+1`; combining ITS partials the same way counts the partials, not
+   * the items - `partitioned-folds`, `combine-algebra`). Throws rather than no-op when nothing is
+   * owed: a caller reaching for `.combine()` on a pipeline that never partitioned almost always
+   * holds the wrong pipeline.
+   *
+   * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0)
+   * .combine((a,v)=>a+v).toArray()` → `[15]`.
+   */
+  combine(fn: ReduceFunction<T, T>): Pipeline<T> {
+    if (this._owesCombine === undefined) {
+      throw new Error("combine() called but no partitioned reduce is owed");
+    }
+    const { initial } = this._reduceStages.get(this._owesCombine)!;
+    return this.local((p) => p.reduce(fn, initial as T));
+  }
+
+  /**
    * Registers a new reduce stage at the next index in the shared stage-index space
    * `_chunkTransforms` already uses (#45) - `ConcurrentPipeline.reduce()`'s own override calls this
    * too, so both share one bookkeeping seam rather than two copies that could drift apart.
@@ -716,7 +752,7 @@ export class Pipeline<T> {
     if (this._owesCombine !== undefined) {
       throw new Error(
         `stage ${this._owesCombine} is a partitioned reduce whose partials were never combined - ` +
-          `follow it with .local((p) => p.reduce(...))`,
+          `follow it with .combine((acc, v) => ...)`,
       );
     }
   }

@@ -193,12 +193,17 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
   // still required (the debt is owed the moment `.reduce()` dispatches, not only when partitioning
   // actually happens), and still prints the identical [150].
   test("ConcurrentPipeline", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5])
-      .reduce((acc: number, x: number) => acc + x, 0)
-      .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
-      .transform((t) => t.map((n: number) => n * 10))
-      .toArray();
-    expect(data).toEqual([150]);
+    process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+    try {
+      const data = await new ConcurrentPipeline([1, 2, 3, 4, 5])
+        .reduce((acc: number, x: number) => acc + x, 0)
+        .combine((acc: number, v: number) => acc + v)
+        .transform((t) => t.map((n: number) => n * 10))
+        .toArray();
+      expect(data).toEqual([150]);
+    } finally {
+      delete process.env.PIPELINE_PARTITIONED_REDUCE;
+    }
   });
 
   // Tracks request PATHS, not just a raw count - the chained .transform() after .reduce() makes
@@ -208,29 +213,34 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
   test(
     "HttpPipeline, the reduce stage itself dispatched over /reduce/<n>",
     async () => {
-      const requestPaths: string[] = [];
-      // The worker must register the IDENTICAL stage sequence the orchestrator below dispatches
-      // against - a `.local(build)` region never crosses the wire, but it still consumes a slot in
-      // the shared `_chunkTransforms`/`_reduceStages` index space (architecture.md: "index N means
-      // the same transform on both sides"), so the worker's own `.transform()` must land at the
-      // SAME index the orchestrator's does, one past the combine's own bookkeeping slot.
-      const worker = new HttpPipeline<number>([], { url: "" })
-        .reduce((acc: number, x: number) => acc + x, 0)
-        .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
-        .transform((t) => t.map((n: number) => n * 10));
-      const trackingHandler = async (request: Request): Promise<Response> => {
-        requestPaths.push(new URL(request.url).pathname);
-        return worker.fetch(request);
-      };
-      await withServer(trackingHandler, async (url) => {
-        const data = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url })
+      process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+      try {
+        const requestPaths: string[] = [];
+        // The worker must register the IDENTICAL stage sequence the orchestrator below dispatches
+        // against - a `.local(build)` region never crosses the wire, but it still consumes a slot in
+        // the shared `_chunkTransforms`/`_reduceStages` index space (architecture.md: "index N means
+        // the same transform on both sides"), so the worker's own `.transform()` must land at the
+        // SAME index the orchestrator's does, one past the combine's own bookkeeping slot.
+        const worker = new HttpPipeline<number>([], { url: "" })
           .reduce((acc: number, x: number) => acc + x, 0)
-          .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
-          .transform((t) => t.map((n: number) => n * 10))
-          .toArray();
-        expect(data).toEqual([150]);
-        expect(requestPaths.some((p) => p.includes("/reduce/"))).toBe(true);
-      });
+          .combine((acc: number, v: number) => acc + v)
+          .transform((t) => t.map((n: number) => n * 10));
+        const trackingHandler = async (request: Request): Promise<Response> => {
+          requestPaths.push(new URL(request.url).pathname);
+          return worker.fetch(request);
+        };
+        await withServer(trackingHandler, async (url) => {
+          const data = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url })
+            .reduce((acc: number, x: number) => acc + x, 0)
+            .combine((acc: number, v: number) => acc + v)
+            .transform((t) => t.map((n: number) => n * 10))
+            .toArray();
+          expect(data).toEqual([150]);
+          expect(requestPaths.some((p) => p.includes("/reduce/"))).toBe(true);
+        });
+      } finally {
+        delete process.env.PIPELINE_PARTITIONED_REDUCE;
+      }
     },
     HTTP_TIMEOUT,
   );
@@ -239,33 +249,50 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
   test(
     "ClusterPipeline, dispatched to a real worker process",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-reduce.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{ sum: number; dispatchedToWorker: boolean }>(fixture);
-      expect(result.sum * 10).toBe(150);
-      expect(result.dispatchedToWorker).toBe(true);
+      // Separate process (execFile) inheriting process.env - needs the flag set on THIS process
+      // right before the spawn.
+      process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+      try {
+        const fixture = await runFixture("__tests__/fixtures/cluster-reduce.ts");
+        expectFixtureOk(fixture);
+        const result = lastJsonLine<{ sum: number; dispatchedToWorker: boolean }>(fixture);
+        expect(result.sum * 10).toBe(150);
+        expect(result.dispatchedToWorker).toBe(true);
+      } finally {
+        delete process.env.PIPELINE_PARTITIONED_REDUCE;
+      }
     },
     FIXTURE_TIMEOUT,
   );
 });
 
 describe("#62 a dispatched reduce partitions and owes a combine (Done-when 1, 2, 4-7)", () => {
-  test("Done-when 1: buffer(2).reduce(sum,0).local(combine).toArray() prints [15]", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
-      .buffer(2)
-      .reduce((acc: number, x: number) => acc + x, 0)
-      .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
-      .toArray();
-    expect(data).toEqual([15]);
+  test("Done-when 1: buffer(2).reduce(sum,0).combine(merge).toArray() prints [15]", async () => {
+    process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+    try {
+      const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+        .buffer(2)
+        .reduce((acc: number, x: number) => acc + x, 0)
+        .combine((acc: number, v: number) => acc + v)
+        .toArray();
+      expect(data).toEqual([15]);
+    } finally {
+      delete process.env.PIPELINE_PARTITIONED_REDUCE;
+    }
   });
 
   test("Done-when 2: the count case, whose combine differs from its fold, prints [5]", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
-      .buffer(2)
-      .reduce((acc: number, _x: number) => acc + 1, 0)
-      .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
-      .toArray();
-    expect(data).toEqual([5]);
+    process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+    try {
+      const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+        .buffer(2)
+        .reduce((acc: number, _x: number) => acc + 1, 0)
+        .combine((acc: number, v: number) => acc + v)
+        .toArray();
+      expect(data).toEqual([5]);
+    } finally {
+      delete process.env.PIPELINE_PARTITIONED_REDUCE;
+    }
   });
 
   // L2 gates the actual partitioning behind PIPELINE_PARTITIONED_REDUCE=1 (deleted at the enable
@@ -281,7 +308,7 @@ describe("#62 a dispatched reduce partitions and owes a combine (Done-when 1, 2,
         .reduce((acc: number, x: number) => acc + x, 0);
       await expect(pipeline.toArray()).rejects.toThrow(
         "stage 0 is a partitioned reduce whose partials were never combined - follow it with " +
-          ".local((p) => p.reduce(...))",
+          ".combine((acc, v) => ...)",
       );
     } finally {
       delete process.env.PIPELINE_PARTITIONED_REDUCE;
@@ -311,16 +338,21 @@ describe("#62 a dispatched reduce partitions and owes a combine (Done-when 1, 2,
   });
 
   test("Done-when 7: no .buffer() is one chunk, one partial - combining it still prints [15]", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
-      .reduce((acc: number, x: number) => acc + x, 0)
-      .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
-      .toArray();
-    expect(data).toEqual([15]);
+    process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+    try {
+      const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+        .reduce((acc: number, x: number) => acc + x, 0)
+        .combine((acc: number, v: number) => acc + v)
+        .toArray();
+      expect(data).toEqual([15]);
+    } finally {
+      delete process.env.PIPELINE_PARTITIONED_REDUCE;
+    }
   });
 });
 
 describe("#62 an input chunk's emits stay together as one output chunk (Done-when 8)", () => {
-  test("each output chunk holds exactly one input chunk's emits", async () => {
+  test("each output chunk holds exactly one input chunk's emits, via async iteration", async () => {
     const observedChunks: number[][] = [];
     const partitioned = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
       .buffer(2)
@@ -328,10 +360,6 @@ describe("#62 an input chunk's emits stay together as one output chunk (Done-whe
         emit(x * 10);
         return 0;
       }, 0);
-    // Async iteration, never `.toArray()` - it exposes chunk structure instead of flattening it
-    // away, and is deliberately NOT guarded by the combine debt (`src/pipeline.ts`'s own
-    // `assertCombined()` docstring): this test wants the RAW per-partition chunks, before any
-    // combine, which is exactly what a terminal op here would refuse to hand back.
     for await (const chunk of partitioned) {
       observedChunks.push([...chunk]);
     }
@@ -344,37 +372,57 @@ describe("#62 an input chunk's emits stay together as one output chunk (Done-whe
     expect(foldedPerChunk).toEqual([30, 50, 70]);
     expect(observedChunks.flat().sort((a, b) => a - b)).toEqual([10, 20, 30, 40, 50]);
   });
+
+  // The point of gating `owesCombine` on `fn.length` (an `emit`-declaring fold means "several
+  // values on purpose"): `.toArray()` - a TERMINAL op, previously refused by assertCombined() for
+  // EVERY partitioned reduce regardless of emit - now just works, no async-iteration workaround
+  // needed, no `.combine()` call needed, no throw.
+  test("no combine debt owed - .toArray() itself returns the raw partials, no throw", async () => {
+    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+      .buffer(2)
+      .reduce((_acc: number, x: number, _ctx: IContextManager, emit: (v: number) => void) => {
+        emit(x * 10);
+        return 0;
+      }, 0)
+      .toArray();
+    expect(data.flat().sort((a, b) => a - b)).toEqual([10, 20, 30, 40, 50]);
+  });
 });
 
 describe("#62 the same two chains print [15] and [5] over HttpPipeline and ClusterPipeline (Done-when 3)", () => {
   test(
     "HttpPipeline",
     async () => {
-      const sumWorker = new HttpPipeline<number>([], { url: "" }).reduce(
-        (acc: number, x: number) => acc + x,
-        0,
-      );
-      await withServer(sumWorker.fetch, async (url) => {
-        const sum = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url, maxConcurrency: 2 })
-          .buffer(2)
-          .reduce((acc: number, x: number) => acc + x, 0)
-          .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
-          .toArray();
-        expect(sum).toEqual([15]);
-      });
+      process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+      try {
+        const sumWorker = new HttpPipeline<number>([], { url: "" }).reduce(
+          (acc: number, x: number) => acc + x,
+          0,
+        );
+        await withServer(sumWorker.fetch, async (url) => {
+          const sum = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url, maxConcurrency: 2 })
+            .buffer(2)
+            .reduce((acc: number, x: number) => acc + x, 0)
+            .combine((acc: number, v: number) => acc + v)
+            .toArray();
+          expect(sum).toEqual([15]);
+        });
 
-      const countWorker = new HttpPipeline<number>([], { url: "" }).reduce(
-        (acc: number, _x: number) => acc + 1,
-        0,
-      );
-      await withServer(countWorker.fetch, async (url) => {
-        const count = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url, maxConcurrency: 2 })
-          .buffer(2)
-          .reduce((acc: number, _x: number) => acc + 1, 0)
-          .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
-          .toArray();
-        expect(count).toEqual([5]);
-      });
+        const countWorker = new HttpPipeline<number>([], { url: "" }).reduce(
+          (acc: number, _x: number) => acc + 1,
+          0,
+        );
+        await withServer(countWorker.fetch, async (url) => {
+          const count = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url, maxConcurrency: 2 })
+            .buffer(2)
+            .reduce((acc: number, _x: number) => acc + 1, 0)
+            .combine((acc: number, v: number) => acc + v)
+            .toArray();
+          expect(count).toEqual([5]);
+        });
+      } finally {
+        delete process.env.PIPELINE_PARTITIONED_REDUCE;
+      }
     },
     HTTP_TIMEOUT,
   );
@@ -382,11 +430,55 @@ describe("#62 the same two chains print [15] and [5] over HttpPipeline and Clust
   test(
     "ClusterPipeline",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-partitioned-reduce.ts");
+      // The fixture is a SEPARATE process (execFile) that inherits process.env - it needs the flag
+      // set on THIS process right before the spawn, same reason as the HttpPipeline case above.
+      process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+      try {
+        const fixture = await runFixture("__tests__/fixtures/cluster-partitioned-reduce.ts");
+        expectFixtureOk(fixture);
+        const result = lastJsonLine<{ sum: number[]; count: number[] }>(fixture);
+        expect(result.sum).toEqual([15]);
+        expect(result.count).toEqual([5]);
+      } finally {
+        delete process.env.PIPELINE_PARTITIONED_REDUCE;
+      }
+    },
+    FIXTURE_TIMEOUT,
+  );
+});
+
+describe("#62 an emit-based reduce owes nothing on HttpPipeline/ClusterPipeline either", () => {
+  test(
+    "HttpPipeline - .toArray() returns the raw emitted partials, no throw",
+    async () => {
+      const emitFold = (
+        _acc: number,
+        x: number,
+        _ctx: IContextManager,
+        emit: (v: number) => void,
+      ) => {
+        emit(x * 10);
+        return 0;
+      };
+      const worker = new HttpPipeline<number>([], { url: "" }).reduce(emitFold, 0);
+      await withServer(worker.fetch, async (url) => {
+        const data = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url, maxConcurrency: 2 })
+          .buffer(2)
+          .reduce(emitFold, 0)
+          .toArray();
+        expect(data.flat().sort((a, b) => a - b)).toEqual([10, 20, 30, 40, 50]);
+      });
+    },
+    HTTP_TIMEOUT,
+  );
+
+  test(
+    "ClusterPipeline - .toArray() returns the raw emitted partials, no throw",
+    async () => {
+      const fixture = await runFixture("__tests__/fixtures/cluster-emit-reduce.ts");
       expectFixtureOk(fixture);
-      const result = lastJsonLine<{ sum: number[]; count: number[] }>(fixture);
-      expect(result.sum).toEqual([15]);
-      expect(result.count).toEqual([5]);
+      const result = lastJsonLine<{ values: number[] }>(fixture);
+      expect(result.values.sort((a, b) => a - b)).toEqual([10, 20, 30, 40, 50]);
     },
     FIXTURE_TIMEOUT,
   );
@@ -433,7 +525,40 @@ describe("#62 the combine debt survives merge and stacked reduces, never silentl
         .reduce((acc: number, x: number) => acc + x, 0);
       expect(() => first.reduce((acc: number, v: number) => acc + v, 0)).toThrow(
         "stage 0 is a partitioned reduce whose partials were never combined - follow it with " +
-          ".local((p) => p.reduce(...))",
+          ".combine((acc, v) => ...)",
+      );
+    } finally {
+      delete process.env.PIPELINE_PARTITIONED_REDUCE;
+    }
+  });
+});
+
+describe("#62 .combine() itself", () => {
+  test("throws when nothing is owed - a caller almost always holds the wrong pipeline", () => {
+    expect(() => new Pipeline([1, 2, 3]).combine((acc: number, v: number) => acc + v)).toThrow(
+      "combine() called but no partitioned reduce is owed",
+    );
+  });
+
+  // Documents the `~/.claude/rules/typescript.md` gotcha this gate rests on: a default value on
+  // the 4th parameter drops it out of `Function.prototype.length`, so a fold that MEANS to use
+  // `emit` but writes it this way is silently read as arity-3 and gets a combine debt it never
+  // intended - proof of the documented caveat, not a bug to fix.
+  test("a defaulted emit parameter silently drops out of fn.length and still owes a combine", async () => {
+    process.env.PIPELINE_PARTITIONED_REDUCE = "1";
+    try {
+      const looksLikeEmit = (
+        acc: number,
+        x: number,
+        _ctx?: IContextManager,
+        _emit = (_v: number) => {},
+      ) => acc + x;
+      expect(looksLikeEmit.length).toBe(3); // NOT 4 - `.length` stops at the first DEFAULTED param
+      const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+        .buffer(2)
+        .reduce(looksLikeEmit, 0);
+      await expect(pipeline.toArray()).rejects.toThrow(
+        /partitioned reduce whose partials were never combined/,
       );
     } finally {
       delete process.env.PIPELINE_PARTITIONED_REDUCE;

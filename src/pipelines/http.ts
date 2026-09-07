@@ -211,6 +211,14 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
   }
 
   /**
+   * Narrows `Pipeline.combine()`'s return type only (#62, `~/.claude/rules/typescript.md`) - same
+   * reason as `.local()` just above. `ConcurrentPipeline.combine()`'s logic runs unchanged.
+   */
+  override combine(fn: ReduceFunction<T, T>): HttpPipeline<T> {
+    return super.combine(fn) as HttpPipeline<T>;
+  }
+
+  /**
    * Carries `url` into the NEXT instance a copy-on-write call builds, on top of what
    * `ConcurrentPipeline.createPipeline()` already carries forward - same reason, one more field.
    */
