@@ -171,8 +171,10 @@ const data = await new ClusterPipeline([1, 2, 3, 4, 5], {
 ```
 
 A `SimpleContextManager` keeps a worker's `ctx.set()` inside that worker. A manager backed by an
-external store publishes it to every process through that store. `Pipeline.merge()` is the one place
-values flow the other way, which is why it takes the manager explicitly.
+external store publishes it to every process through that store. `Pipeline.merge()`, static and
+instance both, are the two places values flow the other way - the static into `options.context` (or
+a fresh manager), the instance into the receiving pipeline's own - which is why each takes or
+already holds the manager explicitly.
 
 ### Branching and merging
 
@@ -182,12 +184,20 @@ into one - the two directions of composing whole pipelines rather than chaining 
 > **Branch** - `Pipeline.branch(definitions)`: each `BranchDefinition` pairs a `predicate` with a
 > `Transformer`; `BranchOptions.firstMatch` (default `true`) sends an item to the first matching branch
 > only, `false` broadcasts it to every match.
-> **Merge** - the static `Pipeline.merge(pipelines, options?)`: concatenates every source pipeline's
-> data and merges their contexts into one new `Pipeline`. Each pipeline's item type is inferred on
-> its own, so merging a `Pipeline<"a"|"b">` with a `Pipeline<"c"|"d">` gives a
-> `Pipeline<"a"|"b"|"c"|"d">`. `options.context`, when given, is the SAME instance returned as the
-> merged pipeline's `.contextManager` (#31) - later pipelines still win on a shared key; with no
-> `options`, a fresh manager is built the same way. `Pipeline.merge([])` returns an empty pipeline.
+> **Merge (static)** - `Pipeline.merge(pipelines, options?)`: concatenates every source pipeline's
+> data and merges their contexts into one FRESH, plain `Pipeline` - for a caller who holds no
+> pipeline of its own to continue. Each pipeline's item type is inferred on its own, so merging a
+> `Pipeline<"a"|"b">` with a `Pipeline<"c"|"d">` gives a `Pipeline<"a"|"b"|"c"|"d">`. `options.context`,
+> when given, is the SAME instance returned as the merged pipeline's `.contextManager` (#31) - later
+> pipelines still win on a shared key; with no `options`, a fresh manager is built the same way.
+> `Pipeline.merge([])` returns an empty pipeline.
+> **Merge (instance)** - `pipeline.merge(...others)` (#41): concatenates OTHER pipelines' items and
+> contexts onto ONE the caller already holds, keeping THIS pipeline's own class, knobs and stage
+> numbering - a stage applied after the merge runs where this pipeline runs, at the NEXT index
+> rather than restarting at 0. Reach for this over the static whenever work after the merge must
+> stay concurrent, remote or clustered: the static always builds a plain `Pipeline`, so a merged
+> `HttpPipeline` gaining one more stage would otherwise collide with its own first stage on
+> `/stage/0`. `pipeline.merge()` with no arguments returns an equivalent pipeline of the same class.
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";

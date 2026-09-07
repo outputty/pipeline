@@ -132,9 +132,11 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 #### Static Methods
 
 - **`Pipeline.merge(pipelines, options?)`** - concatenate several pipelines' data and contexts into
-  one. `pipelines` is an array. `options.context`, when given, is the SAME instance returned as the
-  merged pipeline's `.contextManager`, with later pipelines still winning on a shared key; with no
-  `options`, a fresh manager is built the same way. `Pipeline.merge([])` returns an empty pipeline.
+  a fresh plain `Pipeline`, for a caller who holds no pipeline of its own to continue. `pipelines` is
+  an array. `options.context`, when given, is the SAME instance returned as the merged pipeline's
+  `.contextManager`, with later pipelines still winning on a shared key; with no `options`, a fresh
+  manager is built the same way. `Pipeline.merge([])` returns an empty pipeline. See `.merge()`
+  below (#41) to merge onto a pipeline already held, keeping its class.
 
 #### Instance Methods
 
@@ -148,6 +150,11 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.consume()`** - process all items without collecting.
 - **`.forEach(fn)`** - execute side-effect for each item.
 - **`.branch(definitions)`** - split into multiple branches.
+- **`.merge(...others)`** - concatenate other pipelines' items and contexts onto THIS one,
+  keeping THIS pipeline's own class, knobs and stage numbering (#41) - a stage applied after
+  reaches `others`' items too, at THIS pipeline's next index rather than restarting at 0. Prefer
+  this over the static `Pipeline.merge()` whenever work after the merge must stay concurrent,
+  remote or clustered; the static always returns a plain `Pipeline`.
 
 ### Transformer
 

@@ -134,6 +134,27 @@ function reduceStagePlaceholder(stageIndex: number): ChunkTransform {
   };
 }
 
+/** Merges each `source` context's values onto `target`, later sources winning on a shared key -
+ * the ONE place the static `Pipeline.merge()` and the instance `.merge()` (#41) both copy source
+ * pipelines' contexts onto a receiving manager, so a future change to context-merge semantics has
+ * one home, not two independent copies. */
+function mergeContextsInto(target: IContextManager, sources: IContextManager[]): void {
+  for (const source of sources) {
+    for (const [key, value] of Object.entries(source.toDict())) {
+      target.set(key, value);
+    }
+  }
+}
+
+/** Concatenates several chunk streams into one, in order - no new chunking decision (#39): each
+ * stream's own boundary is kept as-is. The ONE place the static `Pipeline.merge()` and the
+ * instance `.merge()` (#41) both build a merged chunk stream. */
+async function* concatChunks<U>(streams: AsyncIterable<U[]>[]): AsyncGenerator<U[]> {
+  for (const stream of streams) {
+    yield* stream;
+  }
+}
+
 /**
  * A lazy, chunked stream of `T`. Nothing runs until a terminal operation (`toArray`, `first`, async
  * iteration, …) pulls: `.apply()`/`.transform()` compose transformers, chunking is handled for
@@ -249,16 +270,20 @@ export class Pipeline<T> {
   // ===== Static Factory Methods =====
 
   /**
-   * Merge multiple pipelines into a single pipeline (fan-in pattern).
+   * Merge multiple pipelines into a single pipeline (fan-in pattern), always a FRESH, plain
+   * `Pipeline` - for a caller who holds no pipeline of its own to continue. See the instance
+   * `.merge(...others)` (#41, below `.context()`) to merge onto a pipeline already held instead,
+   * keeping its own class, knobs and stage numbering.
    *
    * All items from all input pipelines are yielded in sequence, each source pipeline's OWN
    * already-cut `_chunks` boundary preserved rather than re-derived - merging never re-chunks
    * (#39). `options.context`, when given, is the SAME instance returned as `.contextManager` on
    * the merged pipeline - mutated in place with every source pipeline's own context values, later
-   * pipelines taking precedence on a shared key (#31; the one place values flow BACKWARD across
-   * pipelines, which is why this is the one seam that takes a manager explicitly rather than only
-   * ever receiving one at construction). With no `options`, a fresh `SimpleContextManager` is
-   * built and populated the same way - today's behaviour, unchanged.
+   * pipelines taking precedence on a shared key (#31; one of the TWO seams where values flow
+   * BACKWARD across pipelines - the instance `.merge()` is the other - which is why both take or
+   * already hold a manager explicitly rather than only ever receiving one at construction). With
+   * no `options`, a fresh `SimpleContextManager` is built and populated the same way - today's
+   * behaviour, unchanged.
    *
    * Python equivalent:
    * ```python
@@ -311,24 +336,17 @@ export class Pipeline<T> {
     // fresh copy that would discard it, the same reason .context() (above) mutates in place.
     const mergedContext =
       options?.context ?? options?.contextFactory?.() ?? new SimpleContextManager();
-    for (const pipeline of pipelines) {
-      const ctx = pipeline._context.toDict();
-      for (const [key, value] of Object.entries(ctx)) {
-        mergedContext.set(key, value);
-      }
-    }
+    mergeContextsInto(
+      mergedContext,
+      pipelines.map((pipeline) => pipeline._context),
+    );
 
     // Concatenates each source pipeline's OWN chunk stream in sequence - no new chunking decision
     // at merge time (#39): a pipeline cut at 2 and one cut at 4 both keep their own boundary.
-    async function* mergedChunks(): AsyncGenerator<U[]> {
-      for (const pipeline of pipelines) {
-        for await (const chunk of pipeline._chunks) {
-          yield chunk as U[];
-        }
-      }
-    }
-
-    return new Pipeline<U>([], { context: mergedContext, chunks: mergedChunks() });
+    return new Pipeline<U>([], {
+      context: mergedContext,
+      chunks: concatChunks(pipelines.map((pipeline) => pipeline._chunks as AsyncIterable<U[]>)),
+    });
   }
 
   /**
@@ -387,6 +405,59 @@ export class Pipeline<T> {
       reduceStages: this._reduceStages,
       preBufferItems: this._preBufferItems,
     }) as this;
+  }
+
+  /**
+   * Concatenate OTHER pipelines' items onto THIS one - the instance-method sibling of the static
+   * `Pipeline.merge()`, for a caller who already holds a pipeline to continue rather than a fresh
+   * one to build. Copy-on-write through `createPipeline()` (#41), so the result carries THIS
+   * pipeline's class, knobs, address AND `_chunkTransforms` - a stage applied after the merge runs
+   * WHERE this pipeline runs, at the next index rather than restarting at 0. The static's own
+   * `new Pipeline(...)` always builds a plain `Pipeline` and always starts stage numbering over,
+   * which collides once a merged dispatching pipeline gains one more stage (#41's own ticket); this
+   * method has no such problem, because there is no stranger - it continues an instance that
+   * already has its own address and its own stage table.
+   *
+   * `others`' own chunk transforms are NOT carried forward - each has already run, producing that
+   * pipeline's own `_chunks`, which is all this method reads from it. Only `_preBufferItems` resets
+   * to `null` (`.apply()`'s own reason: several chunk streams are now concatenated, so there is no
+   * single raw item view left for a later `.buffer()` to recut from).
+   *
+   * Each other pipeline's context merges into THIS one's manager, mutating it in place -
+   * `.context()`'s own reason: a caller's own manager class is never silently swapped for a copy -
+   * later pipelines winning on a shared key, through the same `mergeContextsInto()` the static
+   * `Pipeline.merge()` (above) shares with this method rather than a second copy of the loop.
+   *
+   * Typed `this` (#17/#31's own reason on `.context()`): `T` never changes here, so `.fetch` and
+   * `{ local: true }` still typecheck off the result on a dispatching subclass.
+   *
+   * @param others - Pipelines to concatenate onto this one, in order. None: returns an equivalent
+   *   pipeline of the same class with nothing appended.
+   *
+   * @example
+   * The ticket's own planning spike (`#41`'s `## Interface`), reproduced live in
+   * `__tests__/merge-instance.e2e.test.ts`: `new HttpPipeline([1,2,3,4], { url })
+   * .transform((t) => t.map((x) => x + 1))` (stage 0, dispatched) `.merge(new
+   * ConcurrentPipeline([10, 20]).transform((t) => t.map((x) => x + 5)))` (the
+   * `ConcurrentPipeline`'s own items, through its own in-process fan-out) `.transform((t) =>
+   * t.map((x) => x * 100))` (stage 1, continuing THIS pipeline's own index, never restarting at
+   * 0) → `.toArray()` → `[200,300,400,500,1500,2500]`.
+   */
+  merge(...others: Pipeline<T>[]): this {
+    mergeContextsInto(
+      this._context,
+      others.map((other) => other._context),
+    );
+
+    return this.createPipeline<T>(
+      concatChunks([this._chunks, ...others.map((other) => other._chunks)]),
+      {
+        context: this._context,
+        chunkTransforms: this._chunkTransforms,
+        reduceStages: this._reduceStages,
+        preBufferItems: null,
+      },
+    ) as this;
   }
 
   /**

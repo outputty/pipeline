@@ -234,3 +234,34 @@ const banked = await new Pipeline([1, 2, 3, 4, 5])
 ```json
 { "total": [150], "banked": [60, 90] }
 ```
+
+## Case 8 - merging onto a pipeline you already hold
+
+The static `Pipeline.merge()` (Case 5) always builds a fresh, plain `Pipeline`. The instance
+`.merge()` (#41) continues one already held instead - class, knobs and `_chunkTransforms` all carry
+forward, so a stage applied after the merge runs at THIS pipeline's own next index rather than
+restarting at 0 and colliding with its own first stage.
+
+<!-- illustrative -->
+
+```ts
+import { HttpPipeline, ConcurrentPipeline } from "@outputty/pipeline";
+
+const remote = new HttpPipeline([1, 2, 3, 4], { url: process.env.WORKER_URL! })
+  .buffer(1)
+  .transform((t) => t.map((x: number) => x + 1)); // stage 0, dispatched over HTTP
+
+const local = new ConcurrentPipeline([10, 20])
+  .buffer(1)
+  .transform((t) => t.map((x: number) => x + 5)); // its own in-process fan-out, never the wire
+
+const merged = remote
+  .merge(local)
+  .transform((t) => t.map((x: number) => x * 100)); // stage 1 - THIS pipeline's own next index
+
+const data = await merged.toArray();
+```
+
+```json
+[200, 300, 400, 500, 1500, 2500]
+```
