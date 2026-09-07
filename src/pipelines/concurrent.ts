@@ -15,6 +15,7 @@ import type { IContextManager, InternalTransformer, ReduceFunction } from "@src/
 import { Pipeline, type PipelineOptions, type PipelineSource } from "@src/pipeline";
 import type { ChunkTransform } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
+import { foldChunkStream } from "@src/utils/reduce";
 
 /** Construction-time knobs for `ConcurrentPipeline` and every class that extends it. */
 export interface ConcurrentPipelineOptions {
@@ -275,33 +276,47 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
   }
 
   /**
-   * Fold every chunk this pipeline produces (#45) — STUB (L1): the real signature, body throwing.
-   * Adds `StageOptions` on top of the base `Pipeline.reduce(fn, initial)` signature, mirroring
-   * `apply()`/`transform()`'s own base-vs-`{ local: true }` split (L3 fills in the fold via
-   * `reduceWork()`, this class's own override point, `stageWork()`'s sibling).
+   * Fold every chunk this pipeline produces (#45). Adds `StageOptions` on top of the base
+   * `Pipeline.reduce(fn, initial)` signature, mirroring `apply()`/`transform()`'s own
+   * base-vs-`{ local: true }` split - `{ local: true }` runs `super.reduce()` (the base class's
+   * in-process fold) directly, everything else folds via `reduceWork()`, this class's own override
+   * point, `stageWork()`'s sibling.
    */
   override reduce<U>(
-    _fn: ReduceFunction<U, T>,
-    _initial: U,
-    _options?: StageOptions,
+    fn: ReduceFunction<U, T>,
+    initial: U,
+    options?: StageOptions,
   ): ConcurrentPipeline<U> {
-    throw new Error("ConcurrentPipeline.reduce: not implemented (#45 L3)");
+    if (options?.local) {
+      return super.reduce(fn, initial) as ConcurrentPipeline<U>;
+    }
+
+    const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
+    const work = this.reduceWork(fn, initial, stageIndex);
+    const newChunks = work(this._chunks, this._context);
+
+    return this.createPipeline<U>(newChunks, {
+      context: this._context,
+      chunkTransforms,
+      reduceStages,
+      preBufferItems: null,
+    });
   }
 
   /**
-   * The one method a subclass overrides to change WHERE a reducer runs (#45) — STUB (L1): the real
-   * signature, body throwing. `stageWork()`'s sibling: a reducer streams in and out (it emits fewer
-   * or more values than it consumes), so this returns a generator over OUTPUT CHUNKS rather than an
-   * `InternalTransformer`. `ConcurrentPipeline` (L3) folds in-process and sequentially -
-   * `maxConcurrency` is inert on a reduce stage, one accumulator, one connection; `HttpPipeline` (L5)
-   * overrides it to open one duplex POST instead.
+   * The one method a subclass overrides to change WHERE a reducer runs (#45). `stageWork()`'s
+   * sibling: a reducer streams in and out (it emits fewer or more values than it consumes), so this
+   * returns a generator over OUTPUT CHUNKS rather than an `InternalTransformer`. This class's own
+   * implementation (below) folds in-process and sequentially - `maxConcurrency` is inert on a
+   * reduce stage, one accumulator, one connection; `HttpPipeline` (L5) overrides it to open one
+   * duplex POST instead.
    */
   protected reduceWork<U>(
-    _fn: ReduceFunction<U, T>,
-    _initial: U,
+    fn: ReduceFunction<U, T>,
+    initial: U,
     _stageIndex: number,
   ): (chunks: AsyncIterable<T[]>, ctx: IContextManager) => AsyncGenerator<U[]> {
-    throw new Error("ConcurrentPipeline.reduceWork: not implemented (#45 L3)");
+    return (chunks, ctx) => foldChunkStream(fn, initial, chunks, ctx);
   }
 
   /**
