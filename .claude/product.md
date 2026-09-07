@@ -100,18 +100,23 @@ const data = await new ClusterPipeline([1, 2, 3, 4, 5])
 [6, 8, 10]
 ```
 
-A dispatching class runs every stage elsewhere by default. `{ local: true }` keeps one stage in the
-orchestrating process - useful when a stage is cheap, or touches something only the orchestrator has:
+A dispatching class runs every stage elsewhere by default. `.local(build)` keeps a whole region in
+the orchestrating process - useful when a stage is cheap, or touches something only the orchestrator
+has. Inside the region the pipeline is a plain `Pipeline`, so nothing there dispatches:
 
 ```ts
 import { HttpPipeline } from "@outputty/pipeline";
 
 const pipeline = new HttpPipeline(rows, { url: process.env.SELF_URL! })
   .transform((t) => t.map(expensiveScore))
-  .transform((t) => t.filter((r) => r.ok), { local: true });
+  .local((p) => p.transform((t) => t.filter((r) => r.ok)));
 
 app.mount("/pipeline", pipeline.fetch);
 ```
+
+> **`.local(build)`** - runs the region `build` describes in the orchestrating process. Every class
+> has it, the base `Pipeline` included, where it is an identity - so one chain runs unchanged on all
+> four. `build` receives a plain `Pipeline`, which is what makes a region unable to dispatch.
 
 Two rules follow from a stage being a position rather than a name, and both are the caller's to keep:
 
@@ -244,10 +249,13 @@ produced, never assuming there was one.
 > **`Transformer.reduce(fn, initial)`** - folds ONE chunk. Run once and forget: no state survives to
 > the next chunk.
 > **`Pipeline.reduce(fn, initial)`** - folds EVERY chunk the pipeline produces. On a dispatching
-> class (`ConcurrentPipeline.reduce(fn, initial, options?)`, `{ local: true }` its own addition, the
-> base `Pipeline` never gains it) it runs remotely like any other stage, over one duplex connection
-> whose accumulator lives for the life of that connection; `{ local: true }` keeps it in the
-> orchestrating process instead.
+> class it partitions: `maxConcurrency` accumulators fold independently, each over its own duplex
+> connection, and each produces its own partial. `.local((p) => p.reduce(combine, initial))` folds
+> those partials into the answer.
+> **A combine** - the reduce stage that follows a partitioned one. It is an ordinary reducer over
+> the partials, with its own accumulator type and its own initial, and it is the caller's to write:
+> a fold and its combine are different functions whenever folding two partials means something
+> other than folding two items.
 > **`emit`** - the reducer callback's fourth parameter, `(acc, item, ctx, emit)`. Calling it pushes
 > a value downstream mid-fold and lets the caller decide what a finished result is. The final
 > accumulator is emitted only if items were folded since the last `emit()`.
@@ -288,8 +296,18 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 [60, 90]
 ```
 
-A reduce stage is a serialization point: one accumulator, and on a dispatching class one connection,
-so `maxConcurrency` does not apply to it. With `ordered: false` upstream the reducer folds in
-completion order, so the fold must be order-insensitive. And because a remote reducer's emits arrive
-while the input is still streaming, a failure mid-stream reaches the caller after values have
-already flowed downstream - the price of results that arrive as they happen.
+On a dispatching class a reducer partitions, so it is not a serialization point: `maxConcurrency`
+accumulators fold at once, each producing a partial, and the caller combines them. Partitioning is
+chunk-granular, so it is inert below `maxConcurrency` chunks - a source smaller than one chunk yields
+one partial. The partition count is a ceiling, never a promise.
+
+Three things the caller owes a partitioned reducer. `initial` is a per-partition seed, so it must be
+the combine's identity - summing from `100` over four partitions counts that `100` four times, and no
+combine can recover it. The fold must be order-insensitive: an input chunk's emits stay together, but
+partitions finish in any order. And a reducer whose partials are never combined is an error, reported
+when the pipeline is drained rather than silently answered with the partials.
+
+`.local((p) => p.reduce(fn, initial))` is the serialization point: one accumulator, in the
+orchestrating process. And because a remote reducer's emits arrive while the input is still
+streaming, a failure mid-stream reaches the caller after values have already flowed downstream - the
+price of results that arrive as they happen.

@@ -158,16 +158,26 @@ none of it survived the hand-trim (#745).
   never declared, so no `fn.length` arity check is needed for reduce at all (#45 deleted
   `isContextAwareReduce`, dead once this shipped). `Transformer.reduce(fn, initial)` folds the ONE
   chunk it receives and keeps no state between chunks; `Pipeline.reduce(fn, initial)` folds EVERY
-  chunk the pipeline produces, the only place cross-chunk state lives -
-  `ConcurrentPipeline.reduce(fn, initial, options?)` is the one override adding `{ local: true }`,
-  the base `Pipeline` never gains it, same as `.transform()`/`.apply()`. Both may produce several
+  chunk the pipeline produces, the only place cross-chunk state lives. Both may produce several
   values and the chain continues after either, downstream running over every value produced.
   `emit(value)` pushes one downstream mid-fold; the final accumulator is emitted only if items were
-  folded since the last `emit()`. A reduce stage dispatches like any other stage, over ONE duplex
-  POST to `/reduce/<n>` whose accumulator lives for the life of the connection, so `maxConcurrency`
-  is inert on it (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
-  callable `Transformer.reduce`'s old per-chunk-toggle overload are deleted -
+  folded since the last `emit()` (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the
+  standalone callable `Transformer.reduce`'s old per-chunk-toggle overload are deleted -
   `ReduceFunction` is the one type, `Pipeline.reduce` the whole-dataset replacement).
+- **Partitioned reduce** - on a DISPATCHING class, `.reduce()` folds `maxConcurrency` independent
+  accumulators at once, each over its own duplex POST to `/reduce/<n>`, each producing its own
+  partial (#62, BREAKING - `maxConcurrency` was inert on a reduce stage under #45, one accumulator
+  for the whole stream). N partitions are N calls to the UNCHANGED `reduceWork()` over one shared
+  chunk iterator, merged in completion order: a shared async iterator already IS free-slot dealing,
+  so there is no dealer, no per-partition queue and no wire change. `HttpPipeline`/`ClusterPipeline`
+  inherit it with no new code, since `runReduceStage` builds a `Reducer` PER REQUEST.
+- **Combine** - the reduce stage that follows a partitioned one, folding its partials. An ordinary
+  `ReduceFunction<V, U>` with its own accumulator type and its own initial, written by the CALLER
+  and spelled `.local((p) => p.reduce(combine, initial))` - never a `combine` parameter and never an
+  associativity marker. A fold is not its own combine: `(acc, _x) => acc + 1` typechecks as one and
+  counts the partials instead of the items. `initial` becomes a PER-PARTITION seed, so it must be
+  the combine's identity; the library cannot check that. A partitioned reduce that is never combined
+  throws at the terminal op, never answers with the partials.
 - **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`
   decision, not a `Transformer` one (#39) - `.buffer(size)` sets it explicitly, defaulting
   to `DEFAULT_CHUNK_SIZE = 1000` when never called; every later stage sees the same chunks unchanged
@@ -193,9 +203,16 @@ none of it survived the hand-trim (#745).
   `src/pipelines/http.ts:273`) - unrelated to chunking and untouched by #39. A reduce stage occupies
   the SAME index space with its own registry, `_reduceStages` (#45) - its `_chunkTransforms` slot
   holds a placeholder that throws if ever invoked as a per-chunk transform.
-- **`{ local: true }`** - The optional SECOND argument to a dispatching subclass's own
-  `transform()`/`apply()`, keeping that stage in the orchestrating process. It is `super.apply()` at
-  every level, and the base `Pipeline` never gains it.
+- **`.local(build)`** - runs the REGION `build` describes in the orchestrating process, replacing
+  the per-stage `{ local: true }` flag and `StageOptions` with it (#61, BREAKING - `local` was
+  `StageOptions`' only field, so `.transform()`/`.apply()`/`.reduce()` lose their options parameter
+  entirely and `ConcurrentPipeline.reduce(fn, initial)` matches the base signature exactly). ONE
+  implementation, on the base `Pipeline`: it builds a base `Pipeline` over `this._chunks`, runs
+  `build` against it, and carries the region's `_chunks` back through `createPipeline()`. `build`'s
+  parameter is a plain `Pipeline`, which is what makes a region unable to dispatch - "local" is a
+  property of the class, not a flag. Every class has it, the base included, where it is an identity,
+  so one chain runs unchanged on all four (#37's own premise). A subclass re-declares it only to
+  narrow its return type.
 - **Source position** (killed, #39) - was the `Pipeline` drain path that did NOT run
   `Transformer.execute()`: async iteration (`[Symbol.asyncIterator]`) replayed each transform's plain
   function instead of running the real chain, and `inertKnobsOf` threw there for any knob that only

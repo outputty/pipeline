@@ -300,9 +300,30 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 console.log(data); // [60, 90]
 ```
 
-On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, `.reduce()` runs remotely like any other
-stage - one accumulator over one connection for the whole stream, so `maxConcurrency` is inert on
-it. `{ local: true }` keeps it in the orchestrating process instead.
+On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, `.reduce()` partitions: `maxConcurrency`
+accumulators fold at once, each over its own connection, and each produces its own partial. The
+caller folds those partials with an ordinary reduce inside `.local()`.
+
+<!-- illustrative -->
+
+```typescript
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const total = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .local((p) => p.reduce((acc: number, partial: number) => acc + partial, 0))
+  .toArray(); // [15]
+```
+
+A fold and its combine are different functions whenever folding two partials means something other
+than folding two items - counting adds one per item, but its combine adds the partials together.
+Three things a partitioned reducer asks of the caller: a combine, an `initial` that is that combine's
+identity (it seeds every partition), and a fold that does not depend on order. A partitioned reducer
+whose partials are never combined throws when the pipeline is drained.
+
+`.local(build)` runs a whole region in the orchestrating process, and every class has it - on the
+base `Pipeline` it is an identity, so one chain runs unchanged on all four.
 
 ## Error Handling
 

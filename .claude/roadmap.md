@@ -9,6 +9,19 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
+- **`.local(build)` runs a whole region in the orchestrating process** (#61, `feat!`) - `{ local:
+  true }` is a per-stage flag, so several consecutive local stages repeat it and no region can be
+  expressed; it also lives only on the dispatching subclasses, so a chain using it does not
+  typecheck on a base `Pipeline` - exactly the property #37's conformance suite exists to prove.
+  `.local((p) => …)` hands the caller a plain `Pipeline`, which is what makes a region unable to
+  dispatch. Now, because #62 makes the combine after a partitioned reduce the most common local
+  region, and settling the spelling first means writing it once.
+- **The reducer partitions across `maxConcurrency` accumulators** (#62, `feat!`, blocked by #61) -
+  a `ConcurrentPipeline` that fans a `.map` out four ways collapses to a single fold the moment a
+  `.reduce` appears, so summing a billion rows across four workers is not expressible. N partitions
+  each fold their own accumulator and the caller combines the partials with an ordinary reduce.
+  Now, because #45 built every piece it needs: `reduceWork()` is the per-class override, and
+  `runReduceStage` already builds a `Reducer` per request, so the server and the wire are untouched.
 - **A conformance suite every `Pipeline` and Context class runs** (#37), **`EventEmitterPipeline`**
   (#30), **the pipeline's error handlers** (#40), **instance `merge`** (#41) and **cross-runtime
   benchmarks** (#11) are the other open tickets; each issue carries its own detail.
@@ -104,6 +117,50 @@ The two older candidates, still not filed:
 
 ## Killed
 
+Every row in this block was spiked and run while planning #62, not argued.
+
+- **A `combine` parameter on the reduce stage** (#62) - `.reduce(fold, initial, { partitions, combine,
+  combineInitial })`, one stage carrying both folds so the combine cannot be forgotten. Killed by the
+  user: a combine is an ordinary `ReduceFunction<V, U>` with its own accumulator type and its own
+  initial (measured: `collect` folds `Fold<number[], number>` and its partials are `number[]`, which
+  the fold cannot type as its own combine), and the package already has exactly one way to spell a
+  reducer. A second spelling of a reduce stage is the defect, not the convenience.
+- **An associativity marker** (#62) - `{ associative: true }`, reusing the fold as its own combine
+  when the caller marks the reducer safe. Killed on three measured counterexamples it cannot detect:
+  a count `(acc, _x) => acc + 1` typechecks as its own combine and returns `[2]`, the number of
+  partials, where `[5]` is written; `sum` from `initial: 100` returns `[215]` where `[115]` is
+  written; and `collect` does not typecheck under it at all.
+- **A `partitions` option on `StageOptions`** (#62) - an additive opt-in leaving every existing
+  program unchanged. Killed by the user in favour of `maxConcurrency` simply ceasing to be inert:
+  one knob, and the breaking change is loud rather than silent, because an uncombined partitioned
+  reduce throws at its terminal op.
+- **A per-stage `maxConcurrency` override** (#62) - `StageOptions.maxConcurrency`, restoring
+  "dispatched to one worker, one accumulator" after `maxConcurrency` stopped being inert. Killed by
+  the user: `.local()` is the one spelling for a single accumulator. The consequence is accepted and
+  documented - a single-accumulator fold that must run OFF the orchestrator has no spelling.
+- **`partitionBy: (item) => key`** (#62) - the group-by shuffle, routing each ITEM by a caller's key
+  so all of one key folds in one partition. Killed because items within one chunk would split across
+  partitions, so the stage must re-cut its input - the thing #39 removed. Whole chunks are dealt
+  instead, with no grouping guarantee.
+- **Ordering the partials across partitions** (#62) - a reorder buffer keyed by the dealer's chunk
+  index, so chunk 1's emits precede chunk 2's, with a `{"chunk":…,"i":k}` / `{"emit":…,"i":k}` wire
+  tag and a distinct `{"final":…}` frame to carry it. Also priced: positional correlation with empty
+  frames sent. Killed by the user for its head-of-line blocking - a slow partition holds up every
+  later chunk's output. What survives is per-input-chunk grouping, which `foldChunkStream` already
+  gives; only the order BETWEEN partitions is given up, and the NDJSON wire needs no change at all.
+- **A dealer with per-partition queues** (#62) - round-robin dealing into N bounded queues, with a
+  backpressure rule. Killed by measurement: N consumers pulling from ONE shared async iterator IS
+  free-slot dealing. Three consumers, partition 0 made 30x slower - `per-partition
+  [[0],[1,3,5,7],[2,4,6,8]]`, `union 9 of 9 distinct, 0 duplicates`. A `share()` wrapper of about
+  three lines replaces the whole mechanism.
+- **Deleting `ordered` from `ConcurrentPipeline`** (#62) - proposed on the premise that ordering
+  "adds too much overhead". Refuted by measurement at `maxConcurrency: 4`: uniform work at 200
+  chunks ran `ordered=281ms` against `unordered=289ms`, and at 1000 chunks `1498ms` against `1480ms`
+  - no throughput cost, since `fanOutOrdered` is `inFlight.shift()` over the same window and buffers
+  no more than unordered. Its only real cost is first-value latency when one chunk is slow (`251ms`
+  vs `202ms`, first value `0` instead of `1`). Kept by the user; `Transformer` never had an ordering
+  knob at all. Its own ticket if revisited.
+
 - **A forward-descending `Transformer` composition** (#45) - each link calling the NEXT one rather
   than wrapping the previous one, so the stack descends in the order the caller wrote the chain.
   Measured: today's composition enters last-link-first and produces data on the unwind (`enter
@@ -144,7 +201,10 @@ Every row below was spiked and run while planning #17, not argued.
   inside cluster and learns it from an already-bound socket, so it has none of the check-then-bind race
   `get-port`'s own readme documents.
 - **A `.local(transformer)` method** (#17) - replaced by `{ local: true }` on `.transform()`/`.apply()`,
-  which needs no new verb and confines the flag to the subclasses.
+  which needs no new verb and confines the flag to the subclasses. ⚠ This row is the SINGLE-STAGE
+  form and does not cover #61's `.local(build)`, a region builder taking a whole sub-chain, which
+  reverses the #17 decision deliberately: the flag is what confined it to the subclasses, and that
+  confinement is the defect #37 needs removed.
 - **Wire-level drift protection** (#17) - a chain fingerprint, a stage count and a caller version string
   were all priced against a real reproduction (v1 `x*2`, v2 `x+1000`, mixed fleet -> `[2,4,1003,1004,1005]`
   at HTTP 200). Atomic deployment is documented instead.

@@ -134,6 +134,15 @@ worker bootstrap, wraps `stageWork()` to lazily bootstrap on first dispatch, and
 `{ local: true }` on `.transform()`/`.apply()` is `super.apply(transformer)` at every level - a
 plain `Pipeline`'s own sequential, in-process `apply()`, needing no per-level code.
 
+`pending #61`: `.local(build)` replaces that flag, and `StageOptions` goes with it - `local` is its
+only field, so `.transform()`/`.apply()`/`.reduce()` lose their options parameter entirely and
+`ConcurrentPipeline.reduce(fn, initial)` matches the base signature exactly. One implementation, on
+the BASE `Pipeline`: build a base `Pipeline` over `this._chunks`, run the caller's builder against
+it, carry the region's `_chunks` back through `createPipeline()`. A subclass re-declares it only to
+narrow its return type. Because `build`'s parameter is a plain `Pipeline`, a region cannot dispatch
+by construction rather than by flag; and because the base class has it too, one chain runs unchanged
+on all four classes, which is what #37's conformance suite needs.
+
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
 createPipeline()` calling `this.constructor` rather than a hard-coded `new Pipeline<U>`, so a
 subclass survives a `.transform()`/`.context()`/`.buffer()` chain; each level overrides
@@ -294,6 +303,36 @@ plain per-chunk transform - the fail-loud guard, and the only one needed: #39 al
 whole source-position/replay mechanism a reduce-specific `sourcePositionViolations` list would have
 needed to hook into, since async iteration reads the exact same persisted `_chunks` every terminal
 op reads.
+
+`pending #62`: `maxConcurrency` stops being inert on a dispatched reduce. `ConcurrentPipeline.reduce()`
+calls the UNCHANGED `reduceWork()` once per partition, each over its own `share()` view of the one
+chunk stream, and merges the N generators in completion order:
+
+```text
+ConcurrentPipeline.reduce(fn, initial)          every dispatched reduce partitions now
+	share(this._chunks[Symbol.asyncIterator]())   ONE iterator, N views - free-slot dealing,
+	                                                a slow partition calls next() less often
+	reduceWork(fn, initial, stageIndex)           called N times, unchanged per class
+		HttpPipeline      N duplex POSTs /reduce/<n>   new Reducer PER REQUEST, http.ts:85
+		ClusterPipeline   N bootstrap/inFlight brackets
+	mergeUnordered(generators)                    completion order; no reorder buffer
+	owesCombine = true                            terminal ops throw until a local reduce clears it
+```
+
+Three things this does NOT need, each settled by a real probe. No dealer and no per-partition queue:
+a shared async iterator already deals by free slot (measured: 3 consumers, partition 0 30x slower →
+`[[0],[1,3,5,7],[2,4,6,8]]`, 9 of 9 distinct, 0 duplicates). No wire change: with no reordering,
+nothing needs to tell a trailing partial from a mid-fold emit, because the caller's combine folds
+both alike. And no server change: `runReduceStage` already builds one `Reducer` per request, so N
+concurrent POSTs to the same `/reduce/<n>` already hold N independent accumulators.
+
+The combine is the caller's own next reduce stage, `.local((p) => p.reduce(combine, initial))` - a
+combine is an ordinary `ReduceFunction<V, U>`, and a reduce stage is the one way this package spells
+one. Measured, over `[1,2,3,4,5]` split `[1,2,3]`/`[4,5]`: a count fold `(acc, _x) => acc + 1`
+typechecks as its own combine and yields `[2]`, the number of partials, where `[5]` is written; and
+`sum` seeded at `100` yields partials `[106,109]`, which no combine recovers `[115]` from, since
+`initial` is folded once per partition. Hence the caller's two obligations - a combine distinct from
+the fold, and an `initial` that is the combine's identity - neither of which the library can check.
 
 The wire is NDJSON both ways over one POST, `HttpPipeline.routePath("reduce", index)` (`routePath`
 takes a verb, `stage` or `reduce`, replacing the old `stagePath(index)`): `{"context":{…}}` once,

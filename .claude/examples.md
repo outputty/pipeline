@@ -120,7 +120,7 @@ import { HttpPipeline } from "@outputty/pipeline";
 const pipeline = new HttpPipeline([1, 2, 3, 4, 5], { url: process.env.SELF_URL! })
   .buffer(2)
   .transform((t) => t.map((x: number) => x * 2))
-  .transform((t) => t.filter((x: number) => x > 4), { local: true });
+  .local((p) => p.transform((t) => t.filter((x: number) => x > 4)));
 
 app.mount("/pipeline", pipeline.fetch);
 ```
@@ -234,3 +234,52 @@ const banked = await new Pipeline([1, 2, 3, 4, 5])
 ```json
 { "total": [150], "banked": [60, 90] }
 ```
+
+## Case 8 - a reducer partitioned across workers, and its combine
+
+The base pipeline's reducer folds one accumulator. On a dispatching class it folds `maxConcurrency`
+of them at once, each producing its own partial, and the caller folds the partials with an ordinary
+reduce inside `.local()`. Partitioning is chunk-granular, so `.buffer()` is what makes it possible at
+all - the canonical five items are one chunk under `DEFAULT_CHUNK_SIZE`, and one chunk is one
+partition.
+
+<!-- illustrative -->
+
+```ts
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const total = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .local((p) => p.reduce((acc: number, partial: number) => acc + partial, 0))
+  .toArray();
+```
+
+```json
+[15]
+```
+
+A fold and its combine are different functions whenever folding two partials means something other
+than folding two items. Counting is the case that makes it visible: the fold adds one per item, the
+combine adds the partials together.
+
+<!-- illustrative -->
+
+```ts
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const count = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, _x: number) => acc + 1, 0)
+  .local((p) => p.reduce((acc: number, partial: number) => acc + partial, 0))
+  .toArray();
+```
+
+```json
+[5]
+```
+
+Reusing the fold as its own combine typechecks here, because both are `(number, number) => number`,
+and returns `[2]` - the number of partials. That is why the combine is written out rather than
+inferred. A partitioned reducer whose partials are never combined throws when the pipeline is
+drained, so the wrong answer is never returned quietly.
