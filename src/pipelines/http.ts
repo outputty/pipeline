@@ -284,7 +284,7 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
    * own placeholder occupies, so an unknown index here means the stack was never given one, never a
    * stage that just isn't a reducer (that case 404s above, on the `stage` verb's own range check).
    * The response streams (`TransformStream`) so an emit reaches the caller as it happens - the
-   * whole point of `toNodeHandler` (L4) actually delivering bytes before the handler returns.
+   * whole point of `toNodeHandler` actually delivering bytes before the handler returns.
    */
   private async serveReduceRequest(index: number, request: Request): Promise<Response> {
     const stage = this._reduceStages.get(index);

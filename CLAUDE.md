@@ -153,16 +153,21 @@ none of it survived the hand-trim (#745).
   at a time (#17); wrap the chain in a `ConcurrentPipeline` for concurrency instead of configuring
   the `Transformer` that drives it.
 - **Reducer** - a fold, at two levels with ONE callback signature, `ReduceFunction<U, T> = (acc,
-  item, ctx, emit) => U | Promise<U>` (`emit` FOURTH, so `ctx` keeps arity 3 and
-  `isContextAwareReduce`'s `fn.length` check is untouched). `Transformer.reduce(fn, initial)` folds
-  the ONE chunk it receives and keeps no state between chunks; `Pipeline.reduce(fn, initial,
-  options?)` folds EVERY chunk the pipeline produces, the only place cross-chunk state lives (#45).
-  Both may produce several values and the chain continues after either, downstream running over
-  every value produced. `emit(value)` pushes one downstream mid-fold; the final accumulator is
-  emitted only if items were folded since the last `emit()`. A reduce stage dispatches like any
-  other stage, over ONE duplex POST to `/reduce/<n>` whose accumulator lives for the life of the
-  connection, so `maxConcurrency` is inert on it (#45, BREAKING: `ReduceOptions`/`perChunk` and the
-  standalone callable `reduce(fn, initial, { perChunk: false })` returned are deleted).
+  item, ctx, emit) => U | Promise<U>` (`emit` FOURTH, so `ctx` keeps arity 3). Every reduce path
+  calls `fn` with all four arguments unconditionally - JS ignores the extras a shorter callback
+  never declared, so no `fn.length` arity check is needed for reduce at all (#45 deleted
+  `isContextAwareReduce`, dead once this shipped). `Transformer.reduce(fn, initial)` folds the ONE
+  chunk it receives and keeps no state between chunks; `Pipeline.reduce(fn, initial)` folds EVERY
+  chunk the pipeline produces, the only place cross-chunk state lives -
+  `ConcurrentPipeline.reduce(fn, initial, options?)` is the one override adding `{ local: true }`,
+  the base `Pipeline` never gains it, same as `.transform()`/`.apply()`. Both may produce several
+  values and the chain continues after either, downstream running over every value produced.
+  `emit(value)` pushes one downstream mid-fold; the final accumulator is emitted only if items were
+  folded since the last `emit()`. A reduce stage dispatches like any other stage, over ONE duplex
+  POST to `/reduce/<n>` whose accumulator lives for the life of the connection, so `maxConcurrency`
+  is inert on it (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
+  callable `Transformer.reduce`'s old per-chunk-toggle overload are deleted -
+  `ReduceFunction` is the one type, `Pipeline.reduce` the whole-dataset replacement).
 - **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`
   decision, not a `Transformer` one (#39) - `.buffer(size)` sets it explicitly, defaulting
   to `DEFAULT_CHUNK_SIZE = 1000` when never called; every later stage sees the same chunks unchanged
@@ -180,12 +185,14 @@ none of it survived the hand-trim (#745).
   a `.fetch` handler; `ClusterPipeline` adds the worker bootstrap, brought up lazily on the first
   chunk actually dispatched. Each level overrides ONE thing, and the chain is identical in all four.
 - **Stage** - One `.apply()` call, and therefore one `.transform()` call, since `transform()` is
-  `return this.apply(transformer)` (`pipeline.ts:429-432`). A stage's identity is its INDEX in
+  `return this.apply(transformer)` (`pipeline.ts:451-454`). A stage's identity is its INDEX in
   `_chunkTransforms`, so a dispatching class sends a chunk plus an index and never a function.
   `.transform((t) => t.map(f).filter(g))` is ONE stage; two chained `.transform()` calls are TWO, and
   on a dispatching class that is two network hops. `_chunkTransforms` is `HttpPipeline`/
   `ClusterPipeline`'s own worker-side stage registry (`this._chunkTransforms[requested]`,
-  `src/pipelines/http.ts:170`) - unrelated to chunking and untouched by #39.
+  `src/pipelines/http.ts:273`) - unrelated to chunking and untouched by #39. A reduce stage occupies
+  the SAME index space with its own registry, `_reduceStages` (#45) - its `_chunkTransforms` slot
+  holds a placeholder that throws if ever invoked as a per-chunk transform.
 - **`{ local: true }`** - The optional SECOND argument to a dispatching subclass's own
   `transform()`/`apply()`, keeping that stage in the orchestrating process. It is `super.apply()` at
   every level, and the base `Pipeline` never gains it.
@@ -198,7 +205,7 @@ none of it survived the hand-trim (#745).
   terminal op.
 - **Context / `IContextManager`** - the shared key-value store threading through a pipeline run:
   `.get()`/`.set()`/`.getOrDefault()`/`.toDict()`. `SimpleContext` is the one shipped implementation.
-  Every `PipelineFunction`/`PipelineReduceFunction` callback receives it as an optional second
+  Every `PipelineFunction`/`ReduceFunction` callback receives it as an optional second
   parameter - one signature, not a union of arities, so an un-annotated callback still infers its item
   type (`types.ts`'s own docstring on `PipelineFunction` records why the union form was rejected).
   `.context()` mutates a caller's OWN manager in place and carries the SAME instance forward, never

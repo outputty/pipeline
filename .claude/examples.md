@@ -201,14 +201,14 @@ const data = await new Pipeline(["a", "b", "3", "d", "5"])
 [999]
 ```
 
-## Case 7 - a reducer that folds the whole stream, and emits mid-fold (pending #45)
+## Case 7 - a reducer that folds the whole stream, and emits mid-fold
 
 `Pipeline.reduce` folds every chunk the pipeline produces, unlike `Transformer.reduce`, which folds
 the one chunk it receives. `emit()` banks a value downstream mid-fold, so the caller decides what a
 finished result is; the final accumulator is emitted only if items were folded since the last
 `emit()`, which is why `[60,90]` has no trailing `0`.
 
-<!-- illustrative -->
+<!-- compiles -->
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";

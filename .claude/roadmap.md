@@ -9,13 +9,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **A reducer on the `Pipeline`, folding every chunk it receives** (#45) - `reduce` only folds one
-  chunk today, and the whole-dataset form returns a standalone callable that is never a stage. So a
-  running total across a stream means draining the pipeline and folding outside it, giving up both
-  streaming and dispatch. `Pipeline.reduce` folds every chunk, `emit()` lets the caller decide what
-  a finished result is, and a reduce stage dispatches like any other - one duplex POST whose
-  accumulator lives for the life of the connection. Now, because it is the last operation that
-  cannot cross a process boundary. BREAKING: `perChunk` and `ReduceOptions` go.
 - **A conformance suite every `Pipeline` and Context class runs** (#37), **`EventEmitterPipeline`**
   (#30), **the pipeline's error handlers** (#40), **instance `merge`** (#41) and **cross-runtime
   benchmarks** (#11) are the other open tickets; each issue carries its own detail.
@@ -44,6 +37,22 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **A reducer on the `Pipeline`, folding every chunk it receives** (#45, `feat!`) - `reduce` only
+  folded one chunk before, and the whole-dataset form returned a standalone callable that was never
+  a stage, so a running total across a stream meant draining the pipeline and folding outside it,
+  giving up both streaming and dispatch. `Pipeline.reduce(fn, initial)` folds every chunk, in-process
+  and sequential - `ConcurrentPipeline.reduce()` overrides it, adding `{ local: true }`, and
+  dispatches to `reduceWork()`, `stageWork()`'s sibling; `HttpPipeline.reduceWork()` opens one duplex
+  POST to `/reduce/<n>` (NDJSON both ways), `maxConcurrency` inert on it; `ClusterPipeline`'s own
+  bootstrap/`inFlight` bracket wraps the WHOLE connection instead of one chunk. `emit()`, the reducer
+  callback's fourth argument, banks a value downstream mid-fold and resets the accumulator; the
+  trailing accumulator is only emitted if items were folded since the last `emit()`. `toNodeHandler`
+  streams both directions now instead of buffering them whole, unblocking the duplex response every
+  Node consumer gets, one-shot routes included. BREAKING: `Transformer.reduce`'s old per-chunk-toggle
+  overload and `ReduceOptions` are deleted; `PipelineReduceFunction` is `ReduceFunction`.
+  PRs #52 (L1, pinned cases), #53 (L2, the fold + `emit`), #55 (L3, `ConcurrentPipeline`), #56 (L4,
+  `toNodeHandler` streaming), #57 (L5, `HttpPipeline`/`ClusterPipeline` duplex dispatch), #58
+  (enable), #59 (docs).
 - **Chunking becomes an explicit `Pipeline.buffer()` boundary, off `Transformer` entirely** (#39,
   `feat!`) - `ConcurrentPipeline.apply()` used to refuse a custom chunker outright and re-derive its
   own cut from `transformer.chunkSize`, disagreeing with `.transform()`'s own seeding (#42, closed as
@@ -104,7 +113,7 @@ The two older candidates, still not filed:
   instead of returning them together at the end of the chunk. Killed by the user: it makes every
   link a middleware that decides whether the rest of the chain runs, which is a larger contract than
   `map`/`filter`/`reduce` need, and it would rewrite `pipe()` and every link including `.catch()`.
-  A reducer stays one ordinary `pipe()` link (`src/transformer.ts:717`, `:731`).
+  A reducer stays one ordinary `pipe()` link (`Transformer.reduce`, `src/transformer.ts:626-634`).
 
 Every row below was spiked and run while planning #17, not argued.
 

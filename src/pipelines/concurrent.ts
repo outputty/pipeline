@@ -308,8 +308,8 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
    * sibling: a reducer streams in and out (it emits fewer or more values than it consumes), so this
    * returns a generator over OUTPUT CHUNKS rather than an `InternalTransformer`. This class's own
    * implementation (below) folds in-process and sequentially - `maxConcurrency` is inert on a
-   * reduce stage, one accumulator, one connection; `HttpPipeline` (L5) overrides it to open one
-   * duplex POST instead.
+   * reduce stage, one accumulator, one connection; `HttpPipeline` overrides it to open one duplex
+   * POST instead.
    */
   protected reduceWork<U>(
     fn: ReduceFunction<U, T>,
