@@ -16,11 +16,15 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   a finished result is, and a reduce stage dispatches like any other - one duplex POST whose
   accumulator lives for the life of the connection. Now, because it is the last operation that
   cannot cross a process boundary. BREAKING: `perChunk` and `ReduceOptions` go.
+- **Chunking becomes an explicit `Pipeline.buffer()` boundary, off `Transformer` entirely** (#39,
+  `feat!`) - `ConcurrentPipeline.apply()` refuses a custom chunker outright today, and
+  `ConcurrentPipelineOptions.chunkSize`/`Transformer.chunkSize` can already disagree (#42) - both are
+  symptoms of chunking being an inferred, per-stage property of `Transformer` rather than one
+  explicit decision `Pipeline` owns. `.buffer(size)` replaces both, persisted across every later
+  stage until called again; #42 closes as superseded once this ships.
 - **A conformance suite every `Pipeline` and Context class runs** (#37), **`EventEmitterPipeline`**
-  (#30), **the pipeline's own chunker extraction** (#39, `needs-planning`), **the pipeline's error
-  handlers** (#40), **instance `merge`** (#41), **a pipeline-level `chunkSize`** (#42,
-  `needs-planning`) and **cross-runtime benchmarks** (#11) are the other open tickets; each issue
-  carries its own detail.
+  (#30), **the pipeline's error handlers** (#40), **instance `merge`** (#41) and **cross-runtime
+  benchmarks** (#11) are the other open tickets; each issue carries its own detail.
 
 ### Later - not yet filed
 

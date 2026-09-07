@@ -27,6 +27,40 @@ prompted a second look; reordered, the real answer was `echoes received BEFORE t
 closed = 3 of 3`, and the whole remote-reducer design rests on it. `.claude/rules/code.md` (new, this
 repo) now says to feed a streaming probe's input before awaiting the call that consumes it.
 
+## 2026-09-06 Closing #39's L1 draft PR left its commit on the worktree branch
+
+Building #39, a mid-build architecture reopen (chunking should not live on `Transformer` at all)
+triggered the "premise is false" stop: comment posted, draft PR #44 closed, ticket labelled
+`needs-planning`. The worktree's own branch still carried L1's commit after all of that - a `git log`
+during the resumed planning session showed `main` plus one extra commit, and a `grep` for the OLD
+design's symbols (`chunkGenerator`, `executeChunks`) still matched `src/`, as if the closed PR's code
+were the real, shipped state. Caught before it misled any premise-check; fixed with `git reset --hard`
+to `main`. `~/.claude/rules/code.md`'s While you work section now says to reset the worktree branch
+too, not just close the PR.
+
+## 2026-09-06 `_chunkTransforms` was nearly deleted for a role it doesn't own
+
+Replanning #39's chunk-first redesign, the ticket draft first said `_chunkTransforms` (`pipeline.ts`)
+gets deleted alongside `_sourcePositionViolations`, reasoning from its ONE consumer that motivated the
+question - the async-iteration replay loop being unified away. A second grep, while writing
+`architecture.md`, found `HttpPipeline.fetch()`'s own server-side stage lookup
+(`this._chunkTransforms[requested]`, `src/pipelines/http.ts:170`) - a second, unrelated role the field
+also serves, unaffected by the redesign. Caught before it reached the filed ticket.
+`~/.claude/rules/code.md`'s Names and pointers section now says to grep every consumer BEFORE
+proposing a shared mechanism's deletion, not just the one that raised the question.
+
+## 2026-09-06 Several rounds designed machinery to skip a cost the design itself had just added
+
+Mid-build, asked whether a redundant re-chunk between two dispatched stages could be skipped, several
+rounds were spent designing detection machinery for it - a `preservesCount` flag on `Transformer`,
+then a chunker-identity comparison, each priced against the other, neither questioning why the
+re-chunk was redundant AND necessary at every stage in the first place. The user redirected instead:
+chunking becomes an explicit, opt-in `Pipeline.buffer()` call, downstream stages never re-chunk by
+default - the "skip a redundant re-chunk" question stopped existing, by construction, once nothing
+re-chunks unless asked to. `~/.claude/rules/code.md`'s existing "price fixing the inconsistency
+instead of accommodating it" line is sharpened to cover a cost a design just introduced, not only an
+inconsistency between siblings.
+
 ## 2026-09-06 A review finding was framed as #31's own regression before checking `main`
 
 Building #31, code review found `HttpPipeline.fetch()` reusing `this._context` to serve concurrent

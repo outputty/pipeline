@@ -48,25 +48,35 @@ src/
   utils/
     chunk.ts                buildChunkGenerator - breaks an AsyncIterable into fixed-size chunks
     helpers.ts               isContextAware / isContextAwareReduce - fn.length arity checks
-  factories.ts             createTransformer - chunk-size sugar over the constructor
+  factories.ts             createTransformer - Transformer construction sugar (pending #39: no
+                             chunk-size parameter - chunking lives on Pipeline, not Transformer)
   index.ts                 barrel - the only export surface
 ```
 
 ## How a chunk flows
 
+Pending #39: the cut moves off `Transformer` onto `Pipeline`. `Pipeline` owns a persisted chunk
+stream (`_chunks`), cut once by `.buffer(size)` (defaulting to `DEFAULT_CHUNK_SIZE` the moment one is
+first needed) and carried unchanged through every later stage - `Transformer.process()` never cuts,
+only processes whatever chunk it is handed:
+
 ```text
-Pipeline.toArray() (or any terminal op)
-	buildChunkGenerator(source, chunkSize)      splits the AsyncIterable into In[] chunks
-	Transformer.execute(chunks, context)
+Pipeline.buffer(size)                             the ONLY place a cut happens - explicit, opt-in
+	buildChunkGenerator(items, size)                splits the flattened item stream into In[] chunks
+Pipeline.apply(transformer) (every later stage)
+	Transformer.process(this._chunks, context)      NO cut here - runs the chunks it is handed
 		runSequentially(internalTransformer, chunks, context)   one chunk at a time, in order
 			internalTransformer(chunk, ctx)          one map/filter/flatMap/reduce/tap link, chained
 				isContextAware(fn) ? fn(item, ctx) : fn(item)      arity-checked once per link, not per item
-	collect Out[] chunks into the terminal op's own shape
+Pipeline.toArray() (or any terminal op, or async iteration)
+	flatten(_chunks)                                the ONE place chunks become items again
 ```
 
-A `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` stage bypasses this path entirely - see "The
-pipeline family", below - `Transformer.execute()` itself is always sequential now, one chunk at a
-time; wrap the chain in one of those classes for concurrency instead of configuring the `Transformer`.
+A `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` stage bypasses `Transformer.process()`
+entirely - see "The pipeline family", below - but shares the SAME `_chunks` state: its own fan-out
+reads `this._chunks` directly and cuts none of its own, so a custom `.buffer()` boundary reaches a
+dispatched stage exactly like a local one. Wrap the chain in one of those classes for concurrency
+instead of configuring the `Transformer`.
 
 `.catch(build, onError)` wraps one internal transformer function in a try/catch at the CHUNK boundary:
 a throw inside `build`'s chain hands the whole failing chunk to `onError`, whose return value (an
@@ -75,8 +85,8 @@ per-item try/catch anywhere in the chain. `ErrorHandler.handle()` (`errors/handl
 registered handler LIFO (last-registered first) and returns the FIRST one that returns an array; a
 handler returning `undefined` passes to the next-oldest one, and `handle()` itself returns `undefined`
 once every handler has passed, which `.catch()` reads as "drop the chunk" (#15). `.onError()`'s own
-call into the same `handle()`, from `Transformer.execute()`'s catch, ignores this return value - it is
-a notification hook there, never a recovery path.
+call into the same `handle()`, from `Transformer.process()`'s catch (pending #39: was `execute()`'s),
+ignores this return value - it is a notification hook there, never a recovery path.
 
 ## The pipeline family
 
@@ -103,26 +113,29 @@ Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `
 createPipeline()` calling `this.constructor` rather than a hard-coded `new Pipeline<U>`, so a
 subclass survives a `.transform()`/`.context()`/`.buffer()` chain; each level overrides
 `createPipeline()` again to carry its OWN extra knobs forward (`ConcurrentPipeline`'s own
-`concurrentOptions()` helper is the one place `maxConcurrency`/`ordered`/`chunkSize` are listed, so
-`HttpPipeline`/`ClusterPipeline` only add their own field). And a stage's identity is its INDEX in
-`_chunkTransforms` - the table `apply()` already maintains - so a dispatching class sends a chunk
-plus an index, never a function. Every instance runs the same code, so index N means the same
-transform on both sides; a mixed-version fleet breaks that assumption silently, which is why atomic
-deploys are a documented requirement rather than a check.
+`concurrentOptions()` helper is the one place `maxConcurrency`/`ordered` are listed - pending #39:
+`chunkSize` drops out of it, since `.buffer()` is `Pipeline`'s own knob now, not
+`ConcurrentPipelineOptions`' - so `HttpPipeline`/`ClusterPipeline` only add their own field). And a
+stage's identity is its INDEX in `_chunkTransforms` - the table `apply()` already maintains - so a
+dispatching class sends a chunk plus an index, never a function. Every instance runs the same code,
+so index N means the same transform on both sides; a mixed-version fleet breaks that assumption
+silently, which is why atomic deploys are a documented requirement rather than a check.
 
-`ConcurrentPipeline.apply()` does NOT call `transformer.execute()` for a non-local stage - that
-bypass IS the mechanism, since `execute()` runs a chain sequentially, one chunk at a time. It builds
-its own chunker from `transformer.chunkSize` and fans chunks out through `stageWork()`'s return
-value directly. A knob that only ever takes effect via `execute()` (`.withHooks()`, `.onError()`, a
-custom `.setChunker()` chunker) THROWS immediately on a non-local stage instead of silently never
-firing - `inertKnobsOf` (`pipeline.ts`) is the same check the async-iteration source-position path
-(below) already used, reused rather than duplicated; `{ local: true }` is the escape hatch.
+`ConcurrentPipeline.apply()` does NOT call `transformer.process()` for a non-local stage - that
+bypass IS the mechanism, since `process()` runs a chain sequentially, one chunk at a time. Pending
+#39: it fans `this._chunks` - the pipeline's OWN already-cut chunk stream, set by `.buffer()` - out
+through `stageWork()`'s return value directly, cutting none of its own; a knob that only ever takes
+effect via `process()` (`.withHooks()`, `.onError()`) THROWS immediately on a non-local stage instead
+of silently never firing; `{ local: true }` is the escape hatch. `.buffer()` reaches a dispatched
+stage exactly like a local one now, since `Pipeline` owns the cut, not `Transformer` - the refusal
+this used to need for a custom chunker (`inertKnobsOf` naming `setChunker`) has nothing left to
+refuse.
 
 A worker process (`ClusterPipeline`'s own bootstrap; `HttpPipeline`'s own `.fetch()`-side instance
-in general) never orchestrates: its `dataSource` is an empty async iterable set at construction, so
-every terminal op resolves immediately with an EMPTY result - the worker exists only to hold the
-transforms (`_chunkTransforms`, registered by running the same entry module the primary runs) and
-serve `.fetch()` requests against them.
+in general) never orchestrates: its chunk stream is empty, set at construction, so every terminal op
+resolves immediately with an EMPTY result - the worker exists only to hold the transforms
+(`_chunkTransforms`, registered by running the same entry module the primary runs) and serve
+`.fetch()` requests against them.
 
 ## Constraints in dependencies
 

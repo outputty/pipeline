@@ -117,7 +117,8 @@ Across machines instead of processes, the same chain takes a url and mounts its 
 ```ts
 import { HttpPipeline } from "@outputty/pipeline";
 
-const pipeline = new HttpPipeline([1, 2, 3, 4, 5], { url: process.env.SELF_URL!, chunkSize: 2 })
+const pipeline = new HttpPipeline([1, 2, 3, 4, 5], { url: process.env.SELF_URL! })
+  .buffer(2)
   .transform((t) => t.map((x: number) => x * 2))
   .transform((t) => t.filter((x: number) => x > 4), { local: true });
 
