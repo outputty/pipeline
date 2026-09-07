@@ -168,8 +168,9 @@ none of it survived the hand-trim (#745).
   `emit(value)` pushes one downstream mid-fold; the final accumulator is emitted only if items were
   folded since the last `emit()`. A reduce stage dispatches like any other stage; on
   `ConcurrentPipeline` (and `HttpPipeline`/`ClusterPipeline`) it PARTITIONS into `maxConcurrency`
-  independent accumulators now (#62), each its own `reduceWork()` call over its own `share()` view
-  of the one shared chunk stream - on `HttpPipeline` that is `maxConcurrency` concurrent duplex
+  independent accumulators now (#62): `reduceWork()` is still called ONCE, but the closure it returns
+  is called `maxConcurrency` times, each its own `share()` view of the one shared chunk stream - on
+  `HttpPipeline` that is `maxConcurrency` concurrent duplex
   POSTs to the SAME `/reduce/<n>`, each with its own accumulator server-side. The result owes a
   combine (`owesCombine`): every terminal op refuses to drain it until `.local(build)` (#61) folds
   the partials into one via a second `.reduce()`, which the caller writes as the very next stage -

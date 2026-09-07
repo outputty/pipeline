@@ -56,8 +56,9 @@ The two older candidates, still not filed:
   `ReduceFunction<U, T>` does not compose across partitions - the count case's own fold,
   `(acc, _x) => acc + 1`, typechecks perfectly as its own combine and silently returns the number of
   partitions instead of the count. `ConcurrentPipeline.reduce()` now folds `maxConcurrency`
-  independent accumulators, each its own `reduceWork()` call over its own `share()` view
-  (`src/utils/chunk.ts`, free-slot dealing over one shared iterator) of the ONE chunk stream, merged
+  independent accumulators: `reduceWork()` is still called once, but the closure it returns is
+  called `maxConcurrency` times, each its own `share()` view (`src/utils/chunk.ts`, free-slot
+  dealing over one shared iterator) of the ONE chunk stream, merged
   in completion order by `mergeUnordered()`; `HttpPipeline`/`ClusterPipeline` inherit partitioning
   with no new code, since `reduceWork()`'s existing per-request `Reducer` already means N concurrent
   dispatches fold N independent accumulators. The result owes a combine (`owesCombine`,
