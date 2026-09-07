@@ -27,6 +27,7 @@ import { DEFAULT_CHUNK_SIZE } from "./types";
 import { SimpleContextManager } from "./context/simple";
 import { Transformer } from "./transformer";
 import { buildChunkGenerator, flattenChunks } from "./utils/chunk";
+import { foldChunkStream } from "./utils/reduce";
 
 /**
  * A chunk-wise transform function: takes one chunk (array) and produces the
@@ -99,6 +100,38 @@ export interface PipelineOptions {
    * Not intended for direct external use.
    */
   chunkTransforms?: ChunkTransform[];
+  /**
+   * Internal: every reduce stage registered via `.reduce()`, keyed by its index in the SAME shared
+   * space `chunkTransforms` uses - `HttpPipeline`'s own `.fetch()` (#45 L5) looks a stage up here to
+   * serve a `/reduce/<n>` request. Not intended for direct external use.
+   */
+  reduceStages?: Map<number, ReduceStage>;
+}
+
+/** A registered reduce stage's own definition - `pushReduceStage()` (below) is the one place that
+ * builds one, `HttpPipeline.fetch()` (#45 L5) the one place that reads one back to serve
+ * `/reduce/<n>`. Untyped on `U`/`T` (kept as `unknown`) since a `Pipeline`'s own map holds reduce
+ * stages of every type a chain has ever registered, not just its current `T`.
+ *
+ * `{ fn: (acc, x) => acc + x, initial: 0 }` → the stage `HttpPipeline.fetch()` (#45 L5) looks up to
+ * serve `/reduce/<n>` for a chain built as `.reduce((acc, x) => acc + x, 0)`. */
+export interface ReduceStage<U = unknown, T = unknown> {
+  fn: ReduceFunction<U, T>;
+  initial: U;
+}
+
+/** The `_chunkTransforms` slot a reduce stage occupies - a reduce stage isn't a per-chunk
+ * `ChunkTransform` (it folds across chunks, not one chunk in for one chunk out), so its slot throws
+ * if ever invoked as one. This IS the fail-loud guard #45's own ticket wanted from the killed
+ * `sourcePositionViolations` mechanism (#39 deleted it entirely, and there is no separate replay
+ * path left for a violations list to protect against - architecture.md's own text says so). */
+function reduceStagePlaceholder(stageIndex: number): ChunkTransform {
+  return () => {
+    throw new Error(
+      `stage ${stageIndex} is a reduce stage, not a plain per-chunk transform - it cannot serve ` +
+        `/stage/${stageIndex}`,
+    );
+  };
 }
 
 /**
@@ -127,6 +160,9 @@ export class Pipeline<T> {
   protected _preBufferItems: AsyncIterable<T> | null;
   protected _context: IContextManager;
   protected _chunkTransforms: ChunkTransform[];
+  /** Every reduce stage registered via `.reduce()`, keyed by its index in the shared stage-index
+   * space - see `PipelineOptions.reduceStages`. */
+  protected _reduceStages: Map<number, ReduceStage>;
 
   /**
    * Create a new Pipeline from a data source.
@@ -141,6 +177,7 @@ export class Pipeline<T> {
     // (#31, Done-when 6: once per process, not once per stage or per request).
     this._context = options?.context ?? options?.contextFactory?.() ?? new SimpleContextManager();
     this._chunkTransforms = options?.chunkTransforms ?? [];
+    this._reduceStages = options?.reduceStages ?? new Map();
 
     if (options?.chunks !== undefined) {
       // The copy-on-write path: `data` is inert (an internal caller passes `[]`) since the chunk
@@ -347,6 +384,7 @@ export class Pipeline<T> {
     return this.createPipeline<T>(this._chunks, {
       context: this._context,
       chunkTransforms: this._chunkTransforms,
+      reduceStages: this._reduceStages,
       preBufferItems: this._preBufferItems,
     }) as this;
   }
@@ -394,6 +432,7 @@ export class Pipeline<T> {
         ...this._chunkTransforms,
         transformer.transform as unknown as ChunkTransform,
       ],
+      reduceStages: this._reduceStages,
       // A real stage just consumed `_chunks` - nothing left to recut a back-to-back `.buffer()`
       // from except this stage's own output, so the pre-buffer item view resets to null.
       preBufferItems: null,
@@ -447,6 +486,7 @@ export class Pipeline<T> {
     return this.createPipeline<T>(chunks, {
       context: this._context,
       chunkTransforms: this._chunkTransforms,
+      reduceStages: this._reduceStages,
       preBufferItems: items,
     }) as this;
   }
@@ -461,8 +501,42 @@ export class Pipeline<T> {
    * `new Pipeline([1,2,3,4,5]).reduce((acc, x) => acc + x, 0).transform((t) => t.map((n) => n *
    * 10)).toArray()` → `[150]` (L2).
    */
-  reduce<U>(_fn: ReduceFunction<U, T>, _initial: U): Pipeline<U> {
-    throw new Error("Pipeline.reduce: not implemented (#45 L2)");
+  reduce<U>(fn: ReduceFunction<U, T>, initial: U): Pipeline<U> {
+    const { chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
+    const newChunks = foldChunkStream(fn, initial, this._chunks, this._context);
+    return this.createPipeline<U>(newChunks, {
+      context: this._context,
+      chunkTransforms,
+      reduceStages,
+      preBufferItems: null,
+    });
+  }
+
+  /**
+   * Registers a new reduce stage at the next index in the shared stage-index space
+   * `_chunkTransforms` already uses (#45) - `ConcurrentPipeline.reduce()`'s own override (L3) calls
+   * this too, so both share one bookkeeping seam rather than two copies that could drift apart.
+   *
+   * @example
+   * On a pipeline with one prior `.transform()` stage, `pushReduceStage(fn, 0)` → `{ stageIndex: 1,
+   * … }`, with `chunkTransforms[1]` a placeholder that throws if ever run as a per-chunk transform.
+   */
+  protected pushReduceStage<U>(
+    fn: ReduceFunction<U, T>,
+    initial: U,
+  ): {
+    stageIndex: number;
+    chunkTransforms: ChunkTransform[];
+    reduceStages: Map<number, ReduceStage>;
+  } {
+    const stageIndex = this._chunkTransforms.length;
+    const reduceStages = new Map(this._reduceStages);
+    reduceStages.set(stageIndex, { fn, initial } as ReduceStage);
+    return {
+      stageIndex,
+      chunkTransforms: [...this._chunkTransforms, reduceStagePlaceholder(stageIndex)],
+      reduceStages,
+    };
   }
 
   // ===== Terminal Operations =====

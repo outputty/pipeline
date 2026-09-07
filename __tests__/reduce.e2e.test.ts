@@ -37,7 +37,7 @@ function emitAtSix(
 }
 
 describe("#45 the whole dataset folds and the chain continues (Done-when 1)", () => {
-  test.fails("prints [150]", async () => {
+  test("prints [150]", async () => {
     const data = await new Pipeline([1, 2, 3, 4, 5])
       .reduce((acc: number, x: number) => acc + x, 0)
       .transform((t) => t.map((n: number) => n * 10))
@@ -47,7 +47,7 @@ describe("#45 the whole dataset folds and the chain continues (Done-when 1)", ()
 });
 
 describe("#45 emit() mid-fold, no trailing initial value (Done-when 2)", () => {
-  test.fails("prints [60,90]", async () => {
+  test("prints [60,90]", async () => {
     const data = await new Pipeline([1, 2, 3, 4, 5])
       .reduce(emitAtSix, 0)
       .transform((t) => t.map((n: number) => n * 10))
@@ -185,7 +185,7 @@ describe("#45 toNodeHandler streams both directions (Done-when 5)", () => {
 });
 
 describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () => {
-  test.fails("Pipeline", async () => {
+  test("Pipeline", async () => {
     const data = await new Pipeline([1, 2, 3, 4, 5])
       .reduce((acc: number, x: number) => acc + x, 0)
       .transform((t) => t.map((n: number) => n * 10))

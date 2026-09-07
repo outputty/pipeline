@@ -264,6 +264,10 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
         ...this._chunkTransforms,
         transformer.transform as unknown as ChunkTransform,
       ],
+      // Carried forward like every base `Pipeline` copy-on-write method already does (#45) - a
+      // dropped `_reduceStages` here would silently lose a stage a prior `.reduce()` registered
+      // the moment `ConcurrentPipeline.reduce()` (#45 L3) stops throwing and starts populating it.
+      reduceStages: this._reduceStages,
       // A dispatched stage's own output IS a real chunk stream now (#39) - a later `.buffer()`
       // flattens it like any other stage's output, so no pre-buffer item view survives this call.
       preBufferItems: null,
