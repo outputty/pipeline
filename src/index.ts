@@ -37,11 +37,7 @@ export { Transformer } from "./transformer";
 export { Pipeline, type PipelineOptions, type PipelineSource } from "./pipeline";
 
 // Pipeline family (#17) — where a chain's chunks are processed
-export {
-  ConcurrentPipeline,
-  type ConcurrentPipelineOptions,
-  type StageOptions,
-} from "./pipelines/concurrent";
+export { ConcurrentPipeline, type ConcurrentPipelineOptions } from "./pipelines/concurrent";
 export { HttpPipeline, toNodeHandler } from "./pipelines/http";
 export { ClusterPipeline, type ClusterPipelineOptions } from "./pipelines/cluster";
 

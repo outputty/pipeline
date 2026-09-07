@@ -31,12 +31,6 @@ export interface ConcurrentPipelineOptions {
  * `ConcurrentPipelineOptions`; the intersection is this file's own plumbing. */
 type ConcurrentPipelineConstructorOptions = ConcurrentPipelineOptions & PipelineOptions;
 
-/** Per-stage override, passed as `.transform()`/`.apply()`'s second argument. */
-export interface StageOptions {
-  /** Run this one stage in the orchestrating process instead of dispatching it. */
-  local?: boolean;
-}
-
 /** One in-flight chunk's promise, tagged with an id so `fanOutUnordered` can tell which slot in
  * `inFlight` finished once `Promise.race` settles - `Promise.race` alone only returns the winning
  * VALUE, not which input promise produced it. */
@@ -222,22 +216,17 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
   }
 
   /**
-   * `options?.local: true` is `super.apply(transformer)` at every level (product.md) - the base
-   * class's own `Transformer.process()` path, in-process, sequential, no fan-out. Everything else
-   * goes through this class's own `stageWork()` fan-out below.
+   * Always dispatches - `.local(build)` (#61) is what keeps a stage in the orchestrating process
+   * now, wrapping a whole region rather than flagging one call. Everything here goes through this
+   * class's own `stageWork()` fan-out below.
    */
   override transform<U>(
     builder: (t: Transformer<T, T>) => Transformer<T, U>,
-    options?: StageOptions,
   ): ConcurrentPipeline<U> {
-    return this.apply(builder(new Transformer<T, T>({ transform: (chunk) => chunk })), options);
+    return this.apply(builder(new Transformer<T, T>({ transform: (chunk) => chunk })));
   }
 
-  override apply<U>(transformer: Transformer<T, U>, options?: StageOptions): ConcurrentPipeline<U> {
-    if (options?.local) {
-      return super.apply(transformer) as ConcurrentPipeline<U>;
-    }
-
+  override apply<U>(transformer: Transformer<T, U>): ConcurrentPipeline<U> {
     // `withHooks`/`onError` only ever take effect through `Transformer.process()`, which
     // `stageWork()` (below) never calls on ANY consumption path - not just async-iteration, the
     // way the base class's own terminal-op path is fine but its old source-position path was not.
@@ -247,7 +236,7 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
       throw new Error(
         `${this.constructor.name}: ${knobViolations.join("/")} never take effect on a dispatched ` +
           `stage (stageWork() runs the stage directly, never Transformer.process()). Drop the ` +
-          `knob, or pass { local: true } to run this stage in-process instead.`,
+          `knob, or wrap it in .local(build) to run it in-process instead.`,
       );
     }
 
@@ -276,21 +265,11 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
   }
 
   /**
-   * Fold every chunk this pipeline produces (#45). Adds `StageOptions` on top of the base
-   * `Pipeline.reduce(fn, initial)` signature, mirroring `apply()`/`transform()`'s own
-   * base-vs-`{ local: true }` split - `{ local: true }` runs `super.reduce()` (the base class's
-   * in-process fold) directly, everything else folds via `reduceWork()`, this class's own override
-   * point, `stageWork()`'s sibling.
+   * Fold every chunk this pipeline produces (#45), always dispatched via `reduceWork()` - this
+   * class's own override point, `stageWork()`'s sibling. `.local(build)` (#61) is what keeps a
+   * reduce stage's fold in-process now.
    */
-  override reduce<U>(
-    fn: ReduceFunction<U, T>,
-    initial: U,
-    options?: StageOptions,
-  ): ConcurrentPipeline<U> {
-    if (options?.local) {
-      return super.reduce(fn, initial) as ConcurrentPipeline<U>;
-    }
-
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U> {
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
     const newChunks = work(this._chunks, this._context);

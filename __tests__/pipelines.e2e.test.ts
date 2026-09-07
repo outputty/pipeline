@@ -8,9 +8,8 @@
  * built in-process here would fork Vitest itself. HTTP and in-process cases run directly.
  *
  * Every case that names a class or behavior #17 has not yet built is `it.fails` - a case that
- * already holds today (the shipped `concurrent()` control, the `{local:true}` type error on a
- * plain `Pipeline`) is a normal, passing `it`. As each layer lands, its cases flip from `it.fails`
- * to `it`.
+ * already holds today (the shipped `concurrent()` control) is a normal, passing `it`. As each
+ * layer lands, its cases flip from `it.fails` to `it`.
  */
 import { describe, it, expect } from "vitest";
 import { Pipeline, Transformer, ConcurrentPipeline, HttpPipeline, ClusterPipeline } from "../src";
@@ -149,9 +148,9 @@ describe("#61 .local(build) prints the ticket's own canonical program on every c
   });
 });
 
-describe("#17 { local: true } keeps a stage in-process (Done-when 6)", () => {
+describe("#61 .local(build) keeps a whole region in-process, replacing { local: true }", () => {
   it(
-    "makes ZERO HTTP requests for the local stage",
+    "makes ZERO HTTP requests for the local region",
     async () => {
       let requests = 0;
       const worker = makeWorker((t) => t.transform((tr) => tr.map((x: number) => x * 2)));
@@ -162,23 +161,26 @@ describe("#17 { local: true } keeps a stage in-process (Done-when 6)", () => {
       await withServer(countingHandler, async (url) => {
         const out = await new HttpPipeline<number>([1, 2, 3], { url })
           .transform((t) => t.map((x: number) => x * 2))
-          .transform((t) => t.filter((x: number) => x > 2), { local: true })
+          .local((p) => p.transform((t) => t.filter((x: number) => x > 2)))
           .toArray();
         expect(out).toEqual([4, 6]);
-        expect(requests).toBe(1); // only the first (non-local) stage crossed the wire
+        expect(requests).toBe(1); // only the first (dispatched) stage crossed the wire
       });
     },
     HTTP_TIMEOUT,
   );
 
-  it("a plain Pipeline has no { local: true } second argument to .transform() - compile error", () => {
+  it("{ local: true } no longer typechecks as a second argument to .transform() on any class - compile error", () => {
     // Type-only: never executed. `tsc --noEmit` is the real assertion; `@ts-expect-error` itself
     // fails (TS2578) if the call ever stopped erroring - the negative-case pattern
     // `.claude/rules/typescript.md` calls for over trusting a "should fail" claim.
     function typeOnlyCheck() {
       const plain = new Pipeline<number>([1]);
-      // @ts-expect-error - Pipeline.transform() takes no StageOptions second argument
+      // @ts-expect-error - .transform() takes no second argument on any Pipeline class now (#61)
       plain.transform((t) => t, { local: true });
+      const concurrent = new ConcurrentPipeline<number>([1]);
+      // @ts-expect-error - the dispatching classes lost the same second argument (#61, BREAKING)
+      concurrent.transform((t) => t, { local: true });
     }
     expect(typeof typeOnlyCheck).toBe("function");
   });
@@ -265,12 +267,12 @@ describe("#17 a knob that only takes effect via Transformer.process() fails loud
     );
   });
 
-  it("{ local: true } still runs a hooked stage in-process, hooks intact", async () => {
+  it(".local(build) still runs a hooked stage in-process, hooks intact", async () => {
     const order: string[] = [];
     const hooked = new Transformer<number, number>()
       .map((x: number) => x * 2)
       .withHooks({ onStart: () => order.push("start"), onComplete: () => order.push("complete") });
-    const out = await new ConcurrentPipeline([1, 2, 3]).apply(hooked, { local: true }).toArray();
+    const out = await new ConcurrentPipeline([1, 2, 3]).local((p) => p.apply(hooked)).toArray();
     expect(out).toEqual([2, 4, 6]);
     expect(order).toEqual(["start", "complete"]);
   });

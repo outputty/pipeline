@@ -1,8 +1,9 @@
 /**
  * `HttpPipeline` and `toNodeHandler` (#17) — each chunk of a stage dispatched over HTTP to another
  * instance running the SAME code. Overrides `stageWork()` alone, per `ConcurrentPipeline`'s own
- * contract: `.transform()`/`.apply()` are inherited unchanged, so the fan-out, the local-stage
- * check and the knob-violation check all keep working exactly as `ConcurrentPipeline` built them.
+ * contract: `.transform()`/`.apply()` are inherited unchanged, so the fan-out and the
+ * knob-violation check keep working exactly as `ConcurrentPipeline` built them; `.local(build)`
+ * (#61) is a separate, always-inherited method that keeps a whole region in-process instead.
  *
  * Wire format, one route per stage index:
  * ```text
@@ -11,7 +12,7 @@
  * ```
  */
 
-import type { ConcurrentPipelineOptions, StageOptions } from "@src/pipelines/concurrent";
+import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import type { Pipeline, PipelineOptions, PipelineSource, ReduceStage } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
@@ -153,7 +154,7 @@ async function flushTrailing(
 /**
  * Each chunk of a stage dispatched over HTTP to another instance running the SAME code (#17).
  * Mounts one route per stage index (`readonly fetch`); the caller gives it the url where that
- * `.fetch` is mounted. `{ local: true }` on `.transform()`/`.apply()` keeps one stage here instead.
+ * `.fetch` is mounted. `.local(build)` (#61) keeps a whole region here instead.
  *
  * `new HttpPipeline([1,2,3,4,5], { url }).transform((t) => t.map((x) => x * 2)).toArray()` →
  * `[2,4,6,8,10]`, across two real instances.
@@ -175,21 +176,18 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
 
   /**
    * Re-declared ONLY to narrow the static return type back to `HttpPipeline<U>` - the inherited
-   * `ConcurrentPipeline.transform()`/`.apply()` logic (fan-out, `{ local: true }`, the
-   * knob-violation check) runs completely unchanged via `super`. Without this, product.md's own
-   * canonical example - two chained `.transform()` calls, then `.fetch` - would not typecheck:
-   * `ConcurrentPipeline<U>` (the un-narrowed inherited return type) has no `.fetch`. The cast is
-   * honest because `createPipeline()` (above) already makes the RUNTIME value an `HttpPipeline`.
+   * `ConcurrentPipeline.transform()`/`.apply()` logic (fan-out, the knob-violation check) runs
+   * completely unchanged via `super`. Without this, product.md's own canonical example - two
+   * chained `.transform()` calls, then `.fetch` - would not typecheck: `ConcurrentPipeline<U>` (the
+   * un-narrowed inherited return type) has no `.fetch`. The cast is honest because
+   * `createPipeline()` (above) already makes the RUNTIME value an `HttpPipeline`.
    */
-  override transform<U>(
-    builder: (t: Transformer<T, T>) => Transformer<T, U>,
-    options?: StageOptions,
-  ): HttpPipeline<U> {
-    return super.transform(builder, options) as HttpPipeline<U>;
+  override transform<U>(builder: (t: Transformer<T, T>) => Transformer<T, U>): HttpPipeline<U> {
+    return super.transform(builder) as HttpPipeline<U>;
   }
 
-  override apply<U>(transformer: Transformer<T, U>, options?: StageOptions): HttpPipeline<U> {
-    return super.apply(transformer, options) as HttpPipeline<U>;
+  override apply<U>(transformer: Transformer<T, U>): HttpPipeline<U> {
+    return super.apply(transformer) as HttpPipeline<U>;
   }
 
   /**
@@ -197,12 +195,8 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
    * `.transform()`/`.apply()` above. `ConcurrentPipeline.reduce()`'s own logic runs unchanged via
    * `super`.
    */
-  override reduce<U>(
-    fn: ReduceFunction<U, T>,
-    initial: U,
-    options?: StageOptions,
-  ): HttpPipeline<U> {
-    return super.reduce(fn, initial, options) as HttpPipeline<U>;
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): HttpPipeline<U> {
+    return super.reduce(fn, initial) as HttpPipeline<U>;
   }
 
   /**
@@ -334,8 +328,8 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
 
   /**
    * POSTs the chunk to `${url}${routePath("stage", stageIndex)}` instead of running it in-process -
-   * `ConcurrentPipeline`'s own `apply()` calls this for every non-local stage; the fan-out, the
-   * `{ local: true }` check and the knob-violation check are otherwise unchanged, inherited as-is.
+   * `ConcurrentPipeline`'s own `apply()` calls this for every stage; the fan-out and the
+   * knob-violation check are otherwise unchanged, inherited as-is.
    *
    * `transformer` itself is unused - a dispatching class sends a chunk plus an INDEX, never a
    * function (product.md); the receiving instance's own `_chunkTransforms[stageIndex]` (its

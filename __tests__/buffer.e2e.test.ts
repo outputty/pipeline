@@ -109,7 +109,7 @@ describe("#39 lifecycle hooks fire identically everywhere (Done-when 4)", () => 
       }
     });
     const viaLocalStage = await orderFor((hooked) =>
-      new ConcurrentPipeline([1, 2]).apply(hooked, { local: true }).toArray(),
+      new ConcurrentPipeline([1, 2]).local((p) => p.apply(hooked)).toArray(),
     );
 
     expect(viaToArray).toEqual(["start", "complete"]);
@@ -143,7 +143,7 @@ describe("#39 lifecycle hooks fire identically everywhere (Done-when 4)", () => 
       }
     });
     const errViaLocalStage = await errorSeenFor((hooked) =>
-      new ConcurrentPipeline([1, 2]).apply(hooked, { local: true }).toArray(),
+      new ConcurrentPipeline([1, 2]).local((p) => p.apply(hooked)).toArray(),
     );
 
     expect(errViaToArray?.message).toBe("boom");

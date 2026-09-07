@@ -386,8 +386,8 @@ export class Pipeline<T> {
    * @param ctx - Dictionary of context values to merge in
    * @returns A new instance of THIS pipeline's own class, carrying the SAME (now-mutated) context
    *   manager forward. Typed `this` (#17), not `Pipeline<T>` - `T` never changes here, so a
-   *   dispatching subclass's own `.transform(fn, { local: true })` still typechecks after a
-   *   `.context()` call, the same as it would directly off the constructor.
+   *   dispatching subclass's own `.local(build)` region still typechecks after a `.context()` call,
+   *   the same as it would directly off the constructor.
    *
    * @example
    * A manager that records every key written (`__tests__/fixtures/context-managers.ts`'s own
@@ -537,7 +537,7 @@ export class Pipeline<T> {
    * a genuine re-chunk of that stage's own output.
    *
    * Typed `this` (#17) - `T` never changes here either, so this stays chainable on a dispatching
-   * subclass without losing its own `.transform(fn, { local: true })` overload.
+   * subclass without losing its own `.local(build)` overload.
    *
    * Python equivalent:
    * ```python
@@ -566,8 +566,8 @@ export class Pipeline<T> {
    * Fold every chunk this pipeline produces into one or more values (#45), sequential and
    * in-process. `Transformer.reduce` folds ONE chunk and keeps nothing between chunks; this folds
    * EVERYTHING the pipeline produces, the only place cross-chunk state lives. `ConcurrentPipeline`
-   * overrides this to add `StageOptions`, mirroring `apply()`/`transform()`'s own base-vs-`{ local:
-   * true }` split.
+   * overrides this to dispatch it instead - `.local(build)` (#61) is what keeps a reduce stage
+   * in-process on a dispatching class now.
    *
    * `new Pipeline([1,2,3,4,5]).reduce((acc, x) => acc + x, 0).transform((t) => t.map((n) => n *
    * 10)).toArray()` → `[150]`.
