@@ -1,8 +1,8 @@
 /**
  * reduce.e2e.test.ts — #45's Done-when cases, each proven through a REAL run: a real HTTP server on
  * loopback, a real `node:cluster` worker (subprocess fixture), a real duplex `fetch()`. No mocks.
- * #62's own Done-when cases (partitioned reduce + the combine debt) live in their own "#62 ..."
- * blocks below, same file, same real-run standard - one reduce mechanism, one home.
+ * #62's own cases (a partitioned reduce, no combine step) live in their own "#62 ..." blocks below,
+ * same file, same real-run standard - one reduce mechanism, one home.
  *
  * Every case #45 hasn't yet built is `test.fails`. Done-when 3 (`Transformer.reduce`, unchanged,
  * still per-chunk) already holds today and is a normal, passing `test`, kept here as a regression
