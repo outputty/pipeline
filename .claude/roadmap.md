@@ -65,7 +65,7 @@ The two older candidates, still not filed:
   the partials into one via a second `.reduce()`, the caller's own next stage: no combine parameter,
   no associativity marker, since a combine is an ordinary `ReduceFunction`. BREAKING, no deprecation
   period: every existing `ConcurrentPipeline.reduce()` call now partitions and owes a combine.
-  PRs #68 (L1, pinned cases), #69 (L2, partitioning + the combine debt), #71 (enable), #72 (docs).
+  PRs #68 (L1, pinned cases), #69 (L2, partitioning + the combine debt), #71 (enable), #74 (docs).
 - **`.local(build)` runs a whole region in the orchestrating process** (#61, `feat!`) - the per-stage
   flag it replaces had to be repeated on every stage of a region that must stay put, and lived only
   on the dispatching subclasses, so a chain using it never typechecked on a base `Pipeline`.
