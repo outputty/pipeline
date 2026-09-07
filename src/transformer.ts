@@ -30,6 +30,7 @@ import { buildChunkGenerator, flattenChunks } from "./utils/chunk";
 import { SimpleContextManager } from "./context/simple";
 import { ErrorHandler } from "./errors/handler";
 import { isContextAware, isContextAwareReduce } from "./utils/helpers";
+import { Reducer } from "./utils/reduce";
 
 /**
  * Construction-time knobs shared by every `Transformer<In, Out>` constructor overload below —
@@ -656,29 +657,19 @@ export class Transformer<In, Out> {
     const perChunk = options?.perChunk !== false; // Default to true
 
     if (perChunk) {
-      // Per-chunk reduce: chainable operation. A `for` loop, not `Array.reduce`, since `fn` may be
-      // async - `reduce`'s own callback never awaits between iterations, so an async `fn` would
-      // hand the NEXT call a `Promise<U>` accumulator instead of the resolved `U`.
-      if (isContextAwareReduce(fn)) {
-        const contextAwareFn = fn as (acc: U, item: Out, ctx: IContextManager) => U | Promise<U>;
-        return this.pipe(async (chunk, ctx) => {
-          if (chunk.length === 0) return [];
-          let acc = initial;
-          for (const val of chunk) {
-            acc = await contextAwareFn(acc, val, ctx);
-          }
-          return [acc];
-        });
-      }
-
-      const simpleFn = fn as (acc: U, item: Out) => U | Promise<U>;
-      return this.pipe(async (chunk, _ctx) => {
+      // Per-chunk reduce: chainable operation, folding this ONE chunk via the shared `Reducer`
+      // (#45) - it calls `fn` with the full `(acc, item, ctx, emit)` signature regardless of `fn`'s
+      // own declared arity (JS ignores extra arguments), so no `isContextAwareReduce` branch is
+      // needed here any more; that check still guards the terminal branch below, untouched.
+      return this.pipe(async (chunk, ctx) => {
         if (chunk.length === 0) return [];
-        let acc = initial;
-        for (const val of chunk) {
-          acc = await simpleFn(acc, val);
+        const reducer = new Reducer<U, Out>(fn, initial);
+        const values: U[] = [];
+        for (const item of chunk) {
+          values.push(...(await reducer.fold(item, ctx)));
         }
-        return [acc];
+        values.push(...reducer.final());
+        return values;
       });
     }
 
