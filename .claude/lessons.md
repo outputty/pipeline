@@ -51,8 +51,11 @@ it, before a check of `~/.claude/skills/partitioned-folds/` - a domain skill tha
 before this build's own L1 commit, named the shipped shape as its own recommended pattern, and would
 have settled the "keep or remove the throw" question immediately. The build skill's own step 3.2
 ("load the expert skill for the ticket's domain") only runs once, at build start; a domain skill
-authored mid-build by a sibling session is invisible to a check that already happened. `retro`
-carries this forward.
+authored mid-build by a sibling session is invisible to a check that already happened.
+`~/.claude/skills/build/SKILL.md`'s Orient step 2 is sharpened to name reading the skill's own
+`## Patterns` list as part of loading it, not just skimming it once; `partitioned-folds/SKILL.md`'s
+own Pattern and Rule entries are marked with which one #62 shipped, so the next session's load finds
+the answer already recorded instead of re-deriving it.
 
 ## 2026-09-07 A test's own tolerant `.local()` call masked test-isolation leakage that a stricter check surfaced
 
@@ -72,6 +75,8 @@ recommended KEEPING some form of it. The user's own direction won every round; t
 wrong, it was answering a question the user had already closed differently. Past the second reversal
 of the identical mechanism, re-litigating it with new evidence costs a round-trip the user's own
 repeated, consistent statement had already settled - confirm the new shape once and build it instead.
+`~/.claude/rules/code.md` gains a rule: when a shipped mechanism's value is questioned a second time,
+price deleting it before designing another layer to protect it.
 
 ## 2026-09-07 #61's Done-when 7 silently contradicted Done-when 5 and its own Constraints
 
