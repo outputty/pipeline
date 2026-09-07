@@ -25,6 +25,43 @@ the base `Pipeline`. `tsc` returned six errors - three `TS2339: Property 'tap' d
 one vanished when the method moved to `Pipeline.prototype`. `~/.claude/rules/code.md`'s probe-shape
 rule gains its inverse: declare the member at the level the design puts it.
 
+## 2026-09-07 #62's enable layer's `/code-review --fix` edited three docs-layer files
+
+`code-review medium --fix`, scoped to the enable layer's own diff (`concurrent.ts` + the test file),
+also rewrote `README.md`/`.claude/architecture.md`/`.claude/product.md` to fix a doc claim the code
+change made stale - correct content, wrong PR, since the docs layer already owned those files in the
+posted plan. Caught by reading `git status --porcelain` after the review returned and reverting the
+three files before committing; the docs layer reproduced the identical fix as part of its own pass.
+`~/.claude/rules/issues.md` gets a new rule: diff review `--fix` output against the current layer's
+own planned file list before staging.
+
+## 2026-09-07 A sixth `ScheduleWakeup` call waiting on a backgrounded `/code-review`
+
+The identical mistake `.claude/lessons.md`'s own 2026-09-07 entry (from #61's build) already logged
+- calling `ScheduleWakeup` to wait on a backgrounded `/code-review` subagent - recurred in this
+session, which had not read that entry before making the call. Self-caught one message later, same
+as the fifth time. `~/.claude/rules/code.md`'s existing rule is sharpened rather than given a sixth
+enumerated trigger: the general form (any "come back later" tool reached for while background work
+is pending) is now named as the trigger, not the specific tool or argument shape.
+
+## 2026-09-07 #62's own shipped combine-debt throw was reopened mid-review without checking for prior art
+
+The user's plain rejection of the throw ("I don't want it to throw") led straight into redesigning
+it, before a check of `~/.claude/skills/partitioned-folds/` - a domain skill that existed two hours
+before this build's own L1 commit, named the shipped shape as its own recommended pattern, and would
+have settled the "keep or remove the throw" question immediately. The build skill's own step 3.2
+("load the expert skill for the ticket's domain") only runs once, at build start; a domain skill
+authored mid-build by a sibling session is invisible to a check that already happened. `retro`
+carries this forward.
+
+## 2026-09-07 A test's own tolerant `.local()` call masked test-isolation leakage that a stricter `.combine()` surfaced
+
+Several `reduce.e2e.test.ts` cases relied on `PIPELINE_PARTITIONED_REDUCE=1` still being set from a
+sibling test's own setup rather than setting it themselves - harmless under `.local()`, which never
+checked `owesCombine` and just re-folded regardless of which code path ran. Converting those same
+calls to the new, stricter `.combine()` (which throws when nothing is owed) turned two of them into
+real failures. The bug was already there; the looser call had been silently absorbing it.
+
 ## 2026-09-07 #61's Done-when 7 silently contradicted Done-when 5 and its own Constraints
 
 Done-when 7 said "no file outside `src/`, `__tests__/` and `.claude/` changed"; Done-when 5 and the

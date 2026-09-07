@@ -166,9 +166,15 @@ none of it survived the hand-trim (#745).
   may produce several
   values and the chain continues after either, downstream running over every value produced.
   `emit(value)` pushes one downstream mid-fold; the final accumulator is emitted only if items were
-  folded since the last `emit()`. A reduce stage dispatches like any other stage, over ONE duplex
-  POST to `/reduce/<n>` whose accumulator lives for the life of the connection, so `maxConcurrency`
-  is inert on it (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
+  folded since the last `emit()`. A reduce stage dispatches like any other stage; on
+  `ConcurrentPipeline` (and `HttpPipeline`/`ClusterPipeline`) it PARTITIONS into `maxConcurrency`
+  independent accumulators now (#62), each its own `reduceWork()` call over its own `share()` view
+  of the one shared chunk stream - on `HttpPipeline` that is `maxConcurrency` concurrent duplex
+  POSTs to the SAME `/reduce/<n>`, each with its own accumulator server-side. The result owes a
+  combine (`owesCombine`): every terminal op refuses to drain it until `.local(build)` (#61) folds
+  the partials into one via a second `.reduce()`, which the caller writes as the very next stage -
+  there is no combine parameter and no associativity marker, since a combine is an ordinary
+  `ReduceFunction` (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
   callable `Transformer.reduce`'s old per-chunk-toggle overload are deleted -
   `ReduceFunction` is the one type, `Pipeline.reduce` the whole-dataset replacement).
 - **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`

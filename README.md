@@ -339,9 +339,23 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 console.log(data); // [60, 90]
 ```
 
-On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, `.reduce()` runs remotely like any other
-stage - one accumulator over one connection for the whole stream, so `maxConcurrency` is inert on
-it. `.local((p) => p.reduce(...))` keeps it in the orchestrating process instead.
+On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, `.reduce()` partitions the stream into
+`maxConcurrency` independent accumulators and owes a combine: every terminal op throws until
+`.local((p) => p.reduce(...))` folds the partials into one, in the orchestrating process.
+
+<!-- compiles -->
+
+```typescript
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
+  .toArray();
+
+console.log(data); // [15]
+```
 
 ## Error Handling
 

@@ -303,15 +303,31 @@ instead, the base class's own fold:
 
 ```text
 ConcurrentPipeline.reduce(fn, initial)
-	reduceWork(fn, initial, stageIndex)            the per-class override
-		ConcurrentPipeline    fold in-process, sequentially     maxConcurrency inert: one accumulator
-		HttpPipeline          one duplex POST /reduce/<n>       accumulator lives in the connection
-		ClusterPipeline       bootstrap + inFlight around the   one worker serves the whole stream
-		                      WHOLE connection (stageWork()'s
+	reduceWork(fn, initial, stageIndex)            the per-class override, called maxConcurrency times
+		ConcurrentPipeline    fold in-process, sequentially     maxConcurrency partitions, each its own
+		                                                       accumulator, merged unordered (#62)
+		HttpPipeline          one duplex POST /reduce/<n>       maxConcurrency concurrent POSTs, each
+		                      per partition                     partition's own accumulator server-side
+		ClusterPipeline       bootstrap + inFlight around the   one worker per partition, each serving
+		                      WHOLE connection (stageWork()'s   its own share() view of the stream
 		                      own bracket wraps one CHUNK)
 	emit(value)                                     buffered per input chunk, yielded as its own chunk
 	final accumulator                               only if items were folded since the last emit
 ```
+
+`ConcurrentPipeline.reduce()` (#62) PARTITIONS rather than delegating once: `maxConcurrency`
+independent accumulators, each its own `reduceWork()` call over its own `share()` view
+(`src/utils/chunk.ts`) of the ONE shared chunk stream - free-slot dealing, no dealer, no
+per-partition queues, a slow partition simply calls `.next()` less often, so the others pick up its
+slack. `mergeUnordered()` (`src/pipelines/concurrent.ts`) merges the partitions' own output in
+completion order, since there is no order between them. The result owes a combine (`owesCombine`,
+`src/pipeline.ts`): every terminal op throws until `.local(build)` folds the partials into one via a
+second `.reduce()`, which the caller writes as the next stage - there is no combine parameter and no
+associativity marker, since a combine is an ordinary `ReduceFunction` and the package already has
+exactly one way to spell one. `HttpPipeline`/`ClusterPipeline` inherit partitioning with no new code
+of their own: `reduceWork()`'s existing per-request `Reducer` construction (`runReduceStage`,
+`src/pipelines/http.ts:85`) already means N concurrent duplex POSTs to the SAME `/reduce/<n>` fold N
+independent accumulators.
 
 `ReduceFunction<U, T> = (acc, item, ctx, emit) => U | Promise<U>` puts `emit` FOURTH so `ctx` keeps
 arity 3. Every reduce path (`Transformer.reduce`, the shared `Reducer`/`foldChunk`/`foldChunkStream`
