@@ -2,8 +2,10 @@
  * `ClusterPipeline` (#17) — each chunk of a stage dispatched to another PROCESS on the same
  * machine, via `node:cluster`. Reuses `HttpPipeline`'s own dispatch and `.fetch()` wholesale -
  * a cluster worker is just another `HttpPipeline` instance, reached at
- * `http://localhost:<bootstrapped port>`; only `stagePath()` changes, to route several pipeline
- * definitions through the ONE server every worker runs (`/pipeline/<i>/stage/<n>`).
+ * `http://localhost:<bootstrapped port>`; `routePath()` changes to route several pipeline
+ * definitions through the ONE server every worker runs (`/pipeline/<i>/<verb>/<n>`), and
+ * `reduceWork()` (#45) wraps the SAME bootstrap/`inFlight` bracket `stageWork()` uses, but around
+ * the whole reduce connection rather than one chunk.
  *
  * Brings its own workers up lazily, on the first chunk actually dispatched - `stageWork()` itself
  * still runs at BUILD time (`ConcurrentPipeline.apply()` calls it synchronously), but the bootstrap
@@ -19,7 +21,7 @@ import type { ConcurrentPipelineOptions, StageOptions } from "@src/pipelines/con
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
 import type { PipelineOptions, PipelineSource } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import type { InternalTransformer, ReduceFunction } from "@src/types";
+import type { IContextManager, InternalTransformer, ReduceFunction } from "@src/types";
 
 /** Construction-time knobs for `ClusterPipeline`. */
 export type ClusterPipelineOptions = { workers?: number } & ConcurrentPipelineOptions;
@@ -216,29 +218,60 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
     return super.reduce(fn, initial, options) as ClusterPipeline<U>;
   }
 
-  /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/stage/<n>` instead of plain
-   * `HttpPipeline`'s `/stage/<n>` - the one hook `stagePath()` (`http.ts`) exists for, so several
+  /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain
+   * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`http.ts`) exists for, so several
    * `ClusterPipeline`s can share one worker server without colliding on stage 0. */
-  protected override stagePath(stageIndex: number): string {
-    return `/pipeline/${this.pipelineIndex}/stage/${stageIndex}`;
+  protected override routePath(verb: "stage" | "reduce", index: number): string {
+    return `/pipeline/${this.pipelineIndex}/${verb}/${index}`;
   }
 
   /**
    * Lazily bootstraps the shared worker set on the FIRST actual dispatch (never at build time -
    * the class docstring above explains why), sets `this._url` to the bootstrapped port, then
-   * delegates to `HttpPipeline`'s own dispatch logic (`stagePath()` above already redirects it).
+   * delegates to `HttpPipeline`'s own dispatch logic (`routePath()` above already redirects it).
    */
+  /** Bootstraps the shared worker set (memoized, `bootstrapCluster()`) and points `this._url` at
+   * it - the one bit `stageWork()` (once per chunk) and `reduceWork()` (once per whole stream)
+   * share, rather than each inlining the same two lines. */
+  protected async bootstrapAndSetUrl(): Promise<void> {
+    const { port } = await bootstrapCluster(this.workers);
+    this._url = `http://localhost:${port}`;
+  }
+
   protected override stageWork<U>(
     transformer: Transformer<T, U>,
     stageIndex: number,
   ): InternalTransformer<T, U> {
     const dispatch = super.stageWork(transformer, stageIndex);
     return async (chunk, ctx) => {
-      const { port } = await bootstrapCluster(this.workers);
-      this._url = `http://localhost:${port}`;
+      await this.bootstrapAndSetUrl();
       inFlight++;
       try {
         return await dispatch(chunk, ctx);
+      } finally {
+        inFlight--;
+        scheduleIdleCheck();
+      }
+    };
+  }
+
+  /**
+   * `stageWork()`'s own bootstrap/`inFlight` wrap, but for the WHOLE stream rather than once per
+   * chunk - a reduce stage is one long-lived connection, so the bootstrap and `inFlight` bracket
+   * the entire generator's life, not each chunk dispatched through it.
+   */
+  protected override reduceWork<U>(
+    fn: ReduceFunction<U, T>,
+    initial: U,
+    stageIndex: number,
+  ): (chunks: AsyncIterable<T[]>, ctx: IContextManager) => AsyncGenerator<U[]> {
+    const dispatch = super.reduceWork(fn, initial, stageIndex);
+    const self = this;
+    return async function* dispatchOnWorker(chunks, ctx) {
+      await self.bootstrapAndSetUrl();
+      inFlight++;
+      try {
+        yield* dispatch(chunks, ctx);
       } finally {
         inFlight--;
         scheduleIdleCheck();
