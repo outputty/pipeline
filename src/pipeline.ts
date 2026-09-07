@@ -106,32 +106,6 @@ export interface PipelineOptions {
    * serve a `/reduce/<n>` request. Not intended for direct external use.
    */
   reduceStages?: Map<number, ReduceStage>;
-  /**
-   * Internal: the STAGE INDEX of the most recent partitioned reduce (`ConcurrentPipeline.reduce()`,
-   * #62) whose partials were never combined, or `undefined` when nothing is owed. Set ONLY when the
-   * fold function declares no 4th (`emit`) parameter (`fn.length < 4`) - that arity is the fold's
-   * own declaration of intent: no `emit` means it means to produce ONE value per partition, which is
-   * exactly the case a caller can forget to merge back into one; a fold that DOES declare `emit`
-   * already means to produce several values on purpose; nothing is ever owed for it, the same as a
-   * non-partitioned reduce's own `emit()` output today. Cleared back to `undefined` by `.local(build)`
-   * (or its sugar, `.combine()`) when `build` itself registers a reduce stage (the combine) - any
-   * OTHER copy-on-write call (`.apply()`/`.buffer()`/`.context()`/`.merge()`) just carries it forward
-   * unchanged, the same as `reduceStages`. Every one of the 5 TERMINAL ops (`toArray`/`first`/
-   * `consume`/`forEach`/`branch`) throws while this is set - `assertCombined()`, below - but async
-   * iteration does NOT: it exposes chunk structure rather than flattening it into one scalar
-   * answer, so inspecting a still-owed reduce's raw per-partition chunks that way is a legitimate
-   * lower-level use, not the mistake this guard exists to catch. A stage index rather than a plain
-   * boolean so the thrown error can name the actual offending stage, the same way
-   * `reduceStagePlaceholder()`'s own message does. Not intended for direct external use.
-   *
-   * The `fn.length < 4` check is a RUNTIME opt-in on the fold's exact literal shape - TypeScript
-   * cannot catch a caller who misses it (`~/.claude/rules/typescript.md`). A default value on the
-   * 4th parameter (`(acc, x, ctx, emit = () => {}) => …`) or a rest parameter drops it out of
-   * `.length` entirely, so a fold that MEANS to use `emit` but writes either of those is silently
-   * read as arity-3 and gets a combine debt it never intended. Declare `emit` as a plain, undefaulted
-   * positional parameter to opt out of the debt.
-   */
-  owesCombine?: number;
 }
 
 /** A registered reduce stage's own definition - `pushReduceStage()` (below) is the one place that
@@ -210,9 +184,6 @@ export class Pipeline<T> {
   /** Every reduce stage registered via `.reduce()`, keyed by its index in the shared stage-index
    * space - see `PipelineOptions.reduceStages`. */
   protected _reduceStages: Map<number, ReduceStage>;
-  /** The stage index of an un-combined partitioned reduce, or `undefined` - see
-   * `PipelineOptions.owesCombine`. */
-  protected _owesCombine: number | undefined;
 
   /**
    * Create a new Pipeline from a data source.
@@ -228,7 +199,6 @@ export class Pipeline<T> {
     this._context = options?.context ?? options?.contextFactory?.() ?? new SimpleContextManager();
     this._chunkTransforms = options?.chunkTransforms ?? [];
     this._reduceStages = options?.reduceStages ?? new Map();
-    this._owesCombine = options?.owesCombine;
 
     if (options?.chunks !== undefined) {
       // The copy-on-write path: `data` is inert (an internal caller passes `[]`) since the chunk
@@ -294,12 +264,6 @@ export class Pipeline<T> {
    * ```
    */
   async *[Symbol.asyncIterator](): AsyncGenerator<T[]> {
-    // Deliberately NOT `assertCombined()`-guarded, unlike the 5 terminal ops below: async
-    // iteration exposes chunk STRUCTURE rather than flattening it away into one scalar answer
-    // (product.md's own "one of five terminal ops... to drain it" - iteration is not the sixth),
-    // so a caller inspecting a still-owed partitioned reduce's raw per-partition output chunks
-    // directly is a legitimate lower-level use, not the mistake the terminal-op guard exists to
-    // catch. `outputty/laygo`'s own `m.from(pipeline)` seam relies on this staying unguarded too.
     yield* this._chunks;
   }
 
@@ -359,15 +323,6 @@ export class Pipeline<T> {
     options?: PipelineOptions,
   ): Pipeline<ElementOf<Ps[number]>> {
     type U = ElementOf<Ps[number]>;
-
-    // A source still owing a combine (#62) never gets its `_owesCombine` carried forward below -
-    // this builds a fresh, classless pipeline the same way it already drops chunkTransforms/
-    // reduceStages, by design (architecture.md: "the static builds a fresh, class-less pipeline") -
-    // so a silently-dropped debt would let an un-combined partitioned reduce's raw partials merge
-    // through as if they were the whole answer. Asserted eagerly instead (review finding).
-    for (const pipeline of pipelines) {
-      pipeline.assertCombined();
-    }
 
     // `options?.context`/`contextFactory` both honored on the zero-pipeline path too (review: the
     // fast return used to drop context entirely, and contextFactory was never read at all - a
@@ -449,7 +404,6 @@ export class Pipeline<T> {
       chunkTransforms: this._chunkTransforms,
       reduceStages: this._reduceStages,
       preBufferItems: this._preBufferItems,
-      owesCombine: this._owesCombine,
     }) as this;
   }
 
@@ -490,14 +444,6 @@ export class Pipeline<T> {
    * 0) → `.toArray()` → `[200,300,400,500,1500,2500]`.
    */
   merge(...others: Pipeline<T>[]): this {
-    // `this`'s own debt already survives below (`owesCombine: this._owesCombine`) - an `other`'s
-    // never does (its `_reduceStages`/`chunkTransforms` are not merged in either, pre-existing), so
-    // a still-un-combined `other` is asserted eagerly instead of letting its raw partials merge
-    // through undetected (review finding).
-    for (const other of others) {
-      other.assertCombined();
-    }
-
     mergeContextsInto(
       this._context,
       others.map((other) => other._context),
@@ -510,7 +456,6 @@ export class Pipeline<T> {
         chunkTransforms: this._chunkTransforms,
         reduceStages: this._reduceStages,
         preBufferItems: null,
-        owesCombine: this._owesCombine,
       },
     ) as this;
   }
@@ -562,7 +507,6 @@ export class Pipeline<T> {
       // A real stage just consumed `_chunks` - nothing left to recut a back-to-back `.buffer()`
       // from except this stage's own output, so the pre-buffer item view resets to null.
       preBufferItems: null,
-      owesCombine: this._owesCombine,
     });
   }
 
@@ -615,7 +559,6 @@ export class Pipeline<T> {
       chunkTransforms: this._chunkTransforms,
       reduceStages: this._reduceStages,
       preBufferItems: items,
-      owesCombine: this._owesCombine,
     }) as this;
   }
 
@@ -671,44 +614,12 @@ export class Pipeline<T> {
       preBufferItems: this._preBufferItems,
     });
     const built = build(region);
-    // The combine: `build` registered at least one NEW reduce stage (`_reduceStages` grew past
-    // `region`'s own starting copy of `this._reduceStages`) - a base `Pipeline.reduce()` inside
-    // `build` folds `region`'s WHOLE chunk stream sequentially, into one accumulator, regardless of
-    // how many partitions produced it, which is what actually pays the debt off. `build` doing
-    // anything else (a bare `.transform()`, say) leaves the debt exactly as it was.
-    const combined = built._reduceStages.size > region._reduceStages.size;
     return this.createPipeline<U>(built._chunks, {
       context: built._context,
       chunkTransforms: built._chunkTransforms,
       reduceStages: built._reduceStages,
       preBufferItems: built._preBufferItems,
-      owesCombine: combined ? undefined : this._owesCombine,
     });
-  }
-
-  /**
-   * Pays off a partitioned reduce's combine debt (#62) - sugar for
-   * `.local((p) => p.reduce(fn, initial))` that reuses the owed stage's OWN `initial` from
-   * `_reduceStages` rather than asking the caller to repeat it: the fold's `initial` must already
-   * be `fn`'s identity for the merge to be correct (`partitioned-folds` skill,
-   * `initial-value-trap`), so a caller who already got that right gets it for free instead of
-   * typing it twice and risking the two copies drift apart. `fn` is deliberately a DIFFERENT
-   * function than the fold's own in general - reusing the fold as its own combine typechecks
-   * whenever the accumulator type happens to equal the item type and is silently wrong otherwise (a
-   * count folds `(acc,_x) => acc+1`; combining ITS partials the same way counts the partials, not
-   * the items - `partitioned-folds`, `combine-algebra`). Throws rather than no-op when nothing is
-   * owed: a caller reaching for `.combine()` on a pipeline that never partitioned almost always
-   * holds the wrong pipeline.
-   *
-   * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0)
-   * .combine((a,v)=>a+v).toArray()` → `[15]`.
-   */
-  combine(fn: ReduceFunction<T, T>): Pipeline<T> {
-    if (this._owesCombine === undefined) {
-      throw new Error("combine() called but no partitioned reduce is owed");
-    }
-    const { initial } = this._reduceStages.get(this._owesCombine)!;
-    return this.local((p) => p.reduce(fn, initial as T));
   }
 
   /**
@@ -738,25 +649,6 @@ export class Pipeline<T> {
     };
   }
 
-  /**
-   * Throws while `_owesCombine` is set - a partitioned reduce (`ConcurrentPipeline.reduce()`, #62)
-   * whose partials were never folded into one via `.local(build)`. Called first thing by every one
-   * of the 5 terminal ops below (never by async iteration - see `PipelineOptions.owesCombine`) so a
-   * caller can never read a partitioned partial as if it were the pipeline's one finished answer.
-   *
-   * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0).toArray()`
-   * rejects `stage 0 is a partitioned reduce whose partials were never combined - follow it with
-   * .local((p) => p.reduce(...))`.
-   */
-  protected assertCombined(): void {
-    if (this._owesCombine !== undefined) {
-      throw new Error(
-        `stage ${this._owesCombine} is a partitioned reduce whose partials were never combined - ` +
-          `follow it with .combine((acc, v) => ...)`,
-      );
-    }
-  }
-
   // ===== Terminal Operations =====
 
   /**
@@ -770,7 +662,6 @@ export class Pipeline<T> {
    * ```
    */
   async toArray(): Promise<T[]> {
-    this.assertCombined();
     const results: T[] = [];
     for await (const item of flattenChunks(this._chunks)) {
       results.push(item);
@@ -789,7 +680,6 @@ export class Pipeline<T> {
    * ```
    */
   async first(n = 1): Promise<T[]> {
-    this.assertCombined();
     if (n < 1) {
       throw new Error("n must be at least 1");
     }
@@ -816,7 +706,6 @@ export class Pipeline<T> {
    * ```
    */
   async consume(): Promise<void> {
-    this.assertCombined();
     for await (const _ of flattenChunks(this._chunks)) {
       // Just consume, don't collect
     }
@@ -834,7 +723,6 @@ export class Pipeline<T> {
    * ```
    */
   async forEach(fn: (item: T) => void | Promise<void>): Promise<void> {
-    this.assertCombined();
     for await (const item of flattenChunks(this._chunks)) {
       await fn(item);
     }
@@ -870,7 +758,6 @@ export class Pipeline<T> {
     branches: Record<string, BranchDefinition<T, U, Transformer<T, U>>>,
     options?: BranchOptions,
   ): Promise<Record<string, U[]>> {
-    this.assertCombined();
     const firstMatch = options?.firstMatch !== false; // Default to true (router mode)
 
     const results: Record<string, U[]> = {};

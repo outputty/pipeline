@@ -297,7 +297,6 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
       // A dispatched stage's own output IS a real chunk stream now (#39) - a later `.buffer()`
       // flattens it like any other stage's output, so no pre-buffer item view survives this call.
       preBufferItems: null,
-      owesCombine: this._owesCombine,
     });
   }
 
@@ -306,57 +305,43 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
    * independent accumulators, each its own `reduceWork()` call over its own `share()` view of the
    * ONE underlying chunk stream (free-slot dealing, `src/utils/chunk.ts` - a slow partition simply
    * calls `.next()` less often, so the others pick up its slack), merged in completion order since
-   * there is no order between partitions. `fn` declaring no 4th (`emit`) parameter means it means to
-   * fold to ONE value per partition - the result then owes a combine (`owesCombine`,
-   * `src/pipeline.ts`), and every draining path throws until `.combine(fn)` (sugar for
-   * `.local(build)`, #61) folds the partials into one. `fn` declaring `emit` already means to
-   * produce several values on purpose; nothing is ever owed for that case, and the emitted chunks
-   * pass straight through. There is no combine parameter on `.reduce()` itself, and no associativity
-   * marker - a combine is an ordinary `ReduceFunction`, and the package already has exactly one way
-   * to spell one. Gated on `PIPELINE_PARTITIONED_REDUCE=1` until the enable layer (#62's own stack);
-   * the pre-#62 single-accumulator fold runs otherwise.
+   * there is no order between partitions. Each partition's own result - an `emit()` mid-fold, or its
+   * trailing accumulator once its share of the stream ends - flows downstream as an ordinary value,
+   * exactly like a non-partitioned reduce's own `emit()` output already does: no debt, no throw, no
+   * combine step. A caller who wants ONE final value writes an ordinary second reduce, the same way
+   * they would fold down any other multi-value reduce output: `.local((p) => p.reduce(mergeFn,
+   * initial))` runs it in-process, over the WHOLE stream, sequentially. Gated on
+   * `PIPELINE_PARTITIONED_REDUCE=1` until the enable layer (#62's own stack); the pre-#62
+   * single-accumulator fold runs otherwise.
    *
    * `PIPELINE_PARTITIONED_REDUCE=1`:
    * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0)
-   * .combine((a,v)=>a+v).toArray()` → `[15]`.
+   * .local((p)=>p.reduce((a,v)=>a+v,0)).toArray()` → `[15]`.
    */
   override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U> {
-    // Fail loud rather than silently compounding: a second dispatched reduce stacked on an
-    // already-un-combined one would fold raw, still-partitioned partials as if they were plain
-    // items, and overwrite `owesCombine` with its OWN stage index, permanently losing the first
-    // one's debt with no diagnostic ever naming it (review finding) - refused here instead.
-    this.assertCombined();
-
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
-    // `fn.length < 4` means `fn` declares no `emit` parameter - it means to fold to ONE value per
-    // partition, which is exactly what a caller can forget to merge back into one (`owesCombine`
-    // below). A `fn` that DOES declare `emit` already means to produce several values on purpose;
-    // nothing is ever owed for it - see `PipelineOptions.owesCombine`'s own docstring. A default
-    // value or rest param on `emit` drops it out of `.length` (`~/.claude/rules/typescript.md`) -
-    // TypeScript cannot catch that here, so a fold meaning to use `emit` must declare it plain.
-    const intendsOneValue = fn.length < 4;
 
     if (process.env.PIPELINE_PARTITIONED_REDUCE !== "1") {
       // TEMPORARY (#62 L2, deleted at the enable layer): the pre-#62 single-accumulator fold, one
       // `reduceWork()` call over the WHOLE chunk stream - kept until every caller of this method
-      // (including the tests this stack ships) has moved onto the combined form. Carries
-      // `owesCombine` forward like every other copy-on-write call (review finding: this branch
-      // used to omit it, silently clearing a debt owed from an earlier, flag-on `.reduce()` call).
+      // (including the tests this stack ships) has moved onto the partitioned form.
       const newChunks = work(this._chunks, this._context);
       return this.createPipeline<U>(newChunks, {
         context: this._context,
         chunkTransforms,
         reduceStages,
         preBufferItems: null,
-        owesCombine: this._owesCombine,
       });
     }
 
     // ONE shared iterator over `this._chunks` - `maxConcurrency` partitions each get their own
     // `share()` view of it, never their own slice: the partition count is a CEILING, not a
     // promise, since a partition whose view never sees a chunk (fewer chunks than partitions)
-    // simply yields nothing.
+    // simply yields nothing. Each partition's own result (an emit mid-fold, or its trailing
+    // accumulator once its share of chunks ends) flows downstream as an ordinary value - no
+    // debt, no throw. A caller who wants ONE final value writes an ordinary second reduce, same
+    // as any other multi-value reduce output: `.local((p) => p.reduce(mergeFn, initial))`.
     const iterator = this._chunks[Symbol.asyncIterator]();
     const partitions = Array.from({ length: this.maxConcurrency }, () =>
       work(share(iterator), this._context),
@@ -368,7 +353,6 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
       chunkTransforms,
       reduceStages,
       preBufferItems: null,
-      owesCombine: intendsOneValue ? stageIndex : undefined,
     });
   }
 
@@ -381,14 +365,6 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
    */
   override local<U>(build: (p: Pipeline<T>) => Pipeline<U>): ConcurrentPipeline<U> {
     return super.local(build) as ConcurrentPipeline<U>;
-  }
-
-  /**
-   * Narrows `Pipeline.combine()`'s return type only (#62, `~/.claude/rules/typescript.md`) - the
-   * body is an unchanged `super()` call, same reason as `.local()` just above.
-   */
-  override combine(fn: ReduceFunction<T, T>): ConcurrentPipeline<T> {
-    return super.combine(fn) as ConcurrentPipeline<T>;
   }
 
   /**
