@@ -9,9 +9,16 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **A conformance suite every `Pipeline` and Context class runs** (#37), **`EventEmitterPipeline`**
-  (#30), **the pipeline's error handlers** (#40) and **cross-runtime benchmarks** (#11) are the
-  other open tickets; each issue carries its own detail.
+- **A conformance suite every `Pipeline` and Context class runs** (#37), **the pipeline's error
+  handlers** (#40) and **cross-runtime benchmarks** (#11) are the other open tickets; each issue
+  carries its own detail.
+- **`.tap()` becomes the one observation surface** (#72). `.withHooks()` is deleted with
+  `TransformerLifecycleHooks`, and `Pipeline` gains its own `.tap()` that always runs in the
+  orchestrating process. Now, because `.withHooks()` is silently order-sensitive - `pipe()` drops it,
+  so `t.withHooks({onStart}).map(f)` fires nothing while `t.map(f).withHooks({onStart})` fires - and
+  because its invariant `hooks` field is what breaks `t.tap(someTransformer)` at the type level.
+  Blocked by #40: a fixed `.onError()` must ship before `hooks.onError`, today's only
+  failure-observation surface, is removed.
 
 ### Later - not yet filed
 
@@ -125,6 +132,18 @@ The two older candidates, still not filed:
   `In`/`Out` with no `transform`. PRs #7, #8, #10, #12.
 
 ## Killed
+
+- **`EventEmitterPipeline`** (#30, closed unbuilt) - a fourth `Pipeline` subclass publishing five
+  chunk-level lifecycle events per dispatched stage, on a `PipelineEmitter` the caller passes in.
+  Killed on its own opening premise, re-run while planning #72: `.withHooks()` was never the only
+  observation surface. `Transformer.tap` already observes, and `dispatchKnobViolations` never refused
+  it - `ConcurrentPipeline.buffer(2).transform((t) => t.map((x) => x * 2).tap(push))` over `[1..5]`
+  returned `out [2,4,6,8,10]  seen [2,4,6,8,10]`. Two more of its premises went stale after it was
+  filed: `{ local: true }` (#61 deleted it; `.local(build)` already gives an orchestrator-side tap)
+  and "both fan-outs yield ITEMS" (#39 made both yield `U[]`). So the class bought nothing `.tap()`
+  did not already do, at the cost of a `fanOut()` seam, an emitter interface, five event names and a
+  consumer-error containment path. Its Enable layer - deleting `.withHooks()` - is what survives, as
+  #72.
 
 - **A forward-descending `Transformer` composition** (#45) - each link calling the NEXT one rather
   than wrapping the previous one, so the stack descends in the order the caller wrote the chain.

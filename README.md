@@ -110,6 +110,30 @@ const data = await new ConcurrentPipeline(["a", "b", "c"], { maxConcurrency: 10 
 worker processes on the same machine, brought up automatically. See [Core Concepts](#core-concepts)
 above.
 
+`.tap()` is the one exception, and it is deliberate. `Pipeline.tap(fn)` always runs in the
+orchestrating process, whichever class it is called on, so a `console.log` or a `ctx.set()` written
+at pipeline level lands where you can see it. The stages either side of it still dispatch:
+
+<!-- illustrative -->
+
+```typescript
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+  .tap((x: number, ctx) => {
+    ctx.set("seen", (ctx.getOrDefault("seen", 0) as number) + 1);
+  });
+
+console.log(await pipeline.toArray(), pipeline.contextManager.toDict());
+// [ 6, 8, 10 ] { seen: 3 }
+```
+
+Use `.tap()` inside a `.transform()` instead when you want the callback to run beside the work, in
+the worker. A tap's context write is per chunk, not per item: the whole chunk is tapped before the
+next stage sees any of it.
+
 ## API Reference
 
 ### Pipeline
@@ -147,6 +171,9 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.local(build)`** - run a whole region of the chain in the orchestrating process; on
   `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, nothing `build` does can dispatch.
 - **`.buffer(size)`** - collect items and re-chunk.
+- **`.tap(fn | transformer)`** - observe items without changing them. Always runs in the
+  orchestrating process, on every class; the stages either side of it still dispatch. Use
+  `Transformer.tap` inside a `.transform()` to observe beside the work instead.
 - **`.toArray()`** - collect all results into an array. Read `.contextManager` afterward for context.
 - **`.first(n)`** - take first n items.
 - **`.consume()`** - process all items without collecting.
@@ -167,7 +194,10 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.filter(fn)`** - keep elements matching predicate.
 - **`.reduce(fn, initial)`** - fold this ONE chunk; `fn` is `(acc, item, ctx, emit) => acc`, called
   with all four arguments regardless of its own declared arity. See [Reducing](#reducing).
-- **`.tap(fn)`** - execute side-effect without changing data.
+- **`.tap(fn | transformer)`** - execute a side-effect without changing data. `fn` receives each item
+  and the context; the `transformer` form receives the whole chunk. This one travels with its stage,
+  so on `HttpPipeline`/`ClusterPipeline` it runs in the worker. `Pipeline.tap(...)` is the same
+  observation point run in the orchestrating process instead - see [Where the work runs](#where-the-work-runs).
 - **`.catch(build, onError?)`** - run a sub-chain, handling its errors.
 
 ### Context-Aware Functions

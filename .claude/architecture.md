@@ -107,11 +107,28 @@ is a notification hook there, never a recovery path.
 
 Async iteration (`for await` over a `Pipeline`, the `outputty/laygo` `m.from(pipeline)` seam) reads
 the exact same persisted `_chunks` every terminal op reads (#39) - there is no separate replay path
-any more. `.apply()` already ran `Transformer.process()` when it built `_chunks`, lazily, so hooks
+any more. `.apply()` already ran `Transformer.process()` when it built `_chunks`, lazily, so `.tap()`
 and `.onError()` fire identically whichever consumption path drains it. The killed "source position"
 mechanism (`_rootSource`/`_sourcePositionViolations`/`inertKnobsOf`, `normalize(rootSource)`) existed
 only to protect against a knob a SEPARATE replay path couldn't honor; once every consumption path
 reads the one real chunk stream, there is nothing left for it to protect against.
+
+## Observation - pending #72
+
+`.tap()` is the one observation surface, at two levels that differ only in WHERE the callback runs.
+`Transformer.tap` is an ordinary `pipe()` link, so it travels with its stage: on a dispatching class
+the callback executes in the worker, and the `ctx.set()` it makes never crosses back (the wire
+carries `{ chunk, context }` out and `{ chunk }` back). `Pipeline.tap` is declared once on the base
+as `tap(arg): this` and wraps `Transformer.tap` in `.local(build)`, which pins the callback to the
+orchestrating process on every class. Its stage occupies an index like any other, and the dispatched
+stages either side of it still dispatch - measured over a real loopback `HttpPipeline`, a tap between
+two dispatched stages ran only in the caller and the output was unchanged.
+
+`.withHooks()` and `TransformerLifecycleHooks` are deleted by the same ticket. `pipe()` deliberately
+dropped `hooks` when `Out` changed, so the knob fired or did not depending on where in the chain it
+was written, and `dispatchKnobViolations` could not refuse what `.map()` had already discarded.
+`dispatchKnobViolations` and `ConcurrentPipeline.apply()`'s refusal go with it, once #40 has removed
+their `onError` branch.
 
 ## The pipeline family
 
