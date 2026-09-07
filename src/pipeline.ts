@@ -429,7 +429,7 @@ export class Pipeline<T> {
    * `Pipeline.merge()` (above) shares with this method rather than a second copy of the loop.
    *
    * Typed `this` (#17/#31's own reason on `.context()`): `T` never changes here, so `.fetch` and
-   * `{ local: true }` still typecheck off the result on a dispatching subclass.
+   * `.local(build)` still typecheck off the result on a dispatching subclass.
    *
    * @param others - Pipelines to concatenate onto this one, in order. None: returns an equivalent
    *   pipeline of the same class with nothing appended.

@@ -7,6 +7,34 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-07 #61's Done-when 7 silently contradicted Done-when 5 and its own Constraints
+
+Done-when 7 said "no file outside `src/`, `__tests__/` and `.claude/` changed"; Done-when 5 and the
+Constraints section both required a `README.md` edit - a file outside all three. Caught only by
+reading the whole ticket before the first edit, then resolved with `AskUserQuestion` rather than
+guessing either reading. `~/.claude/rules/issues.md` gets a new rule: read a ticket's Implementation
+criteria against its own Constraints/Where scope for a contradiction before the first edit, and ask
+rather than pick a side silently.
+
+## 2026-09-07 #61's plan comment and `gh stack init` landed after the code, not before it
+
+The base `Pipeline.local()` method, the three subclass overrides, new tests and a fixture were all
+written and green before the layer plan was posted or the stack was initialized - only `advisor`
+caught that the single-PR-vs-stack decision, the plan comment and `gh stack init` were all still
+outstanding on code that already existed. Recovery cost a `git diff` backup, a `git checkout -- .`
+reset, and rebuilding the same edits as two `gh stack add`-first layers. `~/.claude/rules/issues.md`'s
+existing diff-measurement rule (2026-09-03) is sharpened: writing a hard-to-pre-slice ticket's code
+first can be unavoidable, but the plan comment, `gh stack init` and the shape decision itself must
+still land before the first COMMIT, not get skipped because the code already exists.
+
+## 2026-09-07 A second `ScheduleWakeup` call, waiting on a backgrounded `/code-review` mid-build
+
+After the first `/code-review` call for L1 finished and while waiting on the enable layer's own
+`/code-review`, `ScheduleWakeup` was called again despite the exact same tool being flagged and
+self-caught earlier in this same session. `~/.claude/rules/code.md`'s existing rule (already
+re-violated four times before this) gets a fifth violation logged, self-caught one call later by
+`ListAgents` instead.
+
 ## 2026-09-07 #41's instance `merge()` copied the static `merge()`'s own loop instead of sharing it
 
 Writing `Pipeline.prototype.merge()` right below the static `Pipeline.merge()`, the same

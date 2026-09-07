@@ -87,6 +87,9 @@ changes.
 > its own workers on first run and every later pipeline in the process reuses them.
 > **Stage** - one `.transform()` or `.apply()` call. A stage is identified by its position in the
 > chain, so a dispatching class sends a chunk and a stage index, never a function.
+> **`.local(build)`** - runs a whole region of the chain in the orchestrating process, on every
+> class the same way: builds a base `Pipeline` over the caller's own chunk stream, runs `build`
+> against it (nothing inside can dispatch), and resumes the caller's own class afterward.
 
 ```ts
 import { ClusterPipeline } from "@outputty/pipeline";
@@ -100,15 +103,17 @@ const data = await new ClusterPipeline([1, 2, 3, 4, 5])
 [6, 8, 10]
 ```
 
-A dispatching class runs every stage elsewhere by default. `{ local: true }` keeps one stage in the
-orchestrating process - useful when a stage is cheap, or touches something only the orchestrator has:
+A dispatching class runs every stage elsewhere by default. `.local(build)` keeps a whole region in
+the orchestrating process instead - useful when a stage is cheap, or touches something only the
+orchestrator has. It takes the region as one builder, so several consecutive stages that must stay
+put are written once, not repeated on every one of them:
 
 ```ts
 import { HttpPipeline } from "@outputty/pipeline";
 
 const pipeline = new HttpPipeline(rows, { url: process.env.SELF_URL! })
   .transform((t) => t.map(expensiveScore))
-  .transform((t) => t.filter((r) => r.ok), { local: true });
+  .local((p) => p.transform((t) => t.filter((r) => r.ok)));
 
 app.mount("/pipeline", pipeline.fetch);
 ```
@@ -254,10 +259,9 @@ produced, never assuming there was one.
 > **`Transformer.reduce(fn, initial)`** - folds ONE chunk. Run once and forget: no state survives to
 > the next chunk.
 > **`Pipeline.reduce(fn, initial)`** - folds EVERY chunk the pipeline produces. On a dispatching
-> class (`ConcurrentPipeline.reduce(fn, initial, options?)`, `{ local: true }` its own addition, the
-> base `Pipeline` never gains it) it runs remotely like any other stage, over one duplex connection
-> whose accumulator lives for the life of that connection; `{ local: true }` keeps it in the
-> orchestrating process instead.
+> class (`ConcurrentPipeline.reduce(fn, initial)`, an override the base `Pipeline` never gains) it
+> runs remotely like any other stage, over one duplex connection whose accumulator lives for the
+> life of that connection; `.local(build)` keeps it in the orchestrating process instead.
 > **`emit`** - the reducer callback's fourth parameter, `(acc, item, ctx, emit)`. Calling it pushes
 > a value downstream mid-fold and lets the caller decide what a finished result is. The final
 > accumulator is emitted only if items were folded since the last `emit()`.

@@ -37,6 +37,17 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`.local(build)` runs a whole region in the orchestrating process** (#61, `feat!`) - the per-stage
+  flag it replaces had to be repeated on every stage of a region that must stay put, and lived only
+  on the dispatching subclasses, so a chain using it never typechecked on a base `Pipeline`.
+  `.local(build)` builds a bare `Pipeline` over the caller's own chunk stream, runs the caller's
+  builder against it (nothing inside can dispatch), and carries the result back through
+  `createPipeline()` so the caller's own class resumes afterward - one implementation on the base
+  class, each dispatching subclass re-declaring it only to narrow its return type. BREAKING, no
+  deprecation period: `StageOptions` and its `options?` argument - the second on `.apply()`/
+  `.transform()`, the third on `.reduce()` - are deleted.
+  PRs #64 (L1, `.local(build)` + narrowing overrides), #65 (enable, `StageOptions` deleted), #67
+  (docs).
 - **`Pipeline.prototype.merge()` continues a pipeline already held, keeping its class** (#41) - the
   static `Pipeline.merge()` always builds a plain `Pipeline` and always restarts `_chunkTransforms`
   at 0, so a merged dispatching pipeline gaining one more stage collides with its own first stage on
@@ -50,15 +61,17 @@ The two older candidates, still not filed:
   folded one chunk before, and the whole-dataset form returned a standalone callable that was never
   a stage, so a running total across a stream meant draining the pipeline and folding outside it,
   giving up both streaming and dispatch. `Pipeline.reduce(fn, initial)` folds every chunk, in-process
-  and sequential - `ConcurrentPipeline.reduce()` overrides it, adding `{ local: true }`, and
-  dispatches to `reduceWork()`, `stageWork()`'s sibling; `HttpPipeline.reduceWork()` opens one duplex
-  POST to `/reduce/<n>` (NDJSON both ways), `maxConcurrency` inert on it; `ClusterPipeline`'s own
-  bootstrap/`inFlight` bracket wraps the WHOLE connection instead of one chunk. `emit()`, the reducer
-  callback's fourth argument, banks a value downstream mid-fold and resets the accumulator; the
-  trailing accumulator is only emitted if items were folded since the last `emit()`. `toNodeHandler`
-  streams both directions now instead of buffering them whole, unblocking the duplex response every
-  Node consumer gets, one-shot routes included. BREAKING: `Transformer.reduce`'s old per-chunk-toggle
-  overload and `ReduceOptions` are deleted; `PipelineReduceFunction` is `ReduceFunction`.
+  and sequential - `ConcurrentPipeline.reduce()` overrides it and dispatches to `reduceWork()`,
+  `stageWork()`'s sibling (at the time this shipped, keeping a fold in-process was a per-stage flag;
+  #61 later replaced it with the region combinator `.local(build)`); `HttpPipeline.reduceWork()`
+  opens one duplex POST to `/reduce/<n>` (NDJSON both ways), `maxConcurrency` inert on it;
+  `ClusterPipeline`'s own bootstrap/`inFlight` bracket wraps the WHOLE connection instead of one
+  chunk. `emit()`, the reducer callback's fourth argument, banks a value downstream mid-fold and
+  resets the accumulator; the trailing accumulator is only emitted if items were folded since the
+  last `emit()`. `toNodeHandler` streams both directions now instead of buffering them whole,
+  unblocking the duplex response every Node consumer gets, one-shot routes included. BREAKING:
+  `Transformer.reduce`'s old per-chunk-toggle overload and `ReduceOptions` are deleted;
+  `PipelineReduceFunction` is `ReduceFunction`.
   PRs #52 (L1, pinned cases), #53 (L2, the fold + `emit`), #55 (L3, `ConcurrentPipeline`), #56 (L4,
   `toNodeHandler` streaming), #57 (L5, `HttpPipeline`/`ClusterPipeline` duplex dispatch), #58
   (enable), #59 (docs).
@@ -152,8 +165,13 @@ Every row below was spiked and run while planning #17, not argued.
 - **`get-port`** (#17) - built both paths, identical results. `listen(0)` already yields a shared port
   inside cluster and learns it from an already-bound socket, so it has none of the check-then-bind race
   `get-port`'s own readme documents.
-- **A `.local(transformer)` method** (#17) - replaced by `{ local: true }` on `.transform()`/`.apply()`,
-  which needs no new verb and confines the flag to the subclasses.
+- **A `.local(transformer)` method, single-stage** (#17) - replaced by a per-stage flag on
+  `.transform()`/`.apply()`, which needed no new verb and confined the flag to the subclasses. That
+  flag itself was killed by #61, whose Built entry above has the reasoning; #61 ships a DIFFERENT
+  `.local(build)` - a region builder taking a whole sub-chain, parameterized over a base `Pipeline`
+  so nothing inside it can dispatch at all, correct on every class unchanged. Not a revival of this
+  row: the killed form took one `Transformer` for one stage; the shipped form takes a
+  builder function over several stages.
 - **Wire-level drift protection** (#17) - a chain fingerprint, a stage count and a caller version string
   were all priced against a real reproduction (v1 `x*2`, v2 `x+1000`, mixed fleet -> `[2,4,1003,1004,1005]`
   at HTTP 200). Atomic deployment is documented instead.

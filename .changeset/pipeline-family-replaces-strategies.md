@@ -11,8 +11,8 @@
 - `HttpPipeline` dispatches a stage's chunk to another instance over HTTP, given its url.
 - `ClusterPipeline` dispatches to worker processes on the same machine, brought up automatically -
   no server, listen, fork or url in caller code.
-- `{ local: true }` on `.transform()`/`.apply()` keeps one stage in the orchestrating process on
-  any of the three.
+- `.local(build)` keeps a whole region of the chain in the orchestrating process on any of the
+  three.
 - A plain `Pipeline` (the default, one chunk at a time) is unchanged - `Transformer.execute()`
   itself also runs sequentially now, since the pluggable strategy it dispatched through is gone.
 
