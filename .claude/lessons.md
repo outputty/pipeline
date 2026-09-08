@@ -7,6 +7,33 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-08 A diff was measured once, under the single-PR threshold, then trusted after it grew
+
+#40 measured its diff before the first commit, under the single-PR threshold at that moment; a
+`/code-review medium` round then added fixes that pushed it past the threshold, caught only because
+the diff was measured again on request. `~/.claude/output-styles/outputty.md`'s Language section
+now forbids measuring or stating a line/character/token count as a fact anywhere - it is false the
+moment anything else changes the work - so a size decision names the check it passed, never a
+number.
+
+## 2026-09-08 A ticket's "move it, don't duplicate" covered one path, and the move dropped the rest
+
+#40's own Interface moved a chunk-failure report from `Transformer.process()`'s loop-scope catch
+into `runSequentially`'s per-chunk one; the ticket's own worked example only ever exercised the
+chunk-failure path, so the move silently dropped the one case that never reaches that loop at all (a
+`.withHooks()` hook throwing before any chunk runs) - caught by `/code-review medium`, not by the
+ticket's own example. `.claude/rules/code.md` gains a line: the same call-site grep is owed before a
+move, not only a deletion.
+
+## 2026-09-08 "Neither overrides apply()" was written after already reading two overrides that do
+
+`HttpPipeline.apply()` and `ClusterPipeline.apply()` were both read this session, each a real
+`override apply()` narrowing the return type and delegating to `super.apply()` unchanged - the docs
+pass still wrote "neither overrides `apply()`" in `CLAUDE.md` and `.claude/roadmap.md`, from memory
+rather than the literal declaration, caught by `/code-review medium` rather than a re-read.
+`.claude/rules/code.md` gains a line: re-check a method's literal override status right before
+writing a claim about it.
+
 ## 2026-09-07 A "runs in the worker" claim reached four files before anything measured it
 
 Planning #72 measured that `Pipeline.tap` runs in the orchestrator, over a real loopback

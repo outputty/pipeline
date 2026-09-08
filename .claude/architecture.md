@@ -102,8 +102,15 @@ per-item try/catch anywhere in the chain. `ErrorHandler.handle()` (`errors/handl
 registered handler LIFO (last-registered first) and returns the FIRST one that returns an array; a
 handler returning `undefined` passes to the next-oldest one, and `handle()` itself returns `undefined`
 once every handler has passed, which `.catch()` reads as "drop the chunk" (#15). `.onError()`'s own
-call into the same `handle()`, from `Transformer.process()`'s catch, ignores this return value - it
-is a notification hook there, never a recovery path.
+call into the same `handle()` ignores this return value - it is a notification hook, never a recovery
+path - and, unlike `.catch()`, it fires with the ACTUAL failing chunk (#40): `Transformer.process()`'s
+own chunk-loop scope was too late to see it (a strategy-level catch, outside the loop, saw only
+`[]`). `runSequentially`'s own per-chunk try/catch now CAPTURES that chunk where it is still in
+scope, but `Transformer.chunkErrorReporter` itself is called from `process()`'s own outer catch,
+deferred until after `hooks.onError` runs - the same relative order the two independent
+notification mechanisms had before this ticket. `ConcurrentPipeline.apply()`'s wrapped `work` calls
+`chunkErrorReporter` immediately instead, for a dispatched stage - `.withHooks()` alone already
+refuses to build one, so there is no ordering question there.
 
 Async iteration (`for await` over a `Pipeline`, the `outputty/laygo` `m.from(pipeline)` seam) reads
 the exact same persisted `_chunks` every terminal op reads (#39) - there is no separate replay path
@@ -127,8 +134,9 @@ two dispatched stages ran only in the caller and the output was unchanged.
 `.withHooks()` and `TransformerLifecycleHooks` are deleted by the same ticket. `pipe()` deliberately
 dropped `hooks` when `Out` changed, so the knob fired or did not depending on where in the chain it
 was written, and `dispatchKnobViolations` could not refuse what `.map()` had already discarded.
-`dispatchKnobViolations` and `ConcurrentPipeline.apply()`'s refusal go with it, once #40 has removed
-their `onError` branch.
+`dispatchKnobViolations` and `ConcurrentPipeline.apply()`'s refusal go with `.withHooks()` - #40
+already removed the `onError` branch, since a dispatched stage's own `.onError()` handler now fires
+directly off `ConcurrentPipeline.apply()`'s wrapped `work` and needs no refusal to protect it.
 
 ## The pipeline family
 
@@ -183,8 +191,11 @@ bypass IS the mechanism, since `process()` runs a chain sequentially, one chunk 
 `this._chunks` - the pipeline's OWN already-cut chunk stream, set by `.buffer()` (#39) - out through
 `stageWork()`, and `fanOutOrdered`/`fanOutUnordered` (`concurrent.ts`) yield each dispatched chunk's
 own RESULT ARRAY rather than flattening it: the fanned-out output IS itself a real `_chunks`
-boundary, so a later `.buffer()` recuts from it exactly like any other stage's output. A knob that
-only ever takes effect via `process()` (`.withHooks()`, `.onError()`) THROWS immediately on a
+boundary, so a later `.buffer()` recuts from it exactly like any other stage's output. `apply()`
+wraps `stageWork()`'s own work in a try/catch of its own (#40) that reports a dispatched stage's
+ACTUAL failing chunk to `transformer.errorHandler` before rethrowing - `Transformer.process()` never
+runs on this path, so this wrapper is the one place that chunk is still in scope. A knob that only
+ever takes effect via `process()` itself (`.withHooks()`, now the only one) THROWS immediately on a
 non-local stage instead of silently never firing (`dispatchKnobViolations`, `concurrent.ts`); wrapping
 the stage in `.local(build)` is the escape hatch (#61 deleted the old per-stage `StageOptions` flag
 this used to name). `.buffer()` reaches a dispatched stage exactly like a local one, since

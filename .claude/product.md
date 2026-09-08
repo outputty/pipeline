@@ -283,6 +283,29 @@ const data = await new Pipeline(["a", "b", "3", "d", "5"])
 [999]
 ```
 
+`.onError()` is the other half: a notification, never a recovery path, that fires on every chunk
+failure with the chunk that actually failed - `.catch()` remains the only way to keep the run going.
+
+> **`Transformer.onError(fn)`** - `fn` receives the failing `chunk` and `Error`; its return value is
+> ignored. Several handlers registered this way run LIFO (last-registered first), and every one runs
+> regardless of what an earlier one returned. The run still rejects with the original error - this
+> is a hook, not `.catch()`'s replacement mechanism.
+
+```ts
+import { Pipeline, Transformer } from "@outputty/pipeline";
+
+const seen: number[][] = [];
+const transformer = new Transformer<number, number>()
+  .map((x: number) => {
+    if (x === 3) throw new Error("boom on 3");
+    return x;
+  })
+  .onError((chunk) => seen.push(chunk));
+
+await new Pipeline([1, 2, 3, 4]).buffer(2).apply(transformer).toArray().catch(() => {});
+console.log(seen); // [[3, 4]] - the chunk that failed, chunkSize 2 over [1,2,3,4]
+```
+
 ### Reducing
 
 A reducer folds items into an accumulator, at two levels with one meaning. On a `Transformer` it
