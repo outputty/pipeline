@@ -7,6 +7,36 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-08 A line-count decision was treated as settled after the code that produced it changed
+
+#40 measured 196 added lines before its first commit, correctly under the single-PR threshold at
+that moment - then code-review fixes landed and the real total was 236, past it, discovered only
+because the diff was measured again. The output style's own count-drift rule covered writing a
+count into a document, not treating one already measured as still true after more work landed on
+top of it. `~/.claude/output-styles/outputty.md`'s Language section broadens: a count is stale the
+moment anything else changes, in a document or in the moment, LOC/characters/tokens alike - re-run
+the check at the point of use, never carry its last answer forward.
+
+## 2026-09-08 A ticket's "move it, don't duplicate" covered one path, and the move dropped the rest
+
+#40's own Interface moved a chunk-failure report from `Transformer.process()`'s loop-scope catch
+into `runSequentially`'s per-chunk one - the ticket's own worked example, and its Constraint against
+a second call, only ever exercised the chunk-failure path. The move silently dropped the ONE case
+that never reaches that loop at all: a `.withHooks()` `onStart`/`onComplete` throw, which used to
+notify `.onError()` (with `[]`) and now notified nothing - caught by `/code-review medium`, not by
+the ticket's own example. `~/.claude/rules/code.md`'s call-site-grep rule gains a sibling clause: the
+same grep is owed before a MOVE, not only a deletion.
+
+## 2026-09-08 "Neither overrides apply()" was written after already reading two overrides that do
+
+`HttpPipeline.apply()` and `ClusterPipeline.apply()` were both read this session - each is a real
+`override apply()` that narrows the return type and delegates to `super.apply()` unchanged. The docs
+pass still wrote "since neither overrides `apply()`" in `CLAUDE.md` and `.claude/roadmap.md`, from
+memory of what the override DOES rather than the literal declaration - caught by `/code-review
+medium`, not by re-reading either file before writing the sentence. `~/.claude/rules/code.md` gains
+a line: re-check a method's literal override status right before writing a claim about it, even when
+it was already read earlier in the same session.
+
 ## 2026-09-07 A "runs in the worker" claim reached four files before anything measured it
 
 Planning #72 measured that `Pipeline.tap` runs in the orchestrator, over a real loopback

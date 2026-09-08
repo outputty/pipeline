@@ -9,9 +9,8 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **A conformance suite every `Pipeline` and Context class runs** (#37), **the pipeline's error
-  handlers** (#40) and **cross-runtime benchmarks** (#11) are the other open tickets; each issue
-  carries its own detail.
+- **A conformance suite every `Pipeline` and Context class runs** (#37) and **cross-runtime
+  benchmarks** (#11) are the other open tickets; each issue carries its own detail.
 - **`.tap()` becomes the one observation surface** (#72). `.withHooks()` is deleted with
   `TransformerLifecycleHooks`, and `Pipeline` gains its own `.tap()` that always runs in the
   orchestrating process. Now, because `.withHooks()` is silently order-sensitive - `pipe()` drops it,
@@ -69,6 +68,15 @@ The two older candidates, still not filed:
   automatically. BREAKING, no deprecation period: every existing `ConcurrentPipeline.reduce()` call
   now returns as many values as there are partitions instead of one.
   PRs #68 (L1, pinned cases), #69 (L2, partitioning), #71 (enable), #74 (docs).
+- **`.onError()` reports the chunk that actually failed** (#40, `feat!`) - `Transformer.process()`'s
+  own catch sat outside the chunk loop, so a handler saw `[]`, and `ConcurrentPipeline.apply()`
+  refused a dispatched stage carrying one outright. `runSequentially`'s own per-chunk try/catch
+  (`Transformer.chunkErrorReporter`) and `ConcurrentPipeline.apply()`'s wrapped `work` now report
+  from wherever the failing chunk is still in scope, on every class - `HttpPipeline`/`ClusterPipeline`
+  included, since both only narrow `apply()`'s return type and delegate to `super.apply()` unchanged.
+  `dispatchKnobViolations` keeps only its `withHooks` branch. BREAKING, no deprecation period: a
+  handler that read `chunk.length` as "no detail available" must be updated. PRs #75 (L1, the fix
+  and its tests), #76 (docs).
 - **`.local(build)` runs a whole region in the orchestrating process** (#61, `feat!`) - the per-stage
   flag it replaces had to be repeated on every stage of a region that must stay put, and lived only
   on the dispatching subclasses, so a chain using it never typechecked on a base `Pipeline`.

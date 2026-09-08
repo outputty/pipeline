@@ -268,8 +268,20 @@ none of it survived the hand-trim (#745).
   chunk-level throw, hands the failing chunk and error to a `ChunkErrorHandler` (`src/types.ts` - the
   ONE declaration; `src/errors/handler.ts` takes the same shape inline, never re-declaring or
   re-importing the name) - return a replacement array to substitute the chunk, or nothing to drop it.
-  Never a per-item try/catch: the unit of failure and recovery is the chunk. Several handlers registered
-  via `.onError()` run LIFO (last-registered first); the first one to return an array wins (#15).
+  Never a per-item try/catch: the unit of failure and recovery is the chunk. Several handlers chained
+  onto ONE `ErrorHandler` (`.catch()`'s own, or `Transformer.onError()`, below) run LIFO
+  (last-registered first); for `.catch()`, the first one to return an array wins (#15).
+- **`Transformer.onError(fn)`** - the notification sibling: `fn` receives the chunk that ACTUALLY
+  failed and the `Error`, fires on every registered handler (LIFO, all of them, every time - its
+  return value is ignored, unlike `.catch()`'s), and the run still rejects with the original error
+  regardless - `.catch()` is the only recovery path. Drives the same `ErrorHandler` `.catch()` does,
+  from wherever the failing chunk is still in scope: `Transformer.chunkErrorReporter`, called from
+  `runSequentially`'s own per-chunk try/catch, for a local stage; `ConcurrentPipeline.apply()`'s
+  wrapped `work` for a dispatched one, `HttpPipeline`/`ClusterPipeline` included, since both only
+  narrow `apply()`'s RETURN TYPE and delegate its logic to `super.apply()` unchanged (#40, BREAKING:
+  a handler used to see `[]`, `Transformer.process()`'s own loop-scope catch being the only caller,
+  and refused outright on a dispatched stage - `dispatchKnobViolations` keeps only its `withHooks`
+  branch now).
 
 ## Toolchain
 
