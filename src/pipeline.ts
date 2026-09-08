@@ -648,6 +648,13 @@ export class Pipeline<T> {
   tap(fn: PipelineFunction<T, unknown>): this;
   tap(transformer: Transformer<T, unknown>): this;
   tap(arg: PipelineFunction<T, unknown> | Transformer<T, unknown>): this {
+    // Both arms below call the exact same runtime expression, `t.tap(arg)` - this is NOT dead code:
+    // `Transformer.tap` is itself overloaded, and a union-typed `arg` matches neither overload on
+    // its own, so the instanceof check exists purely to narrow `arg`'s STATIC type per arm before
+    // each (otherwise-identical) call, the same way `Transformer.tap`'s own implementation narrows
+    // it internally. Collapsing this to one arm - `p.transform((t) => t.tap(arg))` - fails to
+    // typecheck. Never edit one arm without the other; a real behavior change belongs in
+    // `Transformer.tap` itself, which both arms delegate to unconditionally.
     return this.local((p) =>
       arg instanceof Transformer ? p.transform((t) => t.tap(arg)) : p.transform((t) => t.tap(arg)),
     ) as this;

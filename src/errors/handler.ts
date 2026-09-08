@@ -110,15 +110,6 @@ export class ErrorHandler<In, U = void> {
   }
 
   /**
-   * Check if any handlers are registered.
-   *
-   * @returns True if at least one handler is registered
-   */
-  hasHandlers(): boolean {
-    return this.handlers.length > 0;
-  }
-
-  /**
    * Create a copy of this ErrorHandler with all handlers.
    *
    * @returns A new ErrorHandler with the same handlers
