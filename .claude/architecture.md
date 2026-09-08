@@ -122,9 +122,10 @@ InternalTransformer(chunk, ctx, run?)      pipe() forwards `run` down the compos
 ```
 
 A link with no handler registered runs its existing `Promise.all` path unchanged - measured on the
-shipped code at 353.6-354.0 ns/row across two runs at 1M rows, matching the pre-#78 floor (344.9-353
-ns/row, ad hoc measurements taken during #78's own planning and build) within run-to-run JIT noise,
-so the seam costs nothing unused. `DROP` is a `unique symbol` and every site tests it with `!== DROP`.
+shipped code at 354-380 ns/row at 1M rows across four separate runs, matching the pre-#78 floor
+within run-to-run JIT noise, so the seam costs nothing unused. A registered handler measured 6-14%
+slower across the same runs (377-415 ns/row) - noisy but consistently positive, never free. `DROP`
+is a `unique symbol` and every site tests it with `!== DROP`.
 
 `Pipeline.onError(fn)` is the run handler, `(error, ctx) => void`: returning drops the failing chunk
 and the run continues, throwing stops it. It cannot be a catch on the drain side, because an async

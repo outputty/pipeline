@@ -14,17 +14,17 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   `product.md` promises the chain "is identical in all four" and only the base class was ever tested
   against it. Now, because planning found four separate reasons a case could not run everywhere, and
   each turned out to be a defect rather than a boundary - three of them since fixed by #39
-  (chunking), #40 (error handlers) and #41 (`merge` keeping its class).
+  (chunking), #40 (error handlers) and #41 (`merge` keeping its class). Its own `.reduce()` case
+  needs its `ConcurrentPipeline` branch rewritten now (#62): a bare `.reduce()` prints `[15]` on
+  `Pipeline` but N values summing to 15 on `ConcurrentPipeline` (partition count is a ceiling,
+  timing-dependent) - the conformance case either sums the array or adds
+  `.local((p) => p.reduce(mergeFn, initial))` to compare one value.
 - **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
   `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
   change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results
   committed as JSON; the second table controls measured ITEMS IN FLIGHT rather than any declared
   concurrency option, because no two libraries name that knob the same way. Layout and rationale in
   `.claude/architecture.md`'s Benchmarks section.
-  #37's own conformance case for `.reduce()` needs its `ConcurrentPipeline` branch rewritten now
-  (#62): a bare `.reduce()` prints `[15]` on `Pipeline` but N values summing to 15 on
-  `ConcurrentPipeline` (partition count is a ceiling, timing-dependent) - the conformance case
-  either sums the array or adds `.local((p) => p.reduce(mergeFn, initial))` to compare one value.
 
 ### Later - not yet filed
 
@@ -62,15 +62,12 @@ The two older candidates, still not filed:
   runnable (`Pipeline.apply()`, `ConcurrentPipeline.apply()`, `ConcurrentPipeline.stageWork()`'s own
   default) - a WORKER's own `_chunkTransforms` registry entry gets row recovery for free, since it
   was built the same `runnable()` call when its own copy of the entry module constructed the same
-  chain. Measured on the shipped code: 353.6-354.0 ns/row for a `.map()` with no handler registered,
-  matching the pre-#78 floor within run-to-run JIT noise - the seam costs nothing unused. `.catch()`,
-  `ChunkErrorHandler` and `ErrorHandler` (`src/errors/`) are deleted, no deprecation period; a chunk
-  failure with no run handler registered still propagates and ends the run, same as before.
-  A live review (`/code-review medium --fix`) caught `dropOrRethrow` calling the run handler
-  without awaiting it - a `Promise`-returning `Pipeline.onError()` handler that rethrows after its
-  own `await` would have resolved the drop-and-continue path first, surfacing the rejection later
-  as an unhandled rejection instead of stopping the run; fixed before merge.
-  PR #81 (code, tests), PR #82 (docs).
+  chain. Measured on the shipped code across four runs: 354-380 ns/row for a `.map()` with no
+  handler registered, matching the pre-#78 floor within run-to-run JIT noise (the seam costs
+  nothing unused), and 6-14% slower with one registered (377-415 ns/row, same setup) - noisy but
+  consistently positive. `.catch()`, `ChunkErrorHandler` and `ErrorHandler` (`src/errors/`) are
+  deleted, no deprecation period; a chunk failure with no run handler registered still propagates
+  and ends the run, same as before. PR #81 (code, tests), PR #82 (docs).
 - **`.tap()` becomes the one observation surface, and `Pipeline` gains its own** (#72, `feat!`) -
   the old lifecycle-hooks knob depended on where in the chain it was written (`pipe()` dropped it on
   `Out` change, so attaching it before a later `.map()` fired nothing while attaching it after fired),
