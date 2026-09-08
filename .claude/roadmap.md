@@ -21,19 +21,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   committed as JSON; the second table controls measured ITEMS IN FLIGHT rather than any declared
   concurrency option, because no two libraries name that knob the same way. Layout and rationale in
   `.claude/architecture.md`'s Benchmarks section.
-- **Error handling moves onto the function that failed** (#78, `feat!`). `Transformer.onError(fn)`
-  becomes the ROW handler - return a value to replace the row, the exported `DROP` sentinel to
-  remove it, or throw to escalate - reaching every element-wise call and `Transformer.reduce()`'s
-  fold step, wherever in the chain it is written. `Pipeline.onError(fn)` becomes the RUN handler:
-  returning drops the failing chunk and the run continues, throwing stops it. `.catch()`,
-  `ChunkErrorHandler` and `ErrorHandler` are deleted. Now, because one bad row costs a whole chunk
-  of good ones today (`t.catch((sub) => sub.map(parseStrict), () => [999])` over
-  `["a","b","3","d","5"]` returns `[999]`, losing the `3` and the `5` that parsed), and because a
-  sub-chain region makes the recovery point unpredictable while the per-row workaround callers
-  already write (`t.flatMap` with its own try/catch, real `[3,5]`) has nowhere to report a failure.
-  Measured: the seam costs nothing when no handler is registered (344.9 ns/row against a 353 ns/row
-  floor at 1M rows) and about 8-12% when one is.
-
   #37's own conformance case for `.reduce()` needs its `ConcurrentPipeline` branch rewritten now
   (#62): a bare `.reduce()` prints `[15]` on `Pipeline` but N values summing to 15 on
   `ConcurrentPipeline` (partition count is a ceiling, timing-dependent) - the conformance case
@@ -63,6 +50,27 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **Error handling moves onto the function that failed** (#78, `feat!`) - `Transformer.onError(fn)`
+  is now the ROW handler: returning a value replaces the row, the exported `DROP` sentinel removes
+  it, throwing escalates. It reaches every element-wise call - `.map()`, `.filter()`, `.flatMap()`,
+  `.tap(fn)` - and `Transformer.reduce()`'s fold step, wherever in the chain it is written,
+  position-independent since `pipe()` carries the handler forward the same way it already carries
+  the composed `transform` function. `Pipeline.onError(fn)` is the RUN handler, position-DEPENDENT:
+  only a stage applied after it is covered; returning drops the failing chunk and the run
+  continues, throwing stops it. `Transformer.runnable()` is the new seam that carries the row
+  handler into a runnable chunk-transform function, read once wherever a `Transformer` becomes
+  runnable (`Pipeline.apply()`, `ConcurrentPipeline.apply()`, `ConcurrentPipeline.stageWork()`'s own
+  default) - a WORKER's own `_chunkTransforms` registry entry gets row recovery for free, since it
+  was built the same `runnable()` call when its own copy of the entry module constructed the same
+  chain. Measured on the shipped code: 353.6-354.0 ns/row for a `.map()` with no handler registered,
+  matching the pre-#78 floor within run-to-run JIT noise - the seam costs nothing unused. `.catch()`,
+  `ChunkErrorHandler` and `ErrorHandler` (`src/errors/`) are deleted, no deprecation period; a chunk
+  failure with no run handler registered still propagates and ends the run, same as before.
+  A live review (`/code-review medium --fix`) caught `dropOrRethrow` calling the run handler
+  without awaiting it - a `Promise`-returning `Pipeline.onError()` handler that rethrows after its
+  own `await` would have resolved the drop-and-continue path first, surfacing the rejection later
+  as an unhandled rejection instead of stopping the run; fixed before merge.
+  PR #81 (code, tests), PR #82 (docs).
 - **`.tap()` becomes the one observation surface, and `Pipeline` gains its own** (#72, `feat!`) -
   the old lifecycle-hooks knob depended on where in the chain it was written (`pipe()` dropped it on
   `Out` change, so attaching it before a later `.map()` fired nothing while attaching it after fired),

@@ -184,6 +184,9 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
   reaches `others`' items too, at THIS pipeline's next index rather than restarting at 0. Prefer
   this over the static `Pipeline.merge()` whenever work after the merge must stay concurrent,
   remote or clustered; the static always returns a plain `Pipeline`.
+- **`.onError(fn)`** - the run handler. `fn` receives the error and the context; returning drops
+  the failing chunk and the run continues, throwing stops the run. Position-dependent: only a
+  stage applied AFTER this call is covered. See [Error Handling](#error-handling).
 
 ### Transformer
 
@@ -198,7 +201,9 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
   and the context; the `transformer` form receives the whole chunk. This one travels with its stage,
   so on `HttpPipeline`/`ClusterPipeline` it runs in the worker. `Pipeline.tap(...)` is the same
   observation point run in the orchestrating process instead - see [Where the work runs](#where-the-work-runs).
-- **`.catch(build, onError?)`** - run a sub-chain, handling its errors.
+- **`.onError(fn)`** - the row handler. `fn` receives the failing item, error and context; a
+  returned value replaces the row, `DROP` removes it, throwing escalates to the pipeline. See
+  [Error Handling](#error-handling).
 
 ### Context-Aware Functions
 
@@ -376,44 +381,39 @@ console.log(data); // [15]
 
 ## Error Handling
 
+Error handling belongs to the function that failed, at two levels. `Transformer.onError(fn)` is the
+ROW handler: `fn` receives the failing item, the error and the context - returning a value replaces
+the row, the exported `DROP` sentinel removes it, throwing escalates to the pipeline. It reaches
+`.map()`, `.filter()`, `.flatMap()`, `.tap(fn)` and `.reduce()`'s fold step, wherever in the chain
+it's written. `Pipeline.onError(fn)` is the RUN handler: `fn` receives the error and the context -
+returning drops the failing chunk and the run continues, throwing stops the run.
+
 <!-- compiles -->
 
 ```typescript
-import { Pipeline } from "@outputty/pipeline";
+import { Pipeline, DROP } from "@outputty/pipeline";
 
-// A handler's returned array REPLACES the failing chunk.
-const replaced = await new Pipeline(["a", "b", "3", "d", "5"])
-  .transform((t) =>
-    t.catch(
-      (sub) =>
-        sub.map((s: string) => {
-          const n = parseInt(s);
-          if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-          return n;
-        }),
-      () => [999],
-    ),
-  )
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
+
+// A dropped row is repaired out of the chunk, not lost with it.
+const recovered = await new Pipeline(["a", "b", "3", "d", "5"])
+  .transform((t) => t.onError(() => DROP).map(parseStrict))
   .toArray();
 
-console.log(replaced); // [999]
+console.log(recovered); // [ 3, 5 ]
 
-// A handler returning nothing DROPS the failing chunk instead.
-const dropped = await new Pipeline(["a", "b", "3", "d", "5"])
-  .transform((t) =>
-    t.catch(
-      (sub) =>
-        sub.map((s: string) => {
-          const n = parseInt(s);
-          if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-          return n;
-        }),
-      () => undefined,
-    ),
-  )
+// The run handler is what keeps a stream alive past a chunk nothing could repair.
+const survived = await new Pipeline(["1", "x", "3", "4"])
+  .buffer(1)
+  .onError((err) => console.warn("dropping chunk:", err.message))
+  .transform((t) => t.map(parseStrict))
   .toArray();
 
-console.log(dropped); // []
+console.log(survived); // [ 1, 3, 4 ]
 ```
 
 ## Branching

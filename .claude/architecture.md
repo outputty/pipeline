@@ -33,9 +33,12 @@ direction (#743, #745).
 
 ```text
 src/
-  types.ts              PipelineFunction, IContextManager, InternalTransformer, every options interface
-  pipeline.ts            Pipeline: source + context + terminal ops + Pipeline.merge + createPipeline()
-  transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError
+  types.ts              PipelineFunction, IContextManager, InternalTransformer, every options
+                          interface, plus DROP/RowErrorHandler/PipelineErrorHandler/RunScope (#78)
+  pipeline.ts            Pipeline: source + context + terminal ops + Pipeline.merge +
+                          createPipeline() + onError() (#78)
+  transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError()
+                          (the row handler, #78) and runnable() (the seam that carries it in)
   pipelines/
     concurrent.ts          ConcurrentPipeline - the fan-out (fanOutOrdered/fanOutUnordered),
                              stageWork()/reduceWork()
@@ -46,15 +49,17 @@ src/
   context/
     types.ts              re-exported IContextManager shape
     simple.ts              SimpleContextManager - the one shipped IContextManager
-  errors/                 deleted by #78 with .catch(), the only mechanism its handler chain served
   utils/
     chunk.ts                buildChunkGenerator (cuts) / flattenChunks (undoes) / normalize (dead
                              in production code post-#39, kept as public API)
     helpers.ts               isContextAware - fn.length arity check (isContextAwareReduce, its
                              reduce-side twin, is gone: every reduce path always passes all four
-                             ReduceFunction arguments, #45)
+                             ReduceFunction arguments, #45); dropOrRethrow - the run handler's own
+                             "call it, or propagate" decision, shared by runSequentially and
+                             ConcurrentPipeline.apply()'s wrapped work (#78)
     reduce.ts                Reducer/foldChunk/foldChunkStream - the shared fold, used by
-                             Transformer.reduce, Pipeline.reduce and http.ts's own frame folding
+                             Transformer.reduce, Pipeline.reduce and http.ts's own frame folding;
+                             Reducer takes an optional row handler (#78)
     ndjson.ts                readNdjsonLines/ndjsonFrame - the reduce wire's framing, shared by
                              the client (reduceWork) and the server (.fetch's /reduce/<n>)
   factories.ts             createTransformer - Transformer construction sugar, no chunk-size
@@ -94,16 +99,17 @@ reads `this._chunks` directly and cuts none of its own, so a custom `.buffer()` 
 dispatched stage exactly like a local one. Wrap the chain in one of those classes for concurrency
 instead of configuring the `Transformer`.
 
-## Error handling - pending #78
+## Error handling
 
 Error handling sits on the function that failed, at two levels, and `.catch()` is deleted with the
-`ErrorHandler`/`ChunkErrorHandler` chain that only ever served it.
+`ErrorHandler`/`ChunkErrorHandler` chain that only ever served it (#78).
 
 `Transformer.onError(fn)` is the row handler, `(item, error, ctx) => value | DROP | throw`. It is a
 property of the transformer, not of a link, which is what makes it position-independent: `pipe()`
-carries it forward exactly as it already carries `errorHandler`. `Transformer.runnable()` is the seam
-that hands it to the chain - it reads `this.rowHandler` off the FINAL transformer and builds the
-`RunScope` the links read, and it is called wherever a `Transformer` becomes runnable:
+carries it forward exactly as it already carries the composed `transform` function itself.
+`Transformer.runnable()` is the seam that hands it to the chain - it reads `this.rowHandler` off the
+FINAL transformer and builds the `RunScope` the links read, and it is called wherever a `Transformer`
+becomes runnable:
 
 ```text
 Transformer.runnable()                     reads this.rowHandler off the FINAL transformer
@@ -115,9 +121,10 @@ InternalTransformer(chunk, ctx, run?)      pipe() forwards `run` down the compos
 	Transformer.reduce -> Reducer.fold       the one place a single item is folded
 ```
 
-A link with no handler registered runs its existing `Promise.all` path unchanged - measured at 344.9
-ns/row against the 353 ns/row floor at 1M rows, so the seam costs nothing unused; a registered
-handler costs about 8-12%. `DROP` is a `unique symbol` and every site tests it with `!== DROP`.
+A link with no handler registered runs its existing `Promise.all` path unchanged - measured on the
+shipped code at 353.6-354.0 ns/row across two runs at 1M rows, matching the pre-#78 floor (344.9-353
+ns/row, ad hoc measurements taken during #78's own planning and build) within run-to-run JIT noise,
+so the seam costs nothing unused. `DROP` is a `unique symbol` and every site tests it with `!== DROP`.
 
 `Pipeline.onError(fn)` is the run handler, `(error, ctx) => void`: returning drops the failing chunk
 and the run continues, throwing stops it. It cannot be a catch on the drain side, because an async
