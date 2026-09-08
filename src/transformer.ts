@@ -58,8 +58,8 @@ async function* runSequentially<In, Out>(
     try {
       yield transformerLogic(chunk, context);
     } catch (error) {
-      // Reports with THIS chunk, still in scope here - `process()`'s own catch, below, sits one
-      // level up the call stack, past the point where the failing chunk is reachable (#40).
+      // Hands THIS chunk to `onError` while it is still in scope here - `process()`'s own catch,
+      // below, sits one level up the call stack, past the point where it would be reachable (#40).
       onError(chunk, error as Error, context);
       throw error;
     }
