@@ -76,10 +76,13 @@ export async function foldChunk<U, T>(
 }
 
 /**
- * Folds an entire chunk stream into emitted-value chunks, in-process and sequentially - the shared
- * body behind base `Pipeline.reduce()` and `ConcurrentPipeline.reduceWork()`'s own default
- * (`maxConcurrency` is inert on a reduce stage: one accumulator). Streams: yields whatever a given
- * input chunk emitted as its own output chunk, then the trailing accumulator once the stream ends.
+ * Folds one chunk stream into emitted-value chunks, in-process and sequentially, ONE accumulator
+ * for the WHOLE stream it is handed - the shared body behind base `Pipeline.reduce()`'s own fold
+ * and `ConcurrentPipeline.reduceWork()`'s own default. A dispatched, partitioned reduce (#62) calls
+ * this once PER PARTITION, each over its own `share()` view of the source, so "one accumulator" is
+ * per-partition there, not per-stage - `maxConcurrency` now decides how many of these run at once,
+ * never whether more than one does. Streams: yields whatever a given input chunk emitted as its own
+ * output chunk, then the trailing accumulator once the stream ends.
  *
  * `foldChunkStream((acc, x) => acc + x, 0, chunksOf([[1,2],[3]]), ctx)` → yields `[6]` once, the
  * whole dataset's sum, nothing emitted mid-fold.
