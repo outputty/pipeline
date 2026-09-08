@@ -103,11 +103,14 @@ registered handler LIFO (last-registered first) and returns the FIRST one that r
 handler returning `undefined` passes to the next-oldest one, and `handle()` itself returns `undefined`
 once every handler has passed, which `.catch()` reads as "drop the chunk" (#15). `.onError()`'s own
 call into the same `handle()` ignores this return value - it is a notification hook, never a recovery
-path - and, unlike `.catch()`, it fires from wherever the ACTUAL failing chunk is still in scope
-(#40): `Transformer.process()`'s own chunk-loop scope was too late to see it (a strategy-level catch,
-outside the loop, saw only `[]`), so the report moved to `runSequentially`'s own per-chunk try/catch
-(`Transformer.chunkErrorReporter`) for a local stage, and to `ConcurrentPipeline.apply()`'s wrapped
-`work` for a dispatched one - the two places a chunk's real value is still held at the moment it fails.
+path - and, unlike `.catch()`, it fires with the ACTUAL failing chunk (#40): `Transformer.process()`'s
+own chunk-loop scope was too late to see it (a strategy-level catch, outside the loop, saw only
+`[]`). `runSequentially`'s own per-chunk try/catch now CAPTURES that chunk where it is still in
+scope, but `Transformer.chunkErrorReporter` itself is called from `process()`'s own outer catch,
+deferred until after `hooks.onError` runs - the same relative order the two independent
+notification mechanisms had before this ticket. `ConcurrentPipeline.apply()`'s wrapped `work` calls
+`chunkErrorReporter` immediately instead, for a dispatched stage - `.withHooks()` alone already
+refuses to build one, so there is no ordering question there.
 
 Async iteration (`for await` over a `Pipeline`, the `outputty/laygo` `m.from(pipeline)` seam) reads
 the exact same persisted `_chunks` every terminal op reads (#39) - there is no separate replay path

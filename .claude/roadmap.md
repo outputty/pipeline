@@ -70,13 +70,15 @@ The two older candidates, still not filed:
   PRs #68 (L1, pinned cases), #69 (L2, partitioning), #71 (enable), #74 (docs).
 - **`.onError()` reports the chunk that actually failed** (#40, `feat!`) - `Transformer.process()`'s
   own catch sat outside the chunk loop, so a handler saw `[]`, and `ConcurrentPipeline.apply()`
-  refused a dispatched stage carrying one outright. `runSequentially`'s own per-chunk try/catch
-  (`Transformer.chunkErrorReporter`) and `ConcurrentPipeline.apply()`'s wrapped `work` now report
-  from wherever the failing chunk is still in scope, on every class - `HttpPipeline`/`ClusterPipeline`
-  included, since both only narrow `apply()`'s return type and delegate to `super.apply()` unchanged.
-  `dispatchKnobViolations` keeps only its `withHooks` branch. BREAKING, no deprecation period: a
-  handler that read `chunk.length` as "no detail available" must be updated. PRs #75 (L1, the fix
-  and its tests), #76 (docs).
+  refused a dispatched stage carrying one outright. `Transformer.chunkErrorReporter` now reports the
+  chunk that actually failed, on every class - `HttpPipeline`/`ClusterPipeline` included, since both
+  only narrow `apply()`'s return type and delegate to `super.apply()` unchanged.
+  `ConcurrentPipeline.apply()`'s wrapped `work` calls it immediately for a dispatched stage;
+  `runSequentially`'s own per-chunk try/catch only CAPTURES the chunk for a local one, and
+  `process()`'s own outer catch reports it after `hooks.onError` runs, keeping the two notification
+  mechanisms' relative order unchanged. `dispatchKnobViolations` keeps only its `withHooks` branch.
+  BREAKING, no deprecation period: a handler that read `chunk.length` as "no detail available" must
+  be updated. PRs #75 (L1, the fix and its tests), #76 (docs).
 - **`.local(build)` runs a whole region in the orchestrating process** (#61, `feat!`) - the per-stage
   flag it replaces had to be repeated on every stage of a region that must stay put, and lived only
   on the dispatching subclasses, so a chain using it never typechecked on a base `Pipeline`.

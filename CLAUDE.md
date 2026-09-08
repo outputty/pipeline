@@ -275,13 +275,15 @@ none of it survived the hand-trim (#745).
   failed and the `Error`, fires on every registered handler (LIFO, all of them, every time - its
   return value is ignored, unlike `.catch()`'s), and the run still rejects with the original error
   regardless - `.catch()` is the only recovery path. Drives the same `ErrorHandler` `.catch()` does,
-  from wherever the failing chunk is still in scope: `Transformer.chunkErrorReporter`, called from
-  `runSequentially`'s own per-chunk try/catch, for a local stage; `ConcurrentPipeline.apply()`'s
-  wrapped `work` for a dispatched one, `HttpPipeline`/`ClusterPipeline` included, since both only
-  narrow `apply()`'s RETURN TYPE and delegate its logic to `super.apply()` unchanged (#40, BREAKING:
-  a handler used to see `[]`, `Transformer.process()`'s own loop-scope catch being the only caller,
-  and refused outright on a dispatched stage - `dispatchKnobViolations` keeps only its `withHooks`
-  branch now).
+  through `Transformer.chunkErrorReporter` (#40, BREAKING: a handler used to see `[]`,
+  `Transformer.process()`'s own loop-scope catch being the only caller, and refused outright on a
+  dispatched stage - `dispatchKnobViolations` keeps only its `withHooks` branch now).
+  `ConcurrentPipeline.apply()`'s wrapped `work` calls it immediately for a dispatched stage
+  (`HttpPipeline`/`ClusterPipeline` included, since both only narrow `apply()`'s RETURN TYPE and
+  delegate to `super.apply()` unchanged); for a local stage, `runSequentially`'s own per-chunk
+  try/catch CAPTURES the chunk where it is still in scope, but `process()`'s own outer catch is
+  what calls the reporter, deferred until after `hooks.onError` runs, so the two independent
+  notification mechanisms keep the same relative order they had before this ticket.
 
 ## Toolchain
 
