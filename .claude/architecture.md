@@ -35,7 +35,7 @@ direction (#743, #745).
 src/
   types.ts              PipelineFunction, IContextManager, InternalTransformer, every options interface
   pipeline.ts            Pipeline: source + context + terminal ops + Pipeline.merge + createPipeline()
-  transformer.ts          Transformer: the chainable map/filter/reduce/tap/catch chain
+  transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError
   pipelines/
     concurrent.ts          ConcurrentPipeline - the fan-out (fanOutOrdered/fanOutUnordered),
                              stageWork()/reduceWork()
@@ -46,8 +46,7 @@ src/
   context/
     types.ts              re-exported IContextManager shape
     simple.ts              SimpleContextManager - the one shipped IContextManager
-  errors/
-    handler.ts              ErrorHandler - runs a ChunkErrorHandler, used by Transformer.catch()
+  errors/                 deleted by #78 with .catch(), the only mechanism its handler chain served
   utils/
     chunk.ts                buildChunkGenerator (cuts) / flattenChunks (undoes) / normalize (dead
                              in production code post-#39, kept as public API)
@@ -95,22 +94,43 @@ reads `this._chunks` directly and cuts none of its own, so a custom `.buffer()` 
 dispatched stage exactly like a local one. Wrap the chain in one of those classes for concurrency
 instead of configuring the `Transformer`.
 
-`.catch(build, onError)` wraps one internal transformer function in a try/catch at the CHUNK boundary:
-a throw inside `build`'s chain hands the whole failing chunk to `onError`, whose return value (an
-array, or nothing) replaces or drops it. The unit of failure is the chunk, never the row - there is no
-per-item try/catch anywhere in the chain. `ErrorHandler.handle()` (`errors/handler.ts`) runs every
-registered handler LIFO (last-registered first) and returns the FIRST one that returns an array; a
-handler returning `undefined` passes to the next-oldest one, and `handle()` itself returns `undefined`
-once every handler has passed, which `.catch()` reads as "drop the chunk" (#15). `.onError()`'s own
-call into the same `handle()` ignores this return value - it is a notification hook, never a recovery
-path - and, unlike `.catch()`, it fires with the ACTUAL failing chunk (#40): `Transformer.process()`'s
-own chunk-loop scope was too late to see it (a strategy-level catch, outside the loop, saw only
-`[]`). `runSequentially`'s own per-chunk try/catch now CAPTURES that chunk where it is still in
-scope, but `Transformer.chunkErrorReporter` itself is called from `process()`'s own outer catch,
-deferred until after `hooks.onError` runs - the same relative order the two independent
-notification mechanisms had before this ticket. `ConcurrentPipeline.apply()`'s wrapped `work` calls
-`chunkErrorReporter` immediately instead, for a dispatched stage - `.withHooks()` alone already
-refuses to build one, so there is no ordering question there.
+## Error handling - pending #78
+
+Error handling sits on the function that failed, at two levels, and `.catch()` is deleted with the
+`ErrorHandler`/`ChunkErrorHandler` chain that only ever served it.
+
+`Transformer.onError(fn)` is the row handler, `(item, error, ctx) => value | DROP | throw`. It is a
+property of the transformer, not of a link, which is what makes it position-independent: `pipe()`
+carries it forward exactly as it already carries `errorHandler`. `Transformer.runnable()` is the seam
+that hands it to the chain - it reads `this.rowHandler` off the FINAL transformer and builds the
+`RunScope` the links read, and it is called wherever a `Transformer` becomes runnable:
+
+```text
+Transformer.runnable()                     reads this.rowHandler off the FINAL transformer
+	Pipeline.apply()                         stored into _chunkTransforms, and passed to process()
+	ConcurrentPipeline.apply()               stored into _chunkTransforms
+	ConcurrentPipeline.stageWork()           what HttpPipeline.fetch()'s registry lookup invokes
+InternalTransformer(chunk, ctx, run?)      pipe() forwards `run` down the composed chain
+	map/filter/flatMap/tap(fn)               per-row try/catch, only when run.rowHandler is set
+	Transformer.reduce -> Reducer.fold       the one place a single item is folded
+```
+
+A link with no handler registered runs its existing `Promise.all` path unchanged - measured at 344.9
+ns/row against the 353 ns/row floor at 1M rows, so the seam costs nothing unused; a registered
+handler costs about 8-12%. `DROP` is a `unique symbol` and every site tests it with `!== DROP`.
+
+`Pipeline.onError(fn)` is the run handler, `(error, ctx) => void`: returning drops the failing chunk
+and the run continues, throwing stops it. It cannot be a catch on the drain side, because an async
+generator that throws is finished - measured, a `Pipeline` over `["1","x","3","4"]` at `.buffer(1)`
+yields `[[1]]` and then `done`, losing rows `3` and `4`, where the same failure guarded inside the
+per-chunk loop yields `[1,3,4]`. So it plugs into the two per-chunk guards #40 already built:
+`runSequentially`'s own try/catch for a local stage, and `ConcurrentPipeline.apply()`'s wrapped
+`work` for a dispatched one, where returning `[]` IS the "drop this chunk" answer the fan-out needs.
+The unit dropped is therefore the chunk; nothing smaller is in scope there.
+
+`Pipeline.reduce()` is out of reach: it calls `foldChunkStream(fn, initial, this._chunks,
+this._context)` with no `Transformer` anywhere, so only `Transformer.reduce()`'s fold gets row
+recovery.
 
 Async iteration (`for await` over a `Pipeline`, the `outputty/laygo` `m.from(pipeline)` seam) reads
 the exact same persisted `_chunks` every terminal op reads (#39) - there is no separate replay path
@@ -192,9 +212,10 @@ bypass IS the mechanism, since `process()` runs a chain sequentially, one chunk 
 `stageWork()`, and `fanOutOrdered`/`fanOutUnordered` (`concurrent.ts`) yield each dispatched chunk's
 own RESULT ARRAY rather than flattening it: the fanned-out output IS itself a real `_chunks`
 boundary, so a later `.buffer()` recuts from it exactly like any other stage's output. `apply()`
-wraps `stageWork()`'s own work in a try/catch of its own (#40) that reports a dispatched stage's
-ACTUAL failing chunk to `transformer.errorHandler` before rethrowing - `Transformer.process()` never
-runs on this path, so this wrapper is the one place that chunk is still in scope. A knob that only
+wraps `stageWork()`'s own work in a try/catch of its own (#40) - `Transformer.process()` never runs
+on this path, so this wrapper is the one place a dispatched stage's failing chunk is still in scope,
+and #78 makes it the site `Pipeline.onError()` plugs into, returning `[]` to drop the chunk. A knob
+that only
 ever takes effect via `process()` itself (`.withHooks()`, now the only one) THROWS immediately on a
 non-local stage instead of silently never firing (`dispatchKnobViolations`, `concurrent.ts`); wrapping
 the stage in `.local(build)` is the escape hatch (#61 deleted the old per-stage `StageOptions` flag
@@ -218,8 +239,11 @@ resolves immediately with an EMPTY result - the worker exists only to hold the t
   parameter position. Only `Pipeline<any>` works as a constraint over pipelines of mixed item types.
 - Node `>=26` (`package.json` `engines`) - the package targets `node18` at build (`tsup.config.ts`) for
   the widest consumer range, but development and CI run on 26 (`.nvmrc`).
-- `ts-pattern` is a declared runtime dependency that `src/` never imports. Verified by a repo-wide
-  search whose control target (`p-limit`) returned 4 hits. Dropped by #5.
+- `ts-pattern` 5.9.0 cannot check exhaustiveness at a site generic in its payload type: with every
+  arm present, `tsc --strict` still refuses with `TS2349: This expression is not callable. Type
+  'NonExhaustiveError<unknown>' has no call signatures.` A concrete union works; a tagged
+  `{ kind: "keep"; value: U } | { kind: "drop" }` wrapper restores it, at 254.4 ns/row for the match
+  plus 13.7 to build the wrappers, against 9.6 ns/row for a bare `!== DROP` identity check.
 - Node 26 exposes `Request`/`Response`/`fetch` but serves no fetch handler natively. A real probe of
   `createServer(async () => new Response("hi"))` hangs and times out - the returned `Response` is
   ignored and nothing is written to `res`. Hence `toNodeHandler` (#17). Bun, Deno and Cloudflare need

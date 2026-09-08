@@ -7,6 +7,32 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-08 A sibling knob's known defect was cited as fact for a different knob
+
+Planning #78 objected to a chain-wide row handler on the grounds that `pipe()` drops it "like
+`hooks`" - the defect #72 is deleting `.withHooks()` for. `pipe()` carries `errorHandler` forward
+deliberately, so `.onError()` was already position-independent, measured immediately afterwards
+(`S1a onError BEFORE map -> fired 1x`, `S1b onError AFTER map -> fired 1x`). The wrong objection
+shaped a whole question round and the user had to push back to get it corrected.
+`~/.claude/rules/code.md` gains a line: read the method for the sibling knob by name before citing
+one knob's defect as another's.
+
+## 2026-09-08 A probe measured a compile-time guarantee on a concrete type the design site never has
+
+The ts-pattern exhaustiveness probe for #78's `DROP` sentinel used a concrete `number | typeof DROP`
+and reported both a working `.exhaustive()` and a 62 ns/row price. The three real sites are generic
+in `U`, where `.exhaustive()` is not callable at all - `TS2349 … NonExhaustiveError<unknown>` with
+every arm present - and the shape that does compile costs 254.4 ns/row. The user picked on the
+62 ns number before the re-probe caught it. `~/.claude/rules/code.md`'s 2026-09-07 probe-shape line
+is sharpened: a probe carries the design site's own TYPE PARAMETERS, not only its member placement.
+
+## 2026-09-08 An option's label promised `.exhaustive()` while its preview showed `.otherwise()`
+
+The same round's recommended option was labelled "Every DROP site, .exhaustive()" and previewed
+`match(r).with(DROP, …).otherwise(…)` - a different mechanism with no compile-time guarantee at all.
+The user picked on the label. `.claude/rules/docs.md` is created with one line: an option's preview
+holds the literal code its label names.
+
 ## 2026-09-08 A diff was measured once, under the single-PR threshold, then trusted after it grew
 
 #40 measured its diff before the first commit, under the single-PR threshold at that moment; a
