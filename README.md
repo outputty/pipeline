@@ -114,7 +114,7 @@ above.
 orchestrating process, whichever class it is called on, so a `console.log` or a `ctx.set()` written
 at pipeline level lands where you can see it. The stages either side of it still dispatch:
 
-<!-- illustrative -->
+<!-- compiles -->
 
 ```typescript
 import { ConcurrentPipeline } from "@outputty/pipeline";

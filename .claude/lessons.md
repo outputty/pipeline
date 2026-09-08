@@ -7,6 +7,17 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-08 A pre-existing-ness check was already settled by `git log`, then re-checked with a stash anyway
+
+Building #72, `/code-review medium` flagged a mutable-`initial` bug in `ConcurrentPipeline.reduce()` -
+`git log`/`git show` on the diff's own two commits already confirmed neither touched `reduce()` or
+`src/utils/reduce.ts`, settling "pre-existing" outright. A `git stash push -u` to "get a clean base"
+followed anyway, reverting six staged doc edits and costing a full stash-recovery dance (capture SHA
+by tag, apply, drop) to get them back - self-caught one tool call later from the harness's own
+file-change reminders. `~/.claude/rules/code.md`'s existing base-commit-reproduction rule gains a
+sub-bullet: once `--stat` confirms a finding's file is untouched, reproduce directly against the
+current tree, no isolation needed.
+
 ## 2026-09-04 A shared knob name is not a shared quantity
 
 Planning #11's cross-runtime benchmark, four priced ways to make a "concurrency 10" column fair
@@ -28,10 +39,10 @@ sibling package; `ix` has `flatMap(selector, concurrent?)`). The rule now lives 
 ## 2026-09-08 A sibling knob's known defect was cited as fact for a different knob
 
 Planning #78 objected to a chain-wide row handler on the grounds that `pipe()` drops it "like
-`hooks`" - the defect #72 is deleting `.withHooks()` for. `pipe()` carries `errorHandler` forward
-deliberately, so `.onError()` was already position-independent, measured immediately afterwards
-(`S1a onError BEFORE map -> fired 1x`, `S1b onError AFTER map -> fired 1x`). The wrong objection
-shaped a whole question round and the user had to push back to get it corrected.
+`hooks`" - the defect #72 is deleting the old lifecycle-hooks knob for. `pipe()` carries
+`errorHandler` forward deliberately, so `.onError()` was already position-independent, measured
+immediately afterwards (`S1a onError BEFORE map -> fired 1x`, `S1b onError AFTER map -> fired 1x`).
+The wrong objection shaped a whole question round and the user had to push back to get it corrected.
 `~/.claude/rules/code.md` gains a line: read the method for the sibling knob by name before citing
 one knob's defect as another's.
 
@@ -65,7 +76,7 @@ number.
 #40's own Interface moved a chunk-failure report from `Transformer.process()`'s loop-scope catch
 into `runSequentially`'s per-chunk one; the ticket's own worked example only ever exercised the
 chunk-failure path, so the move silently dropped the one case that never reaches that loop at all (a
-`.withHooks()` hook throwing before any chunk runs) - caught by `/code-review medium`, not by the
+lifecycle-hook throwing before any chunk runs) - caught by `/code-review medium`, not by the
 ticket's own example. `.claude/rules/code.md` gains a line: the same call-site grep is owed before a
 move, not only a deletion.
 
@@ -303,8 +314,9 @@ inconsistency between siblings.
 Planning #37, four knobs appeared to work on some `Pipeline` classes and not others, so the
 conformance suite grew a Tier A / Tier B split, a `runsOn(subject)` predicate, three separate case
 lists and a 5x3 permutation grid to route around them. Every one of the four was a defect:
-`.withHooks()` drops silently through `pipe()`, `setChunker` and `onError` are refused on a dispatched
-stage only because `apply()` never consults them, and `merge` demotes to a base `Pipeline`. The user's
+the lifecycle-hooks knob drops silently through `pipe()`, `setChunker` and `onError` are refused on
+a dispatched stage only because `apply()` never consults them, and `merge` demotes to a base
+`Pipeline`. The user's
 one-line standard - all pipeline classes support all functionality - dissolved three of the four
 mechanisms at once, leaving one case list and five wrapper files. Produced
 `~/.claude/rules/code.md`'s "price fixing the inconsistency instead" line.
@@ -329,9 +341,10 @@ corrected. Produced `~/.claude/rules/issues.md`'s "re-fetch before FILING" line.
 
 ## 2026-09-06 Project vocabulary was used in questions without ever defining it
 
-Three rounds asked where `withHooks` and `setChunker` should live, and what should test them, without
-once showing what either knob does. The user asked "what is the withHooks?", "What does this
-setChunker do?" and "I dont understand this" twice. A single worked example - nine sensor readings in
+Three rounds asked where the lifecycle-hooks knob and `setChunker` should live, and what should test
+them, without once showing what either knob does. The user twice asked what the point of the whole
+mechanism was, asked separately what `setChunker` did, and said "I dont understand this" twice. A
+single worked example - nine sensor readings in
 groups of 3, 2 and 4, where a fixed chunk size gives `b` a total of 130 instead of 30 - answered the
 question the three rounds had been circling. Produced `~/.claude/rules/docs.md`'s "a question about an
 EXISTING knob opens with what that knob does" line.

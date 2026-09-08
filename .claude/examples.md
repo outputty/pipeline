@@ -302,7 +302,7 @@ always runs in the orchestrating process, so its context writes reach the caller
 chain was built on; called inside a `.transform()` it travels with the stage and runs wherever that
 stage runs. Everything else here is the base program with `.buffer(2)` and a fan-out added.
 
-<!-- illustrative -->
+<!-- compiles -->
 
 ```ts
 import { ConcurrentPipeline } from "@outputty/pipeline";
