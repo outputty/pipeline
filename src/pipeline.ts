@@ -22,7 +22,13 @@
  * ```
  */
 
-import type { IContextManager, BranchDefinition, BranchOptions, ReduceFunction } from "./types";
+import type {
+  IContextManager,
+  BranchDefinition,
+  BranchOptions,
+  ReduceFunction,
+  PipelineFunction,
+} from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
 import { SimpleContextManager } from "./context/simple";
 import { Transformer } from "./transformer";
@@ -620,6 +626,31 @@ export class Pipeline<T> {
       reduceStages: built._reduceStages,
       preBufferItems: built._preBufferItems,
     });
+  }
+
+  /**
+   * An observation point that always runs in the orchestrating process, whatever class it is
+   * called on (#72). Delegates to `Transformer.tap`, wrapped in `.local(build)` so the callback and
+   * its context writes stay where the caller is even on `HttpPipeline`/`ClusterPipeline`, where a
+   * dispatched stage either side of it still dispatches. Declared once here, returning `this` -
+   * `Transformer.tap` keeps `Out` unchanged, so `T` never changes either and no subclass
+   * re-declaration is needed, unlike `.local()` itself.
+   *
+   * `arg`'s two overloads dispatch to `Transformer.tap`'s own two overloads inside `build` - a
+   * plain `t.tap(arg)` call with `arg` still typed as their union would not typecheck against either
+   * overload individually, so the `instanceof` check narrows it first, mirroring
+   * `Transformer.tap`'s own implementation.
+   *
+   * @example
+   * `new Pipeline([1, 2, 3]).tap((x) => seen.push(x)).transform((t) => t.map((x) => x *
+   * 2)).toArray()` → `[2, 4, 6]`, with `seen` `[1, 2, 3]`.
+   */
+  tap(fn: PipelineFunction<T, unknown>): this;
+  tap(transformer: Transformer<T, unknown>): this;
+  tap(arg: PipelineFunction<T, unknown> | Transformer<T, unknown>): this {
+    return this.local((p) =>
+      arg instanceof Transformer ? p.transform((t) => t.tap(arg)) : p.transform((t) => t.tap(arg)),
+    ) as this;
   }
 
   /**
