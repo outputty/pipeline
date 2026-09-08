@@ -166,9 +166,19 @@ none of it survived the hand-trim (#745).
   may produce several
   values and the chain continues after either, downstream running over every value produced.
   `emit(value)` pushes one downstream mid-fold; the final accumulator is emitted only if items were
-  folded since the last `emit()`. A reduce stage dispatches like any other stage, over ONE duplex
-  POST to `/reduce/<n>` whose accumulator lives for the life of the connection, so `maxConcurrency`
-  is inert on it (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
+  folded since the last `emit()`. A reduce stage dispatches like any other stage; on
+  `ConcurrentPipeline` (and `HttpPipeline`/`ClusterPipeline`) it PARTITIONS into `maxConcurrency`
+  independent accumulators now (#62): `reduceWork()` is still called ONCE, but the closure it returns
+  is called `maxConcurrency` times, each its own `share()` view of the one shared chunk stream - on
+  `HttpPipeline` that is `maxConcurrency` concurrent duplex
+  POSTs to the SAME `/reduce/<n>`, each with its own accumulator server-side. Each partition's own
+  result flows downstream as an ordinary value - no forced merge, no thrown error, same as a
+  non-partitioned reduce's own `emit()` output. A caller who wants ONE final value writes an
+  ordinary second reduce as the next stage, `.local((p) => p.reduce(mergeFn, initial))` (#61) - the
+  same pattern used to fold down any other multi-value reduce output; reusing the fold itself as
+  that merge is silently wrong in general (a count's own fold, `(acc, _x) => acc + 1`, folded again
+  over its own partials counts the partials, not the items), which is why nothing merges
+  automatically (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
   callable `Transformer.reduce`'s old per-chunk-toggle overload are deleted -
   `ReduceFunction` is the one type, `Pipeline.reduce` the whole-dataset replacement).
 - **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`

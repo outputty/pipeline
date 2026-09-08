@@ -295,8 +295,8 @@ produced, never assuming there was one.
 > the next chunk.
 > **`Pipeline.reduce(fn, initial)`** - folds EVERY chunk the pipeline produces. On a dispatching
 > class (`ConcurrentPipeline.reduce(fn, initial)`, an override the base `Pipeline` never gains) it
-> runs remotely like any other stage, over one duplex connection whose accumulator lives for the
-> life of that connection; `.local(build)` keeps it in the orchestrating process instead.
+> partitions the stream into `maxConcurrency` independent accumulators; each partition's own result
+> flows downstream as an ordinary value, the same as any other multi-value reducer output.
 > **`emit`** - the reducer callback's fourth parameter, `(acc, item, ctx, emit)`. Calling it pushes
 > a value downstream mid-fold and lets the caller decide what a finished result is. The final
 > accumulator is emitted only if items were folded since the last `emit()`.
@@ -337,8 +337,44 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 [60, 90]
 ```
 
-A reduce stage is a serialization point: one accumulator, and on a dispatching class one connection,
-so `maxConcurrency` does not apply to it. With `ordered: false` upstream the reducer folds in
-completion order, so the fold must be order-insensitive. And because a remote reducer's emits arrive
+On a dispatching class, `.reduce()` partitions across `maxConcurrency` independent accumulators.
+Nothing merges them automatically - each partition's own result flows downstream as its own value:
+
+```ts
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .toArray();
+```
+
+```json
+[7, 8]
+```
+
+(two numbers summing to 15 - the split is timing-dependent). A caller who wants ONE value writes an
+ordinary second reduce as the next stage, the same pattern used to fold down any other multi-value
+reducer output:
+
+```ts
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
+  .toArray();
+```
+
+```json
+[15]
+```
+
+Reusing the fold itself as that second reduce is silently wrong in general: a count folds
+`(acc, _x) => acc + 1`, and folding ITS OWN partials with the same function counts the partials, not
+the items. There is no order between partitions, so a caller's own merge must be order-insensitive
+regardless of `ordered` upstream - `ordered: false` upstream already required an order-insensitive
+fold before partitioning existed, for the same reason. And because a remote reducer's emits arrive
 while the input is still streaming, a failure mid-stream reaches the caller after values have
 already flowed downstream - the price of results that arrive as they happen.

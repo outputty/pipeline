@@ -300,3 +300,26 @@ const context = pipeline.contextManager.toDict();
 A tap's context write is per chunk, never per item: the whole chunk is tapped before the next stage
 sees any of it. Over `[1, 2, 3]`, a tap writing `last` followed by a map reading it gives `["1:3",
 "2:3", "3:3"]`, not `["1:1", "2:2", "3:3"]`.
+
+## Case 10 - a partitioned reduce, merged by hand
+
+On `ConcurrentPipeline` (and `HttpPipeline`/`ClusterPipeline`), `.reduce()` (#62) partitions across
+`maxConcurrency` independent accumulators instead of one. Each partition's own result flows
+downstream as an ordinary value - no forced merge, no thrown error. A caller who wants ONE final
+value writes an ordinary second reduce as the next stage.
+
+<!-- compiles -->
+
+```ts
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
+  .toArray();
+```
+
+```json
+[15]
+```

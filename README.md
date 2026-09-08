@@ -339,9 +339,40 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 console.log(data); // [60, 90]
 ```
 
-On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, `.reduce()` runs remotely like any other
-stage - one accumulator over one connection for the whole stream, so `maxConcurrency` is inert on
-it. `.local((p) => p.reduce(...))` keeps it in the orchestrating process instead.
+On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, `.reduce()` partitions the stream into
+`maxConcurrency` independent accumulators. Each partition's own result - an `emit()` mid-fold, or
+its trailing accumulator once its share of the stream ends - flows downstream as an ordinary value,
+the same way `emit()` output already does above: no forced merge, no thrown error.
+
+<!-- compiles -->
+
+```typescript
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .toArray();
+
+console.log(data); // two numbers summing to 15, e.g. [7, 8] - split is timing-dependent
+```
+
+A caller who wants ONE final value writes an ordinary second reduce, the same pattern used to fold
+down any other multi-value reduce output - nothing named "combine":
+
+<!-- compiles -->
+
+```typescript
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .buffer(2)
+  .reduce((acc: number, x: number) => acc + x, 0)
+  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
+  .toArray();
+
+console.log(data); // [15]
+```
 
 ## Error Handling
 

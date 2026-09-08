@@ -25,6 +25,60 @@ the base `Pipeline`. `tsc` returned six errors - three `TS2339: Property 'tap' d
 one vanished when the method moved to `Pipeline.prototype`. `~/.claude/rules/code.md`'s probe-shape
 rule gains its inverse: declare the member at the level the design puts it.
 
+## 2026-09-07 #62's enable layer's `/code-review --fix` edited three docs-layer files
+
+`code-review medium --fix`, scoped to the enable layer's own diff (`concurrent.ts` + the test file),
+also rewrote `README.md`/`.claude/architecture.md`/`.claude/product.md` to fix a doc claim the code
+change made stale - correct content, wrong PR, since the docs layer already owned those files in the
+posted plan. Caught by reading `git status --porcelain` after the review returned and reverting the
+three files before committing; the docs layer reproduced the identical fix as part of its own pass.
+`~/.claude/rules/issues.md` gets a new rule: diff review `--fix` output against the current layer's
+own planned file list before staging.
+
+## 2026-09-07 A sixth `ScheduleWakeup` call waiting on a backgrounded `/code-review`
+
+The identical mistake `.claude/lessons.md`'s own 2026-09-07 entry (from #61's build) already logged
+- calling `ScheduleWakeup` to wait on a backgrounded `/code-review` subagent - recurred in this
+session, which had not read that entry before making the call. Self-caught one message later, same
+as the fifth time. `~/.claude/rules/code.md`'s existing rule is sharpened rather than given a sixth
+enumerated trigger: the general form (any "come back later" tool reached for while background work
+is pending) is now named as the trigger, not the specific tool or argument shape.
+
+## 2026-09-07 #62's own shipped combine-debt throw was reopened mid-review without checking for prior art
+
+The user's plain rejection of the throw ("I don't want it to throw") led straight into redesigning
+it from scratch, without re-checking `~/.claude/skills/partitioned-folds/` - a domain skill that
+existed two hours before this build's own L1 commit (so it was present at build start, when Orient
+step 2 says to load it) and already named "a combine expressed as a second reduce stage" as its own
+recommended pattern, which would have settled the "keep or remove the throw" question immediately.
+Unverified whether the skill was loaded and its Patterns list skimmed past, or not loaded at all -
+either way, the pattern it already recorded wasn't applied at the point the throw was reopened.
+`~/.claude/skills/build/SKILL.md`'s Orient step 2 is sharpened to name reading the skill's own
+`## Patterns` list as part of loading it, not just skimming it once; `partitioned-folds/SKILL.md`'s
+own Pattern and Rule entries are marked with which one #62 shipped, so the next session's load finds
+the answer already recorded instead of re-deriving it.
+
+## 2026-09-07 A test's own tolerant `.local()` call masked test-isolation leakage that a stricter check surfaced
+
+Several `reduce.e2e.test.ts` cases relied on `PIPELINE_PARTITIONED_REDUCE=1` still being set from a
+sibling test's own setup rather than setting it themselves - harmless under a hand-written
+`.local()` fold, which never checked anything and just re-folded regardless of which code path ran.
+A stricter combine-debt check (since deleted, see the next entry) turned two of them into real
+failures the moment it was tried. The bug was already there; the looser call had been silently
+absorbing it - every affected test now sets its own flag rather than relying on ambient state.
+
+## 2026-09-07 The same combine-debt mechanism was reopened three times in one session before it was deleted outright
+
+The shipped throw (Done-when 4/6) became a `.combine()` sugar method, then a phantom compile-time
+type layer (mid-build, never committed), then was deleted entirely - three real reversals of the
+same mechanism, each time after fresh research (an expert skill, an independent multi-agent verdict)
+recommended KEEPING some form of it. The user's own direction won every round; the research was not
+wrong, it was answering a question the user had already closed differently. Past the second reversal
+of the identical mechanism, re-litigating it with new evidence costs a round-trip the user's own
+repeated, consistent statement had already settled - confirm the new shape once and build it instead.
+`~/.claude/rules/code.md` gains a rule: when a shipped mechanism's value is questioned a second time,
+price deleting it before designing another layer to protect it.
+
 ## 2026-09-07 #61's Done-when 7 silently contradicted Done-when 5 and its own Constraints
 
 Done-when 7 said "no file outside `src/`, `__tests__/` and `.claude/` changed"; Done-when 5 and the
