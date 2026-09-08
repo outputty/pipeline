@@ -171,34 +171,63 @@ const data = await merged.toArray(); // [1,2,3,4,5,6]
 [1, 2, 3, 4, 5, 6]
 ```
 
-## Case 6 - chunk-level error handling
+## Case 6 - per-row error recovery, and the run-level decision (pending #78)
 
-A throw inside `.catch()`'s sub-chain hands the whole failing chunk to the handler; a small enough
-input is one chunk, so one bad item drops or replaces the entire result. The handler's returned
-array REPLACES the chunk; returning nothing DROPS it (#15).
+Error handling sits on the function that failed. `Transformer.onError(fn)` is the row handler: it
+receives the failing item and the error, and returns a replacement value, returns `DROP` to remove
+the row, or throws to escalate. It applies to every element-wise call in the chain wherever it is
+written, so the rows that parsed survive the one that did not.
 
 <!-- compiles -->
 
 ```ts
-import { Pipeline } from "@outputty/pipeline";
+import { Pipeline, DROP } from "@outputty/pipeline";
 
-const data = await new Pipeline(["a", "b", "3", "d", "5"])
-  .transform((t) =>
-    t.catch(
-      (sub) =>
-        sub.map((s: string) => {
-          const n = parseInt(s);
-          if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-          return n;
-        }),
-      () => [999],
-    ),
-  )
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
+
+const dropped = await new Pipeline(["a", "b", "3", "d", "5"])
+  .transform((t) => t.onError(() => DROP).map(parseStrict))
   .toArray();
 ```
 
 ```json
-[999]
+[3, 5]
+```
+
+Returning a value repairs the row in place instead of removing it:
+
+<!-- compiles -->
+
+```ts
+const repaired = await new Pipeline(["a", "b", "3", "d", "5"])
+  .transform((t) => t.onError(() => -1).map(parseStrict))
+  .toArray();
+```
+
+```json
+[-1, -1, 3, -1, 5]
+```
+
+`Pipeline.onError(fn)` is the run handler, for a failure no row handler repaired: returning drops the
+failing chunk and the run continues, throwing stops it. At `.buffer(1)` each row is its own chunk,
+so the chunk carrying `"x"` is the only one lost.
+
+<!-- compiles -->
+
+```ts
+const survived = await new Pipeline(["1", "x", "3", "4"])
+  .buffer(1)
+  .onError((err) => console.warn(err.message))
+  .transform((t) => t.map(parseStrict))
+  .toArray();
+```
+
+```json
+[1, 3, 4]
 ```
 
 ## Case 7 - a reducer that folds the whole stream, and emits mid-fold

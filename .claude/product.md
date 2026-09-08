@@ -29,7 +29,7 @@ unchanged inside a `Pipeline`, over an HTTP paginator, or inside a laygo `Source
 > `.tap()` to observe without changing the data, and one of five terminal ops (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`) to
 > drain it.
 > **Transformer** - the chainable, reusable chunk-transform: `new Transformer<In, Out>(options?)`,
-> `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.catch()`. `.process(chunks, context?)` runs
+> `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.onError()`. `.process(chunks, context?)` runs
 > it directly over an `AsyncIterable` of already-cut chunks, independent of `Pipeline` - it takes no
 > chunk size or chunker of its own.
 
@@ -254,56 +254,65 @@ console.log(await pipeline.toArray(), pipeline.contextManager.toDict());
 
 ### Error handling
 
-A chunk that throws mid-chain is handled at the chunk, never the row: `.catch()` runs a sub-chain and
-hands a failing chunk to a handler that can replace it or drop it, so one bad row's blast radius is
-bounded and explicit.
+Error handling belongs to the function that failed. A callback that throws on one row hands that row
+to the row handler, which replaces it, drops it, or escalates - the other rows in the chunk are
+unaffected. A failure the row handler escalates, or one a chunk-wide operation raises, reaches the
+pipeline's own handler, which decides whether the run continues without that chunk or stops.
 
-> **`.catch(build, onError?)`** - `build` is the sub-chain to guard; `onError` receives the failing
-> `chunk` and `Error`, and its return value (an array, or nothing) replaces or drops the chunk.
+> **`Transformer.onError(fn)`** - the row handler. `fn` receives the failing `item`, the `Error` and
+> the context; returning a value puts that value in the row's place, returning `DROP` removes the
+> row, and throwing escalates to the pipeline. It applies to every element-wise call in the chain -
+> `.map()`, `.filter()`, `.flatMap()`, `.tap(fn)` and `.reduce()`'s fold step - wherever in the chain
+> it is written, and it may be async.
+> **`DROP`** - the exported sentinel a row handler returns to remove a row, so `undefined` stays an
+> ordinary value a handler may return.
+> **`Pipeline.onError(fn)`** - the run handler. `fn` receives the `Error` and the context; returning
+> drops the failing chunk and the run continues, throwing stops the run with that error.
 
 ```ts
-import { Pipeline } from "@outputty/pipeline";
+import { Pipeline, DROP } from "@outputty/pipeline";
 
 const data = await new Pipeline(["a", "b", "3", "d", "5"])
   .transform((t) =>
-    t.catch(
-      (sub) =>
-        sub.map((s: string) => {
-          const n = parseInt(s);
-          if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-          return n;
-        }),
-      () => [999],
-    ),
+    t
+      .onError(() => DROP)
+      .map((s: string) => {
+        const n = parseInt(s);
+        if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+        return n;
+      }),
   )
   .toArray();
 ```
 
 ```json
-[999]
+[3, 5]
 ```
 
-`.onError()` is the other half: a notification, never a recovery path, that fires on every chunk
-failure with the chunk that actually failed - `.catch()` remains the only way to keep the run going.
-
-> **`Transformer.onError(fn)`** - `fn` receives the failing `chunk` and `Error`; its return value is
-> ignored. Several handlers registered this way run LIFO (last-registered first), and every one runs
-> regardless of what an earlier one returned. The run still rejects with the original error - this
-> is a hook, not `.catch()`'s replacement mechanism.
+A row the handler replaces keeps its place in the output, so a chunk is repaired rather than lost:
 
 ```ts
-import { Pipeline, Transformer } from "@outputty/pipeline";
+const repaired = await new Pipeline(["a", "b", "3", "d", "5"])
+  .transform((t) => t.onError(() => -1).map(parseStrict))
+  .toArray();
+```
 
-const seen: number[][] = [];
-const transformer = new Transformer<number, number>()
-  .map((x: number) => {
-    if (x === 3) throw new Error("boom on 3");
-    return x;
-  })
-  .onError((chunk) => seen.push(chunk));
+```json
+[-1, -1, 3, -1, 5]
+```
 
-await new Pipeline([1, 2, 3, 4]).buffer(2).apply(transformer).toArray().catch(() => {});
-console.log(seen); // [[3, 4]] - the chunk that failed, chunkSize 2 over [1,2,3,4]
+The run handler is what keeps a stream alive past a chunk nothing could repair:
+
+```ts
+const survived = await new Pipeline(["1", "x", "3", "4"])
+  .buffer(1)
+  .onError((err) => console.warn(err.message))
+  .transform((t) => t.map(parseStrict))
+  .toArray();
+```
+
+```json
+[1, 3, 4]
 ```
 
 ### Reducing

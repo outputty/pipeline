@@ -11,6 +11,19 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 - **A conformance suite every `Pipeline` and Context class runs** (#37) and **cross-runtime
   benchmarks** (#11) are the other open tickets; each issue carries its own detail.
+- **Error handling moves onto the function that failed** (#78, `feat!`). `Transformer.onError(fn)`
+  becomes the ROW handler - return a value to replace the row, the exported `DROP` sentinel to
+  remove it, or throw to escalate - reaching every element-wise call and `Transformer.reduce()`'s
+  fold step, wherever in the chain it is written. `Pipeline.onError(fn)` becomes the RUN handler:
+  returning drops the failing chunk and the run continues, throwing stops it. `.catch()`,
+  `ChunkErrorHandler` and `ErrorHandler` are deleted. Now, because one bad row costs a whole chunk
+  of good ones today (`t.catch((sub) => sub.map(parseStrict), () => [999])` over
+  `["a","b","3","d","5"]` returns `[999]`, losing the `3` and the `5` that parsed), and because a
+  sub-chain region makes the recovery point unpredictable while the per-row workaround callers
+  already write (`t.flatMap` with its own try/catch, real `[3,5]`) has nowhere to report a failure.
+  Measured: the seam costs nothing when no handler is registered (344.9 ns/row against a 353 ns/row
+  floor at 1M rows) and about 8-12% when one is.
+
 - **`.tap()` becomes the one observation surface** (#72). `.withHooks()` is deleted with
   `TransformerLifecycleHooks`, and `Pipeline` gains its own `.tap()` that always runs in the
   orchestrating process. Now, because `.withHooks()` is silently order-sensitive - `pipe()` drops it,
@@ -168,6 +181,43 @@ The two older candidates, still not filed:
   `In`/`Out` with no `transform`. PRs #7, #8, #10, #12.
 
 ## Killed
+
+- **A `.catch()`-shaped per-row region** (#78, spiked) - a region combinator whose sub-chain runs row
+  by row, the per-row sibling of `.catch()`. Killed by measurement: per-row execution changes what a
+  chunk-aware link inside the region MEANS. Real, `.reduce((acc, x) => acc + x, 0)` over
+  `[1,2,3,4,5]`: `.buffer(5)` gives `[15]`, `.buffer(1)` gives `[1,2,3,4,5]`. Sound only for
+  element-wise links, which is a per-function handler wearing a bigger API.
+
+- **`Promise.allSettled` as the per-row mechanism** (#78, spiked) - the obvious way to attribute a
+  rejection to its row without a wrapper. Killed on correctness, not cost: `chunk.map((x) => fn(x))`
+  runs `fn` during the array build, so a SYNCHRONOUS throw (`JSON.parse`, `parseInt`, a schema
+  parse) escapes before `allSettled` is ever called. Real: `R1 bare allSettled -> THREW: Invalid: x`
+  against `R2 async-wrapped -> ["fulfilled","rejected","fulfilled"]`. The `async` wrapper it needs
+  IS the per-row try/catch candidate, plus allSettled's own result objects - 430 against 381 ns/row
+  at 1M.
+
+- **A sequential fold, and an optimistic re-run, as the per-row mechanism** (#78, spiked) - both sit
+  at the floor for synchronous callbacks and collapse on an async one, because both recover a chunk
+  by walking it one row at a time. Real at 10k rows with a 1 ms callback: `.map()` today 18.51 ms,
+  per-row try/catch 18.15 ms, the sequential loop 12497.87 ms, the optimistic re-run 13804.81 ms
+  once one row per chunk fails. The optimistic form also re-runs every good row's side effects.
+
+- **`Pipeline.onError()` as a catch on the drain side** (#78, spiked) - catching at `toArray()` and
+  continuing. Killed because an async generator that throws is finished: a `Pipeline` over
+  `["1","x","3","4"]` at `.buffer(1)` yields `[[1]]` then `done`, losing rows `3` and `4`, where the
+  same failure guarded inside the per-chunk loop yields `[1,3,4]`. The guard lives at the two
+  per-chunk sites #40 built instead.
+
+- **`ts-pattern` for the `DROP` sentinel** (#78, spiked at 5.9.0, then uninstalled) - asked for, then
+  killed by the user on its measured price. It would be this package's FIRST runtime dependency
+  (`package.json` carries no `dependencies` key) and is the one #5 already removed, and
+  `tsup.config.ts`'s `external` names only `p-limit`, so it would be bundled into `dist`. It does
+  match a `unique symbol`, but `.exhaustive()` - the only part worth paying for - is not callable at
+  the three real sites, which are all generic in `U`: with every arm present, `tsc --strict` refuses
+  with `TS2349 … NonExhaustiveError<unknown>`. The tagged
+  `{ kind: "keep"; value: U } | { kind: "drop" }` wrapper that restores it costs 254.4 ns/row for the
+  match plus 13.7 to build the wrappers, against 9.6 ns/row for `!== DROP`; `match/otherwise` on the
+  bare sentinel compiles at 30.9 ns/row and carries no guarantee at all.
 
 - **The combine debt** (#62, built and shipped on L1/L2, then deleted before merge) - `owesCombine`, a
   tracked flag every copy-on-write `Pipeline` method carried forward, and `assertCombined()`, throwing

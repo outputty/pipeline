@@ -148,7 +148,7 @@ none of it survived the hand-trim (#745).
   instance `.merge(...others)` (#41), concatenating other pipelines onto ONE already held, keeping
   its own class, knobs and stage numbering instead of building a stranger.
 - **Transformer** - the chainable chunk-transformation builder: `new Transformer<In, Out>(options?)`,
-  `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.catch()`. Chunk-agnostic (#39) - it never decides how its own input was cut, only
+  `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.onError()`. Chunk-agnostic (#39) - it never decides how its own input was cut, only
   processes whatever chunk it is handed. `.process(chunks, context?)` runs it directly over an
   `AsyncIterable` of already-cut chunks, independent of `Pipeline` - always sequentially, one chunk
   at a time (#17); wrap the chain in a `ConcurrentPipeline` for concurrency instead of configuring
@@ -264,26 +264,27 @@ none of it survived the hand-trim (#745).
   `TransformerLifecycleHooks` (#72, BREAKING) - `pipe()` deliberately dropped `hooks`, making the
   knob silently order-sensitive, and its invariant `Out` was what broke `t.tap(someTransformer)`.
   `onStart`/`onComplete`/`onItemStart`/`onItemComplete` go unreplaced by decision.
-- **Error handling / `.catch()`** - a `Transformer.catch(build, onError?)` runs a sub-chain and, on a
-  chunk-level throw, hands the failing chunk and error to a `ChunkErrorHandler` (`src/types.ts` - the
-  ONE declaration; `src/errors/handler.ts` takes the same shape inline, never re-declaring or
-  re-importing the name) - return a replacement array to substitute the chunk, or nothing to drop it.
-  Never a per-item try/catch: the unit of failure and recovery is the chunk. Several handlers chained
-  onto ONE `ErrorHandler` (`.catch()`'s own, or `Transformer.onError()`, below) run LIFO
-  (last-registered first); for `.catch()`, the first one to return an array wins (#15).
-- **`Transformer.onError(fn)`** - the notification sibling: `fn` receives the chunk that ACTUALLY
-  failed and the `Error`, fires on every registered handler (LIFO, all of them, every time - its
-  return value is ignored, unlike `.catch()`'s), and the run still rejects with the original error
-  regardless - `.catch()` is the only recovery path. Drives the same `ErrorHandler` `.catch()` does,
-  through `Transformer.chunkErrorReporter` (#40, BREAKING: a handler used to see `[]`,
-  `Transformer.process()`'s own loop-scope catch being the only caller, and refused outright on a
-  dispatched stage - `dispatchKnobViolations` keeps only its `withHooks` branch now).
-  `ConcurrentPipeline.apply()`'s wrapped `work` calls it immediately for a dispatched stage
-  (`HttpPipeline`/`ClusterPipeline` included, since both only narrow `apply()`'s RETURN TYPE and
-  delegate to `super.apply()` unchanged); for a local stage, `runSequentially`'s own per-chunk
-  try/catch CAPTURES the chunk where it is still in scope, but `process()`'s own outer catch is
-  what calls the reporter, deferred until after `hooks.onError` runs, so the two independent
-  notification mechanisms keep the same relative order they had before this ticket.
+- **Error handling / `.onError()`** (#78) - error handling belongs to the function that failed; there
+  is no chunk-level region and no `.catch()`. `Transformer.onError(fn)` is the ROW handler:
+  `(item, error, ctx) => value | DROP | throw`, one plain function, async allowed. It is
+  transformer-scoped and position-independent - `pipe()` carries it forward, so `t.onError(h).map(f)`
+  and `t.map(f).onError(h)` behave identically - and it reaches every ELEMENT-WISE call plus
+  `Transformer.reduce()`'s fold step: `.map()`, `.filter()`, `.flatMap()`, `.tap(fn)`. It never
+  reaches a chunk-aware link (`.tap(transformer)`, `.loop()`) nor `Pipeline.reduce()`, which folds
+  `this._chunks` with no `Transformer` in scope at all. `DROP` is an exported `unique symbol`, so
+  `undefined` stays an ordinary value a handler may return; every site tests it with `!== DROP`
+  (ts-pattern was priced and killed, see `.claude/roadmap.md`). `Transformer.runnable()` is the seam
+  that carries the handler in: it reads `this.rowHandler` off the FINAL transformer and is called at
+  `Pipeline.apply()`, `ConcurrentPipeline.apply()` and `ConcurrentPipeline.stageWork()`, which is
+  what reaches `HttpPipeline.fetch()`'s own registry lookup too; `InternalTransformer` gains an
+  optional third `run?: RunScope` parameter that `pipe()` forwards. `Pipeline.onError(fn)` is the RUN
+  handler: `(error, ctx) => void`, returning drops the failing CHUNK and continues, throwing stops
+  the run. It cannot live at the drain - once a stage's generator throws it is finished - so it
+  plugs into `runSequentially`'s per-chunk try/catch and `ConcurrentPipeline.apply()`'s wrapped
+  `work`, the two sites #40 built. BREAKING three ways, no deprecation period: `.catch()`,
+  `ChunkErrorHandler` and `ErrorHandler` are deleted from the export surface, `.onError()`'s #40
+  notification contract is replaced, and whole-chunk REPLACEMENT goes unreplaced by decision - a
+  chunk-level failure can only continue with that chunk dropped, or stop.
 
 ## Toolchain
 
