@@ -310,30 +310,14 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
    * exactly like a non-partitioned reduce's own `emit()` output already does: no debt, no throw, no
    * combine step. A caller who wants ONE final value writes an ordinary second reduce, the same way
    * they would fold down any other multi-value reduce output: `.local((p) => p.reduce(mergeFn,
-   * initial))` runs it in-process, over the WHOLE stream, sequentially. Gated on
-   * `PIPELINE_PARTITIONED_REDUCE=1` until the enable layer (#62's own stack); the pre-#62
-   * single-accumulator fold runs otherwise.
+   * initial))` runs it in-process, over the WHOLE stream, sequentially.
    *
-   * `PIPELINE_PARTITIONED_REDUCE=1`:
    * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0)
    * .local((p)=>p.reduce((a,v)=>a+v,0)).toArray()` → `[15]`.
    */
   override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U> {
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
-
-    if (process.env.PIPELINE_PARTITIONED_REDUCE !== "1") {
-      // TEMPORARY (#62 L2, deleted at the enable layer): the pre-#62 single-accumulator fold, one
-      // `reduceWork()` call over the WHOLE chunk stream - kept until every caller of this method
-      // (including the tests this stack ships) has moved onto the partitioned form.
-      const newChunks = work(this._chunks, this._context);
-      return this.createPipeline<U>(newChunks, {
-        context: this._context,
-        chunkTransforms,
-        reduceStages,
-        preBufferItems: null,
-      });
-    }
 
     // ONE shared iterator over `this._chunks` - `maxConcurrency` partitions each get their own
     // `share()` view of it, never their own slice: the partition count is a CEILING, not a
