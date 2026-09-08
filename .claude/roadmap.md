@@ -15,7 +15,12 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   against it. Now, because planning found four separate reasons a case could not run everywhere, and
   each turned out to be a defect rather than a boundary - three of them since fixed by #39
   (chunking), #40 (error handlers) and #41 (`merge` keeping its class).
-- **Cross-runtime benchmarks** (#11) - the other open ticket; the issue carries its own detail.
+- **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
+  `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
+  change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results
+  committed as JSON; the second table controls measured ITEMS IN FLIGHT rather than any declared
+  concurrency option, because no two libraries name that knob the same way. Layout and rationale in
+  `.claude/architecture.md`'s Benchmarks section.
 - **Error handling moves onto the function that failed** (#78, `feat!`). `Transformer.onError(fn)`
   becomes the ROW handler - return a value to replace the row, the exported `DROP` sentinel to
   remove it, or throw to escalate - reaching every element-wise call and `Transformer.reduce()`'s

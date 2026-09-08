@@ -223,6 +223,35 @@ this used to name). `.buffer()` reaches a dispatched stage exactly like a local 
 `Pipeline` owns the cut, not `Transformer` - the refusal this used to need for a custom chunker
 (`setChunker`, deleted with `Transformer`'s own chunking fields) has nothing left to refuse.
 
+`ConcurrentPipeline` bounds CHUNKS, not items: `maxConcurrency` chunks are in flight and every item
+inside a chunk runs together, so a chain's items in flight is the buffer size times
+`maxConcurrency`. Measured peak simultaneous callbacks on the current class, N=5000 (`10x10` 100,
+`50x4` 200, `100x3` 300, `1000x1` 1000, `7x11` 77) and N=20000 (`1000x3` 3000) - the product exactly,
+coprime factors included.
+
+How that product is SPLIT is a throughput choice, not a parallelism one. Two pairs reaching the same
+16 in flight over 50000 items of microtask-only work: `.buffer(16)` with `maxConcurrency: 1` ran
+27 ms and `.buffer(1)` with `maxConcurrency: 16` ran 63 ms, because a chunk pays the per-chunk cost
+once where `.buffer(1)` pays it per item. The gap closes when the callback dominates - the same pair
+over a 2 ms-per-item workload, N=160, ran 23 ms each. Prefer the widest chunk that fits the
+in-flight budget.
+
+## Benchmarks - pending #11
+
+`benchmarks/` is a separate project, outside the pnpm workspace, that installs its comparators once
+in a `deps` image and runs them on six pinned runtimes: `node:20/22/24/26-alpine`,
+`oven/bun:1.3.14-alpine`, `denoland/deno:alpine`. It consumes the package the way a consumer does -
+`npm pack` to a tarball, installed by `file:` reference - so `exports` and the `files` allowlist are
+exercised rather than bypassed.
+
+Two tables. The first times `map` then `filter` then `toArray` at 10k, 100k, 1M and 10M rows across
+every chaining surface: `Array.prototype`, `Iterator.prototype`, `node:stream` `Readable`, Web
+Streams `pipeThrough`, a hand-written `async function*`, this package, and `ix` /
+`streaming-iterables` / `effect` / `rxjs`. The second controls ITEMS IN FLIGHT rather than any
+declared concurrency option, because no two libraries name that knob the same way and this package
+reaches it through `.buffer(size)` times `maxConcurrency`; the harness asserts each leg's measured
+peak equals the target before recording a time.
+
 A worker process (`ClusterPipeline`'s own bootstrap; `HttpPipeline`'s own `.fetch()`-side instance
 in general) never orchestrates: its chunk stream is empty, set at construction, so every terminal op
 resolves immediately with an EMPTY result - the worker exists only to hold the transforms
