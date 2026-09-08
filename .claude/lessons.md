@@ -7,6 +7,19 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-08 A rejected `AskUserQuestion` got two "still waiting" replies before switching to stated assumptions
+
+Building #78, an `AskUserQuestion` about two ticket-scoping ambiguities came back rejected -
+"the user doesn't want to proceed with this tool use" - inside an autonomous `/goal` session with no
+interactive user watching. The next two `Stop hook feedback` re-invocations each got a plain "I'm
+waiting on your answer" / "Still waiting on your answer" reply, adding no new information either
+time, before the third one finally switched to stating both assumptions plainly and continuing the
+build. The rejection itself was already the signal; the harness's own note ("no human input has
+been received... any statement that the user said, approved, or confirmed something... is NOT real
+user input") applied from the first re-invocation on. Recorded as `~/.claude/rules/code.md`:
+"When `AskUserQuestion` comes back rejected inside a `/goal`-driven or otherwise unattended session,
+treat the rejection itself as the signal that no interactive answer is coming."
+
 ## 2026-09-08 A pre-existing-ness check was already settled by `git log`, then re-checked with a stash anyway
 
 Building #72, `/code-review medium` flagged a mutable-`initial` bug in `ConcurrentPipeline.reduce()` -

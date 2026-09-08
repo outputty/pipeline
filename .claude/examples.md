@@ -171,7 +171,7 @@ const data = await merged.toArray(); // [1,2,3,4,5,6]
 [1, 2, 3, 4, 5, 6]
 ```
 
-## Case 6 - per-row error recovery, and the run-level decision (pending #78)
+## Case 6 - per-row error recovery, and the run-level decision
 
 Error handling sits on the function that failed. `Transformer.onError(fn)` is the row handler: it
 receives the failing item and the error, and returns a replacement value, returns `DROP` to remove
