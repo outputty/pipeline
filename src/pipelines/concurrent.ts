@@ -41,25 +41,6 @@ interface TaggedResult<U> {
 }
 
 /**
- * Which of a `Transformer`'s knobs are INERT on a DISPATCHED stage - `stageWork()` runs the stage
- * directly (its own `.transform` function, or a POST over the wire), never `Transformer.process()`,
- * so `.hooks` never take effect there (architecture.md's own documented contract; `.buffer()`
- * reaches a dispatched stage exactly like a local one now, since `Pipeline` owns the cut, so there
- * is nothing left to check for chunking - #39 deleted the whole `chunkSize`/`setChunker` half of
- * this check along with `Transformer`'s own knobs). `.onError()` left this check in #40:
- * `apply()`'s own wrapped `work` (below) reports a dispatched stage's failing chunk directly, so an
- * `.onError()` handler no longer needs `process()` to fire at all.
- *
- * `dispatchKnobViolations(new Transformer().withHooks({}))` → `["withHooks"]`;
- * `dispatchKnobViolations(new Transformer())` → `[]`.
- */
-function dispatchKnobViolations<In, Out>(transformer: Transformer<In, Out>): string[] {
-  const violations: string[] = [];
-  if (transformer.hooks !== undefined) violations.push("withHooks");
-  return violations;
-}
-
-/**
  * `ordered: true`'s fan-out: a sliding window of `maxConcurrency` chunks, yielded in ARRIVAL
  * order (never completion order) - a chunk finishing early still waits behind an earlier, slower
  * one. Streams: only `maxConcurrency` chunks are ever pulled ahead of what has been yielded.
@@ -263,19 +244,6 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
   }
 
   override apply<U>(transformer: Transformer<T, U>): ConcurrentPipeline<U> {
-    // `withHooks` only ever takes effect through `Transformer.process()`, which `stageWork()`
-    // (below) never calls on ANY consumption path - not just async-iteration, the way the base
-    // class's own terminal-op path is fine but its old source-position path was not. Fail loud
-    // immediately rather than silently never firing.
-    const knobViolations = dispatchKnobViolations(transformer);
-    if (knobViolations.length > 0) {
-      throw new Error(
-        `${this.constructor.name}: ${knobViolations.join("/")} never take effect on a dispatched ` +
-          `stage (stageWork() runs the stage directly, never Transformer.process()). Drop the ` +
-          `knob, or wrap it in .local(build) to run it in-process instead.`,
-      );
-    }
-
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
     // Reports the chunk `stageWork()` was actually given, then rethrows - `Transformer.process()`'s

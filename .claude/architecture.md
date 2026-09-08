@@ -140,7 +140,7 @@ mechanism (`_rootSource`/`_sourcePositionViolations`/`inertKnobsOf`, `normalize(
 only to protect against a knob a SEPARATE replay path couldn't honor; once every consumption path
 reads the one real chunk stream, there is nothing left for it to protect against.
 
-## Observation - pending #72
+## Observation
 
 `.tap()` is the one observation surface, at two levels that differ only in WHERE the callback runs.
 `Transformer.tap` is an ordinary `pipe()` link, so it travels with its stage: on a dispatching class
@@ -148,15 +148,17 @@ the callback executes in the worker, and the `ctx.set()` it makes never crosses 
 carries `{ chunk, context }` out and `{ chunk }` back). `Pipeline.tap` is declared once on the base
 as `tap(arg): this` and wraps `Transformer.tap` in `.local(build)`, which pins the callback to the
 orchestrating process on every class. Its stage occupies an index like any other, and the dispatched
-stages either side of it still dispatch - measured over a real loopback `HttpPipeline`, a tap between
-two dispatched stages ran only in the caller and the output was unchanged.
+stages either side of it still dispatch - measured over a real loopback `HttpPipeline` with a tap
+between two dispatched stages: `orchestratorSeen [2,4,6,8,10]`, two HTTP requests served (one per
+dispatched stage, none for the tap), the worker's OWN identical `.tap()` call never invoked.
 
-`.withHooks()` and `TransformerLifecycleHooks` are deleted by the same ticket. `pipe()` deliberately
-dropped `hooks` when `Out` changed, so the knob fired or did not depending on where in the chain it
-was written, and `dispatchKnobViolations` could not refuse what `.map()` had already discarded.
-`dispatchKnobViolations` and `ConcurrentPipeline.apply()`'s refusal go with `.withHooks()` - #40
-already removed the `onError` branch, since a dispatched stage's own `.onError()` handler now fires
-directly off `ConcurrentPipeline.apply()`'s wrapped `work` and needs no refusal to protect it.
+The index consequence follows from `.local()` carrying the built region's own `_chunkTransforms`
+back (`Pipeline.local`, below): a `Pipeline.tap()` call occupies a real slot in that shared array even
+though it never dispatches, so a stage placed after it gets the NEXT index along, not the one its
+position in the chain alone would suggest. A second instance's own registry (`HttpPipeline.fetch`'s
+`_chunkTransforms` lookup) needs the identical `.tap()` call built into it too, for its indices to
+line up with the orchestrator's - a real second instance already has it, since it re-executes the
+same entry module.
 
 ## The pipeline family
 
@@ -214,14 +216,15 @@ own RESULT ARRAY rather than flattening it: the fanned-out output IS itself a re
 boundary, so a later `.buffer()` recuts from it exactly like any other stage's output. `apply()`
 wraps `stageWork()`'s own work in a try/catch of its own (#40) - `Transformer.process()` never runs
 on this path, so this wrapper is the one place a dispatched stage's failing chunk is still in scope,
-and #78 makes it the site `Pipeline.onError()` plugs into, returning `[]` to drop the chunk. A knob
-that only
-ever takes effect via `process()` itself (`.withHooks()`, now the only one) THROWS immediately on a
-non-local stage instead of silently never firing (`dispatchKnobViolations`, `concurrent.ts`); wrapping
-the stage in `.local(build)` is the escape hatch (#61 deleted the old per-stage `StageOptions` flag
-this used to name). `.buffer()` reaches a dispatched stage exactly like a local one, since
-`Pipeline` owns the cut, not `Transformer` - the refusal this used to need for a custom chunker
-(`setChunker`, deleted with `Transformer`'s own chunking fields) has nothing left to refuse.
+and #78 makes it the site `Pipeline.onError()` plugs into, returning `[]` to drop the chunk. No
+`Transformer` knob is inert on a dispatched stage any more - #40 already moved `.onError()`'s own
+notification off `process()` entirely, and #72 deletes the last one that only ever took effect there
+(the old lifecycle-hooks knob) along with `dispatchKnobViolations`, the refusal that used to guard
+it - so a caller who needs a stage kept in-process reaches for `.local(build)` (#61) by choice, not
+because leaving it dispatched would silently do nothing. `.buffer()` reaches a dispatched stage
+exactly like a local one, since `Pipeline` owns the cut, not `Transformer` - the refusal this used to
+need for a custom chunker (`setChunker`, deleted with `Transformer`'s own chunking fields) has
+nothing left to refuse.
 
 `ConcurrentPipeline` bounds CHUNKS, not items: `maxConcurrency` chunks are in flight and every item
 inside a chunk runs together, so a chain's items in flight is the buffer size times

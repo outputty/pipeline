@@ -258,11 +258,14 @@ none of it survived the hand-trim (#745).
   declared ONCE on the base as `tap(arg): this` - `tap` keeps `T`, so no subclass re-declares it,
   unlike `.local()` - and its body wraps `Transformer.tap` in `.local(build)`, which is what pins the
   callback and its context writes to the ORCHESTRATING process on every class. Its stage still
-  occupies an index, and the dispatched stages either side of it still dispatch. A tap's context
-  write is chunk-granular, never item-granular: the whole chunk is tapped before the next link sees
-  any of it, and an async callback lands in completion order. Replaces `.withHooks()` and
-  `TransformerLifecycleHooks` (#72, BREAKING) - `pipe()` deliberately dropped `hooks`, making the
-  knob silently order-sensitive, and its invariant `Out` was what broke `t.tap(someTransformer)`.
+  occupies an index - so a stage dispatched after it, on `HttpPipeline`/`ClusterPipeline`, gets the
+  NEXT index along, a real second instance's own registry needing the identical `.tap()` call built
+  into it even though that call is never itself dispatched - and the dispatched stages either side
+  of it still dispatch. A tap's context write is chunk-granular, never item-granular: the whole
+  chunk is tapped before the next link sees any of it, and an async callback lands in completion
+  order. Replaces the deleted per-item lifecycle-hooks knob and its `TransformerLifecycleHooks` type
+  (#72, BREAKING) - `pipe()` deliberately dropped that knob's field, making it silently
+  order-sensitive, and its invariant `Out` was what broke `t.tap(someTransformer)`.
   `onStart`/`onComplete`/`onItemStart`/`onItemComplete` go unreplaced by decision.
 - **Error handling / `.onError()`** (#78) - error handling belongs to the function that failed; there
   is no chunk-level region and no `.catch()`. `Transformer.onError(fn)` is the ROW handler:

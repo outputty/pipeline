@@ -34,14 +34,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   Measured: the seam costs nothing when no handler is registered (344.9 ns/row against a 353 ns/row
   floor at 1M rows) and about 8-12% when one is.
 
-- **`.tap()` becomes the one observation surface** (#72). `.withHooks()` is deleted with
-  `TransformerLifecycleHooks`, and `Pipeline` gains its own `.tap()` that always runs in the
-  orchestrating process. Now, because `.withHooks()` is silently order-sensitive - `pipe()` drops it,
-  so `t.withHooks({onStart}).map(f)` fires nothing while `t.map(f).withHooks({onStart})` fires - and
-  because its invariant `hooks` field is what breaks `t.tap(someTransformer)` at the type level.
-  Blocked by #40: a fixed `.onError()` must ship before `hooks.onError`, today's only
-  failure-observation surface, is removed.
-
   #37's own conformance case for `.reduce()` needs its `ConcurrentPipeline` branch rewritten now
   (#62): a bare `.reduce()` prints `[15]` on `Pipeline` but N values summing to 15 on
   `ConcurrentPipeline` (partition count is a ceiling, timing-dependent) - the conformance case
@@ -71,6 +63,18 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`.tap()` becomes the one observation surface, and `Pipeline` gains its own** (#72, `feat!`) -
+  the old lifecycle-hooks knob depended on where in the chain it was written (`pipe()` dropped it on
+  `Out` change, so attaching it before a later `.map()` fired nothing while attaching it after fired),
+  and its invariant `Out` broke `t.tap(someTransformer)` at the type level.
+  `Pipeline.tap(arg)`, declared once on the base, delegates to `Transformer.tap` wrapped in
+  `.local(build)`, pinning the callback and its context writes to the orchestrating process on every
+  class - measured over a real loopback `HttpPipeline`, a tap between two dispatched stages ran only
+  in the caller, the worker's own identical `.tap()` call never invoked, and the dispatched stages
+  either side of it still dispatched. `dispatchKnobViolations` and its refusal are deleted whole -
+  the last knob it guarded is gone. BREAKING, no deprecation period: the old lifecycle-hooks knob and
+  its `TransformerLifecycleHooks` type are removed; `onStart`/`onComplete`/`onItemStart`/
+  `onItemComplete` have no replacement, by decision. PR #80 (code, tests and docs, one layer).
 - **A dispatched reduce really partitions across `maxConcurrency` accumulators** (#62, `feat!`) -
   #45 shipped a reduce stage as a serialization point, one accumulator whatever `maxConcurrency`
   said, so a `ConcurrentPipeline` fanning a `.map` out four ways collapsed to a single fold the
@@ -98,10 +102,12 @@ The two older candidates, still not filed:
   only narrow `apply()`'s return type and delegate to `super.apply()` unchanged.
   `ConcurrentPipeline.apply()`'s wrapped `work` calls it immediately for a dispatched stage;
   `runSequentially`'s own per-chunk try/catch only CAPTURES the chunk for a local one, and
-  `process()`'s own outer catch reports it after `hooks.onError` runs, keeping the two notification
-  mechanisms' relative order unchanged. `dispatchKnobViolations` keeps only its `withHooks` branch.
-  BREAKING, no deprecation period: a handler that read `chunk.length` as "no detail available" must
-  be updated. PRs #75 (L1, the fix and its tests), #76 (docs).
+  `process()`'s own outer catch reports it after the (later deleted, #72) lifecycle-hooks knob's own
+  `onError` runs, keeping the two notification mechanisms' relative order unchanged.
+  `dispatchKnobViolations`'s own refusal keeps only its lifecycle-hooks branch - #72 deletes the
+  function whole, the last knob it guarded. BREAKING, no deprecation period: a handler that read
+  `chunk.length` as "no detail available" must be updated. PRs #75 (L1, the fix and its tests), #76
+  (docs).
 - **`.local(build)` runs a whole region in the orchestrating process** (#61, `feat!`) - the per-stage
   flag it replaces had to be repeated on every stage of a region that must stay put, and lived only
   on the dispatching subclasses, so a chain using it never typechecked on a base `Pipeline`.
@@ -247,15 +253,15 @@ The two older candidates, still not filed:
 
 - **`EventEmitterPipeline`** (#30, closed unbuilt) - a fourth `Pipeline` subclass publishing five
   chunk-level lifecycle events per dispatched stage, on a `PipelineEmitter` the caller passes in.
-  Killed on its own opening premise, re-run while planning #72: `.withHooks()` was never the only
-  observation surface. `Transformer.tap` already observes, and `dispatchKnobViolations` never refused
-  it - `ConcurrentPipeline.buffer(2).transform((t) => t.map((x) => x * 2).tap(push))` over `[1..5]`
-  returned `out [2,4,6,8,10]  seen [2,4,6,8,10]`. Two more of its premises went stale after it was
-  filed: `{ local: true }` (#61 deleted it; `.local(build)` already gives an orchestrator-side tap)
-  and "both fan-outs yield ITEMS" (#39 made both yield `U[]`). So the class bought nothing `.tap()`
-  did not already do, at the cost of a `fanOut()` seam, an emitter interface, five event names and a
-  consumer-error containment path. Its Enable layer - deleting `.withHooks()` - is what survives, as
-  #72.
+  Killed on its own opening premise, re-run while planning #72: the old lifecycle-hooks knob was
+  never the only observation surface. `Transformer.tap` already observes, and `dispatchKnobViolations`
+  never refused it - `ConcurrentPipeline.buffer(2).transform((t) => t.map((x) => x * 2).tap(push))`
+  over `[1..5]` returned `out [2,4,6,8,10]  seen [2,4,6,8,10]`. Two more of its premises went stale
+  after it was filed: `{ local: true }` (#61 deleted it; `.local(build)` already gives an
+  orchestrator-side tap) and "both fan-outs yield ITEMS" (#39 made both yield `U[]`). So the class
+  bought nothing `.tap()` did not already do, at the cost of a `fanOut()` seam, an emitter interface,
+  five event names and a consumer-error containment path. Its Enable layer - deleting the old
+  lifecycle-hooks knob - is what survives, as #72.
 
 - **A forward-descending `Transformer` composition** (#45) - each link calling the NEXT one rather
   than wrapping the previous one, so the stack descends in the order the caller wrote the chain.

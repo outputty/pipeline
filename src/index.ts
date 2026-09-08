@@ -17,7 +17,6 @@ export type {
   BranchDefinition,
   BranchOptions,
   TransformerOptions,
-  TransformerLifecycleHooks,
 } from "./types";
 export { DEFAULT_CHUNK_SIZE } from "./types";
 
