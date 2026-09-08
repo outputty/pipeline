@@ -74,8 +74,7 @@ The two older candidates, still not filed:
   either side of it still dispatched. `dispatchKnobViolations` and its refusal are deleted whole -
   the last knob it guarded is gone. BREAKING, no deprecation period: the old lifecycle-hooks knob and
   its `TransformerLifecycleHooks` type are removed; `onStart`/`onComplete`/`onItemStart`/
-  `onItemComplete` have no replacement, by decision. PR #80 (code, tests and docs, one layer -
-  under 200 added lines).
+  `onItemComplete` have no replacement, by decision. PR #80 (code, tests and docs, one layer).
 - **A dispatched reduce really partitions across `maxConcurrency` accumulators** (#62, `feat!`) -
   #45 shipped a reduce stage as a serialization point, one accumulator whatever `maxConcurrency`
   said, so a `ConcurrentPipeline` fanning a `.map` out four ways collapsed to a single fold the
