@@ -44,15 +44,25 @@ type TransformerConstructorOptions<In, Out> = TransformerOptions<In, Out> & {
  * a `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` is the replacement for concurrency,
  * wrapping the chain rather than configuring the `Transformer` that drives it).
  *
- * `runSequentially(logic, chunks, ctx)` → each output chunk yielded in input order.
+ * `runSequentially(logic, chunks, ctx, onError)` → each output chunk yielded in input order;
+ * `onError` fires with the ACTUAL failing chunk before a chunk-level throw propagates - the loop
+ * here is the one place that chunk is still in scope (#40).
  */
 async function* runSequentially<In, Out>(
   transformerLogic: InternalTransformer<In, Out>,
   chunks: AsyncIterable<In[]>,
   context: IContextManager,
+  onError: (chunk: In[], error: Error, ctx: IContextManager) => void,
 ): AsyncGenerator<Out[]> {
   for await (const chunk of chunks) {
-    yield transformerLogic(chunk, context);
+    try {
+      yield transformerLogic(chunk, context);
+    } catch (error) {
+      // Hands THIS chunk to `onError` while it is still in scope here - `process()`'s own catch,
+      // below, sits one level up the call stack, past the point where it would be reachable (#40).
+      onError(chunk, error as Error, context);
+      throw error;
+    }
   }
 }
 
@@ -74,6 +84,22 @@ export class Transformer<In, Out> {
 
   /** Error handler chain for this transformer */
   readonly errorHandler: ErrorHandler<In>;
+
+  /**
+   * Reports one chunk's failure to `this.errorHandler`, with the chunk that actually failed (#40).
+   * `ConcurrentPipeline.apply()`'s wrapped `work` calls it directly, immediately, from wherever a
+   * DISPATCHED stage's chunk is still in scope. `process()` (below) calls it too, but deferred to
+   * its own outer catch rather than from `runSequentially`'s inner one - `runSequentially` only
+   * captures the chunk while it is still in scope, so `hooks.onError` still runs first, the same
+   * relative order the two independent notification mechanisms had before this ticket. A failure
+   * that never reaches a chunk loop at all (a `.withHooks()` `onStart`/`onComplete` throw) has no
+   * chunk to report and falls through to `this.errorHandler` directly instead, never through this
+   * reporter. An arrow field, not a method, so it stays bound to `this.errorHandler` wherever it
+   * travels.
+   */
+  readonly chunkErrorReporter = (chunk: In[], error: Error, ctx: IContextManager): void => {
+    this.errorHandler.handle(chunk, error, ctx);
+  };
 
   /** Lifecycle hooks for monitoring execution progress */
   readonly hooks?: TransformerLifecycleHooks<In, Out>;
@@ -160,7 +186,7 @@ export class Transformer<In, Out> {
    *     yield self.transformer(chunk, run_context)
    * ```
    *
-   * On a chunk failure, `this.errorHandler.handle([], error, runContext)` fires (any
+   * On a chunk failure, `this.chunkErrorReporter` fires with the chunk that actually failed (any
    * handler registered via `.onError()`) BEFORE the error re-throws — a notification, not a
    * recovery path, so the failure still propagates to the caller.
    *
@@ -173,19 +199,30 @@ export class Transformer<In, Out> {
    * const t = new Transformer<number, number>().map((x) => x * 2);
    * for await (const chunk of t.process(chunksOf([1, 2, 3]))) console.log(chunk); // [2, 4, 6]
    *
-   * // onError wiring: a throwing transform still propagates, but the handler sees it first.
-   * let seen: Error | undefined;
+   * // onError wiring: a throwing transform still propagates, but the handler sees the failing
+   * // chunk first (#40).
+   * let seenChunk: number[] = [];
    * const failing = new Transformer<number, number>()
    *   .map(() => { throw new Error("boom"); })
-   *   .onError((e) => { seen = e; });
+   *   .onError((chunk) => { seenChunk = chunk; });
    * await expect(failing.process(chunksOf([1])).next()).rejects.toThrow("boom");
-   * // seen.message === "boom"
+   * // seenChunk === [1]
    * ```
    */
   async *process(chunks: AsyncIterable<In[]>, context?: IContextManager): AsyncGenerator<Out[]> {
     const runContext = context ?? this.defaultContext;
     const startTime = Date.now();
     const itemCounter = { index: 0 };
+    // Set by `onChunkError` (below) the moment a chunk actually fails - captures the real chunk
+    // where it is still in scope, but reporting it is DEFERRED to the catch below so `hooks.onError`
+    // still runs first, same relative order the two independent notification mechanisms had before
+    // this ticket (`.withHooks()` and `.onError()` never coexist on a DISPATCHED stage - `.withHooks()`
+    // alone already refuses to build one, `dispatchKnobViolations` in `concurrent.ts` - so only this
+    // local path can ever run both).
+    let chunkFailure: { chunk: In[]; error: Error; ctx: IContextManager } | undefined;
+    const onChunkError = (chunk: In[], error: Error, ctx: IContextManager): void => {
+      chunkFailure = { chunk, error, ctx };
+    };
 
     try {
       await this.hooks?.onStart?.();
@@ -195,10 +232,10 @@ export class Transformer<In, Out> {
 
       if (hasItemHooks) {
         const wrappedTransform = this.wrapTransformForItemHooks(itemCounter);
-        yield* runSequentially(wrappedTransform, chunks, runContext);
+        yield* runSequentially(wrappedTransform, chunks, runContext, onChunkError);
       } else {
         yield* this.countOutputItems(
-          runSequentially(this.transform, chunks, runContext),
+          runSequentially(this.transform, chunks, runContext, onChunkError),
           itemCounter,
         );
       }
@@ -207,12 +244,16 @@ export class Transformer<In, Out> {
       await this.hooks?.onComplete?.(itemCounter.index, totalDurationMs);
     } catch (error) {
       await this.hooks?.onError?.(error as Error);
-      // Registered via `.onError()` (above) — fires on any chunk failure, THEN the error still
-      // propagates (`.onError()` is a notification hook, not a recovery path; `.catch()` is the
-      // sub-pipeline that actually recovers). The offending chunk is not tracked at this scope, so
-      // handlers see `[]` — same as every OTHER caller of this `process()` catch, letting a
-      // handler tell error-occurred from error-details.
-      this.errorHandler.handle([], error as Error, runContext);
+      // `onChunkError` (above) only captured a CHUNK failure's real chunk - reporting it to
+      // `this.errorHandler` happens here, after `hooks.onError`, not inside `runSequentially`'s own
+      // catch (#40). A failure that never reached that loop at all (`hooks.onStart`/`onComplete`
+      // throwing) leaves `chunkFailure` unset, so it still falls through to the old `handle([], …)`
+      // call, same as before this ticket - there is no chunk to report for it, only that one happened.
+      if (chunkFailure) {
+        this.chunkErrorReporter(chunkFailure.chunk, chunkFailure.error, chunkFailure.ctx);
+      } else {
+        this.errorHandler.handle([], error as Error, runContext);
+      }
       throw error;
     }
   }
