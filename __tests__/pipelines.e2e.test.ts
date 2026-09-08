@@ -256,8 +256,9 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
 
 describe("#17 a knob that only takes effect via Transformer.process() fails loud, not silent", () => {
   // Regression: stageWork() never calls process() on ANY consumption path (not just async
-  // iteration), so .withHooks()/.onError() on a dispatched stage used to run with the hook
-  // silently never firing - no error, no warning. ConcurrentPipeline.apply() now throws instead.
+  // iteration), so .withHooks() on a dispatched stage used to run with the hook silently never
+  // firing - no error, no warning. ConcurrentPipeline.apply() now throws instead. .onError() left
+  // this refusal in #40 - it reports a dispatched stage's failing chunk directly (below).
   it("rejects .withHooks() on a non-local stage", () => {
     const hooked = new Transformer<number, number>()
       .map((x: number) => x * 2)
@@ -276,17 +277,85 @@ describe("#17 a knob that only takes effect via Transformer.process() fails loud
     expect(out).toEqual([2, 4, 6]);
     expect(order).toEqual(["start", "complete"]);
   });
+});
 
-  it("rejects .onError() on a non-local stage", () => {
-    // Regression: review found inertKnobsOf() checking withHooks/chunkSize/setChunker but omitting
-    // errorHandler entirely - an .onError() handler silently never fired on a dispatched stage,
-    // with none of the fail-loud protection every OTHER inert knob already had.
+describe("#40 .onError() receives the chunk that actually failed", () => {
+  // Real run from planning: chunkSize 2 over [1,2,3,4], throwing on 3 - the failing chunk is
+  // [3,4], never the whole source and never [] (Done-when 1, 2).
+  const throwOn3 = (t: Transformer<number, number>) =>
+    t.map((x: number) => {
+      if (x === 3) throw new Error("boom on 3");
+      return x;
+    });
+
+  it("Pipeline: handler sees chunk [3,4], the run still rejects with the original error", async () => {
+    const seen: number[][] = [];
+    const transformer = throwOn3(new Transformer<number, number>()).onError((chunk) => {
+      seen.push(chunk);
+    });
+    await expect(new Pipeline([1, 2, 3, 4]).buffer(2).apply(transformer).toArray()).rejects.toThrow(
+      "boom on 3",
+    );
+    expect(seen).toEqual([[3, 4]]);
+  });
+
+  it("ConcurrentPipeline: handler sees chunk [3,4], the run still rejects with the original error", async () => {
+    const seen: number[][] = [];
+    const transformer = throwOn3(new Transformer<number, number>()).onError((chunk) => {
+      seen.push(chunk);
+    });
+    await expect(
+      new ConcurrentPipeline([1, 2, 3, 4]).buffer(2).apply(transformer).toArray(),
+    ).rejects.toThrow("boom on 3");
+    expect(seen).toEqual([[3, 4]]);
+  });
+
+  it(
+    "HttpPipeline: handler sees chunk [3,4]; the rejection wraps the original error with the stage and url",
+    async () => {
+      const worker = makeWorker((t) => t.transform((tr) => throwOn3(tr)));
+      const seen: number[][] = [];
+      const transformer = throwOn3(new Transformer<number, number>()).onError((chunk) => {
+        seen.push(chunk);
+      });
+      await withServer(worker.fetch, async (url) => {
+        const orchestrator = new HttpPipeline<number>([1, 2, 3, 4], { url })
+          .buffer(2)
+          .apply(transformer);
+        await expect(orchestrator.toArray()).rejects.toThrow(/stage 0.*failed: boom on 3/);
+      });
+      expect(seen).toEqual([[3, 4]]);
+    },
+    HTTP_TIMEOUT,
+  );
+
+  it('several handlers still run LIFO on Pipeline: ["second","first"]', async () => {
+    const calls: string[] = [];
+    const transformer = throwOn3(new Transformer<number, number>())
+      .onError(() => calls.push("first"))
+      .onError(() => calls.push("second"));
+    await expect(
+      new Pipeline([1, 2, 3, 4]).buffer(2).apply(transformer).toArray(),
+    ).rejects.toThrow();
+    expect(calls).toEqual(["second", "first"]);
+  });
+
+  it('several handlers still run LIFO on ConcurrentPipeline: ["second","first"]', async () => {
+    const calls: string[] = [];
+    const transformer = throwOn3(new Transformer<number, number>())
+      .onError(() => calls.push("first"))
+      .onError(() => calls.push("second"));
+    await expect(
+      new ConcurrentPipeline([1, 2, 3, 4]).buffer(2).apply(transformer).toArray(),
+    ).rejects.toThrow();
+    expect(calls).toEqual(["second", "first"]);
+  });
+
+  it("ConcurrentPipeline.apply() no longer refuses a stage carrying .onError()", () => {
     const withHandler = new Transformer<number, number>()
       .map((x: number) => x * 2)
       .onError(() => {});
-    expect(() => new ConcurrentPipeline([1, 2, 3]).apply(withHandler)).toThrow(
-      /onError never take effect on a dispatched stage/,
-    );
+    expect(() => new ConcurrentPipeline([1, 2, 3]).apply(withHandler)).not.toThrow();
   });
 });
 

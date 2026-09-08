@@ -532,6 +532,28 @@ describe("Pipeline", () => {
       await expect(new Pipeline([1, 2, 3]).apply(transformer).toArray()).rejects.toThrow(boom);
       expect(seen).toHaveLength(1);
     });
+
+    it("a hooks.onStart throw - never reaching the chunk loop - still notifies onError, with [] (#40)", async () => {
+      // Regression: moving the report into runSequentially's own per-chunk catch (#40) must not
+      // drop the ONE case that never reaches that loop at all - a lifecycle hook throwing before
+      // any chunk is processed. process()'s own catch still falls back to handle([], ...) for it,
+      // same as every case did before this ticket.
+      const seen: { chunk: number[]; message: string }[] = [];
+      const boom = new Error("boom from onStart");
+      const transformer = new Transformer<number, number>()
+        .map((x: number) => x)
+        .withHooks({
+          onStart: () => {
+            throw boom;
+          },
+        })
+        .onError((chunk, error) => {
+          seen.push({ chunk: [...chunk], message: error.message });
+        });
+
+      await expect(new Pipeline([1, 2, 3]).apply(transformer).toArray()).rejects.toThrow(boom);
+      expect(seen).toEqual([{ chunk: [], message: "boom from onStart" }]);
+    });
   });
 
   describe("async iteration reads the same persisted chunk stream a terminal op does (#39)", () => {

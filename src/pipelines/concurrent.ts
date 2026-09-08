@@ -43,19 +43,19 @@ interface TaggedResult<U> {
 /**
  * Which of a `Transformer`'s knobs are INERT on a DISPATCHED stage - `stageWork()` runs the stage
  * directly (its own `.transform` function, or a POST over the wire), never `Transformer.process()`,
- * so `.hooks`/`.onError()` never take effect there (architecture.md's own documented contract;
- * `.buffer()` reaches a dispatched stage exactly like a local one now, since `Pipeline` owns the
- * cut, so there is nothing left to check for chunking - #39 deleted the whole `chunkSize`/
- * `setChunker` half of this check along with `Transformer`'s own knobs).
+ * so `.hooks` never take effect there (architecture.md's own documented contract; `.buffer()`
+ * reaches a dispatched stage exactly like a local one now, since `Pipeline` owns the cut, so there
+ * is nothing left to check for chunking - #39 deleted the whole `chunkSize`/`setChunker` half of
+ * this check along with `Transformer`'s own knobs). `.onError()` left this check in #40:
+ * `apply()`'s own wrapped `work` (below) reports a dispatched stage's failing chunk directly, so an
+ * `.onError()` handler no longer needs `process()` to fire at all.
  *
  * `dispatchKnobViolations(new Transformer().withHooks({}))` → `["withHooks"]`;
- * `dispatchKnobViolations(new Transformer().onError(() => {}))` → `["onError"]`;
  * `dispatchKnobViolations(new Transformer())` → `[]`.
  */
 function dispatchKnobViolations<In, Out>(transformer: Transformer<In, Out>): string[] {
   const violations: string[] = [];
   if (transformer.hooks !== undefined) violations.push("withHooks");
-  if (transformer.errorHandler.hasHandlers()) violations.push("onError");
   return violations;
 }
 
@@ -263,10 +263,10 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
   }
 
   override apply<U>(transformer: Transformer<T, U>): ConcurrentPipeline<U> {
-    // `withHooks`/`onError` only ever take effect through `Transformer.process()`, which
-    // `stageWork()` (below) never calls on ANY consumption path - not just async-iteration, the
-    // way the base class's own terminal-op path is fine but its old source-position path was not.
-    // Fail loud immediately rather than silently never firing.
+    // `withHooks` only ever takes effect through `Transformer.process()`, which `stageWork()`
+    // (below) never calls on ANY consumption path - not just async-iteration, the way the base
+    // class's own terminal-op path is fine but its old source-position path was not. Fail loud
+    // immediately rather than silently never firing.
     const knobViolations = dispatchKnobViolations(transformer);
     if (knobViolations.length > 0) {
       throw new Error(
@@ -277,7 +277,19 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
     }
 
     const stageIndex = this._chunkTransforms.length;
-    const work = this.stageWork(transformer, stageIndex);
+    const rawWork = this.stageWork(transformer, stageIndex);
+    // Reports the chunk `stageWork()` was actually given, then rethrows - `Transformer.process()`'s
+    // own chunk loop never runs on this path, so this wrapper is where a dispatched stage's failing
+    // chunk is captured instead (#40). `transformer.chunkErrorReporter` (`transformer.ts`) is a
+    // no-op when nothing is registered via `.onError()`, so this costs nothing on the common path.
+    const work: InternalTransformer<T, U> = async (chunk, ctx) => {
+      try {
+        return await rawWork(chunk, ctx);
+      } catch (error) {
+        transformer.chunkErrorReporter(chunk, error as Error, ctx);
+        throw error;
+      }
+    };
     const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;
     // `this._chunks` handed straight to the fan-out - no chunking call of this class's own (#39):
     // whatever boundary `.buffer()` (or the constructor's own default) already cut is what gets
