@@ -223,22 +223,6 @@ this used to name). `.buffer()` reaches a dispatched stage exactly like a local 
 `Pipeline` owns the cut, not `Transformer` - the refusal this used to need for a custom chunker
 (`setChunker`, deleted with `Transformer`'s own chunking fields) has nothing left to refuse.
 
-**The transformer declares, the pipeline drives** (pending, chunking then errors). A `Transformer`
-declares how its input is cut and what handles a failing chunk; every `Pipeline` class reads those
-off the transformer and applies them itself, so one declaration serves all five classes. `execute()`
-splits, keeping hooks and the transform loop with the chunks and handing the cutting to the caller;
-`apply()` at every level reads the same `chunkGenerator` and reports a failing chunk to the same
-handlers. Two knobs leave `inertKnobsOf`'s refusal as a result: a custom chunker works across a
-process boundary once the dispatching side consults it, and an error handler fires with the chunk
-that actually failed rather than an empty array.
-
-**A merged pipeline continues an existing one** (pending). `pipeline.merge(...others)` is
-copy-on-write through `createPipeline()` like every other operation, so the result carries `this`'s
-class, knobs, address AND `_chunkTransforms`. Stage numbering therefore continues rather than
-restarting, which is what keeps a merged `HttpPipeline`'s next stage on `/stage/1` instead of
-colliding with its own `/stage/0`. The static `Pipeline.merge()` builds a stranger and so cannot do
-this; it stays, always returning a plain `Pipeline`.
-
 A worker process (`ClusterPipeline`'s own bootstrap; `HttpPipeline`'s own `.fetch()`-side instance
 in general) never orchestrates: its chunk stream is empty, set at construction, so every terminal op
 resolves immediately with an EMPTY result - the worker exists only to hold the transforms

@@ -14,7 +14,7 @@ paths: ["**/*.ts", "**/*.tsx"]
   own arguments - the outer call's return-type annotation does not propagate it back in. Annotate the
   literal at its own construction site (`new Pipeline<"a" | "b">([...])`) when a literal union must
   survive. (2026-09-04)
-- Set `chunkSize: 1` on BOTH sides before using an in-flight counter to tell a sequential `Pipeline`
-  from a concurrent one. (2026-09-06)
-  - At the default chunk size the whole source is one chunk and `.map()` runs its items in parallel,
-    so a plain `Pipeline` also reads 4 in flight and the counter proves nothing.
+- Call `.buffer(1)` on BOTH sides before using an in-flight counter to tell a `Pipeline` from a
+  `ConcurrentPipeline`. (2026-09-06)
+  - At `DEFAULT_CHUNK_SIZE` a small source is one chunk and `.map()` runs its items together, so a
+    plain `Pipeline` also reads 4 in flight and the counter proves nothing.
