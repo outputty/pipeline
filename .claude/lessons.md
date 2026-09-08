@@ -280,6 +280,63 @@ re-chunks unless asked to. `~/.claude/rules/code.md`'s existing "price fixing th
 instead of accommodating it" line is sharpened to cover a cost a design just introduced, not only an
 inconsistency between siblings.
 
+## 2026-09-06 Four mechanisms were designed to accommodate defects, then deleted
+
+Planning #37, four knobs appeared to work on some `Pipeline` classes and not others, so the
+conformance suite grew a Tier A / Tier B split, a `runsOn(subject)` predicate, three separate case
+lists and a 5x3 permutation grid to route around them. Every one of the four was a defect:
+`.withHooks()` drops silently through `pipe()`, `setChunker` and `onError` are refused on a dispatched
+stage only because `apply()` never consults them, and `merge` demotes to a base `Pipeline`. The user's
+one-line standard - all pipeline classes support all functionality - dissolved three of the four
+mechanisms at once, leaving one case list and five wrapper files. Produced
+`~/.claude/rules/code.md`'s "price fixing the inconsistency instead" line.
+
+## 2026-09-06 A merge spike varied one parameter four ways and missed the shape
+
+`Pipeline.merge()` returns a plain `Pipeline` whatever went in, so four candidates were spiked in
+parallel. All four answered "what class should the STATIC return" - first pipeline's, refuse mixed,
+return a source, name it explicitly - because the brief inherited "static" from the question as
+framed. Two produced wrong output from a stage-index collision. The user's own proposal, `merge` as an
+INSTANCE method, beat all four and was never in the set: the merged pipeline keeps `this`'s
+`_chunkTransforms`, so stage numbering continues instead of restarting at 0 and colliding. Produced
+`~/.claude/rules/code.md`'s "a candidate set varies the SHAPE of the seam" sub-bullet.
+
+## 2026-09-06 A prerequisite shipped mid-session and the plan was built on a stale base
+
+#31 merged in four PRs while #37 was being planned. Every spike ran on `909ea41`, five ticket bodies
+were drafted against it, and the staleness only surfaced at filing time when #31 was absent from the
+open-issue list - after blockers had already been set pointing at a closed ticket. The branch was
+rebased and all three load-bearing premises re-verified against the new `main` before the bodies were
+corrected. Produced `~/.claude/rules/issues.md`'s "re-fetch before FILING" line.
+
+## 2026-09-06 Project vocabulary was used in questions without ever defining it
+
+Three rounds asked where `withHooks` and `setChunker` should live, and what should test them, without
+once showing what either knob does. The user asked "what is the withHooks?", "What does this
+setChunker do?" and "I dont understand this" twice. A single worked example - nine sensor readings in
+groups of 3, 2 and 4, where a fixed chunk size gives `b` a total of 130 instead of 30 - answered the
+question the three rounds had been circling. Produced `~/.claude/rules/docs.md`'s "a question about an
+EXISTING knob opens with what that knob does" line.
+
+## 2026-09-06 A message string was asserted, and its divergence called a design blocker
+
+A conformance case for `onError` asserted the error message, which reads `"boom on 3"` on a base
+`Pipeline` and `"stage 0 at http://localhost:53529 failed: boom on 3"` on an `HttpPipeline` - carrying
+a port that changes every run. That divergence was presented as blocking `onError` from the shared
+contract, and a change to the error wrapping was priced to fix it. The user pointed out the contract
+is that an error occurred and what it carried, not how it reads: the case asserts the failing chunk
+and the rejection, and holds on every class unchanged. Produced `~/.claude/rules/code.md`'s "check
+whether the diverging DETAIL is part of the contract at all" line.
+
+## 2026-09-06 Two subagents edited the parent worktree through Serena
+
+Four spike agents ran under `isolation: "worktree"`. Two of them used Serena, whose project root
+resolved to the PARENT worktree rather than their own, and edited `src/pipeline.ts` there - inside the
+planning session's live tree. Both detected it and restored the file; the parent's
+`git status --porcelain` and `git diff --stat HEAD` were verified empty twice. Produced
+`~/.claude/rules/code.md`'s "a worktree-isolated subagent edits with the built-in `Edit` tool, never
+Serena" line.
+
 ## 2026-09-06 A review finding was framed as #31's own regression before checking `main`
 
 Building #31, code review found `HttpPipeline.fetch()` reusing `this._context` to serve concurrent
