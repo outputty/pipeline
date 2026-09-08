@@ -86,14 +86,16 @@ export class Transformer<In, Out> {
   readonly errorHandler: ErrorHandler<In>;
 
   /**
-   * Reports one chunk's failure to `this.errorHandler`, with the chunk that actually failed - the
-   * reporter every dispatching seam (`runSequentially`'s own chunk loop here, `ConcurrentPipeline
-   * .apply()`'s wrapped `work`) calls from wherever the failing chunk is still in scope (#40). An
-   * arrow field, not a method, so it stays bound to `this.errorHandler` wherever it travels. The
-   * OLD loop-scope catch it displaced for a chunk failure - `process()`'s own catch, seeing only
-   * `[]` - still runs as a fallback there for the one failure that never reaches a chunk loop at
-   * all (a `.withHooks()` `onStart`/`onComplete` throw); that fallback calls `this.errorHandler`
-   * directly, never through this reporter.
+   * Reports one chunk's failure to `this.errorHandler`, with the chunk that actually failed (#40).
+   * `ConcurrentPipeline.apply()`'s wrapped `work` calls it directly, immediately, from wherever a
+   * DISPATCHED stage's chunk is still in scope. `process()` (below) calls it too, but deferred to
+   * its own outer catch rather than from `runSequentially`'s inner one - `runSequentially` only
+   * captures the chunk while it is still in scope, so `hooks.onError` still runs first, the same
+   * relative order the two independent notification mechanisms had before this ticket. A failure
+   * that never reaches a chunk loop at all (a `.withHooks()` `onStart`/`onComplete` throw) has no
+   * chunk to report and falls through to `this.errorHandler` directly instead, never through this
+   * reporter. An arrow field, not a method, so it stays bound to `this.errorHandler` wherever it
+   * travels.
    */
   readonly chunkErrorReporter = (chunk: In[], error: Error, ctx: IContextManager): void => {
     this.errorHandler.handle(chunk, error, ctx);
@@ -211,13 +213,15 @@ export class Transformer<In, Out> {
     const runContext = context ?? this.defaultContext;
     const startTime = Date.now();
     const itemCounter = { index: 0 };
-    // Set by `onChunkError` (below) the moment a chunk actually fails - lets the outer catch tell
-    // "already reported, with the real chunk" apart from "never reported at all" (a `.withHooks()`
-    // `onStart`/`onComplete` throw, which never reaches `runSequentially`'s own loop).
-    let chunkFailureReported = false;
+    // Set by `onChunkError` (below) the moment a chunk actually fails - captures the real chunk
+    // where it is still in scope, but reporting it is DEFERRED to the catch below so `hooks.onError`
+    // still runs first, same relative order the two independent notification mechanisms had before
+    // this ticket (`.withHooks()` and `.onError()` never coexist on a DISPATCHED stage - `.withHooks()`
+    // alone already refuses to build one, `dispatchKnobViolations` in `concurrent.ts` - so only this
+    // local path can ever run both).
+    let chunkFailure: { chunk: In[]; error: Error; ctx: IContextManager } | undefined;
     const onChunkError = (chunk: In[], error: Error, ctx: IContextManager): void => {
-      chunkFailureReported = true;
-      this.chunkErrorReporter(chunk, error, ctx);
+      chunkFailure = { chunk, error, ctx };
     };
 
     try {
@@ -240,13 +244,14 @@ export class Transformer<In, Out> {
       await this.hooks?.onComplete?.(itemCounter.index, totalDurationMs);
     } catch (error) {
       await this.hooks?.onError?.(error as Error);
-      // `onChunkError` (above), passed into `runSequentially`, already reported a CHUNK failure
-      // with its real chunk, from inside its own loop where that chunk is still in scope (#40) -
-      // reporting it again here would notify every `.onError()` handler twice for one failure. A
-      // failure that never reached that loop (`hooks.onStart`/`onComplete` throwing) was never
-      // reported at all, so it still falls through to `this.errorHandler.handle([], …)` here, same
-      // as before this ticket - there is no chunk to report for it, only that one happened.
-      if (!chunkFailureReported) {
+      // `onChunkError` (above) only captured a CHUNK failure's real chunk - reporting it to
+      // `this.errorHandler` happens here, after `hooks.onError`, not inside `runSequentially`'s own
+      // catch (#40). A failure that never reached that loop at all (`hooks.onStart`/`onComplete`
+      // throwing) leaves `chunkFailure` unset, so it still falls through to the old `handle([], …)`
+      // call, same as before this ticket - there is no chunk to report for it, only that one happened.
+      if (chunkFailure) {
+        this.chunkErrorReporter(chunkFailure.chunk, chunkFailure.error, chunkFailure.ctx);
+      } else {
         this.errorHandler.handle([], error as Error, runContext);
       }
       throw error;

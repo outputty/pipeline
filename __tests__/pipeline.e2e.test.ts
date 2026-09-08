@@ -554,6 +554,25 @@ describe("Pipeline", () => {
       await expect(new Pipeline([1, 2, 3]).apply(transformer).toArray()).rejects.toThrow(boom);
       expect(seen).toEqual([{ chunk: [], message: "boom from onStart" }]);
     });
+
+    it("hooks.onError still fires before a chunk-level onError() handler, same order as before #40", async () => {
+      // Regression: review found the chunk-report moving into runSequentially's own per-chunk catch
+      // would fire onError() BEFORE hooks.onError for a real chunk failure - reversed from the order
+      // every failure had before this ticket. Deferring the chunkErrorReporter call to process()'s
+      // own outer catch (after hooks.onError) restores it.
+      const order: string[] = [];
+      const boom = new Error("boom on 2");
+      const transformer = new Transformer<number, number>()
+        .map((x: number) => {
+          if (x === 2) throw boom;
+          return x;
+        })
+        .withHooks({ onError: () => order.push("hooks.onError") })
+        .onError(() => order.push("onError()"));
+
+      await expect(new Pipeline([1, 2, 3]).apply(transformer).toArray()).rejects.toThrow(boom);
+      expect(order).toEqual(["hooks.onError", "onError()"]);
+    });
   });
 
   describe("async iteration reads the same persisted chunk stream a terminal op does (#39)", () => {
