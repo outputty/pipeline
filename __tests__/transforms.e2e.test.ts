@@ -8,7 +8,13 @@
  * collapse everything into one default 1000-item chunk and hide it.
  */
 import { describe, it, expect } from "vitest";
-import { Pipeline, Transformer, SimpleContextManager, ErrorHandler } from "../src";
+import {
+  Pipeline,
+  ConcurrentPipeline,
+  Transformer,
+  SimpleContextManager,
+  ErrorHandler,
+} from "../src";
 
 /** Run `input` through a real pipeline built on `transformer`, returning [results, contextSnapshot].
  * `Pipeline.toArray()` itself carries no context slot (#744) - this LOCAL helper builds its own
@@ -77,30 +83,70 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
     expect(fm).toEqual([1, 10, 2, 20, 3, 30]);
   });
 
-  it("tap runs a side effect and passes items through unchanged (function + transformer forms)", async () => {
-    const seen: number[] = [];
-    const [passed] = await run(
+  it("tap: both overloads pass items through unchanged, its context writes accumulate across the whole run, and it fires identically on .toArray(), async iteration and a .local() stage (#72)", async () => {
+    // Both overloads pass data through unchanged.
+    const seenByFn: number[] = [];
+    const [passedByFn] = await run(
       [1, 2, 3],
       T<number>().tap((x) => {
-        seen.push(x as number);
+        seenByFn.push(x as number);
       }),
     );
-    expect(passed).toEqual([1, 2, 3]);
-    expect(seen).toEqual([1, 2, 3]);
+    expect(passedByFn).toEqual([1, 2, 3]);
+    expect(seenByFn).toEqual([1, 2, 3]);
 
     // tap(transformer) form: the sub-transformer runs for its effect, the stream is untouched.
-    const tapped: number[] = [];
-    const [passed2] = await run(
+    // `Transformer<number, number>` here, not `<number, unknown>` - the exact Done-when 7 shape,
+    // so this pins the invariance fix (`t.tap(someTransformer)` used to fail to typecheck when the
+    // sub-transformer's own Out was concrete rather than already `unknown`).
+    const seenByTransformer: number[] = [];
+    const [passedByTransformer] = await run(
       [1, 2, 3],
       T<number>().tap(
-        new Transformer<number, unknown>().map((x) => {
-          tapped.push((x as number) * 100);
-          return x;
+        new Transformer<number, number>().map((x) => {
+          seenByTransformer.push(x * 100);
+          return x * 2;
         }),
       ),
     );
-    expect(passed2).toEqual([1, 2, 3]);
-    expect(tapped).toEqual([100, 200, 300]);
+    expect(passedByTransformer).toEqual([1, 2, 3]);
+    expect(seenByTransformer).toEqual([100, 200, 300]);
+
+    // Fires identically, its context writes accumulating across the whole run, whichever of the
+    // three consumption paths drains the SAME persisted chunk stream (#39): .toArray(), async
+    // iteration, or a ConcurrentPipeline .local() stage - #72's own replacement for the deleted
+    // lifecycle-hooks knob's old Done-when 4/5 (#39) coverage.
+    async function countFor(
+      drain: (tapped: Transformer<number, number>) => Promise<Record<string, unknown>>,
+    ): Promise<number> {
+      const tapped = T<number>().tap((_x, c) =>
+        c.set("count", (c.getOrDefault("count", 0) as number) + 1),
+      );
+      const ctx = await drain(tapped);
+      return ctx.count as number;
+    }
+
+    const viaToArray = await countFor(async (tapped) => {
+      const pipeline = new Pipeline([1, 2, 3]).apply(tapped);
+      await pipeline.toArray();
+      return pipeline.contextManager.toDict();
+    });
+    const viaAsyncIteration = await countFor(async (tapped) => {
+      const pipeline = new Pipeline([1, 2, 3]).apply(tapped);
+      for await (const _chunk of pipeline) {
+        // drain
+      }
+      return pipeline.contextManager.toDict();
+    });
+    const viaLocalStage = await countFor(async (tapped) => {
+      const pipeline = new ConcurrentPipeline([1, 2, 3]).local((p) => p.apply(tapped));
+      await pipeline.toArray();
+      return pipeline.contextManager.toDict();
+    });
+
+    expect(viaToArray).toBe(3);
+    expect(viaAsyncIteration).toBe(3);
+    expect(viaLocalStage).toBe(3);
   });
 
   it("apply composes a sub-transformer into the chain", async () => {
@@ -109,15 +155,6 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
       T<number>().apply((t) => t.map((x) => x + 1).filter((x) => x % 2 === 0)),
     );
     expect(out).toEqual([2, 4]);
-  });
-
-  it("a tap that mutates context accumulates across the whole run", async () => {
-    const [, ctx] = await run(
-      [1, 2, 3],
-      T<number>().tap((_, c) => c.set("count", (c.getOrDefault("count", 0) as number) + 1)),
-      new SimpleContextManager({ count: 0 }),
-    );
-    expect(ctx.count).toBe(3);
   });
 });
 

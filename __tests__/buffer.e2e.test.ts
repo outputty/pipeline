@@ -88,84 +88,8 @@ describe("#39 two .buffer() calls back to back collapse to the last one (Done-wh
   });
 });
 
-describe("#39 lifecycle hooks fire identically everywhere (Done-when 4)", () => {
-  it("Pipeline, async iteration, and a ConcurrentPipeline local stage all see the same order and onError", async () => {
-    async function orderFor(run: (hooked: Transformer<number, number>) => Promise<unknown>) {
-      const order: string[] = [];
-      const hooked = new Transformer<number, number>()
-        .map((x: number) => x * 2)
-        .withHooks({
-          onStart: () => order.push("start"),
-          onComplete: () => order.push("complete"),
-        });
-      await run(hooked);
-      return order;
-    }
-
-    const viaToArray = await orderFor((hooked) => new Pipeline([1, 2]).apply(hooked).toArray());
-    const viaAsyncIteration = await orderFor(async (hooked) => {
-      for await (const _chunk of new Pipeline([1, 2]).apply(hooked)) {
-        // drain
-      }
-    });
-    const viaLocalStage = await orderFor((hooked) =>
-      new ConcurrentPipeline([1, 2]).local((p) => p.apply(hooked)).toArray(),
-    );
-
-    expect(viaToArray).toEqual(["start", "complete"]);
-    expect(viaAsyncIteration).toEqual(["start", "complete"]);
-    expect(viaLocalStage).toEqual(["start", "complete"]);
-
-    // Done-when 4 also names onError explicitly: a chunk-level throw must still notify it,
-    // on every one of the same three paths, before the error propagates.
-    async function errorSeenFor(run: (hooked: Transformer<number, number>) => Promise<unknown>) {
-      let seen: Error | undefined;
-      const hooked = new Transformer<number, number>()
-        .map((x: number) => {
-          if (x === 2) throw new Error("boom");
-          return x;
-        })
-        .withHooks({
-          onError: (e) => {
-            seen = e;
-          },
-        });
-      await expect(run(hooked)).rejects.toThrow("boom");
-      return seen;
-    }
-
-    const errViaToArray = await errorSeenFor((hooked) =>
-      new Pipeline([1, 2]).apply(hooked).toArray(),
-    );
-    const errViaAsyncIteration = await errorSeenFor(async (hooked) => {
-      for await (const _chunk of new Pipeline([1, 2]).apply(hooked)) {
-        // drain
-      }
-    });
-    const errViaLocalStage = await errorSeenFor((hooked) =>
-      new ConcurrentPipeline([1, 2]).local((p) => p.apply(hooked)).toArray(),
-    );
-
-    expect(errViaToArray?.message).toBe("boom");
-    expect(errViaAsyncIteration?.message).toBe("boom");
-    expect(errViaLocalStage?.message).toBe("boom");
-  });
-});
-
-describe("#39 async iteration reads the same persisted chunk stream a terminal op does (Done-when 5)", () => {
-  it("no inertKnobsOf/'not applied in source position' error throws any more", async () => {
-    const hooked = new Transformer<number, number>()
-      .map((x: number) => x * 2)
-      .withHooks({
-        onStart: () => {},
-      });
-    const pipeline = new Pipeline([1, 2, 3]).apply(hooked);
-
-    const chunks: number[][] = [];
-    for await (const chunk of pipeline) {
-      chunks.push(chunk);
-    }
-
-    expect(chunks.flat()).toEqual([2, 4, 6]);
-  });
-});
+// #39's own Done-when 4 and 5 - lifecycle hooks firing identically across every consumption path,
+// and async iteration reading the same persisted chunk stream a terminal op does - are covered by
+// __tests__/transforms.e2e.test.ts's single tap observation case now that #72 deletes hooks in
+// favor of .tap(): the mechanism .tap() replaced them with is what that case proves fires the
+// same way on .toArray(), on async iteration and on a .local() stage.

@@ -1,12 +1,13 @@
 /**
- * execution.e2e.test.ts — lifecycle hooks, streaming edge behaviors and the factory helpers, each
- * proven through an ENTIRE PIPELINE RUN rather than by calling a function in isolation.
+ * execution.e2e.test.ts — chunking, async I/O work, streaming edge behaviors and the factory
+ * helpers, each proven through an ENTIRE PIPELINE RUN rather than by calling a function in
+ * isolation.
  *
  * Concurrency used to be a `Transformer`-level pluggable seam here, before #17 deleted it - a
  * caller now wraps the chain in `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`
  * (`__tests__/pipelines.e2e.test.ts`) instead of configuring the `Transformer` that drives it.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { Pipeline, Transformer, createTransformer } from "../src";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -72,116 +73,6 @@ describe("execution e2e — async I/O work through a run", () => {
       }),
     );
     expect(out).toEqual([{ ok: true }, { ok: false }]);
-  });
-});
-
-describe("execution e2e — lifecycle hooks fire during a run", () => {
-  it("a plain-value hook (onStart: () => order.push(...)) compiles against the bare void return type", async () => {
-    const order: string[] = [];
-    const out = await run(
-      [1],
-      new Transformer<number, number>()
-        .map((x) => x * 2)
-        .withHooks({
-          onStart: () => order.push("start"),
-          onComplete: () => order.push("complete"),
-        }),
-    );
-    expect(out).toEqual([2]);
-    expect(order).toEqual(["start", "complete"]);
-  });
-
-  it("an async hook is still assignable to the bare void return type, and still awaited", async () => {
-    const order: string[] = [];
-    const out = await run(
-      [1, 2],
-      new Transformer<number, number>()
-        .map((x) => x * 2)
-        .withHooks({
-          onStart: async () => {
-            await delay(1);
-            order.push("start");
-          },
-          onComplete: async () => {
-            await delay(1);
-            order.push("complete");
-          },
-        }),
-    );
-    expect(out).toEqual([2, 4]);
-    // Both async hooks were AWAITED, not fired-and-forgotten: "start" is in before onComplete ran,
-    // and onComplete's own push landed before this assertion, proving execute() awaited it too.
-    expect(order).toEqual(["start", "complete"]);
-  });
-
-  it("onStart fires once before work, onComplete once after with item count", async () => {
-    const onStart = vi.fn();
-    const onComplete = vi.fn();
-    const out = await run(
-      [1, 2, 3],
-      new Transformer<number, number>().map((x) => x * 2).withHooks({ onStart, onComplete }),
-    );
-    expect(out).toEqual([2, 4, 6]);
-    expect(onStart).toHaveBeenCalledTimes(1);
-    expect(onComplete).toHaveBeenCalledTimes(1);
-    expect(onComplete).toHaveBeenCalledWith(3, expect.any(Number));
-  });
-
-  it("per-item hooks fire for each item with input/output (total is -1 while streaming)", async () => {
-    const onItemStart = vi.fn();
-    const onItemComplete = vi.fn();
-    await run(
-      [10, 20],
-      new Transformer<number, number>()
-        .map((x) => x * 2)
-        .withHooks({ onItemStart, onItemComplete }),
-    );
-    expect(onItemStart).toHaveBeenNthCalledWith(1, 10, 0, -1);
-    expect(onItemStart).toHaveBeenNthCalledWith(2, 20, 1, -1);
-    expect(onItemComplete).toHaveBeenNthCalledWith(1, 10, 20, expect.any(Number));
-    expect(onItemComplete).toHaveBeenNthCalledWith(2, 20, 40, expect.any(Number));
-  });
-
-  it("onItemError / onError fire on a failing item and the run rejects", async () => {
-    const onItemError = vi.fn();
-    const onError = vi.fn();
-    const err = new Error("boom");
-    await expect(
-      run(
-        [1, 2, 3],
-        new Transformer<number, number>()
-          .map((x) => {
-            if (x === 2) throw err;
-            return x;
-          })
-          .withHooks({ onItemError, onError }),
-      ),
-    ).rejects.toThrow(err);
-    expect(onItemError).toHaveBeenCalledWith(2, err);
-    expect(onError).toHaveBeenCalledWith(err);
-  });
-
-  it("hooks fire in order: start → (itemStart → itemComplete)* → complete", async () => {
-    const order: string[] = [];
-    await run(
-      [1, 2],
-      new Transformer<number, number>()
-        .map((x) => x * 2)
-        .withHooks({
-          onStart: () => order.push("start"),
-          onItemStart: (item) => order.push(`itemStart:${item}`),
-          onItemComplete: (_in, out) => order.push(`itemComplete:${out}`),
-          onComplete: () => order.push("complete"),
-        }),
-    );
-    expect(order).toEqual([
-      "start",
-      "itemStart:1",
-      "itemComplete:2",
-      "itemStart:2",
-      "itemComplete:4",
-      "complete",
-    ]);
   });
 });
 

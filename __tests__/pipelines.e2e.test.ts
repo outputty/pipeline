@@ -254,31 +254,6 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
   });
 });
 
-describe("#17 a knob that only takes effect via Transformer.process() fails loud, not silent", () => {
-  // Regression: stageWork() never calls process() on ANY consumption path (not just async
-  // iteration), so .withHooks() on a dispatched stage used to run with the hook silently never
-  // firing - no error, no warning. ConcurrentPipeline.apply() now throws instead. .onError() left
-  // this refusal in #40 - it reports a dispatched stage's failing chunk directly (below).
-  it("rejects .withHooks() on a non-local stage", () => {
-    const hooked = new Transformer<number, number>()
-      .map((x: number) => x * 2)
-      .withHooks({ onStart: () => {} });
-    expect(() => new ConcurrentPipeline([1, 2, 3]).apply(hooked)).toThrow(
-      /withHooks never take effect on a dispatched stage/,
-    );
-  });
-
-  it(".local(build) still runs a hooked stage in-process, hooks intact", async () => {
-    const order: string[] = [];
-    const hooked = new Transformer<number, number>()
-      .map((x: number) => x * 2)
-      .withHooks({ onStart: () => order.push("start"), onComplete: () => order.push("complete") });
-    const out = await new ConcurrentPipeline([1, 2, 3]).local((p) => p.apply(hooked)).toArray();
-    expect(out).toEqual([2, 4, 6]);
-    expect(order).toEqual(["start", "complete"]);
-  });
-});
-
 describe("#40 .onError() receives the chunk that actually failed", () => {
   // Real run from planning: chunkSize 2 over [1,2,3,4], throwing on 3 - the failing chunk is
   // [3,4], never the whole source and never [] (Done-when 1, 2).

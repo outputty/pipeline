@@ -21,7 +21,6 @@ import type {
   TransformerOptions,
   PipelineFunction,
   ReduceFunction,
-  TransformerLifecycleHooks,
   ChunkErrorHandler,
 } from "./types";
 import { SimpleContextManager } from "./context/simple";
@@ -34,7 +33,6 @@ import { Reducer, foldChunk } from "./utils/reduce";
  * named once rather than repeated per overload.
  */
 type TransformerConstructorOptions<In, Out> = TransformerOptions<In, Out> & {
-  hooks?: TransformerLifecycleHooks<In, Out>;
   errorHandler?: ErrorHandler<In>;
 };
 
@@ -72,8 +70,8 @@ async function* runSequentially<In, Out>(
  * here). Built by chaining (`.map()`, `.filter()`, `.reduce()`, …), each call returning a NEW
  * `Transformer` so one can be shared across pipelines without aliasing. It carries its own error
  * handling, which is what lets `pipeline.apply(t)` stay a one-liner. Every configuration method
- * (`.onError()`, `.withHooks()`) is copy-on-write like `.map()`/`.filter()`: it returns a NEW
- * `Transformer` carrying every other knob forward, never mutates `this` — the shape
+ * (`.onError()`) is copy-on-write like `.map()`/`.filter()`: it returns a NEW `Transformer`
+ * carrying every other knob forward, never mutates `this` — the shape
  * `@outputty/laygo`'s own `Model#named` follows.
  *
  * `new Transformer<number, number>().map((n) => n * 2)` → a transformer a pipeline can `.apply()`.
@@ -90,19 +88,14 @@ export class Transformer<In, Out> {
    * `ConcurrentPipeline.apply()`'s wrapped `work` calls it directly, immediately, from wherever a
    * DISPATCHED stage's chunk is still in scope. `process()` (below) calls it too, but deferred to
    * its own outer catch rather than from `runSequentially`'s inner one - `runSequentially` only
-   * captures the chunk while it is still in scope, so `hooks.onError` still runs first, the same
-   * relative order the two independent notification mechanisms had before this ticket. A failure
-   * that never reaches a chunk loop at all (a `.withHooks()` `onStart`/`onComplete` throw) has no
-   * chunk to report and falls through to `this.errorHandler` directly instead, never through this
-   * reporter. An arrow field, not a method, so it stays bound to `this.errorHandler` wherever it
-   * travels.
+   * captures the chunk while it is still in scope. A failure that never reaches that loop at all
+   * (the upstream `AsyncIterable` itself rejecting, before any chunk is pulled) has no chunk to
+   * report and falls through to `this.errorHandler` directly instead, never through this reporter.
+   * An arrow field, not a method, so it stays bound to `this.errorHandler` wherever it travels.
    */
   readonly chunkErrorReporter = (chunk: In[], error: Error, ctx: IContextManager): void => {
     this.errorHandler.handle(chunk, error, ctx);
   };
-
-  /** Lifecycle hooks for monitoring execution progress */
-  readonly hooks?: TransformerLifecycleHooks<In, Out>;
 
   /** Default context to use when none provided */
   private defaultContext: IContextManager;
@@ -111,8 +104,8 @@ export class Transformer<In, Out> {
    * Overload 1 — a real `transform` in hand. Not conditional on `In extends Out`, so it resolves
    * (and is preferred) even from inside this class's OWN generic methods, where `In`/`Out` are
    * still abstract type parameters a deferred conditional can never distribute over. Every
-   * copy-on-write rebuild site below (`.pipe()`, `.withHooks()`, `.onError()`) already carries a
-   * real `transform` forward, so all of them land here.
+   * copy-on-write rebuild site below (`.pipe()`, `.onError()`) already carries a real `transform`
+   * forward, so all of them land here.
    */
   constructor(
     options: TransformerConstructorOptions<In, Out> & { transform: InternalTransformer<In, Out> },
@@ -133,35 +126,6 @@ export class Transformer<In, Out> {
     this.transform = options?.transform ?? ((chunk, _ctx) => chunk as unknown as Out[]);
     this.errorHandler = options?.errorHandler ?? new ErrorHandler<In>();
     this.defaultContext = new SimpleContextManager();
-    this.hooks = options?.hooks;
-  }
-
-  /**
-   * Attach lifecycle hooks to this transformer.
-   *
-   * Creates a new transformer with the specified hooks that will be called
-   * during execution. This enables event-driven monitoring without embedding
-   * event logic in transformer implementations.
-   *
-   * @param hooks - Lifecycle hooks for monitoring execution
-   * @returns New Transformer with hooks attached
-   *
-   * @example
-   * ```typescript
-   * const transformer = new Transformer()
-   *   .map(item => item.toUpperCase())
-   *   .withHooks({
-   *     onItemStart: (item, index) => console.log(`Processing ${index}`),
-   *     onItemComplete: (input, output, ms) => console.log(`Done in ${ms}ms`),
-   *   })
-   * ```
-   */
-  withHooks(hooks: TransformerLifecycleHooks<In, Out>): Transformer<In, Out> {
-    return new Transformer<In, Out>({
-      transform: this.transform,
-      errorHandler: this.errorHandler,
-      hooks,
-    });
   }
 
   /**
@@ -169,14 +133,6 @@ export class Transformer<In, Out> {
    * knowledge of its own (#39). The one seam every `Pipeline` class drives it through:
    * `Pipeline.apply()` hands it `this._chunks` directly, and a caller running a `Transformer`
    * standalone supplies its own already-cut `AsyncIterable<In[]>`.
-   *
-   * If hooks are attached, they will be called at appropriate lifecycle points:
-   * - onStart: Before processing begins
-   * - onItemStart: Before each item is processed
-   * - onItemComplete: After each item is successfully processed
-   * - onItemError: When an item fails to process
-   * - onComplete: After all items are processed
-   * - onError: When the transformer fails
    *
    * Python equivalent:
    * ```python
@@ -211,127 +167,27 @@ export class Transformer<In, Out> {
    */
   async *process(chunks: AsyncIterable<In[]>, context?: IContextManager): AsyncGenerator<Out[]> {
     const runContext = context ?? this.defaultContext;
-    const startTime = Date.now();
-    const itemCounter = { index: 0 };
     // Set by `onChunkError` (below) the moment a chunk actually fails - captures the real chunk
-    // where it is still in scope, but reporting it is DEFERRED to the catch below so `hooks.onError`
-    // still runs first, same relative order the two independent notification mechanisms had before
-    // this ticket (`.withHooks()` and `.onError()` never coexist on a DISPATCHED stage - `.withHooks()`
-    // alone already refuses to build one, `dispatchKnobViolations` in `concurrent.ts` - so only this
-    // local path can ever run both).
+    // where it is still in scope, but reporting it is DEFERRED to the catch below rather than from
+    // `runSequentially`'s own inner one (#40).
     let chunkFailure: { chunk: In[]; error: Error; ctx: IContextManager } | undefined;
     const onChunkError = (chunk: In[], error: Error, ctx: IContextManager): void => {
       chunkFailure = { chunk, error, ctx };
     };
 
     try {
-      await this.hooks?.onStart?.();
-
-      const hasItemHooks =
-        this.hooks?.onItemStart ?? this.hooks?.onItemComplete ?? this.hooks?.onItemError;
-
-      if (hasItemHooks) {
-        const wrappedTransform = this.wrapTransformForItemHooks(itemCounter);
-        yield* runSequentially(wrappedTransform, chunks, runContext, onChunkError);
-      } else {
-        yield* this.countOutputItems(
-          runSequentially(this.transform, chunks, runContext, onChunkError),
-          itemCounter,
-        );
-      }
-
-      const totalDurationMs = Date.now() - startTime;
-      await this.hooks?.onComplete?.(itemCounter.index, totalDurationMs);
+      yield* runSequentially(this.transform, chunks, runContext, onChunkError);
     } catch (error) {
-      await this.hooks?.onError?.(error as Error);
       // `onChunkError` (above) only captured a CHUNK failure's real chunk - reporting it to
-      // `this.errorHandler` happens here, after `hooks.onError`, not inside `runSequentially`'s own
-      // catch (#40). A failure that never reached that loop at all (`hooks.onStart`/`onComplete`
-      // throwing) leaves `chunkFailure` unset, so it still falls through to the old `handle([], …)`
-      // call, same as before this ticket - there is no chunk to report for it, only that one happened.
+      // `this.errorHandler` happens here rather than inside `runSequentially`'s own catch (#40).
+      // A failure that never reached that loop at all (the upstream `AsyncIterable` itself
+      // rejecting, before any chunk is pulled) leaves `chunkFailure` unset, so it falls through to
+      // the old `handle([], …)` call instead - there is no chunk to report for it.
       if (chunkFailure) {
         this.chunkErrorReporter(chunkFailure.chunk, chunkFailure.error, chunkFailure.ctx);
       } else {
         this.errorHandler.handle([], error as Error, runContext);
       }
-      throw error;
-    }
-  }
-
-  /**
-   * Yields each chunk unchanged, advancing `counter.index` by its OUTPUT length first - the
-   * no-item-hooks fast path's own item count for `onComplete` (a filter can shrink a chunk, so the
-   * count is read from what is actually yielded, not the input). Its own method purely to keep
-   * `process()` within this repo's own `max-depth: 2` rule.
-   *
-   * @example
-   * `countOutputItems([[1, 2], [3]], counter)` yields `[1, 2]` then `[3]`, leaving
-   * `counter.index` at `3`.
-   */
-  private async *countOutputItems(
-    chunks: AsyncIterable<Out[]>,
-    counter: { index: number },
-  ): AsyncGenerator<Out[]> {
-    for await (const chunk of chunks) {
-      counter.index += chunk.length;
-      yield chunk;
-    }
-  }
-
-  /**
-   * Build a transform that emits `onItemStart`/`onItemComplete`/`onItemError`
-   * hooks around each item of a chunk, one item at a time.
-   *
-   * Runs only when `process()` detects at least one item-level hook attached.
-   * Produces the same chunk output as `this.transform` would, but drives the
-   * hooks as a side effect and advances `counter.index` per processed item.
-   *
-   * @example
-   * `wrapTransformForItemHooks({ index: 0 })([1, 2], ctx)` → `[2, 4]` (with
-   * `onItemStart`/`onItemComplete` invoked for each of `1` and `2`)
-   */
-  private wrapTransformForItemHooks(counter: { index: number }): InternalTransformer<In, Out> {
-    return async (chunk, ctx) => {
-      const results: Out[] = [];
-      for (const item of chunk) {
-        const output = await this.processItemWithHooks(item, ctx, counter);
-        results.push(...output);
-      }
-      return results;
-    };
-  }
-
-  /**
-   * Process a single item through `this.transform`, emitting the item-level
-   * lifecycle hooks around it and advancing the shared item counter.
-   *
-   * Runs once per item from within `wrapTransformForItemHooks`'s loop.
-   * Returns the item's transform output, or re-throws after notifying
-   * `onItemError` if the transform fails.
-   *
-   * @example
-   * `processItemWithHooks(3, ctx, { index: 0 })` → `[6]` (with `onItemStart`
-   * called at index `0`, then `onItemComplete` for the `6` output)
-   */
-  private async processItemWithHooks(
-    item: In,
-    ctx: IContextManager,
-    counter: { index: number },
-  ): Promise<Out[]> {
-    const itemStartTime = Date.now();
-    await this.hooks?.onItemStart?.(item, counter.index, -1); // -1 = total unknown (streaming)
-
-    try {
-      const singleResult = await this.transform([item], ctx);
-      const itemDurationMs = Date.now() - itemStartTime;
-
-      for (const output of singleResult) {
-        await this.hooks?.onItemComplete?.(item, output, itemDurationMs);
-      }
-      counter.index++;
-      return singleResult;
-    } catch (error) {
-      await this.hooks?.onItemError?.(item, error as Error);
       throw error;
     }
   }
@@ -377,8 +233,6 @@ export class Transformer<In, Out> {
       // this is what keeps `.onError(fn).map(g)` from silently dropping the configuration this
       // pipe() call would otherwise discard.
       errorHandler: this.errorHandler,
-      // Note: hooks are NOT preserved through pipe() since types change Out -> U
-      // Use withHooks() at the end of the chain
     });
   }
 
@@ -593,7 +447,6 @@ export class Transformer<In, Out> {
       handler instanceof ErrorHandler ? handler : this.errorHandler.clone().onError(handler);
     return new Transformer<In, Out>({
       transform: this.transform,
-      hooks: this.hooks,
       errorHandler,
     });
   }

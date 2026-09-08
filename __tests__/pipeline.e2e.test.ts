@@ -119,21 +119,6 @@ describe("Pipeline", () => {
 
       expect(results).toEqual([3, 5, 7]);
     });
-
-    it("preserves context across transformers", async () => {
-      const context = new SimpleContextManager({ count: 0 });
-      const pipeline = new Pipeline([1, 2, 3], { context });
-
-      const transformer = new Transformer<number, number>().tap((_, ctx) => {
-        const count = ctx.getOrDefault("count", 0) as number;
-        ctx.set("count", count + 1);
-      });
-
-      await pipeline.apply(transformer).toArray();
-      const ctx = pipeline.contextManager.toDict();
-
-      expect(ctx.count).toBe(3);
-    });
   });
 
   describe("transform", () => {
@@ -449,22 +434,11 @@ describe("Pipeline", () => {
 
   describe("integration", () => {
     it("complex pipeline with multiple operations", async () => {
-      const context = new SimpleContextManager({ processedCount: 0 });
-
-      const results = await new Pipeline([1, 2, 3, 4, 5], { context })
-        .transform((t) =>
-          t
-            .map((x: number) => x * 2)
-            .filter((x: number) => x > 4)
-            .tap((_, c) => {
-              const count = c.getOrDefault("processedCount", 0) as number;
-              c.set("processedCount", count + 1);
-            }),
-        )
+      const results = await new Pipeline([1, 2, 3, 4, 5])
+        .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
         .toArray();
 
       expect(results).toEqual([6, 8, 10]);
-      expect(context.toDict().processedCount).toBe(3);
     });
 
     it("pipeline with chained apply calls", async () => {
@@ -533,84 +507,30 @@ describe("Pipeline", () => {
       expect(seen).toHaveLength(1);
     });
 
-    it("a hooks.onStart throw - never reaching the chunk loop - still notifies onError, with [] (#40)", async () => {
-      // Regression: moving the report into runSequentially's own per-chunk catch (#40) must not
-      // drop the ONE case that never reaches that loop at all - a lifecycle hook throwing before
-      // any chunk is processed. process()'s own catch still falls back to handle([], ...) for it,
-      // same as every case did before this ticket.
+    it("the upstream source itself rejecting, before any chunk is pulled, still notifies onError with [] (#40)", async () => {
+      // process()'s own catch falls back to handle([], …) when runSequentially's per-chunk loop
+      // never ran at all - the source's own async iterator rejecting on its first `.next()` call,
+      // ahead of any chunk, is the one case that reaches this branch.
       const seen: { chunk: number[]; message: string }[] = [];
-      const boom = new Error("boom from onStart");
+      const boom = new Error("boom from the source");
+      async function* failingSource(): AsyncGenerator<number> {
+        throw boom;
+      }
       const transformer = new Transformer<number, number>()
         .map((x: number) => x)
-        .withHooks({
-          onStart: () => {
-            throw boom;
-          },
-        })
         .onError((chunk, error) => {
           seen.push({ chunk: [...chunk], message: error.message });
         });
 
-      await expect(new Pipeline([1, 2, 3]).apply(transformer).toArray()).rejects.toThrow(boom);
-      expect(seen).toEqual([{ chunk: [], message: "boom from onStart" }]);
-    });
-
-    it("hooks.onError still fires before a chunk-level onError() handler, same order as before #40", async () => {
-      // Regression: review found the chunk-report moving into runSequentially's own per-chunk catch
-      // would fire onError() BEFORE hooks.onError for a real chunk failure - reversed from the order
-      // every failure had before this ticket. Deferring the chunkErrorReporter call to process()'s
-      // own outer catch (after hooks.onError) restores it.
-      const order: string[] = [];
-      const boom = new Error("boom on 2");
-      const transformer = new Transformer<number, number>()
-        .map((x: number) => {
-          if (x === 2) throw boom;
-          return x;
-        })
-        .withHooks({ onError: () => order.push("hooks.onError") })
-        .onError(() => order.push("onError()"));
-
-      await expect(new Pipeline([1, 2, 3]).apply(transformer).toArray()).rejects.toThrow(boom);
-      expect(order).toEqual(["hooks.onError", "onError()"]);
+      await expect(new Pipeline(failingSource()).apply(transformer).toArray()).rejects.toThrow(
+        boom,
+      );
+      expect(seen).toEqual([{ chunk: [], message: "boom from the source" }]);
     });
   });
 
-  describe("async iteration reads the same persisted chunk stream a terminal op does (#39)", () => {
-    // The source-position mechanism (a separate replay path that bypassed Transformer.execute(),
-    // and threw naming any knob it couldn't honor) is gone: `.apply()` already ran
-    // `Transformer.process()` when it built `_chunks`, so async iteration - reading that SAME
-    // persisted stream - sees every knob fire exactly like `.toArray()` does. No throw left.
-    it("withHooks fires identically whether consumed via .toArray() or async iteration", async () => {
-      const order: string[] = [];
-      const transformer = new Transformer<number, number>()
-        .map((x: number) => x * 2)
-        .withHooks({ onStart: () => order.push("start") });
-      const pipeline = new Pipeline([1, 2, 3]).apply(transformer);
-
-      const chunks: number[][] = [];
-      for await (const chunk of pipeline) chunks.push(chunk);
-
-      expect(chunks.flat()).toEqual([2, 4, 6]);
-      expect(order).toEqual(["start"]);
-    });
-
-    it("a plain pipeline (no hooks at all) iterates fine directly", async () => {
-      const transformer = new Transformer<number, number>().map((x: number) => x * 2);
-      const pipeline = new Pipeline([1, 2, 3]).apply(transformer);
-
-      const chunks: number[][] = [];
-      for await (const chunk of pipeline) chunks.push(chunk);
-      expect(chunks.flat()).toEqual([2, 4, 6]);
-    });
-
-    it("withHooks is not inert through a terminal op (.toArray() calls Transformer.process)", async () => {
-      const order: string[] = [];
-      const transformer = new Transformer<number, number>()
-        .map((x: number) => x * 2)
-        .withHooks({ onStart: () => order.push("start") });
-      const results = await new Pipeline([1, 2, 3]).apply(transformer).toArray();
-      expect(results).toEqual([2, 4, 6]);
-      expect(order).toEqual(["start"]);
-    });
-  });
+  // Async iteration reading the same persisted chunk stream a terminal op does (#39) is covered by
+  // __tests__/transforms.e2e.test.ts's single tap observation case now that #72 deletes hooks in
+  // favor of .tap() - it proves .tap() fires identically on .toArray(), on async iteration and on a
+  // .local() stage.
 });
