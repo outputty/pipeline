@@ -88,9 +88,12 @@ export class Transformer<In, Out> {
   /**
    * Reports one chunk's failure to `this.errorHandler`, with the chunk that actually failed - the
    * reporter every dispatching seam (`runSequentially`'s own chunk loop here, `ConcurrentPipeline
-   * .apply()`'s wrapped `work`) calls from wherever the failing chunk is still in scope, replacing
-   * the old loop-scope catch that only ever saw `[]` (#40). An arrow field, not a method, so it
-   * stays bound to `this.errorHandler` wherever it travels.
+   * .apply()`'s wrapped `work`) calls from wherever the failing chunk is still in scope (#40). An
+   * arrow field, not a method, so it stays bound to `this.errorHandler` wherever it travels. The
+   * OLD loop-scope catch it displaced for a chunk failure - `process()`'s own catch, seeing only
+   * `[]` - still runs as a fallback there for the one failure that never reaches a chunk loop at
+   * all (a `.withHooks()` `onStart`/`onComplete` throw); that fallback calls `this.errorHandler`
+   * directly, never through this reporter.
    */
   readonly chunkErrorReporter = (chunk: In[], error: Error, ctx: IContextManager): void => {
     this.errorHandler.handle(chunk, error, ctx);

@@ -80,10 +80,12 @@ export class ErrorHandler<In, U = void> {
    * and does not stop a later (earlier-registered) handler from running or winning in its place.
    *
    * `Transformer.catch()` (`transformer.ts`) is the one caller that uses this return value, to
-   * replace or drop the failing chunk. `Transformer.onError()`'s own callers — `chunkErrorReporter`,
-   * called from wherever a chunk actually failed (`runSequentially`'s per-chunk try/catch for a
-   * local stage, `ConcurrentPipeline.apply()`'s wrapped `work` for a dispatched one, #40) — ignore
-   * this return value; `.onError()` is a notification hook there, never a recovery path.
+   * replace or drop the failing chunk. `Transformer.onError()`'s own callers ignore it instead -
+   * `chunkErrorReporter`, from wherever a chunk actually failed (`runSequentially`'s per-chunk
+   * try/catch for a local stage, `ConcurrentPipeline.apply()`'s wrapped `work` for a dispatched
+   * one, #40), and `Transformer.process()`'s own fallback `handle([], …)` call for the one failure
+   * that never reaches a chunk loop at all (a `.withHooks()` hook throwing) - `.onError()` is a
+   * notification hook on every one of these paths, never a recovery path.
    *
    * @param chunk - The chunk that caused the error
    * @param error - The error that occurred
