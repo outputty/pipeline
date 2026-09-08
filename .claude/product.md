@@ -90,6 +90,21 @@ changes.
 > **`.local(build)`** - runs a whole region of the chain in the orchestrating process, on every
 > class the same way: builds a base `Pipeline` over the caller's own chunk stream, runs `build`
 > against it (nothing inside can dispatch), and resumes the caller's own class afterward.
+> **Items in flight** - the number of callbacks a chain runs at once: the buffer size times
+> `maxConcurrency`. `maxConcurrency` bounds CHUNKS; the items inside one chunk run together.
+
+The chunk is the unit of concurrency, so a `ConcurrentPipeline`'s parallelism is its buffer size
+times `maxConcurrency`, never `maxConcurrency` alone. A chain left at the default buffer of 1000 with
+`maxConcurrency: 3` holds 3000 callbacks in flight, not 3. Call `.buffer(size)` to lower the ceiling,
+and prefer the widest chunk that fits it: two chains holding the same 16 in flight over 50000 items
+ran 27 ms and 63 ms, because a narrow chunk pays the per-chunk cost more often.
+
+| `.buffer(size)` | `maxConcurrency` | items in flight |
+| --- | --- | --- |
+| 1000 | 1 | 1000 |
+| 100 | 3 | 300 |
+| 1 | 16 | 16 |
+
 
 ```ts
 import { ClusterPipeline } from "@outputty/pipeline";
