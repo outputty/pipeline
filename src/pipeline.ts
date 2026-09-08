@@ -28,6 +28,7 @@ import type {
   BranchOptions,
   ReduceFunction,
   PipelineFunction,
+  PipelineErrorHandler,
 } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
 import { SimpleContextManager } from "./context/simple";
@@ -112,6 +113,13 @@ export interface PipelineOptions {
    * serve a `/reduce/<n>` request. Not intended for direct external use.
    */
   reduceStages?: Map<number, ReduceStage>;
+  /**
+   * The RUN handler (#78), registered via `.onError()` - position-DEPENDENT, unlike `Transformer`'s
+   * own row handler: only a stage applied AFTER `.onError()` sees it, since it reaches a chunk
+   * failure only through that stage's own dispatch (`Pipeline.apply()`/`ConcurrentPipeline.apply()`).
+   * Carried forward by every copy-on-write call the same way `context`/`chunkTransforms` are.
+   */
+  runHandler?: PipelineErrorHandler;
 }
 
 /** A registered reduce stage's own definition - `pushReduceStage()` (below) is the one place that
@@ -190,6 +198,8 @@ export class Pipeline<T> {
   /** Every reduce stage registered via `.reduce()`, keyed by its index in the shared stage-index
    * space - see `PipelineOptions.reduceStages`. */
   protected _reduceStages: Map<number, ReduceStage>;
+  /** The RUN handler (#78), registered via `.onError()` - see `PipelineOptions.runHandler`. */
+  protected _runHandler?: PipelineErrorHandler;
 
   /**
    * Create a new Pipeline from a data source.
@@ -205,6 +215,7 @@ export class Pipeline<T> {
     this._context = options?.context ?? options?.contextFactory?.() ?? new SimpleContextManager();
     this._chunkTransforms = options?.chunkTransforms ?? [];
     this._reduceStages = options?.reduceStages ?? new Map();
+    this._runHandler = options?.runHandler;
 
     if (options?.chunks !== undefined) {
       // The copy-on-write path: `data` is inert (an internal caller passes `[]`) since the chunk
@@ -410,6 +421,34 @@ export class Pipeline<T> {
       chunkTransforms: this._chunkTransforms,
       reduceStages: this._reduceStages,
       preBufferItems: this._preBufferItems,
+      runHandler: this._runHandler,
+    }) as this;
+  }
+
+  /**
+   * Registers the RUN handler (#78) - position-DEPENDENT, unlike `Transformer.onError()`'s own row
+   * handler: only a stage applied AFTER this call sees it, since `Pipeline.apply()`/
+   * `ConcurrentPipeline.apply()` are what actually read `this._runHandler` at dispatch time. On a
+   * chunk failure that reaches either of those (a chunk-wide throw, or a row handler that itself
+   * rethrows and so escalates past the row), `handler` is called with the error and the context:
+   * returning drops the failing chunk and the run continues to the next one; throwing stops the run,
+   * rejecting with whatever it threw. Copy-on-write, like every other configuration method here.
+   *
+   * @param handler - The run handler, `(error, ctx) => void`.
+   * @returns A new instance of THIS pipeline's own class, carrying the handler forward.
+   *
+   * @example
+   * `new Pipeline(["1","x","3","4"]).buffer(1).onError((e) => console.warn(e.message))
+   * .transform((t) => t.map(parseStrict)).toArray()` → `[1, 3, 4]` - the chunk holding `"x"` is
+   * dropped, every other chunk survives.
+   */
+  onError(handler: PipelineErrorHandler): this {
+    return this.createPipeline<T>(this._chunks, {
+      context: this._context,
+      chunkTransforms: this._chunkTransforms,
+      reduceStages: this._reduceStages,
+      preBufferItems: this._preBufferItems,
+      runHandler: handler,
     }) as this;
   }
 
@@ -462,6 +501,7 @@ export class Pipeline<T> {
         chunkTransforms: this._chunkTransforms,
         reduceStages: this._reduceStages,
         preBufferItems: null,
+        runHandler: this._runHandler,
       },
     ) as this;
   }
@@ -487,9 +527,16 @@ export class Pipeline<T> {
   }
 
   /**
-   * Apply a transformer to the pipeline data - `transformer.process(this._chunks, ctx)` runs it
-   * directly over the pipeline's own persisted chunk stream, no cut here (#39): chunking is never
-   * this method's decision, only `.buffer()`'s.
+   * Apply a transformer to the pipeline data - `transformer.process(this._chunks, ctx, runHandler)`
+   * runs it directly over the pipeline's own persisted chunk stream, no cut here (#39): chunking is
+   * never this method's decision, only `.buffer()`'s.
+   *
+   * `transformer.runnable()` (#78) is what carries the transformer's own row handler into
+   * `_chunkTransforms` - the SAME function `process()` (below `runnable()`'s own call inside it)
+   * drives, so a dispatched stage on `HttpPipeline`/`ClusterPipeline` gets row recovery too, off the
+   * identical entry a worker's own copy of this chain built. `this._runHandler` (`.onError()`, #78)
+   * is threaded through as `process()`'s own third argument, reaching `runSequentially`'s per-chunk
+   * catch.
    *
    * Python equivalent:
    * ```python
@@ -502,17 +549,16 @@ export class Pipeline<T> {
    * `.toArray()` resolves `[2, 4, 6]`.
    */
   apply<U>(transformer: Transformer<T, U>): Pipeline<U> {
-    const newChunks = transformer.process(this._chunks, this._context);
+    const runnable = transformer.runnable();
+    const newChunks = transformer.process(this._chunks, this._context, this._runHandler);
     return this.createPipeline<U>(newChunks, {
       context: this._context,
-      chunkTransforms: [
-        ...this._chunkTransforms,
-        transformer.transform as unknown as ChunkTransform,
-      ],
+      chunkTransforms: [...this._chunkTransforms, runnable as unknown as ChunkTransform],
       reduceStages: this._reduceStages,
       // A real stage just consumed `_chunks` - nothing left to recut a back-to-back `.buffer()`
       // from except this stage's own output, so the pre-buffer item view resets to null.
       preBufferItems: null,
+      runHandler: this._runHandler,
     });
   }
 
@@ -565,6 +611,7 @@ export class Pipeline<T> {
       chunkTransforms: this._chunkTransforms,
       reduceStages: this._reduceStages,
       preBufferItems: items,
+      runHandler: this._runHandler,
     }) as this;
   }
 
@@ -586,6 +633,7 @@ export class Pipeline<T> {
       chunkTransforms,
       reduceStages,
       preBufferItems: null,
+      runHandler: this._runHandler,
     });
   }
 
@@ -618,6 +666,7 @@ export class Pipeline<T> {
       reduceStages: this._reduceStages,
       chunks: this._chunks,
       preBufferItems: this._preBufferItems,
+      runHandler: this._runHandler,
     });
     const built = build(region);
     return this.createPipeline<U>(built._chunks, {
@@ -625,6 +674,7 @@ export class Pipeline<T> {
       chunkTransforms: built._chunkTransforms,
       reduceStages: built._reduceStages,
       preBufferItems: built._preBufferItems,
+      runHandler: built._runHandler,
     });
   }
 

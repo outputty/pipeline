@@ -2,19 +2,21 @@
  * transforms.e2e.test.ts — every `Transformer` operation proven through an ENTIRE PIPELINE RUN
  * (`new Pipeline(input).apply(transformer).toArray()`), never by poking a strategy/util/context
  * function in isolation. A behavior is only "covered" here if it changes the output (or context) of
- * a full run — the same way a caller would observe it. Chunk-level ops (`reduce`/`loop`/`catch`)
- * pass `run()` an explicit `bufferSize` so the run actually crosses chunk boundaries (#39: the
+ * a full run — the same way a caller would observe it. Chunk-level ops (`reduce`/`loop`) pass
+ * `run()` an explicit `bufferSize` so the run actually crosses chunk boundaries (#39: the
  * `Pipeline`'s own `.buffer()`, never a `Transformer` knob) - `Pipeline.transform()` alone would
  * collapse everything into one default 1000-item chunk and hide it.
  */
 import { describe, it, expect } from "vitest";
-import {
-  Pipeline,
-  ConcurrentPipeline,
-  Transformer,
-  SimpleContextManager,
-  ErrorHandler,
-} from "../src";
+import { Pipeline, ConcurrentPipeline, Transformer, SimpleContextManager, DROP } from "../src";
+
+/** The ticket's own canonical example (#78): throws `Invalid: <s>` for anything that doesn't parse
+ * as an int. */
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
 
 /** Run `input` through a real pipeline built on `transformer`, returning [results, contextSnapshot].
  * `Pipeline.toArray()` itself carries no context slot (#744) - this LOCAL helper builds its own
@@ -234,96 +236,131 @@ describe("transforms e2e — chunk-level ops (run crosses chunk boundaries)", ()
     ).toEqual([1, 2, 3]);
   });
 
-  it("catch runs a sub-pipeline, swallowing a throwing chunk to empty and reporting it", async () => {
-    // No error ⇒ sub-pipeline output.
-    expect(
-      (
-        await run(
-          [1, 2, 3],
-          T<number>().catch((t) => t.map((x) => x * 2)),
-          undefined,
-          5,
-        )
-      )[0],
-    ).toEqual([2, 4, 6]);
+  describe("onError — the ROW handler (#78; replaces #40's chunk-level notification and .catch(), both deleted)", () => {
+    it("Done-when 1: t.onError(() => DROP).map(parseStrict) drops only the failing rows", async () => {
+      const [out] = await run(
+        ["a", "b", "3", "d", "5"],
+        T<string>()
+          .onError(() => DROP)
+          .map(parseStrict),
+      );
+      expect(out).toEqual([3, 5]);
+    });
 
-    // A chunk that throws yields nothing; independent chunks still succeed.
-    const [independent] = await run(
-      [1, 2, 3, 4],
-      T<number>().catch((t) =>
-        t.map((x) => {
-          if (x === 2) throw new Error("boom");
-          return x * 10;
-        }),
-      ),
-      undefined,
-      2,
-    );
-    expect(independent).toEqual([30, 40]); // chunk [1,2] failed, chunk [3,4] survived
+    it("Done-when 2: onError is position-independent — after .map() prints the same [3,5]", async () => {
+      const [out] = await run(
+        ["a", "b", "3", "d", "5"],
+        T<string>()
+          .map(parseStrict)
+          .onError(() => DROP),
+      );
+      expect(out).toEqual([3, 5]);
+    });
 
-    // onError callback sees the failing chunk + error.
-    const errors: { chunk: number[]; message: string }[] = [];
-    await run(
-      [1, 2, 3],
-      T<number>().catch(
-        (t) =>
-          t.map((x) => {
-            if (x === 2) throw new Error("Test error");
-            return x;
+    it("Done-when 3: a returned value replaces the row, keeping its place and the chunk's length", async () => {
+      const [out] = await run(
+        ["a", "b", "3", "d", "5"],
+        T<string>()
+          .onError(() => -1)
+          .map(parseStrict),
+      );
+      expect(out).toEqual([-1, -1, 3, -1, 5]);
+    });
+
+    it("Done-when 4: reaches .filter() too — a throwing predicate drops via the row handler", async () => {
+      const [out] = await run(
+        ["a", "b", "3", "d", "5"],
+        T<string>()
+          .onError(() => DROP)
+          .filter((s) => parseStrict(s) > 3),
+      );
+      expect(out).toEqual(["5"]);
+    });
+
+    it("Done-when 5: reaches Transformer.reduce()'s fold step — the accumulator skips a dropped row", async () => {
+      const [out] = await run(
+        ["a", "b", "3", "d", "5"],
+        T<string>()
+          .onError(() => DROP)
+          .reduce((acc, s) => acc + parseStrict(s), 0),
+        undefined,
+        5,
+      );
+      expect(out).toEqual([8]);
+    });
+
+    it("Done-when 6: an async row handler is awaited in place; a dead-letter store receives every dropped row", async () => {
+      const deadLetter: string[] = [];
+      const [out] = await run(
+        ["a", "b", "3", "d", "5"],
+        T<string>()
+          .onError(async (item) => {
+            await Promise.resolve(); // proves the handler is genuinely awaited, not fire-and-forget
+            deadLetter.push(item as string);
+            return DROP;
+          })
+          .map(parseStrict),
+      );
+      expect(out).toEqual([3, 5]);
+      expect(deadLetter).toEqual(["a", "b", "d"]);
+    });
+
+    it("reaches .flatMap() — a recovered value becomes that row's one output item", async () => {
+      const [out] = await run(
+        ["a", "1,2", "b"],
+        T<string>()
+          .onError(() => DROP)
+          .flatMap((s) =>
+            s
+              .split(",")
+              .map(Number)
+              .map((n) => {
+                if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+                return n;
+              }),
+          ),
+      );
+      expect(out).toEqual([1, 2]);
+    });
+
+    it("reaches .tap(fn) — DROP removes the row, any other return keeps it (data untouched)", async () => {
+      const seen: number[] = [];
+      const [out] = await run(
+        [1, 2, 3],
+        T<number>()
+          .onError(() => DROP)
+          .tap((x) => {
+            if (x === 2) throw new Error("boom");
+            seen.push(x);
           }),
-        (chunk, error) => {
-          errors.push({ chunk: [...chunk], message: error.message });
-        },
-      ),
-      undefined,
-      5,
-    );
-    expect(errors).toEqual([{ chunk: [1, 2, 3], message: "Test error" }]);
+      );
+      expect(out).toEqual([1, 3]);
+      expect(seen).toEqual([1, 3]);
+    });
 
-    // #15 — onError's returned array REPLACES the failing chunk, one chunk so the whole run fails.
-    const parseChunk = (t: Transformer<string, string>): Transformer<string, number> =>
-      t.map((s: string) => {
-        const n = parseInt(s);
-        if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-        return n;
-      });
-    const [replaced] = await run(
-      ["a", "b", "3", "d", "5"],
-      T<string>().catch(parseChunk, () => [999]),
-      undefined,
-      5,
-    );
-    expect(replaced).toEqual([999]);
+    it("a rethrowing row handler escalates past the row: process() rejects with the original error", async () => {
+      await expect(
+        run(
+          ["a", "3"],
+          T<string>()
+            .onError((_item, error) => {
+              throw error;
+            })
+            .map(parseStrict),
+        ),
+      ).rejects.toThrow("Invalid: a");
+    });
 
-    // A handler returning nothing still drops the chunk — the replacement is optional, not implied.
-    const [dropped] = await run(
-      ["a", "b", "3", "d", "5"],
-      T<string>().catch(parseChunk, () => undefined),
-      undefined,
-      5,
-    );
-    expect(dropped).toEqual([]);
-
-    // Chaining several handlers onto one ErrorHandler (real object, no mock): the LIFO winner
-    // (last registered, runs first) supplies the replacement, but EVERY handler still runs.
-    const calls: string[] = [];
-    const chained = new ErrorHandler<string, number>()
-      .onError(() => {
-        calls.push("first-registered");
-        return undefined;
-      })
-      .onError(() => {
-        calls.push("second-registered");
-        return [999];
-      });
-    const [chainedResult] = await run(
-      ["a", "b", "3", "d", "5"],
-      T<string>().catch(parseChunk, chained.handle.bind(chained)),
-      undefined,
-      5,
-    );
-    expect(calls).toEqual(["second-registered", "first-registered"]);
-    expect(chainedResult).toEqual([999]);
+    it(".onError(() => DROP).map(fn) is a real recovery, never a silent no-op on success", async () => {
+      // Control: no row throws, so the handler never runs and every row survives unchanged.
+      const [out] = await run(
+        ["1", "2", "3"],
+        T<string>()
+          .onError(() => DROP)
+          .map(parseStrict),
+      );
+      expect(out).toEqual([1, 2, 3]);
+    });
   });
 
   it("shortCircuit aborts the run when its (optionally context-driven) condition holds", async () => {

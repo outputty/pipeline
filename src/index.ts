@@ -10,21 +10,20 @@
 export type {
   PipelineFunction,
   ReduceFunction,
-  ChunkErrorHandler,
   InternalTransformer,
   ChunkerFunction,
   IContextManager,
   BranchDefinition,
   BranchOptions,
   TransformerOptions,
+  RowErrorHandler,
+  PipelineErrorHandler,
+  RunScope,
 } from "./types";
-export { DEFAULT_CHUNK_SIZE } from "./types";
+export { DEFAULT_CHUNK_SIZE, DROP } from "./types";
 
 // Context
 export { SimpleContextManager } from "./context/simple";
-
-// Errors
-export { ErrorHandler } from "./errors/handler";
 
 // Utils
 export { buildChunkGenerator, normalize, isContextAware } from "./utils";

@@ -17,6 +17,7 @@ import type { ChunkTransform } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
 import { share } from "@src/utils/chunk";
+import { dropOrRethrow } from "@src/utils/helpers";
 
 /** Construction-time knobs for `ConcurrentPipeline` and every class that extends it. */
 export interface ConcurrentPipelineOptions {
@@ -246,16 +247,17 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
   override apply<U>(transformer: Transformer<T, U>): ConcurrentPipeline<U> {
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
-    // Reports the chunk `stageWork()` was actually given, then rethrows - `Transformer.process()`'s
-    // own chunk loop never runs on this path, so this wrapper is where a dispatched stage's failing
-    // chunk is captured instead (#40). `transformer.chunkErrorReporter` (`transformer.ts`) is a
-    // no-op when nothing is registered via `.onError()`, so this costs nothing on the common path.
+    // The run handler's own chunk-drop decision (#78) - `dropOrRethrow` (`utils/helpers.ts`) is the
+    // same "call the handler, or propagate" `Transformer.process()`'s own `runSequentially` loop
+    // makes for a local stage; a handler that returns (rather than throws) means "drop this chunk",
+    // and `[]` is the empty-chunk answer the fan-out below needs for that. No handler registered:
+    // `dropOrRethrow` rethrows, same as before #78.
     const work: InternalTransformer<T, U> = async (chunk, ctx) => {
       try {
         return await rawWork(chunk, ctx);
       } catch (error) {
-        transformer.chunkErrorReporter(chunk, error as Error, ctx);
-        throw error;
+        await dropOrRethrow(this._runHandler, error as Error, ctx);
+        return [];
       }
     };
     const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;
@@ -268,7 +270,10 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
       context: this._context,
       chunkTransforms: [
         ...this._chunkTransforms,
-        transformer.transform as unknown as ChunkTransform,
+        // `transformer.runnable()` (#78), not `transformer.transform` directly - the seam that
+        // carries the transformer's own row handler in, so a WORKER's identical registry entry
+        // (`HttpPipeline.fetch()`'s own `_chunkTransforms[requested]` lookup) gets row recovery too.
+        transformer.runnable() as unknown as ChunkTransform,
       ],
       // Carried forward like every base `Pipeline` copy-on-write method already does (#45) - a
       // dropped `_reduceStages` here would silently lose a stage a prior `.reduce()` registered
@@ -277,6 +282,7 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
       // A dispatched stage's own output IS a real chunk stream now (#39) - a later `.buffer()`
       // flattens it like any other stage's output, so no pre-buffer item view survives this call.
       preBufferItems: null,
+      runHandler: this._runHandler,
     });
   }
 
@@ -362,6 +368,9 @@ export class ConcurrentPipeline<T> extends Pipeline<T> {
     transformer: Transformer<T, U>,
     _stageIndex: number,
   ): InternalTransformer<T, U> {
-    return (chunk, ctx) => transformer.transform(chunk, ctx);
+    // `transformer.runnable()` (#78) wires the transformer's own row handler into every dispatch
+    // this method's return value drives - the same seam `apply()` (above) uses to populate this
+    // pipeline's own `_chunkTransforms` entry.
+    return transformer.runnable();
   }
 }
