@@ -6,7 +6,8 @@
  * `(acc, x, ctx, emit) => …` both just work.
  */
 
-import type { IContextManager, ReduceFunction } from "@src/types";
+import type { IContextManager, ReduceFunction, RowErrorHandler } from "@src/types";
+import { DROP } from "@src/types";
 
 /**
  * Folds items one at a time into `U`, buffering values `emit()` pushes and tracking whether the
@@ -27,23 +28,55 @@ export class Reducer<U, T> {
   constructor(
     private readonly fn: ReduceFunction<U, T>,
     initial: U,
+    /** The row handler (#78), read once at construction and applied to every `.fold()` call -
+     * `Transformer.reduce()` passes `run?.rowHandler` here; `foldChunkStream`'s own callers
+     * (`Pipeline.reduce()`, `ConcurrentPipeline.reduceWork()`) never pass one, since they fold with
+     * no `Transformer` in scope (the ticket's own Constraints). */
+    private readonly rowHandler?: RowErrorHandler,
   ) {
     this.acc = initial;
   }
 
   /** Folds one item, returning whatever `emit()` pushed during this call, in emit order - `[]` when
-   * `fn` didn't emit.
+   * `fn` didn't emit. A throwing `fn` (#78) hands the item to `this.rowHandler`, when registered: a
+   * returned value REPLACES the accumulator directly (never re-runs `fn`, so a handler cannot cause
+   * a second throw), `DROP` skips the item - the increment above is undone, so `.final()` doesn't
+   * owe a trailing value for a row that never actually folded. No handler registered: the throw
+   * propagates unchanged, same as before #78.
    *
    * `new Reducer((acc, x, _ctx, emit) => (x === 6 ? (emit(acc + x), 0) : acc + x), 0).fold(6, ctx)`
-   * → `[6]`, the accumulator `emit()` just pushed. */
+   * → `[6]`, the accumulator `emit()` just pushed.
+   *
+   * `new Reducer((_acc, s) => { const n = parseInt(s); if (isNaN(n)) throw new Error("bad"); return n; }, 0, () => DROP).fold("x", ctx)`
+   * → `[]`, the accumulator left at its prior value.
+   */
   async fold(item: T, ctx: IContextManager): Promise<U[]> {
-    this.itemsSinceEmit++;
     const emitted: U[] = [];
-    this.acc = await this.fn(this.acc, item, ctx, (value) => {
-      emitted.push(value);
-      this.itemsSinceEmit = 0;
-    });
+    this.itemsSinceEmit++;
+    try {
+      this.acc = await this.fn(this.acc, item, ctx, (value) => {
+        emitted.push(value);
+        this.itemsSinceEmit = 0;
+      });
+    } catch (error) {
+      if (!this.rowHandler) throw error;
+      const recovered = await this.rowHandler(item, error as Error, ctx);
+      this.applyRecovery(recovered as U | typeof DROP);
+    }
     return emitted;
+  }
+
+  /** Applies a recovered row (#78): `DROP` undoes `fold()`'s own increment - guarded, since `fn`
+   * can `emit()` (resetting `itemsSinceEmit` to `0`) and THEN throw, and `0 - 1` would leave
+   * `.final()` owing a value nothing was folded into since that emit - any other value replaces the
+   * accumulator directly. Split out of `fold()` to keep that method's own `try`/`catch` at this
+   * repo's `max-depth: 2`. */
+  private applyRecovery(recovered: U | typeof DROP): void {
+    if (recovered === DROP) {
+      if (this.itemsSinceEmit > 0) this.itemsSinceEmit--;
+      return;
+    }
+    this.acc = recovered;
   }
 
   /** The final accumulator, only if items were folded since the last `emit()` - `[]` otherwise. */

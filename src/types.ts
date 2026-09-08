@@ -51,24 +51,65 @@ export type ReduceFunction<U, Out> = (
 ) => U | Promise<U>;
 
 /**
- * Error handler for chunk processing errors.
- *
- * Python equivalent:
- * ```python
- * type ChunkErrorHandler[In, U] = Callable[[list[In], Exception, IContextManager], list[U]]
- * ```
+ * The sentinel a `RowErrorHandler` returns to remove its row from the output entirely (#78) - a
+ * `unique symbol`, never a string or `null`, so `undefined` stays an ordinary value a handler may
+ * legitimately return (a map to `undefined` is not the same as dropping the row). Every site that
+ * reads a handler's return tests it with `!== DROP`, never a truthiness check.
  */
-export type ChunkErrorHandler<In, U = void> = (
-  chunk: In[],
+export const DROP: unique symbol = Symbol("DROP");
+
+/**
+ * The ROW handler (#78; replaces #40's chunk-level notification contract entirely) - one plain
+ * function, may be async, registered via `Transformer.onError(fn)`. `item` is `unknown` because one
+ * handler covers every element-wise link in a chain regardless of that link's own item type
+ * (`.map()`, `.filter()`, `.flatMap()`, `.tap(fn)`, `Transformer.reduce()`'s fold step); its return
+ * is unchecked for the same reason - inherent to the design, not a gap.
+ *
+ * Returning a value puts that value in the row's place; returning `DROP` removes the row; throwing
+ * (or returning a rejected `Promise`) escalates past the row to the CHUNK, reaching
+ * `PipelineErrorHandler` (below) instead.
+ *
+ * `(item, error, ctx) => (error.message.includes("Invalid") ? DROP : -1)` recovers a bad row to
+ * `-1` and drops anything else that fails.
+ */
+export type RowErrorHandler = (
+  item: unknown,
   error: Error,
   ctx: IContextManager,
-) => U[] | void;
+) => unknown | typeof DROP | Promise<unknown | typeof DROP>;
+
+/**
+ * The RUN handler (#78), registered via `Pipeline.onError(fn)` - position-DEPENDENT, unlike
+ * `RowErrorHandler`: it must be set before the `.transform()`/`.apply()` call whose chunk failures
+ * it should catch, since it reaches a stage only through that stage's own dispatch (`Pipeline.apply()`
+ * threads it into `Transformer.process()`, `ConcurrentPipeline.apply()` reads it directly off `this`).
+ * Returning drops the failing CHUNK and the run continues to the next one; throwing stops the run,
+ * rejecting with whatever it throws.
+ *
+ * `(error, ctx) => console.warn(error.message)` logs and continues; `(error) => { throw error; }`
+ * makes every chunk failure fatal, same as no handler at all.
+ */
+export type PipelineErrorHandler = (error: Error, ctx: IContextManager) => void;
+
+/**
+ * Carries a chain's row handler down through a composed `InternalTransformer` call (#78) -
+ * `Transformer.runnable()` builds it once, reading `this.rowHandler` off the FINAL transformer, and
+ * `pipe()` forwards the same instance to every link underneath. A link with no `run.rowHandler` set
+ * runs its pre-#78 code path unchanged - the seam costs nothing until a handler is registered.
+ */
+export interface RunScope {
+  rowHandler?: RowErrorHandler;
+}
 
 /**
  * Internal transformer function that processes chunks.
  *
  * Supports both synchronous and asynchronous transformers.
  * When used with execution strategies, Promise results are automatically awaited.
+ *
+ * `run` is optional and forwarded by `pipe()` alone (#78) - a caller driving a `Transformer`
+ * standalone via `.process()` never has to supply it; `Transformer.runnable()` is what builds it
+ * from `this.rowHandler` before the top of the chain is ever called.
  *
  * Python equivalent:
  * ```python
@@ -78,6 +119,7 @@ export type ChunkErrorHandler<In, U = void> = (
 export type InternalTransformer<In, Out> = (
   chunk: In[],
   ctx: IContextManager,
+  run?: RunScope,
 ) => Out[] | Promise<Out[]>;
 
 /**

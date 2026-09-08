@@ -451,81 +451,89 @@ describe("Pipeline", () => {
     });
   });
 
-  describe("onError wiring (Transformer.process)", () => {
-    it("a registered onError handler fires on a chunk failure, and the error still propagates", async () => {
-      const seen: Error[] = [];
-      const boom = new Error("boom");
-      const transformer = new Transformer<number, number>()
-        .map((x: number) => {
-          if (x === 2) throw boom;
-          return x;
-        })
-        .onError((_chunk, error) => {
-          seen.push(error);
-        });
+  describe("Pipeline.onError() — the RUN handler (#78)", () => {
+    const parseStrict = (s: string): number => {
+      const n = parseInt(s);
+      if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+      return n;
+    };
 
-      await expect(new Pipeline([1, 2, 3]).apply(transformer).toArray()).rejects.toThrow(boom);
-      expect(seen).toHaveLength(1);
-      expect(seen[0].message).toBe("boom");
+    it("Done-when 7: a chunk that can't be repaired is dropped, the run continues", async () => {
+      const logged: string[] = [];
+      const out = await new Pipeline(["1", "x", "3", "4"])
+        .buffer(1)
+        .onError((e) => logged.push(e.message))
+        .transform((t) => t.map(parseStrict))
+        .toArray();
+
+      expect(out).toEqual([1, 3, 4]);
+      expect(logged).toEqual(["Invalid: x"]);
     });
 
-    it("onError() registered BEFORE map() survives pipe()'s copy — the handler still fires", async () => {
-      // Regression for #442: `pipe()` (driving map/filter/…) used to always construct a fresh,
-      // empty ErrorHandler, so `t.onError(fn).map(g)` silently dropped `fn` — only the OTHER
-      // order (map-then-onError, the test above) used to work.
-      const seen: Error[] = [];
-      const boom = new Error("boom");
-      const transformer = new Transformer<number, number>()
-        .onError((_chunk, error) => {
-          seen.push(error);
-        })
-        .map((x: number) => {
-          if (x === 2) throw boom;
-          return x;
-        });
-
-      await expect(new Pipeline([1, 2, 3]).apply(transformer).toArray()).rejects.toThrow(boom);
-      expect(seen).toHaveLength(1);
-      expect(seen[0].message).toBe("boom");
+    it("Done-when 8: a handler that rethrows stops the run, rejecting with what it threw", async () => {
+      await expect(
+        new Pipeline(["1", "x", "3", "4"])
+          .buffer(1)
+          .onError((e) => {
+            throw e;
+          })
+          .transform((t) => t.map(parseStrict))
+          .toArray(),
+      ).rejects.toThrow("Invalid: x");
     });
 
-    it("an expression-body handler returning a non-void value still typechecks (#15)", async () => {
-      // Regression: onError()'s function arm must stay a bare `void` return, never
-      // `ChunkErrorHandler<In>` (a `void[] | void` union under #15's own U default) - a union
-      // loses the void-return exemption, so `(chunk, err) => arr.push(err)` (returning `push()`'s
-      // own `number`) would fail TS2345 under the union even though it compiled before #15.
-      const seen: Error[] = [];
-      const boom = new Error("boom");
-      const transformer = new Transformer<number, number>()
-        .map((x: number) => {
-          if (x === 2) throw boom;
-          return x;
+    it("Done-when 10: a rethrowing ROW handler escalates to the RUN handler, which drops the chunk", async () => {
+      // Same chain as Done-when 7, but the row handler is what rethrows this time - it never
+      // recovers "x" itself, so the failure still reaches Pipeline.onError() as a chunk failure.
+      const out = await new Pipeline(["1", "x", "3", "4"])
+        .buffer(1)
+        .onError(() => {
+          /* swallow: drop the chunk, keep going */
         })
-        .onError((_chunk, error) => seen.push(error));
+        .transform((t) =>
+          t
+            .onError((_item, error) => {
+              throw error;
+            })
+            .map(parseStrict),
+        )
+        .toArray();
 
-      await expect(new Pipeline([1, 2, 3]).apply(transformer).toArray()).rejects.toThrow(boom);
-      expect(seen).toHaveLength(1);
+      expect(out).toEqual([1, 3, 4]);
     });
 
-    it("the upstream source itself rejecting, before any chunk is pulled, still notifies onError with [] (#40)", async () => {
-      // process()'s own catch falls back to handle([], …) when runSequentially's per-chunk loop
-      // never ran at all - the source's own async iterator rejecting on its first `.next()` call,
-      // ahead of any chunk, is the one case that reaches this branch.
-      const seen: { chunk: number[]; message: string }[] = [];
+    it("is position-dependent, unlike Transformer.onError() — only a stage applied AFTER it is covered", async () => {
+      // .onError() here is registered on a FRESH pipeline built by .transform() below, applied to
+      // an ALREADY-DISPATCHED stage - too late for THIS run to see it, so the chunk failure still
+      // propagates uncaught. Contrast with Done-when 7, where .onError() precedes .transform().
+      await expect(
+        new Pipeline(["1", "x", "3", "4"])
+          .buffer(1)
+          .transform((t) => t.map(parseStrict))
+          .onError(() => {
+            /* registered too late to catch the stage above */
+          })
+          .toArray(),
+      ).rejects.toThrow("Invalid: x");
+    });
+
+    it("the upstream source itself rejecting, before any chunk is pulled, has no chunk to drop — it still propagates", async () => {
+      // The run handler catches a CHUNK failure; a source that rejects before any chunk is ever
+      // produced never reaches that per-chunk try/catch at all (the ticket's own Constraints: "the
+      // unit dropped is the CHUNK").
       const boom = new Error("boom from the source");
       async function* failingSource(): AsyncGenerator<number> {
         throw boom;
       }
-      const transformer = new Transformer<number, number>()
-        .map((x: number) => x)
-        .onError((chunk, error) => {
-          seen.push({ chunk: [...chunk], message: error.message });
-        });
+      const seen: Error[] = [];
 
-      await expect(new Pipeline(failingSource()).apply(transformer).toArray()).rejects.toThrow(
-        boom,
-      );
-      expect(seen).toEqual([{ chunk: [], message: "boom from the source" }]);
+      await expect(
+        new Pipeline(failingSource())
+          .onError((e) => seen.push(e))
+          .transform((t) => t.map((x: number) => x))
+          .toArray(),
+      ).rejects.toThrow(boom);
+      expect(seen).toEqual([]);
     });
   });
 

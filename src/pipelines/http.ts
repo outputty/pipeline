@@ -231,9 +231,10 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
    * of it (Hono's own default) never breaks routing.
    *
    * An unknown stage index 404s naming the range this deployment actually serves. A stage that
-   * throws (its own transform chain, `.catch()` included, already ran and did NOT recover) 500s
+   * throws (its own transform chain, row recovery included, already ran and did NOT recover) 500s
    * with the error message - `stageWork()` (below) turns that into a thrown error on the
-   * DISPATCHING side, which never reaches that side's own unrelated `.catch()` calls, since the
+   * DISPATCHING side, which never reaches that side's own unrelated `Pipeline.onError()` run
+   * handler until `ConcurrentPipeline.apply()`'s wrapped `work` catches it there (#78), since the
    * HTTP round trip happens entirely outside any `Transformer` chain.
    *
    * `fetch(new Request("http://x/stage/0", { method: "POST", body: JSON.stringify({ chunk: [1,2],

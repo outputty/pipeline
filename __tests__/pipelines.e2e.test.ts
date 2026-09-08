@@ -254,82 +254,66 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
   });
 });
 
-describe("#40 .onError() receives the chunk that actually failed", () => {
-  // Real run from planning: chunkSize 2 over [1,2,3,4], throwing on 3 - the failing chunk is
-  // [3,4], never the whole source and never [] (Done-when 1, 2).
+describe("#78 the row handler reaches a dispatched stage identically to a local one", () => {
+  // throwOn3 fails ONE row; a row handler recovering it proves .runnable() (the seam that carries
+  // Transformer.onError() into _chunkTransforms) reaches every class the same way.
   const throwOn3 = (t: Transformer<number, number>) =>
-    t.map((x: number) => {
-      if (x === 3) throw new Error("boom on 3");
-      return x;
-    });
+    t
+      .onError(() => -1)
+      .map((x: number) => {
+        if (x === 3) throw new Error("boom on 3");
+        return x;
+      });
 
-  it("Pipeline: handler sees chunk [3,4], the run still rejects with the original error", async () => {
-    const seen: number[][] = [];
-    const transformer = throwOn3(new Transformer<number, number>()).onError((chunk) => {
-      seen.push(chunk);
-    });
-    await expect(new Pipeline([1, 2, 3, 4]).buffer(2).apply(transformer).toArray()).rejects.toThrow(
-      "boom on 3",
-    );
-    expect(seen).toEqual([[3, 4]]);
+  it("Pipeline: [1,2,-1,4] - the row is replaced, its chunk siblings unaffected", async () => {
+    const out = await new Pipeline([1, 2, 3, 4])
+      .buffer(2)
+      .transform((t) => throwOn3(t))
+      .toArray();
+    expect(out).toEqual([1, 2, -1, 4]);
   });
 
-  it("ConcurrentPipeline: handler sees chunk [3,4], the run still rejects with the original error", async () => {
-    const seen: number[][] = [];
-    const transformer = throwOn3(new Transformer<number, number>()).onError((chunk) => {
-      seen.push(chunk);
-    });
-    await expect(
-      new ConcurrentPipeline([1, 2, 3, 4]).buffer(2).apply(transformer).toArray(),
-    ).rejects.toThrow("boom on 3");
-    expect(seen).toEqual([[3, 4]]);
+  it("ConcurrentPipeline: [1,2,-1,4] - identical recovery over a dispatched (in-process) stage", async () => {
+    const out = await new ConcurrentPipeline([1, 2, 3, 4])
+      .buffer(2)
+      .transform((t) => throwOn3(t))
+      .toArray();
+    expect(out).toEqual([1, 2, -1, 4]);
   });
 
   it(
-    "HttpPipeline: handler sees chunk [3,4]; the rejection wraps the original error with the stage and url",
+    "HttpPipeline: [1,2,-1,4] - the WORKER's own _chunkTransforms entry carries the row handler too",
     async () => {
       const worker = makeWorker((t) => t.transform((tr) => throwOn3(tr)));
-      const seen: number[][] = [];
-      const transformer = throwOn3(new Transformer<number, number>()).onError((chunk) => {
-        seen.push(chunk);
-      });
       await withServer(worker.fetch, async (url) => {
-        const orchestrator = new HttpPipeline<number>([1, 2, 3, 4], { url })
+        const out = await new HttpPipeline<number>([1, 2, 3, 4], { url })
           .buffer(2)
-          .apply(transformer);
-        await expect(orchestrator.toArray()).rejects.toThrow(/stage 0.*failed: boom on 3/);
+          .transform((t) => throwOn3(t))
+          .toArray();
+        expect(out).toEqual([1, 2, -1, 4]);
       });
-      expect(seen).toEqual([[3, 4]]);
     },
     HTTP_TIMEOUT,
   );
 
-  it('several handlers still run LIFO on Pipeline: ["second","first"]', async () => {
-    const calls: string[] = [];
-    const transformer = throwOn3(new Transformer<number, number>())
-      .onError(() => calls.push("first"))
-      .onError(() => calls.push("second"));
-    await expect(
-      new Pipeline([1, 2, 3, 4]).buffer(2).apply(transformer).toArray(),
-    ).rejects.toThrow();
-    expect(calls).toEqual(["second", "first"]);
-  });
-
-  it('several handlers still run LIFO on ConcurrentPipeline: ["second","first"]', async () => {
-    const calls: string[] = [];
-    const transformer = throwOn3(new Transformer<number, number>())
-      .onError(() => calls.push("first"))
-      .onError(() => calls.push("second"));
-    await expect(
-      new ConcurrentPipeline([1, 2, 3, 4]).buffer(2).apply(transformer).toArray(),
-    ).rejects.toThrow();
-    expect(calls).toEqual(["second", "first"]);
+  it("Done-when 9: ConcurrentPipeline maxConcurrency 2 - Pipeline.onError(() => undefined) drops the failing chunk", async () => {
+    const parseStrict = (s: string): number => {
+      const n = parseInt(s);
+      if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+      return n;
+    };
+    const out = await new ConcurrentPipeline(["1", "x", "3", "4"], { maxConcurrency: 2 })
+      .buffer(1)
+      .onError(() => undefined)
+      .transform((t) => t.map(parseStrict))
+      .toArray();
+    expect(out).toEqual([1, 3, 4]);
   });
 
   it("ConcurrentPipeline.apply() no longer refuses a stage carrying .onError()", () => {
     const withHandler = new Transformer<number, number>()
       .map((x: number) => x * 2)
-      .onError(() => {});
+      .onError(() => -1);
     expect(() => new ConcurrentPipeline([1, 2, 3]).apply(withHandler)).not.toThrow();
   });
 });
@@ -551,9 +535,9 @@ describe("#17 .context() propagates through the wire (Done-when 14)", () => {
   );
 });
 
-describe("#17 a stage's HTTP 500 throws from the terminal op, never reaches .catch() (Done-when 15)", () => {
+describe("#17 a stage's HTTP 500 throws from the terminal op (Done-when 15)", () => {
   it(
-    "rejects naming the stage index and url, and the .catch() handler never runs",
+    "with no Pipeline.onError() registered, rejects naming the stage index and url",
     async () => {
       const worker = makeWorker((t) =>
         t.transform((tr) =>
@@ -562,21 +546,37 @@ describe("#17 a stage's HTTP 500 throws from the terminal op, never reaches .cat
           }),
         ),
       );
-      const onError = () => {
-        throw new Error("must not be reached");
-      };
       await withServer(worker.fetch, async (url) => {
         const orchestrator = new HttpPipeline<number>([1, 2, 3], { url }).transform((t) =>
-          t.catch(
-            (sub) => sub.map((x: number) => x),
-            () => {
-              onError();
-              return undefined;
-            },
-          ),
+          t.map((x: number) => x),
         );
         const escapedUrl = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         await expect(orchestrator.toArray()).rejects.toThrow(new RegExp(`stage 0.*${escapedUrl}`));
+      });
+    },
+    HTTP_TIMEOUT,
+  );
+
+  it(
+    "#78: Pipeline.onError() reaches an HTTP 500 too - ConcurrentPipeline.apply()'s wrapped work catches ANY dispatch failure, not only a row-level one, and drops that chunk",
+    async () => {
+      const worker = makeWorker((t) =>
+        t.transform((tr) =>
+          tr.map((x: number) => {
+            if (x === 2) throw new Error("boom");
+            return x;
+          }),
+        ),
+      );
+      await withServer(worker.fetch, async (url) => {
+        const out = await new HttpPipeline<number>([1, 2, 3], { url })
+          .buffer(1)
+          .onError(() => {
+            /* drop the failing chunk, keep going */
+          })
+          .transform((t) => t.map((x: number) => x))
+          .toArray();
+        expect(out).toEqual([1, 3]);
       });
     },
     HTTP_TIMEOUT,
