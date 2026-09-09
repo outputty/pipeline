@@ -270,7 +270,7 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
     for await (const chunk of p([1, 2, 3, 4, 5]).chunks()) {
       chunks.push(chunk);
     }
-    expect(chunks.flat()).toEqual([2, 4, 6]);
+    expect(chunks.flat()).toEqual([2, 4, 6, 8, 10]);
   });
 });
 

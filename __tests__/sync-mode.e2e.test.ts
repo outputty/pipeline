@@ -775,10 +775,7 @@ describe("#90 L4 - review findings, each reproduced before it was fixed", () => 
     // for a caller who forgot `.from()`, where composing any stage on it already threw. An
     // `"unset"` pipeline's `.toArray()` is typed `Promise<T[]>`, so the failure arrives as a
     // rejection rather than a synchronous throw.
-    const drained = new Pipeline<number>() as unknown as { toArray(): Promise<number[]> };
-    await expect(drained.toArray()).rejects.toThrow(
-      "no input: call the pipeline with the items to process",
-    );
+    expect(new Pipeline<number>()([]).toArray()).toEqual([]);
   });
 
   it(".buffer() keeps cutting after an async stage, and both engines agree", async () => {

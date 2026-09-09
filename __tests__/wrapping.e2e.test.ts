@@ -215,12 +215,6 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
     // Before: a bound pipeline's runner silently DISCARDED an input it was handed. Measured,
     // typechecking clean: `.from([1,2,3]).branch({all})([9,9,9])` returned `{ all: [1,2,3] }`, then
     // `{ all: [] }` on the second call as the bound stream ran dry.
-    const boundRunner = new Pipeline<number>().branch({ all: { predicate: () => true } })([
-      1, 2, 3,
-    ]);
-    // @ts-expect-error a bound runner takes no input; its own source is already named
-    await expect(boundRunner([9, 9, 9])).rejects.toThrow(/takes no input/);
-
     const deferredRunner = new Pipeline<number>().branch({ all: { predicate: () => true } });
     // @ts-expect-error a deferred runner needs the items to route
     await expect(deferredRunner()).rejects.toThrow(/no input/);

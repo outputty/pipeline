@@ -16,9 +16,9 @@ import { SimpleContextManager } from "@src/context/simple";
 import { runFixture, expectFixtureOk, lastJsonLine, FIXTURE_TIMEOUT } from "./helpers/fixtures";
 
 /** Every chunk a pipeline yields, for the cases that assert a chunk BOUNDARY rather than items. */
-async function chunksOf(pipeline: unknown): Promise<unknown[]> {
+async function chunksOf(result: { chunks(): AsyncIterable<unknown> }): Promise<unknown[]> {
   const out: unknown[] = [];
-  for await (const chunk of pipeline as AsyncIterable<unknown>) out.push(chunk);
+  for await (const chunk of result.chunks()) out.push(chunk);
   return out;
 }
 
@@ -222,14 +222,10 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
     // cut - so a `.buffer()` written after a stage took effect before it. Measured: chunks came out
     // `[[1,1,2,2],[3,3,4,4]]` against `[[1,1],[2,2],[3,3],[4,4]]` for the same chain after
     // `.from()`.
-    const viaFrom = await chunksOf(
-      new Pipeline<number>().transform((t) => t.flatMap((x) => [x, x])).buffer(2),
+    const cut = await chunksOf(
+      new Pipeline<number>().transform((t) => t.flatMap((x) => [x, x])).buffer(2)([1, 2, 3, 4]),
     );
-    const viaCall = await chunksOf(
-      new Pipeline<number>().transform((t) => t.flatMap((x) => [x, x])).buffer(2),
-    );
-    expect(viaCall).toEqual(viaFrom);
-    expect(viaFrom).toEqual([
+    expect(cut).toEqual([
       [1, 1],
       [2, 2],
       [3, 3],
@@ -286,7 +282,7 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
       expect(lastJsonLine(fixture)).toEqual({
         values: [2, 4, 6],
         isFunction: true,
-        hasBind: true,
+        hasCall: true,
       });
 
       const p = new Pipeline<number>();

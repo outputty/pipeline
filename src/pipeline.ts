@@ -43,8 +43,6 @@ import {
   buildChunkGenerator,
   buildSyncChunkGenerator,
   flattenChunks,
-  drainSync,
-  drainSyncSettled,
   recutSyncChunks,
 } from "./utils/chunk";
 import { chain, isThenable, dropOrRethrow } from "./utils/helpers";
@@ -642,8 +640,12 @@ export class Pipeline<
    * the instance they own across every call; a default-built manager is per-run, so two calls of
    * one reusable chain never see each other's writes (#90). */
   protected contextForRun(): IContextManager {
-    if (!this._contextIsDefault) return this._context;
-    return this.isDeferred() ? new SimpleContextManager() : this._context;
+    if (!this._contextIsDefault || !this.isDeferred()) return this._context;
+    // A fresh manager per run, SEEDED from the chain's own values - `.context({ multiplier: 10 })`
+    // declares a default every run starts from, and an empty manager here dropped it, so a stage
+    // reading `ctx.getOrDefault("multiplier", 1)` fell back to `1`. Seeded and separate is what
+    // keeps `.context()` working while two calls still never see each other's writes.
+    return new SimpleContextManager(this._context.toDict());
   }
 
   /**
@@ -905,6 +907,12 @@ export class Pipeline<
     // array is a no-op, so the pessimism is safe there; `.then(…)` on it is a `TypeError`. The
     // handler cannot be inspected for asynchrony without guessing (a plain function returning a
     // promise is indistinguishable from a sync one), so the type stays pessimistic by decision.
+    // Defers like a stage (#90), because it IS positional: `.onError()` covers only stages applied
+    // AFTER it, and setting `runHandler` on the deferred pipeline instead made it cover the whole
+    // chain - a handler written after `.transform()` silently started catching that transform.
+    if (this.isDeferred()) {
+      return this.defer<T>((p) => p.onError(handler)) as this;
+    }
     return this.createPipeline<T>(this._chunks, {
       ...this.carriedOptions(),
       runHandler: handler,

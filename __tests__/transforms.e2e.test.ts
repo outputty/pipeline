@@ -131,21 +131,25 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
     }
 
     const viaToArray = await countFor(async (tapped) => {
-      const pipeline = new Pipeline<number>().apply(tapped);
-      await pipeline([1, 2, 3]).toArray();
-      return pipeline.contextManager.toDict();
+      const mine = new SimpleContextManager();
+      await new Pipeline<number>({ context: mine }).apply(tapped)([1, 2, 3]).toArray();
+      return mine.toDict();
     });
     const viaAsyncIteration = await countFor(async (tapped) => {
-      const pipeline = new Pipeline<number>().apply(tapped);
+      const mine = new SimpleContextManager();
+      const pipeline = new Pipeline<number>({ context: mine }).apply(tapped);
       for await (const _chunk of pipeline([1, 2, 3]).chunks()) {
         // drain
       }
-      return pipeline.contextManager.toDict();
+      return mine.toDict();
     });
     const viaLocalStage = await countFor(async (tapped) => {
-      const pipeline = new ConcurrentPipeline<number>().local((p) => p.apply(tapped));
+      const mine = new SimpleContextManager();
+      const pipeline = new ConcurrentPipeline<number>({ context: mine }).local((p) =>
+        p.apply(tapped),
+      );
       await pipeline([1, 2, 3]).toArray();
-      return pipeline.contextManager.toDict();
+      return mine.toDict();
     });
 
     expect(viaToArray).toBe(3);
