@@ -15,7 +15,12 @@
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Pipeline } from "@src/pipeline";
-import type { PipelineOptions, PipelineSource, ReduceStage, AnyPipeline } from "@src/pipeline";
+import type {
+  PipelineOptions,
+  PipelineSource,
+  ReduceStage,
+  WrappablePipeline,
+} from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
   IContextManager,
@@ -177,10 +182,13 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    * WORKER and the TRIGGER share one definition: the worker constructs the wrapper and mounts
    * `.fetch` without ever naming data, and the trigger constructs it and calls it with different
    * data each time. Neither writes the `.from([])` placeholder the worker used to need. */
-  constructor(pipeline: AnyPipeline<T>, options: { url: string } & ConcurrentPipelineOptions);
+  constructor(
+    pipeline: WrappablePipeline<T, In>,
+    options: { url: string } & ConcurrentPipelineOptions,
+  );
   constructor(options: HttpPipelineConstructorOptions);
   constructor(
-    first: AnyPipeline<T> | HttpPipelineConstructorOptions,
+    first: WrappablePipeline<T, In> | HttpPipelineConstructorOptions,
     second?: { url: string } & ConcurrentPipelineOptions,
   ) {
     const options = Pipeline.wrapping<HttpPipelineConstructorOptions>(first, second);
@@ -300,17 +308,23 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
       return this.serveReduceRequest(requested, request);
     }
 
+    // A path that is not a stage route is answered before anything else runs. `registries()` below
+    // can replay a whole deferred chain, and it sat ahead of this guard - so an unrelated request
+    // paid that replay for a `maxIndex` it then ignored, and a replay that threw turned a 404 into
+    // a rejected `fetch` promise instead of an error response.
+    if (!match) {
+      return Response.json({ error: `unknown stage ${pathname}` }, { status: 404 });
+    }
+
     // `registries()`, not `_chunkTransforms` directly (#90): a worker holds a chain and never
     // binds an input, so its stages are still recorded calls until something replays them. Reading
     // the raw field reported `unknown stage 0; this deployment serves 0..-1` for a chain that had
     // one stage.
     const { chunkTransforms } = this.registries();
     const maxIndex = chunkTransforms.length - 1;
-    if (!match || requested > maxIndex) {
+    if (requested > maxIndex) {
       return Response.json(
-        {
-          error: `unknown stage ${match ? requested : pathname}; this deployment serves 0..${maxIndex}`,
-        },
+        { error: `unknown stage ${requested}; this deployment serves 0..${maxIndex}` },
         { status: 404 },
       );
     }

@@ -65,9 +65,26 @@ describe("a wrapping class takes (pipeline, options) and runs the chain elsewher
 
   it("refuses to wrap a pipeline that already named a source", () => {
     const bound = new Pipeline<Order>().from(ordersA);
+    // TS2345: Argument of type 'Pipeline<Order, "sync", "shape", Order>' is not assignable to
+    // parameter of type 'WrappablePipeline<Order, Order>'. The wrapping overload takes an `"unset"`
+    // Mode, so a bound chain is a compile error - the runtime guard below stays for a caller who
+    // reaches `Pipeline.adopt` directly, or who is not using TypeScript.
+    // @ts-expect-error a bound pipeline has materialised its stages; there is nothing left to adopt
     expect(() => new ConcurrentPipeline(bound, { maxConcurrency: 2 })).toThrow(
       /already named a source/,
     );
+  });
+
+  it("keeps the wrapped chain's own input type, not its output type", () => {
+    // Before: the constructor parameter was `AnyPipeline<T>`, whose `In` is `any`, so the wrapper
+    // fell back to its own `T` - each stage's OUTPUT. Measured on a `number → string` chain, the
+    // wrapper typed its input `string` and rejected the `number[]` that ran fine:
+    // `TS2769: Argument of type 'number[]' is not assignable to parameter of type
+    // 'Iterable<string>'`. The `: Promise<string[]>` annotation is the assertion here.
+    const toStr = new Pipeline<number>().transform((t) => t.map((n) => `S${n}`));
+    const wrapped = new ConcurrentPipeline(toStr, { maxConcurrency: 2 });
+    const out: Promise<string[]> = wrapped([1, 2, 3]).toArray();
+    return expect(out).resolves.toEqual(["S1", "S2", "S3"]);
   });
 
   it("partitions a wrapped reduce the way the class always did (#62)", async () => {
@@ -180,16 +197,21 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
     expect(routed.eu.map((o) => o.total)).toEqual([60, 144]);
   });
 
-  it("mixes a transformer-less branch with a transformed one", async () => {
-    const mixed = await withVat.branch<Order | string>({
-      big: {
-        predicate: (o: Order) => o.total > 200,
-        transformer: label("BIG") as unknown as Transformer<Order, Order | string, "sync">,
-      },
+  it("types each branch from its OWN transformer, not one shared type", async () => {
+    // Before: `branch<U>` inferred one `U` from whichever branches named a transformer, and a
+    // routing-only branch pushed its items in as that type. Measured - a map pairing an
+    // `Order → string` branch with a routing-only one typed the routing branch `string[]` and
+    // filled it with `Order` objects, no cast anywhere. This version needs no annotation and no
+    // cast; the two annotations below are the assertion.
+    const mixed = await withVat.branch({
+      big: { predicate: (o: Order) => o.total > 200, transformer: label("BIG") },
       eu: { predicate: (o: Order) => o.region === "eu" },
     })(ordersA);
-    expect(mixed.big).toEqual(["BIG:2", "BIG:4"]);
-    expect((mixed.eu as Order[]).map((o) => o.id)).toEqual([1, 3]);
+
+    const labelled: string[] = mixed.big;
+    const routed: Order[] = mixed.eu;
+    expect(labelled).toEqual(["BIG:2", "BIG:4"]);
+    expect(routed.map((o) => o.id)).toEqual([1, 3]);
   });
 
   it("still works with no argument on a pipeline that named a source", async () => {
@@ -197,5 +219,77 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
     expect(await bound.branch({ eu: { predicate: (o: Order) => o.region === "eu" } })()).toEqual({
       eu: [ordersA[0], ordersA[2]],
     });
+  });
+
+  it("refuses the argument each form cannot honour", async () => {
+    // Before: a bound pipeline's runner silently DISCARDED an input it was handed. Measured,
+    // typechecking clean: `.from([1,2,3]).branch({all})([9,9,9])` returned `{ all: [1,2,3] }`, then
+    // `{ all: [] }` on the second call as the bound stream ran dry.
+    const boundRunner = new Pipeline<number>()
+      .from([1, 2, 3])
+      .branch({ all: { predicate: () => true } });
+    // @ts-expect-error a bound runner takes no input; its own source is already named
+    await expect(boundRunner([9, 9, 9])).rejects.toThrow(/takes no input/);
+
+    const deferredRunner = new Pipeline<number>().branch({ all: { predicate: () => true } });
+    // @ts-expect-error a deferred runner needs the items to route
+    await expect(deferredRunner()).rejects.toThrow(/no input/);
+  });
+
+  it("gives a branch transformer the RUN's context, not the chain's", async () => {
+    // Before: routing went through the owner's own context, so a branch transformer saw none of
+    // this run's writes and every one of the last run's. Measured on a chain writing
+    // `ctx.set("seenByChain", n)`: the branch read `null` for every item, then leaked the previous
+    // call's values into the next.
+    const chain = new Pipeline<number>().transform((t) =>
+      t.map((n, ctx) => {
+        ctx?.set("seenByChain", n);
+        return n;
+      }),
+    );
+    const seen: unknown[] = [];
+    const split = chain.branch({
+      all: {
+        predicate: () => true,
+        transformer: new Transformer<number, number>().map((n, ctx) => {
+          seen.push(ctx?.get("seenByChain"));
+          return n;
+        }),
+      },
+    });
+
+    // `[3, 3, 3]`, not `[1, 2, 3]`: a context write is chunk-granular, never item-granular - the
+    // whole chunk passes through the map before any of it is routed, so every branch read sees the
+    // last write. That is the same rule `.tap()` already documents. What this pins is that the
+    // branch sees THIS run's writes at all; before the fix it read `[null, null, null]`.
+    await split([1, 2, 3]);
+    expect(seen).toEqual([3, 3, 3]);
+
+    // A second call starts clean rather than reading the first call's writes back.
+    seen.length = 0;
+    await split([7, 8]);
+    expect(seen).toEqual([8, 8]);
+  });
+
+  it("reads item by item once the chunk boundary is one item", async () => {
+    // The control for the case above: at `.buffer(1)` each item IS its own chunk, so the branch
+    // reads that item's own write rather than the chunk's last.
+    const chain = new Pipeline<number>().buffer(1).transform((t) =>
+      t.map((n, ctx) => {
+        ctx?.set("seenByChain", n);
+        return n;
+      }),
+    );
+    const seen: unknown[] = [];
+    await chain.branch({
+      all: {
+        predicate: () => true,
+        transformer: new Transformer<number, number>().map((n, ctx) => {
+          seen.push(ctx?.get("seenByChain"));
+          return n;
+        }),
+      },
+    })([1, 2, 3]);
+    expect(seen).toEqual([1, 2, 3]);
   });
 });

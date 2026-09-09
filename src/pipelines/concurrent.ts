@@ -22,7 +22,7 @@ import {
   Pipeline,
   type PipelineOptions,
   type PipelineSource,
-  type AnyPipeline,
+  type WrappablePipeline,
 } from "@src/pipeline";
 import type { ChunkTransform } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
@@ -208,10 +208,10 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
   /** Wraps a chain built elsewhere, running its stages concurrently (#90) - the chain says WHAT to
    * do, this class says WHERE. Only a source-less pipeline can be wrapped, since its stages are
    * still recorded calls to replay; one already bound through `.from()` is refused. */
-  constructor(pipeline: AnyPipeline<T>, options?: ConcurrentPipelineOptions);
+  constructor(pipeline: WrappablePipeline<T, In>, options?: ConcurrentPipelineOptions);
   constructor(options?: ConcurrentPipelineConstructorOptions);
   constructor(
-    first?: AnyPipeline<T> | ConcurrentPipelineConstructorOptions,
+    first?: WrappablePipeline<T, In> | ConcurrentPipelineConstructorOptions,
     second?: ConcurrentPipelineOptions,
   ) {
     const options = Pipeline.wrapping<ConcurrentPipelineConstructorOptions>(first, second);

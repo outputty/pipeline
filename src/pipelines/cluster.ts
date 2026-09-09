@@ -20,7 +20,7 @@ import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
 import { Pipeline } from "@src/pipeline";
-import type { PipelineOptions, PipelineSource, AnyPipeline } from "@src/pipeline";
+import type { PipelineOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
   IContextManager,
@@ -164,12 +164,13 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
   readonly pipelineIndex: number;
 
   /** Wraps a chain built elsewhere, dispatching its stages to forked worker processes (#90). The
-   * worker's own copy needs no placeholder source: a wrapped chain has none by construction, which
-   * is what `emptyAsyncIterable()` below was standing in for. */
-  constructor(pipeline: AnyPipeline<T>, options?: ClusterPipelineOptions);
+   * CALLER no longer writes a placeholder source, because a wrapped chain has none by construction.
+   * `emptyAsyncIterable()` below is a different thing and still runs: it empties a WORKER process's
+   * own already-bound copy, so a worker never orchestrates a drain of its own. */
+  constructor(pipeline: WrappablePipeline<T, In>, options?: ClusterPipelineOptions);
   constructor(options?: ClusterPipelineConstructorOptions);
   constructor(
-    first?: AnyPipeline<T> | ClusterPipelineConstructorOptions,
+    first?: WrappablePipeline<T, In> | ClusterPipelineConstructorOptions,
     second?: ClusterPipelineOptions,
   ) {
     const options = Pipeline.wrapping<ClusterPipelineConstructorOptions>(first, second);
