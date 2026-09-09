@@ -703,3 +703,85 @@ describe("#90 L4 - every fluent method widens, and none of them under-reports it
     expect(await widened).toEqual([1, 2]);
   });
 });
+
+describe("#90 L4 - review findings, each reproduced before it was fixed", () => {
+  it("a synchronous forEach drains a long stream without growing the stack", () => {
+    // `drainSyncSettled`'s `resume` and `runChunk` tail-called each other, so its `for(;;)` never
+    // iterated and every chunk cost a frame pair. Measured on that shape: this threw `RangeError:
+    // Maximum call stack size exceeded` after 3579 items, where `toArray()` over the identical
+    // stream - which drains through `drainSync`'s real loop - returned all 200 000.
+    function* gen(n: number): Generator<number> {
+      for (let index = 0; index < n; index++) yield index;
+    }
+
+    let count = 0;
+    new Pipeline()
+      .from(gen(200000))
+      .buffer(1)
+      .forEach(() => {
+        count++;
+      });
+
+    expect(count).toBe(200000);
+    expect(new Pipeline().from(gen(200000)).buffer(1).toArray()).toHaveLength(200000);
+  });
+
+  it("an async run handler registered BEFORE .from() still widens the chain", async () => {
+    // `fromSource` set the Mode purely from the source's shape, discarding a widening `.onError()`
+    // had already recorded. Measured before the fix: this typed `number[]` and handed back a
+    // pending `Promise` the moment a chunk failed.
+    const out: Promise<number[]> = new Pipeline()
+      .onError(async () => {
+        await Promise.resolve();
+      })
+      .from([1, 2, 3])
+      .buffer(1)
+      .transform((t) =>
+        t.map((x: number) => {
+          if (x === 2) throw new Error("boom");
+          return x;
+        }),
+      )
+      .toArray();
+
+    expect(await out).toEqual([1, 3]);
+  });
+
+  it("a sync run handler registered before .from() keeps the chain sync", () => {
+    const out: number[] = new Pipeline()
+      .onError(() => {})
+      .from([1, 2, 3])
+      .buffer(1)
+      .transform((t) =>
+        t.map((x: number) => {
+          if (x === 2) throw new Error("boom");
+          return x;
+        }),
+      )
+      .toArray();
+
+    expect(out).toEqual([1, 3]);
+  });
+
+  it(".buffer() called before .from() decides the source's own cut", () => {
+    // Measured before the fix: `[15]`. `.buffer()` built a generator over an empty stream that
+    // `.from()` then overwrote with `DEFAULT_CHUNK_SIZE`, so the declared boundary never applied.
+    const out: number[] = new Pipeline()
+      .buffer(2)
+      .from([1, 2, 3, 4, 5])
+      .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+      .toArray();
+
+    expect(out).toEqual([3, 7, 5]);
+  });
+
+  it("a drain with no source fails instead of resolving to an empty array", async () => {
+    // Measured before the fix: `await new Pipeline().toArray()` → `[]`, a plausible-looking answer
+    // for a caller who forgot `.from()`, where composing any stage on it already threw. An
+    // `"unset"` pipeline's `.toArray()` is typed `Promise<T[]>`, so the failure arrives as a
+    // rejection rather than a synchronous throw.
+    await expect(new Pipeline().toArray()).rejects.toThrow(
+      "no source: call .from(data) before composing",
+    );
+  });
+});

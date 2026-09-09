@@ -196,6 +196,13 @@ export interface PipelineOptions {
    * `.buffer()` recuts from on a `"sync"` chain. Not intended for direct external use.
    */
   syncPreBufferItems?: Iterable<unknown> | null;
+  /**
+   * Internal: the chunk boundary `.buffer(size)` last declared, carried so a `.buffer()` called
+   * BEFORE `.from()` still decides the source's own cut (#90). `.from()` read `DEFAULT_CHUNK_SIZE`
+   * unconditionally before this existed, so that call was silently discarded. Not intended for
+   * direct external use.
+   */
+  chunkSize?: number;
 }
 
 /** A registered reduce stage's own definition - `pushReduceStage()` (below) is the one place that
@@ -309,6 +316,8 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
   protected _syncChunks: MaybeAsyncChunks<T> | null;
   /** `_preBufferItems`' sync counterpart - see `PipelineOptions.syncPreBufferItems`. */
   protected _syncPreBufferItems: Iterable<T> | null;
+  /** The chunk boundary `.buffer(size)` last declared - see `PipelineOptions.chunkSize`. */
+  protected _chunkSize: number;
 
   /**
    * Create a new Pipeline from a data source.
@@ -330,6 +339,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     this._chunks = (options?.chunks ?? EMPTY_CHUNKS) as AsyncIterable<T[]>;
     this._preBufferItems = (options?.preBufferItems ?? null) as AsyncIterable<T> | null;
     this._syncPreBufferItems = (options?.syncPreBufferItems ?? null) as Iterable<T> | null;
+    this._chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
   }
 
   /**
@@ -348,7 +358,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * `new Pipeline().from(asyncSource).toArray()` → typed `Promise<number[]>`.
    */
   from<U>(data: AsyncIterable<U>): Pipeline<U, "async", P>;
-  from<U>(data: Iterable<U>): Pipeline<U, AssignMode<P, "sync">, P>;
+  // A receiver already widened to `"async"` stays async whatever the source's own shape (#90):
+  // `.onError()` and `.context()` are both callable BEFORE `.from()`, so an async run handler
+  // registered there had its widening discarded here - the chain typed `number[]` while
+  // `dropOrRethrow` deferred on that handler the moment a chunk failed. `"unset"` is the ordinary
+  // case and still takes the source's own shape, which is what keeps `.from([1,2,3])` synchronous.
+  from<U>(data: Iterable<U>): Pipeline<U, M extends "async" ? "async" : AssignMode<P, "sync">, P>;
   from<U>(data: PipelineSource<U>): Pipeline<U, "sync" | "async", P> {
     return this.fromSource<U>(data, this.sourcePolicy()) as Pipeline<U, "sync" | "async", P>;
   }
@@ -364,7 +379,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    */
   protected fromSource<U>(data: PipelineSource<U>, policy: SourcePolicy): AnyPipeline<U> {
     const isAsyncSource = Symbol.asyncIterator in Object(data);
-    const mode: "sync" | "async" = isAsyncSource || policy === "async" ? "async" : "sync";
+    // `this._mode` is read too, so a receiver already widened before `.from()` stays widened - see
+    // `from`'s own Iterable overload for the case that made this necessary.
+    const mode: "sync" | "async" =
+      isAsyncSource || policy === "async" || this._mode === "async" ? "async" : "sync";
 
     if (mode === "sync") {
       const items = data as Iterable<U>;
@@ -374,14 +392,14 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
         // handler silently never fire.
         ...this.carriedOptions(),
         mode,
-        syncChunks: buildSyncChunkGenerator<U>(DEFAULT_CHUNK_SIZE)(items),
+        syncChunks: buildSyncChunkGenerator<U>(this._chunkSize)(items),
         syncPreBufferItems: items,
         preBufferItems: null,
       });
     }
 
     const items = toAsyncIterable(data);
-    return this.createPipeline<U>(buildChunkGenerator<U>(DEFAULT_CHUNK_SIZE)(items), {
+    return this.createPipeline<U>(buildChunkGenerator<U>(this._chunkSize)(items), {
       ...this.carriedOptions(),
       mode,
       preBufferItems: items,
@@ -440,6 +458,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
       reduceStages: this._reduceStages,
       preBufferItems: this._preBufferItems,
       syncPreBufferItems: this._syncPreBufferItems,
+      chunkSize: this._chunkSize,
       runHandler: this._runHandler,
       mode: this._mode,
       syncChunks: this._syncChunks,
@@ -494,6 +513,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
   /** This pipeline's items, as one stream, whichever engine it runs on (#90) - the seam the async
    * terminal ops and `[Symbol.asyncIterator]` read, so neither has to branch on `_mode` itself. */
   protected asyncItems(): AsyncIterable<T> {
+    // A drain refuses a source-less pipeline for the same reason a stage does (#90): without this,
+    // `new Pipeline().toArray()` resolved to `[]`, a plausible-looking answer for a caller who
+    // simply forgot `.from()`, where composing any stage on the same pipeline throws.
+    this.requireSource();
     if (this._mode !== "sync" || this._syncChunks === null) {
       return flattenChunks(this._chunks);
     }
@@ -918,6 +941,18 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * intermediate 2- or 3-cut.
    */
   buffer(size: number): this {
+    // Before `.from()` there is no stream to cut, so the size is only RECORDED (#90) - `fromSource`
+    // reads it in place of `DEFAULT_CHUNK_SIZE` when the source finally arrives. Without this arm
+    // the call built an empty generator that `.from()` then overwrote, so `new
+    // Pipeline().buffer(2).from([1,2,3,4,5])` yielded one chunk of five and the declared boundary
+    // of 2 never applied, with no error.
+    if (this._mode === "unset") {
+      return this.createPipeline<T>(this._chunks, {
+        ...this.carriedOptions(),
+        chunkSize: size,
+      }) as this;
+    }
+
     // The `"sync"` arm recuts with the sync chunker (#90) - going through the async one here would
     // make `.buffer()` alone widen a chain whose every callback is synchronous, which is exactly
     // the Mode/runtime divergence this ticket exists to remove.

@@ -226,6 +226,13 @@ export function drainSyncSettled<T>(
 ): void | Promise<void> {
   const iterator = chunks[Symbol.iterator]();
 
+  // `runChunk` finishes ONE chunk and returns; advancing to the next is `resume`'s own loop. It must
+  // never tail-call `resume` itself: that made the two mutually recursive, so `resume`'s `for(;;)`
+  // never iterated and every chunk cost a stack frame pair. Measured on that shape, a synchronous
+  // `Pipeline.forEach` over `.buffer(1)` threw `RangeError: Maximum call stack size exceeded` after
+  // 3579 items, where `toArray()` - which drains through `drainSync`'s real loop - returned all
+  // 200 000. Re-entry across an ASYNC boundary is the one safe case, since that continuation runs on
+  // a fresh stack.
   const runChunk = (chunk: T[], start: number): void | Promise<void> => {
     for (let index = start; index < chunk.length; index++) {
       const settled = onItem(chunk[index]);
@@ -236,7 +243,7 @@ export function drainSyncSettled<T>(
         );
       }
     }
-    return resume();
+    return undefined;
   };
 
   const resume = (): void | Promise<void> => {
@@ -246,11 +253,12 @@ export function drainSyncSettled<T>(
 
       const chunk = step.value;
       if (isThenable(chunk)) {
-        return Promise.resolve(chunk).then((settled) => runChunk(settled, 0));
+        return Promise.resolve(chunk).then((settled) =>
+          chainVoid(runChunk(settled, 0), () => resume()),
+        );
       }
       const ran = runChunk(chunk, 0);
       if (isThenable(ran)) return ran;
-      return;
     }
   };
 
