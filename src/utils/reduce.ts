@@ -8,6 +8,7 @@
 
 import type { IContextManager, ReduceFunction, RowErrorHandler } from "@src/types";
 import { DROP } from "@src/types";
+import { chain, isThenable } from "@src/utils/helpers";
 
 /**
  * Folds items one at a time into `U`, buffering values `emit()` pushes and tracking whether the
@@ -50,20 +51,37 @@ export class Reducer<U, T> {
    * `new Reducer((_acc, s) => { const n = parseInt(s); if (isNaN(n)) throw new Error("bad"); return n; }, 0, () => DROP).fold("x", ctx)`
    * → `[]`, the accumulator left at its prior value.
    */
-  async fold(item: T, ctx: IContextManager): Promise<U[]> {
+  fold(item: T, ctx: IContextManager): U[] | Promise<U[]> {
     const emitted: U[] = [];
     this.itemsSinceEmit++;
+
+    // Recovery is shared by the synchronous throw below and the REJECTED-promise arm, which are the
+    // two ways `fn` can fail and must behave identically (#78). A rejection never reaches the
+    // `catch` block, so the async arm passes this as `.then`'s own rejection handler.
+    const recover = (error: Error): U[] | Promise<U[]> => {
+      if (!this.rowHandler) throw error;
+      return chain(this.rowHandler(item, error, ctx), (recovered) => {
+        this.applyRecovery(recovered as U | typeof DROP);
+        return emitted;
+      });
+    };
+
+    const commit = (acc: U): U[] => {
+      this.acc = acc;
+      return emitted;
+    };
+
     try {
-      this.acc = await this.fn(this.acc, item, ctx, (value) => {
+      const next = this.fn(this.acc, item, ctx, (value) => {
         emitted.push(value);
         this.itemsSinceEmit = 0;
       });
+      // Not `await` (#90): a synchronous `fn` folds without creating a `Promise`, which is what
+      // keeps a `.reduce()` stage inside an all-sync chain synchronous end to end.
+      return isThenable(next) ? Promise.resolve(next).then(commit, recover) : commit(next);
     } catch (error) {
-      if (!this.rowHandler) throw error;
-      const recovered = await this.rowHandler(item, error as Error, ctx);
-      this.applyRecovery(recovered as U | typeof DROP);
+      return recover(error as Error);
     }
-    return emitted;
   }
 
   /** Applies a recovered row (#78): `DROP` undoes `fold()`'s own increment - guarded, since `fn`
@@ -96,16 +114,26 @@ export class Reducer<U, T> {
  * `foldChunk(new Reducer((acc, x) => acc + x, 0), [1, 2, 3], ctx)` → `[]` (nothing emitted
  * mid-fold; the accumulator itself only ever surfaces via `.final()`).
  */
-export async function foldChunk<U, T>(
+export function foldChunk<U, T>(
   reducer: Reducer<U, T>,
   chunk: Iterable<T>,
   ctx: IContextManager,
-): Promise<U[]> {
+): U[] | Promise<U[]> {
   const emitted: U[] = [];
-  for (const item of chunk) {
-    emitted.push(...(await reducer.fold(item, ctx)));
-  }
-  return emitted;
+  const items = [...chunk];
+
+  // Folds are ORDER-DEPENDENT - one accumulator, one item at a time - so item `i + 1` cannot start
+  // until `i` has settled. `step` expresses that recursively, so a synchronous reducer runs the
+  // whole chunk without a `Promise` and an async one still folds strictly in order (#90).
+  const step = (index: number): U[] | Promise<U[]> => {
+    if (index >= items.length) return emitted;
+    return chain(reducer.fold(items[index], ctx), (values) => {
+      emitted.push(...values);
+      return step(index + 1);
+    });
+  };
+
+  return step(0);
 }
 
 /**
@@ -131,6 +159,9 @@ export async function* foldChunkStream<U, T>(
     const out = await foldChunk(reducer, chunk, ctx);
     if (out.length > 0) yield out;
   }
+  // `foldChunkStream` itself stays an async generator: its input is an `AsyncIterable`, so it can
+  // never run synchronously whatever the reducer does. `Pipeline.reduce()`'s own sync counterpart
+  // is L3's, over the sync chunk stream.
   const trailing = reducer.final();
   if (trailing.length > 0) yield trailing;
 }

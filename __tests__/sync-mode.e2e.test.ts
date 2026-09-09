@@ -23,6 +23,8 @@ import { describe, it, expect } from "vitest";
 import { createHook } from "node:async_hooks";
 import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
+import { SimpleContextManager } from "@src/context/simple";
+import { DROP } from "@src/types";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
 import { ClusterPipeline } from "@src/pipelines/cluster";
@@ -61,6 +63,59 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     expect(countPromises(() => Promise.resolve().then(() => {}))).toBeGreaterThan(0);
     expect(countPromises(() => void (async () => 1)())).toBeGreaterThan(0);
     expect(countPromises(() => [1, 2, 3].map((x) => x * 2))).toBe(0);
+  });
+
+  it("L2: a Transformer whose callbacks are all synchronous returns a plain array", () => {
+    // L2's own observable, live from the layer that builds it. Without it the layer is invisible:
+    // every pre-existing test awaits its result, and `await` on a plain array is a no-op, so the
+    // whole suite passes identically whether the links create a Promise or not.
+    const t = new Transformer<number, number>({ transform: (chunk) => chunk })
+      .map((x) => x * 2)
+      .filter((x) => x > 4);
+
+    const out = t.runnable()([1, 2, 3, 4, 5], new SimpleContextManager());
+
+    expect(Array.isArray(out)).toBe(true);
+    expect(out).toEqual([6, 8, 10]);
+    expect(countPromises(() => t.runnable()([1, 2, 3, 4, 5], new SimpleContextManager()))).toBe(0);
+  });
+
+  it("L2: one async callback makes that same Transformer return a Promise", async () => {
+    // The negative control for the test above: flip one callback and the plain-array claim must
+    // stop holding, or the assertion was never reading what it says it reads.
+    const t = new Transformer<number, number>({ transform: (chunk) => chunk })
+      .map(async (x) => x * 2)
+      .filter((x) => x > 4);
+
+    const out = t.runnable()([1, 2, 3, 4, 5], new SimpleContextManager());
+
+    expect(Array.isArray(out)).toBe(false);
+    expect(await out).toEqual([6, 8, 10]);
+  });
+
+  it("L2: .onError() and .reduce() both keep a synchronous chain synchronous", () => {
+    // The two links whose recovery and fold steps were `async` before L2 - the paths Done-when 8's
+    // `.onError(h)` and any in-chain `.reduce()` would otherwise widen on their own.
+    const recovered = new Transformer<string, string>({ transform: (chunk) => chunk })
+      .onError(() => DROP)
+      .map((s) => {
+        const n = parseInt(s, 10);
+        if (isNaN(n)) throw new Error(`bad: ${s}`);
+        return n;
+      });
+
+    const recoveredOut = recovered.runnable()(["a", "3"], new SimpleContextManager());
+    expect(Array.isArray(recoveredOut)).toBe(true);
+    expect(recoveredOut).toEqual([3]);
+
+    const folded = new Transformer<number, number>({ transform: (chunk) => chunk }).reduce(
+      (acc, x) => acc + x,
+      0,
+    );
+
+    const foldedOut = folded.runnable()([1, 2, 3], new SimpleContextManager());
+    expect(Array.isArray(foldedOut)).toBe(true);
+    expect(foldedOut).toEqual([6]);
   });
 
   it.fails("Done-when 1: a fully sync chain returns number[] with no await", () => {

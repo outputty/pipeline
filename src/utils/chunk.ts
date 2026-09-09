@@ -114,6 +114,55 @@ export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenera
 }
 
 /**
+ * `buildChunkGenerator`'s synchronous counterpart (#90) - identical cutting, over an `Iterable`
+ * rather than an `AsyncIterable`, so an in-memory source never becomes an async iterator just to be
+ * chunked. That per-item conversion, not the per-chunk `Promise.all`, is where most of the old
+ * cost sat: a chain with ZERO transform stages still paid it.
+ *
+ * Not a shared implementation with the async one: a `for await` loop and a `for` loop are different
+ * statements, and an `async function*` is async even when its input is not - there is no body both
+ * can share that stays synchronous for this one.
+ *
+ * `[...buildSyncChunkGenerator<number>(3)([1, 2, 3, 4, 5, 6, 7])]` → `[[1, 2, 3], [4, 5, 6], [7]]`.
+ */
+export function buildSyncChunkGenerator<T>(
+  chunkSize: number,
+): (data: Iterable<T>) => Generator<T[]> {
+  if (chunkSize < 1) {
+    throw new Error("chunkSize must be at least 1");
+  }
+
+  return function* chunkGenerator(data: Iterable<T>): Generator<T[]> {
+    let chunk: T[] = [];
+
+    for (const item of data) {
+      chunk.push(item);
+
+      if (chunk.length >= chunkSize) {
+        yield chunk;
+        chunk = [];
+      }
+    }
+
+    if (chunk.length > 0) {
+      yield chunk;
+    }
+  };
+}
+
+/**
+ * `flattenChunks`'s synchronous counterpart (#90) - the one place a sync chunk stream becomes its
+ * items again, shared by the sync terminal ops and `.buffer()`'s own sync re-cut fallback.
+ *
+ * `[...flattenSyncChunks([[1, 2], [3]])]` → `[1, 2, 3]`.
+ */
+export function* flattenSyncChunks<T>(chunks: Iterable<T[]>): Generator<T> {
+  for (const chunk of chunks) {
+    yield* chunk;
+  }
+}
+
+/**
  * Wraps an existing iterator as an `AsyncIterable` that pulls from that SAME iterator on every
  * `.next()` call. Calling `share()` N times over one iterator and handing each result to its own
  * consumer is free-slot dealing (`ConcurrentPipeline.reduce()`, #62, fans one chunk stream out to
