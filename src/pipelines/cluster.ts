@@ -202,6 +202,11 @@ export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipelin
   }
 
   override transform<U, M2 extends "sync" | "async">(
+    // The same `"unset"` refusal the base carries (#90). Without it here, an override re-declares
+    // `transform` WITHOUT the guard and a source-less dispatching chain compiles, then resolves to
+    // `[]` at runtime - a chain composed with no engine decided, which is what the guard exists to
+    // make impossible.
+    this: M extends "unset" ? never : Pipeline<T, "async", "async">,
     builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
   ): ClusterPipeline<U, M> {
     return super.transform(builder) as unknown as ClusterPipeline<U, M>;

@@ -209,6 +209,64 @@ export function drainSync<T>(
 }
 
 /**
+ * `drainSync`'s sibling for a callback whose OWN return has to settle before the next item (#90) -
+ * what `Pipeline.forEach` needs, since a `forEach` callback is allowed to be async and its failures
+ * must still reach the caller.
+ *
+ * Stays synchronous while both the chunks and the callback do, and widens at the first thenable
+ * either produces. Items are settled strictly in order, so an async `forEach` behaves like the
+ * `for await` loop it replaces rather than a `Promise.all` fan-out.
+ *
+ * `drainSyncSettled(chunksOf([[1, 2]]), (x) => void out.push(x))` → `undefined`, no `Promise`
+ * created.
+ */
+export function drainSyncSettled<T>(
+  chunks: MaybeAsyncChunks<T>,
+  onItem: (item: T) => void | Promise<void>,
+): void | Promise<void> {
+  const iterator = chunks[Symbol.iterator]();
+
+  const runChunk = (chunk: T[], start: number): void | Promise<void> => {
+    for (let index = start; index < chunk.length; index++) {
+      const settled = onItem(chunk[index]);
+      if (isThenable(settled)) {
+        const resumeAt = index + 1;
+        return Promise.resolve(settled).then(() =>
+          chainVoid(runChunk(chunk, resumeAt), () => resume()),
+        );
+      }
+    }
+    return resume();
+  };
+
+  const resume = (): void | Promise<void> => {
+    for (;;) {
+      const step = iterator.next();
+      if (step.done === true) return;
+
+      const chunk = step.value;
+      if (isThenable(chunk)) {
+        return Promise.resolve(chunk).then((settled) => runChunk(settled, 0));
+      }
+      const ran = runChunk(chunk, 0);
+      if (isThenable(ran)) return ran;
+      return;
+    }
+  };
+
+  return resume();
+}
+
+/** `chain` for a `void`-producing step, kept here rather than imported so `chunk.ts` owns its own
+ * drain helpers. Runs `next` once `value` has settled, creating no `Promise` when it already has. */
+function chainVoid(
+  value: void | Promise<void>,
+  next: () => void | Promise<void>,
+): void | Promise<void> {
+  return isThenable(value) ? Promise.resolve(value).then(next) : next();
+}
+
+/**
  * Re-cuts an already-staged sync chunk stream at a new boundary (#90) - `.buffer()`'s own fallback
  * once a real stage has consumed the pre-buffer item view, so the re-cut runs over that stage's
  * OUTPUT rather than the original source.
