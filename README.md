@@ -31,9 +31,9 @@ console.log(data); // [6, 8, 10]
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐          │
-│  │   Pipeline   │──────│  Transformer │──────│   Strategy   │          │
-│  │              │      │              │      │              │          │
-│  │ Data source  │      │ Chain of     │      │ How chunks   │          │
+│  │   Pipeline   │──────│  Transformer │──────│  the class   │          │
+│  │              │      │              │      │  you build   │          │
+│  │ Data source  │      │ Chain of     │      │ Where chunks │          │
 │  │ + context    │      │ operations   │      │ are executed │          │
 │  └──────────────┘      └──────────────┘      └──────────────┘          │
 │                                                                         │
@@ -107,8 +107,21 @@ const data = await new ConcurrentPipeline(["a", "b", "c"], { maxConcurrency: 10 
 ```
 
 `HttpPipeline` dispatches each chunk to another instance over HTTP; `ClusterPipeline` dispatches to
-worker processes on the same machine, brought up automatically. See [Core Concepts](#core-concepts)
-above.
+worker processes on the same machine, brought up automatically. See [HttpPipeline](#httppipeline)
+and [ClusterPipeline](#clusterpipeline) in the API Reference for their constructors and knobs.
+
+The chunk is the unit of concurrency, so a `ConcurrentPipeline`'s parallelism is its buffer size
+times `maxConcurrency` - items in flight - never `maxConcurrency` alone. A chain left at the
+default buffer of 1000 with `maxConcurrency: 3` holds 3000 callbacks in flight, not 3. Call
+`.buffer(size)` to lower the ceiling, and prefer the widest chunk that fits it: two chains holding
+the same 16 in flight over 50000 items ran 27 ms and 63 ms, because a narrow chunk pays the
+per-chunk cost more often.
+
+| `.buffer(size)` | `maxConcurrency` | items in flight |
+| --------------- | ---------------- | --------------- |
+| 1000            | 1                | 1000            |
+| 100             | 3                | 300             |
+| 1               | 16               | 16              |
 
 `.tap()` is the one exception, and it is deliberate. `Pipeline.tap(fn)` always runs in the
 orchestrating process, whichever class it is called on, so a `console.log` or a `ctx.set()` written
@@ -156,11 +169,7 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 #### Static Methods
 
 - **`Pipeline.merge(pipelines, options?)`** - concatenate several pipelines' data and contexts into
-  a fresh plain `Pipeline`, for a caller who holds no pipeline of its own to continue. `pipelines` is
-  an array. `options.context`, when given, is the SAME instance returned as the merged pipeline's
-  `.contextManager`, with later pipelines still winning on a shared key; with no `options`, a fresh
-  manager is built the same way. `Pipeline.merge([])` returns an empty pipeline. See `.merge()`
-  below (#41) to merge onto a pipeline already held, keeping its class.
+  a fresh, plain `Pipeline`. See [Merging](#merging).
 
 #### Instance Methods
 
@@ -179,11 +188,8 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.consume()`** - process all items without collecting.
 - **`.forEach(fn)`** - execute side-effect for each item.
 - **`.branch(definitions)`** - split into multiple branches.
-- **`.merge(...others)`** - concatenate other pipelines' items and contexts onto THIS one,
-  keeping THIS pipeline's own class, knobs and stage numbering (#41) - a stage applied after
-  reaches `others`' items too, at THIS pipeline's next index rather than restarting at 0. Prefer
-  this over the static `Pipeline.merge()` whenever work after the merge must stay concurrent,
-  remote or clustered; the static always returns a plain `Pipeline`.
+- **`.merge(...others)`** - concatenate other pipelines' items and contexts onto THIS one, keeping
+  THIS pipeline's own class, knobs and stage numbering. See [Merging](#merging).
 - **`.onError(fn)`** - the run handler. `fn` receives the error and the context; returning drops
   the failing chunk and the run continues, throwing stops the run. Position-dependent: only a
   stage applied AFTER this call is covered. See [Error Handling](#error-handling).
@@ -204,6 +210,86 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.onError(fn)`** - the row handler. `fn` receives the failing item, error and context; a
   returned value replaces the row, `DROP` removes it, throwing escalates to the pipeline. See
   [Error Handling](#error-handling).
+
+### ConcurrentPipeline
+
+Extends `Pipeline`. Runs several chunks of a stage at once, in this process - see
+[Where the work runs](#where-the-work-runs) for items in flight. Every `Pipeline` method above
+applies unchanged; `ConcurrentPipeline` adds no new ones, only its own constructor knobs.
+
+<!-- illustrative -->
+
+```typescript
+new ConcurrentPipeline<T>(data: PipelineSource<T>, options?: ConcurrentPipelineOptions)
+```
+
+- **`options.maxConcurrency`** - chunks kept in flight at once. Default `4`.
+- **`options.ordered`** - restore input order in the output. Default `true`.
+
+### HttpPipeline
+
+Extends `ConcurrentPipeline`. Dispatches each chunk of a stage over HTTP to another instance
+running the same code, instead of running it here.
+
+<!-- illustrative -->
+
+```typescript
+new HttpPipeline<T>(data: PipelineSource<T>, options: { url: string } & ConcurrentPipelineOptions)
+```
+
+- **`options.url`** - required. Where another `HttpPipeline`/`ClusterPipeline` instance's `.fetch`
+  is mounted.
+- **`.fetch`** - a `(request: Request) => Promise<Response>` handler serving this pipeline's
+  stages. Prefix-agnostic: it reads only its own trailing `/stage/<n>`/`/reduce/<n>` segment, so
+  mounting it under any path is safe.
+- **`toNodeHandler(handler)`** - bridges a `.fetch` handler to `node:http`'s `(req, res)` callback
+  shape; Node exposes `Request`/`Response`/`fetch` but serves no fetch handler natively.
+
+### ClusterPipeline
+
+Extends `HttpPipeline`. Dispatches each chunk of a stage to another process on the same machine.
+Needs no server, port, url or fork in caller code - it brings its own workers up on the first
+dispatch and every later `ClusterPipeline` in the process reuses them.
+
+<!-- illustrative -->
+
+```typescript
+new ClusterPipeline<T>(data: PipelineSource<T>, options?: { workers?: number } & ConcurrentPipelineOptions)
+```
+
+- **`options.workers`** - worker processes to bring up on first drain. Default
+  `os.availableParallelism()`.
+
+### createTransformer
+
+- **`createTransformer<T>()`** - builds an identity `Transformer<T, T>`. Chunk-agnostic like every
+  `Transformer`: it takes no chunk size, since the caller's own `Pipeline` decides that via
+  `.buffer(size)`.
+
+### SimpleContextManager
+
+The one shipped `IContextManager` - an in-memory store, not process-safe. Pass your own class
+through `options.context`/`options.contextFactory` for anything more.
+
+<!-- illustrative -->
+
+```typescript
+new SimpleContextManager(initial?: Record<string, unknown>)
+```
+
+- **`.get(key)`** - the value at `key`, or `undefined`.
+- **`.set(key, value)`** - stores a value at `key`.
+- **`.getOrDefault(key, defaultValue)`** - the value at `key`, or `defaultValue` when absent.
+- **`.toDict()`** - a shallow copy of the whole store.
+
+### IContextManager
+
+The interface a caller's own context manager implements, in place of `SimpleContextManager`.
+
+- **`.get(key)`** - read a value.
+- **`.set(key, value)`** - write a value.
+- **`.getOrDefault(key, defaultValue)`** - read with a fallback for a missing key.
+- **`.toDict()`** - snapshot every key as a plain object.
 
 ### Context-Aware Functions
 
@@ -434,144 +520,242 @@ console.log(data.evens); // [2, 4]
 console.log(data.odds); // [1, 3, 5]
 ```
 
-## Real-World Examples
+## Merging
 
-### HTTP Batch Processing
+Several sources concatenate back into one - the other direction from branching, and there are two
+ways to do it, pinned in [`.claude/examples.md`](.claude/examples.md) Case 5 and Case 8.
 
-<!-- compiles -->
-
-```typescript
-import { ConcurrentPipeline } from "@outputty/pipeline";
-
-interface User {
-  id: number;
-  name: string;
-}
-
-const enrichedUsers = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 3 })
-  .transform((t) =>
-    t.map(async (id: number): Promise<User> => {
-      const res = await fetch(`/api/users/${id}`);
-      return (await res.json()) as User;
-    }),
-  )
-  .toArray();
-```
-
-### File Processing Pipeline
+`Pipeline.merge(pipelines, options?)` concatenates every source pipeline's data and context into a
+FRESH, plain `Pipeline`, for a caller who holds no pipeline of its own to continue. `pipelines` is
+an array; `options.context`, when given, is the SAME instance returned as the merged pipeline's
+`.contextManager`, later pipelines still winning on a shared key. With no `options`, a fresh
+manager is built the same way.
 
 <!-- compiles -->
 
 ```typescript
 import { Pipeline } from "@outputty/pipeline";
-import * as fs from "fs/promises";
 
-interface FileInfo {
-  path: string;
-  content: string;
-  words: number;
-}
+const pipeline1 = new Pipeline([1, 2, 3]);
+const pipeline2 = new Pipeline([4, 5, 6]);
 
-const stats = await new Pipeline(await fs.readdir("./docs"))
-  .transform((t) =>
-    t
-      .filter((f: string) => f.endsWith(".md"))
-      .map(async (f: string): Promise<FileInfo> => {
-        const content = await fs.readFile(`./docs/${f}`, "utf-8");
-        return { path: f, content, words: content.split(/\s+/).length };
-      }),
-  )
-  .toArray();
+const merged = Pipeline.merge([pipeline1, pipeline2]);
+const data = await merged.toArray();
 
-console.log(stats);
-// [{ path: 'readme.md', content: '...', words: 1234 }, ...]
+console.log(data); // [ 1, 2, 3, 4, 5, 6 ]
 ```
 
-### LLM Batch Processing
+`pipeline.merge(...others)` continues a pipeline you already hold instead: it keeps THIS
+pipeline's own class, knobs and stage numbering, so a stage applied after the merge runs at this
+pipeline's own next index rather than restarting at 0. Reach for this over the static form
+whenever work after the merge must stay concurrent, remote or clustered - the static form always
+returns a plain `Pipeline`, so a merged `HttpPipeline` gaining one more stage would otherwise
+collide with its own first stage on `/stage/0`.
 
 <!-- illustrative -->
+
+```typescript
+import { HttpPipeline, ConcurrentPipeline } from "@outputty/pipeline";
+
+const remote = new HttpPipeline([1, 2, 3, 4], { url: process.env.WORKER_URL! })
+  .buffer(1)
+  .transform((t) => t.map((x: number) => x + 1)); // stage 0, dispatched over HTTP
+
+const local = new ConcurrentPipeline([10, 20])
+  .buffer(1)
+  .transform((t) => t.map((x: number) => x + 5)); // its own in-process fan-out, never the wire
+
+const merged = remote.merge(local).transform((t) => t.map((x: number) => x * 100)); // stage 1 - THIS pipeline's own next index
+
+const data = await merged.toArray();
+
+console.log(data); // [ 200, 300, 400, 500, 1500, 2500 ]
+```
+
+## Patterns
+
+Two patterns, each pinned first in [`.claude/examples.md`](.claude/examples.md) and run unchanged
+on every `Pipeline` class - only the class you construct, and for `HttpPipeline` the worker it
+dispatches to, ever differ.
+
+### Repairing bad rows without losing the batch
+
+`Transformer.onError(fn)` drops or replaces a row that throws; the rows that parsed keep going,
+wherever the chain runs.
+
+<!-- compiles -->
+
+```typescript
+import { Pipeline, DROP } from "@outputty/pipeline";
+
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
+
+const data = await new Pipeline(["a", "1", "b", "3", "5"])
+  .transform((t) => t.onError(() => DROP).map(parseStrict))
+  .toArray();
+
+console.log(JSON.stringify(data)); // [1,3,5]
+```
+
+<!-- compiles -->
+
+```typescript
+import { ConcurrentPipeline, DROP } from "@outputty/pipeline";
+
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
+
+const data = await new ConcurrentPipeline(["a", "1", "b", "3", "5"], { maxConcurrency: 2 })
+  .transform((t) => t.onError(() => DROP).map(parseStrict))
+  .toArray();
+
+console.log(JSON.stringify(data)); // [1,3,5]
+```
+
+<!-- compiles -->
+
+```typescript
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { HttpPipeline, toNodeHandler, DROP } from "@outputty/pipeline";
+
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
+
+// The "another instance" side: an empty-source pipeline holding the SAME chain, so its
+// .fetch can serve it.
+const worker = new HttpPipeline<string>([], { url: "" }).transform((t) =>
+  t.onError(() => DROP).map(parseStrict),
+);
+
+const server = createServer(toNodeHandler(worker.fetch));
+await new Promise<void>((resolve) => server.listen(0, resolve));
+const { port } = server.address() as AddressInfo;
+
+const data = await new HttpPipeline(["a", "1", "b", "3", "5"], {
+  url: `http://localhost:${port}`,
+})
+  .transform((t) => t.onError(() => DROP).map(parseStrict))
+  .toArray();
+
+console.log(JSON.stringify(data)); // [1,3,5]
+
+await new Promise<void>((resolve) => server.close(() => resolve()));
+```
+
+<!-- compiles -->
+
+```typescript
+import { ClusterPipeline, DROP } from "@outputty/pipeline";
+
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
+
+const data = await new ClusterPipeline(["a", "1", "b", "3", "5"])
+  .transform((t) => t.onError(() => DROP).map(parseStrict))
+  .toArray();
+
+// Last line only - a worker also re-executes this module and prints its own empty result first.
+console.log(JSON.stringify(data)); // [1,3,5]
+```
+
+### Bounded-concurrency fan-out over a real per-item task
+
+The same async task, run with a bounded number of chunks in flight instead of one at a time - the
+task never changes, only the class does.
+
+<!-- compiles -->
+
+```typescript
+import { Pipeline } from "@outputty/pipeline";
+
+async function fetchScore(id: number): Promise<number> {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  return id * 10;
+}
+
+const data = await new Pipeline([1, 2, 3, 4, 5]).transform((t) => t.map(fetchScore)).toArray();
+
+console.log(JSON.stringify(data)); // [10,20,30,40,50]
+```
+
+<!-- compiles -->
 
 ```typescript
 import { ConcurrentPipeline } from "@outputty/pipeline";
-import type { IContextManager } from "@outputty/pipeline";
 
-interface LLM {
-  complete(prompt: string): Promise<string>;
+async function fetchScore(id: number): Promise<number> {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  return id * 10;
 }
 
-const summaries = await new ConcurrentPipeline(documents, { maxConcurrency: 5, ordered: true })
-  .context({ llm: myLlmInstance })
-  .transform((t) =>
-    t.map(async (doc: Document, ctx: IContextManager) => {
-      const llm = ctx.get("llm") as LLM;
-      const summary = await llm.complete(`Summarize: ${doc.content}`);
-      return { ...doc, summary };
-    }),
-  )
+const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .transform((t) => t.map(fetchScore))
   .toArray();
+
+console.log(JSON.stringify(data)); // [10,20,30,40,50]
 ```
 
-### Multi-Step Transform
-
-<!-- illustrative -->
+<!-- compiles -->
 
 ```typescript
-const processed = await new Pipeline(rawFiles)
-  .transform((t) =>
-    t
-      // Step 1: Parse
-      .map((raw: string) => JSON.parse(raw) as Record<string, unknown>)
-      // Step 2: Validate
-      .filter((obj: Record<string, unknown>) => obj.status === "active")
-      // Step 3: Transform
-      .map((obj: Record<string, unknown>) => ({
-        id: obj.id,
-        name: (obj.name as string).toUpperCase(),
-      }))
-      // Step 4: Enrich
-      .flatMap(async (item: { id: unknown; name: string }) => {
-        const details = await fetchDetails(item.id);
-        return [{ ...item, ...details }];
-      }),
-  )
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { HttpPipeline, toNodeHandler } from "@outputty/pipeline";
+
+async function fetchScore(id: number): Promise<number> {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  return id * 10;
+}
+
+const worker = new HttpPipeline<number>([], { url: "" }).transform((t) => t.map(fetchScore));
+
+const server = createServer(toNodeHandler(worker.fetch));
+await new Promise<void>((resolve) => server.listen(0, resolve));
+const { port } = server.address() as AddressInfo;
+
+const data = await new HttpPipeline([1, 2, 3, 4, 5], {
+  url: `http://localhost:${port}`,
+  maxConcurrency: 2,
+})
+  .transform((t) => t.map(fetchScore))
   .toArray();
+
+console.log(JSON.stringify(data)); // [10,20,30,40,50]
+
+await new Promise<void>((resolve) => server.close(() => resolve()));
 ```
 
-## Comparison with JSON Graph
-
-This package provides a more ergonomic API than JSON-based graph definitions:
-
-<!-- illustrative -->
+<!-- compiles -->
 
 ```typescript
-// JSON Graph approach
-const graph = {
-  nodes: {
-    fetch: { fn: "fetchData", inputs: ["id"] },
-    parse: { fn: "parseData", inputs: ["fetch.output"] },
-    filter: { fn: "filterActive", inputs: ["parse.output"] },
-  },
-};
-execute(graph, { id: 123 });
+import { ClusterPipeline } from "@outputty/pipeline";
 
-// @outputty/pipeline approach
-new Pipeline([123])
-  .transform((t) =>
-    t
-      .map((id: number) => fetchData(id))
-      .map((data: RawData) => parseData(data))
-      .filter((item: Item) => item.active),
-  )
+async function fetchScore(id: number): Promise<number> {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  return id * 10;
+}
+
+const data = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .transform((t) => t.map(fetchScore))
   .toArray();
+
+// Last line only - a worker also re-executes this module and prints its own empty result first.
+console.log(JSON.stringify(data)); // [10,20,30,40,50]
 ```
-
-Benefits:
-
-- **Type safety** - Full TypeScript support with generics
-- **Composability** - Build reusable transformers
-- **Streaming** - Process data as it arrives, don't wait for all
-- **Debuggability** - Stack traces point to actual code
-- **Testability** - Standard unit testing, no graph mocking
 
 ## License
 
