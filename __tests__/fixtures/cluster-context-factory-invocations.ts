@@ -29,7 +29,7 @@ class CountingContext implements IContextManager {
 
 const workers = 2;
 const chunkCount = 20;
-const items = Array;
+const items = Array.from({ length: chunkCount }, (_, i) => i);
 
 const pipeline = new ClusterPipeline<number>({
   workers,

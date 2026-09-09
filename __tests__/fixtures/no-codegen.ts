@@ -14,6 +14,6 @@ console.log(
   JSON.stringify({
     values: doubled([1, 2, 3]).toArray(),
     isFunction: doubled instanceof Function,
-    hasBind: typeof doubled.bind === "function",
+    hasCall: typeof doubled.call === "function",
   }),
 );

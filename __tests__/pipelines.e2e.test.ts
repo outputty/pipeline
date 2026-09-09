@@ -325,7 +325,7 @@ describe("#78 the row handler reaches a dispatched stage identically to a local 
       if (isNaN(n)) throw new Error(`Invalid: ${s}`);
       return n;
     };
-    const out = await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
+    const out = await new ConcurrentPipeline<string>({ maxConcurrency: 2 })
 
       .buffer(1)
       .onError(() => undefined)

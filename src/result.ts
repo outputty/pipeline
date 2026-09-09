@@ -50,11 +50,29 @@ export class PipelineResult<T, M extends PipelineMode> {
   private drainable(): {
     syncChunks: MaybeAsyncChunks<T> | null;
     items: () => AsyncIterable<T>;
+    chunks: () => AsyncIterable<T[]>;
   } {
     return this._pipeline.drainable(this._input) as {
       syncChunks: MaybeAsyncChunks<T> | null;
       items: () => AsyncIterable<T>;
+      chunks: () => AsyncIterable<T[]>;
     };
+  }
+
+  /**
+   * Iterate the CHUNKS this run produces, rather than its items - the boundary `.buffer(size)`
+   * declared, as the chain actually cut it.
+   *
+   * `Pipeline` used to carry this as its own `[Symbol.asyncIterator]`. With no input on a chain
+   * there is nothing to iterate, so it moved here with the rest of the drains, and the item-wise
+   * `for await` above stays the default: a chunk view is the deliberate ask, never what a plain
+   * loop hands you by accident.
+   *
+   * @example
+   * `for await (const chunk of pipeline.buffer(2).chunks([1, 2, 3]))` yields `[1, 2]`, then `[3]`.
+   */
+  async *chunks(): AsyncGenerator<T[]> {
+    yield* this.drainable().chunks();
   }
 
   /**

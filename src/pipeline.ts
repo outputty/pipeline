@@ -815,30 +815,6 @@ export class Pipeline<
     };
   }
 
-  /**
-   * Async-iterate the pipeline yielding TRANSFORMED CHUNKS - the exact same persisted `_chunks`
-   * stream every terminal op reads (#39). Whichever transforms were accumulated via `.apply()`/
-   * `.transform()` already ran when `_chunks` was built (each `.apply()` call runs
-   * `Transformer.process()` immediately, lazily, over the prior `_chunks`); this loop simply
-   * drains that result, so hooks/`.onError()` fire identically here as through `.toArray()` - no
-   * separate replay, no knob this path can't honor.
-   *
-   * Runs whenever the pipeline is consumed with `for await...of` instead of a terminal operation
-   * like `.toArray()` — this is also the path a bare `Pipeline` handed to laygo's `m.from()`
-   * (`@outputty/laygo`) drains as a source.
-   *
-   * @example
-   * ```typescript
-   * const pipeline = new Pipeline(source).transform((t) => t.map((r) => r.id * 2));
-   * for await (const chunk of pipeline) {
-   *   console.log(chunk); // e.g. [2], [4, 6]
-   * }
-   * ```
-   */
-  async *[Symbol.asyncIterator](): AsyncGenerator<T[]> {
-    yield* this.chunkStream();
-  }
-
   // ===== Static Factory Methods =====
 
   /**
@@ -1328,11 +1304,13 @@ export class Pipeline<
   drainable(input: PipelineSource<In>): {
     syncChunks: MaybeAsyncChunks<T> | null;
     items: () => AsyncIterable<T>;
+    chunks: () => AsyncIterable<T[]>;
   } {
     const bound = this.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
     return {
       syncChunks: bound.isSync() ? bound._syncChunks : null,
       items: () => bound.asyncItems(),
+      chunks: () => bound.chunkStream(),
     };
   }
 

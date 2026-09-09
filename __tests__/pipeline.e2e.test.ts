@@ -468,7 +468,7 @@ describe("Pipeline", () => {
 
     it("Done-when 7: a chunk that can't be repaired is dropped, the run continues", async () => {
       const logged: string[] = [];
-      const out = await new Pipeline<number>()
+      const out = await new Pipeline<string>()
 
         .buffer(1)
         .onError((e) => logged.push(e.message))
@@ -483,7 +483,7 @@ describe("Pipeline", () => {
       // Synchronously on a `"sync"` chain (#90) - every callback here is synchronous, so the throw
       // escapes `.toArray()` directly rather than as a rejected `Promise`.
       expect(() =>
-        new Pipeline<number>()
+        new Pipeline<string>()
 
           .buffer(1)
           .onError((e) => {
@@ -497,7 +497,7 @@ describe("Pipeline", () => {
     it("Done-when 10: a rethrowing ROW handler escalates to the RUN handler, which drops the chunk", async () => {
       // Same chain as Done-when 7, but the row handler is what rethrows this time - it never
       // recovers "x" itself, so the failure still reaches Pipeline.onError() as a chunk failure.
-      const out = await new Pipeline<number>()
+      const out = await new Pipeline<string>()
 
         .buffer(1)
         .onError(() => {
@@ -521,7 +521,7 @@ describe("Pipeline", () => {
       // propagates uncaught. Contrast with Done-when 7, where .onError() precedes .transform().
       // Thrown, not rejected (#90): every callback here is synchronous, so the whole chain is.
       expect(() =>
-        new Pipeline<number>()
+        new Pipeline<string>()
 
           .buffer(1)
           .transform((t) => t.map(parseStrict))

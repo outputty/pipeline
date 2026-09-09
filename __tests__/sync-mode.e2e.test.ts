@@ -509,7 +509,7 @@ describe("#90 L4 - a fold keeps the chain's Mode instead of always widening it",
   });
 
   it("a synchronous fold does not overflow the stack on a long source", () => {
-    const items = Array;
+    const items = Array.from({ length: 20000 }, (_, index) => index);
 
     const totals: number[] = new Pipeline<number>()
 

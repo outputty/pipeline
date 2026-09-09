@@ -78,7 +78,9 @@ describe("#39 two .buffer() calls back to back collapse to the last one (Done-wh
     }
 
     const direct: number[][] = [];
-    for await (const chunk of new Pipeline<number>().buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9])) {
+    for await (const chunk of new Pipeline<number>()
+      .buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      .chunks()) {
       direct.push(chunk);
     }
 

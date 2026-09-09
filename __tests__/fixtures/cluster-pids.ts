@@ -7,7 +7,7 @@
 import { ClusterPipeline } from "../../src";
 
 const workers = 3;
-const items = Array;
+const items = Array.from({ length: 30 }, (_, i) => i);
 
 const pids = await new ClusterPipeline<number>({ workers, maxConcurrency: workers })
 
