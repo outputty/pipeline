@@ -27,7 +27,7 @@ import type {
 } from "./types";
 import { DROP } from "./types";
 import { SimpleContextManager } from "./context/simple";
-import { isContextAware, dropOrRethrow } from "./utils/helpers";
+import { isContextAware, dropOrRethrow, chain, settleMaybe, isThenable } from "./utils/helpers";
 import { Reducer, foldChunk } from "./utils/reduce";
 
 /**
@@ -81,26 +81,43 @@ async function* runSequentially<In, Out>(
  * `settleRows(["a", "3"], (s) => { const n = parseInt(s); if (isNaN(n)) throw new Error("bad"); return n; }, () => DROP, ctx)`
  * → `[3]`.
  */
-async function settleRows<T, U>(
+function settleRows<T, U>(
   chunk: T[],
   attempt: (item: T) => U | typeof DROP | Promise<U | typeof DROP>,
   rowHandler: RowErrorHandler,
   ctx: IContextManager,
-): Promise<U[]> {
-  const settled = await Promise.all(
-    chunk.map(async (item): Promise<U | typeof DROP> => {
-      try {
-        return await attempt(item);
-      } catch (error) {
-        return (await rowHandler(item, error as Error, ctx)) as U | typeof DROP;
-      }
-    }),
-  );
+): U[] | Promise<U[]> {
+  const settled = settleMaybe(chunk.map((item) => attemptRow(item, attempt, rowHandler, ctx)));
   // `U` is an unconstrained type parameter here, so TS cannot itself prove a plain `!== DROP` check
   // narrows to `U` (it could, in principle, be instantiated to include the `DROP` symbol's own
   // type) - the cast is honest because `DROP` is a runtime-unique symbol no caller's `U` actually
   // overlaps with in practice, and every filtered entry really is one attempt's real result.
-  return settled.filter((v) => v !== DROP) as U[];
+  return chain(settled, (rows) => rows.filter((v) => v !== DROP) as U[]);
+}
+
+/**
+ * One row's try/recover step (#78), staying synchronous when `attempt` does (#90) - shared by
+ * `settleRows` and `settleRowsFlat` below rather than written once per helper, since both need the
+ * identical "run it, and on a throw OR a rejection hand the row to `rowHandler`" decision and only
+ * differ in what they do with the SUCCESS value. A synchronous `attempt` that throws recovers
+ * synchronously too; an async one recovers through `.catch`, which is where a REJECTION (as opposed
+ * to a throw) is caught at all.
+ *
+ * `attemptRow("a", parseStrict, () => DROP, ctx)` → `DROP`, no `Promise` created.
+ */
+function attemptRow<T, R>(
+  item: T,
+  attempt: (item: T) => R | Promise<R>,
+  rowHandler: RowErrorHandler,
+  ctx: IContextManager,
+): R | typeof DROP | Promise<R | typeof DROP> {
+  const recover = (error: Error) => rowHandler(item, error, ctx) as R | typeof DROP;
+  try {
+    const result = attempt(item);
+    return isThenable(result) ? Promise.resolve(result).catch(recover) : result;
+  } catch (error) {
+    return recover(error as Error);
+  }
 }
 
 /**
@@ -113,23 +130,22 @@ async function settleRows<T, U>(
  * `settleRowsFlat([1, 2], (x) => (x === 2 ? Promise.reject(new Error("boom")) : [x, x]), () => -1, ctx)`
  * → `[1, 1, -1]`.
  */
-async function settleRowsFlat<T, U>(
+function settleRowsFlat<T, U>(
   chunk: T[],
   attempt: (item: T) => U[] | Promise<U[]>,
   rowHandler: RowErrorHandler,
   ctx: IContextManager,
-): Promise<U[]> {
-  const perItem = await Promise.all(
-    chunk.map(async (item): Promise<U[]> => {
-      try {
-        return await attempt(item);
-      } catch (error) {
-        const recovered = await rowHandler(item, error as Error, ctx);
-        return recovered === DROP ? [] : [recovered as U];
-      }
-    }),
+): U[] | Promise<U[]> {
+  const perItem = settleMaybe(
+    chunk.map((item) =>
+      chain(attemptRow<T, U[]>(item, attempt, rowHandler, ctx), (recovered) =>
+        // A SUCCESS is already an array to flatten; a recovered value is not required to be one, so
+        // it takes the row's place as its own single-element array, and `DROP` contributes nothing.
+        Array.isArray(recovered) ? recovered : recovered === DROP ? [] : [recovered as U],
+      ),
+    ),
   );
-  return perItem.flat();
+  return chain(perItem, (rows) => rows.flat());
 }
 
 /**
@@ -284,10 +300,13 @@ export class Transformer<In, Out> {
   ): Transformer<In, U> {
     const currentTransform = this.transform;
 
-    const newTransform: InternalTransformer<In, U> = async (chunk, ctx, run) => {
-      const intermediate = await currentTransform(chunk, ctx, run);
-      return operation(intermediate, ctx, run);
-    };
+    // `chain`, not `await` (#90): a link whose own operation returns a plain array composes with
+    // the one before it WITHOUT creating a `Promise`, so a chain of purely synchronous callbacks
+    // runs from source to terminal op with no microtask at all. The moment any link returns a
+    // thenable, `chain` defers through `.then` and every link after it composes asynchronously -
+    // that deferral IS the run widening to async, at exactly the link that made it async.
+    const newTransform: InternalTransformer<In, U> = (chunk, ctx, run) =>
+      chain(currentTransform(chunk, ctx, run), (intermediate) => operation(intermediate, ctx, run));
 
     return new Transformer<In, U>({
       transform: newTransform,
@@ -318,10 +337,11 @@ export class Transformer<In, Out> {
   map<U>(fn: PipelineFunction<Out, U>): Transformer<In, U> {
     if (isContextAware(fn)) {
       return this.pipe((chunk, ctx, run) => {
-        // No handler registered: today's code path, textually unchanged (#78 Done-when 11 - the
-        // seam costs nothing until `.onError()` is actually called).
+        // No handler registered: the plain path (#78 Done-when 11 - the seam costs nothing until
+        // `.onError()` is actually called). `settleMaybe`, not `Promise.all` (#90): a chunk whose
+        // items all came back as plain values is returned as-is, creating no `Promise` at all.
         if (!run?.rowHandler) {
-          return Promise.all(chunk.map((x) => fn(x, ctx))) as Promise<U[]>;
+          return settleMaybe(chunk.map((x) => fn(x, ctx)));
         }
         return settleRows(chunk, (x) => fn(x, ctx), run.rowHandler, ctx);
       });
@@ -329,7 +349,7 @@ export class Transformer<In, Out> {
     return this.pipe((chunk, _ctx, run) => {
       const plain = fn as (item: Out) => U | Promise<U>;
       if (!run?.rowHandler) {
-        return Promise.all(chunk.map((x) => plain(x))) as Promise<U[]>;
+        return settleMaybe(chunk.map((x) => plain(x)));
       }
       return settleRows(chunk, (x) => plain(x), run.rowHandler, _ctx);
     });
@@ -354,26 +374,33 @@ export class Transformer<In, Out> {
    */
   filter(predicate: PipelineFunction<Out, boolean>): Transformer<In, Out> {
     if (isContextAware(predicate)) {
-      return this.pipe(async (chunk, ctx, run) => {
+      return this.pipe((chunk, ctx, run) => {
         if (!run?.rowHandler) {
-          const keep = await Promise.all(chunk.map((x) => predicate(x, ctx)));
-          return chunk.filter((_x, i) => keep[i]);
+          return chain(settleMaybe(chunk.map((x) => predicate(x, ctx))), (keep) =>
+            chunk.filter((_x, i) => keep[i]),
+          );
         }
         return settleRows(
           chunk,
-          async (x) => ((await predicate(x, ctx)) ? x : DROP),
+          (x) => chain(predicate(x, ctx), (keep) => (keep ? x : DROP)),
           run.rowHandler,
           ctx,
         );
       });
     }
-    return this.pipe(async (chunk, _ctx, run) => {
+    return this.pipe((chunk, _ctx, run) => {
       const fn = predicate as (item: Out) => boolean | Promise<boolean>;
       if (!run?.rowHandler) {
-        const keep = await Promise.all(chunk.map((x) => fn(x)));
-        return chunk.filter((_x, i) => keep[i]);
+        return chain(settleMaybe(chunk.map((x) => fn(x))), (keep) =>
+          chunk.filter((_x, i) => keep[i]),
+        );
       }
-      return settleRows(chunk, async (x) => ((await fn(x)) ? x : DROP), run.rowHandler, _ctx);
+      return settleRows(
+        chunk,
+        (x) => chain(fn(x), (keep) => (keep ? x : DROP)),
+        run.rowHandler,
+        _ctx,
+      );
     });
   }
 
@@ -405,19 +432,19 @@ export class Transformer<In, Out> {
    */
   flatMap<U>(fn: PipelineFunction<Out, U[]>): Transformer<In, U> {
     if (isContextAware(fn)) {
-      return this.pipe(async (chunk, ctx, run) => {
+      return this.pipe((chunk, ctx, run) => {
         if (!run?.rowHandler) {
-          const results = await Promise.all(chunk.map((x) => fn(x, ctx) as U[] | Promise<U[]>));
-          return results.flat();
+          const results = settleMaybe(chunk.map((x) => fn(x, ctx) as U[] | Promise<U[]>));
+          return chain(results, (rows) => rows.flat());
         }
         return settleRowsFlat(chunk, (x) => fn(x, ctx) as U[] | Promise<U[]>, run.rowHandler, ctx);
       });
     }
-    return this.pipe(async (chunk, _ctx, run) => {
+    return this.pipe((chunk, _ctx, run) => {
       const plain = fn as (item: Out) => U[] | Promise<U[]>;
       if (!run?.rowHandler) {
-        const results = await Promise.all(chunk.map((x) => plain(x)));
-        return results.flat();
+        const results = settleMaybe(chunk.map((x) => plain(x)));
+        return chain(results, (rows) => rows.flat());
       }
       return settleRowsFlat(chunk, (x) => plain(x), run.rowHandler, _ctx);
     });
@@ -455,48 +482,30 @@ export class Transformer<In, Out> {
     // semantics).
     if (arg instanceof Transformer) {
       const tappedTransform = arg.transform;
-      return this.pipe(async (chunk, ctx) => {
-        // Execute the tapped transformer for side effects only, awaited before the chunk moves on
-        await tappedTransform(chunk, ctx);
-        return chunk;
-      });
+      return this.pipe((chunk, ctx) =>
+        // The tapped transformer runs for side effects only, and settles before the chunk moves on.
+        // A tapped chain that is itself synchronous settles without a `Promise` (#90).
+        chain(tappedTransform(chunk, ctx), () => chunk),
+      );
     }
 
     // Handle function case
     const fn = arg;
     if (isContextAware(fn)) {
-      return this.pipe(async (chunk, ctx, run) => {
+      return this.pipe((chunk, ctx, run) => {
         if (!run?.rowHandler) {
-          await Promise.all(chunk.map((x) => fn(x, ctx)));
-          return chunk;
+          return chain(settleMaybe(chunk.map((x) => fn(x, ctx))), () => chunk);
         }
-        return settleRows(
-          chunk,
-          async (x) => {
-            await fn(x, ctx);
-            return x;
-          },
-          run.rowHandler,
-          ctx,
-        );
+        return settleRows(chunk, (x) => chain(fn(x, ctx), () => x), run.rowHandler, ctx);
       });
     }
 
     const nonContextFn = fn as (item: Out) => unknown;
-    return this.pipe(async (chunk, _ctx, run) => {
+    return this.pipe((chunk, _ctx, run) => {
       if (!run?.rowHandler) {
-        await Promise.all(chunk.map((x) => nonContextFn(x)));
-        return chunk;
+        return chain(settleMaybe(chunk.map((x) => nonContextFn(x))), () => chunk);
       }
-      return settleRows(
-        chunk,
-        async (x) => {
-          await nonContextFn(x);
-          return x;
-        },
-        run.rowHandler,
-        _ctx,
-      );
+      return settleRows(chunk, (x) => chain(nonContextFn(x), () => x), run.rowHandler, _ctx);
     });
   }
 
@@ -577,29 +586,24 @@ export class Transformer<In, Out> {
     const loopedTransform = loopTransformer.transform;
     const conditionIsContextAware = condition.length >= 2;
 
-    return this.pipe(async (chunk, ctx) => {
-      let currentChunk = chunk;
-      let iterations = 0;
+    // One iteration, expressed so the next one composes through `chain` rather than `await` (#90) -
+    // a looped transformer whose own links are synchronous runs every pass with no `Promise`.
+    const step = (
+      currentChunk: Out[],
+      ctx: IContextManager,
+      iterations: number,
+    ): Out[] | Promise<Out[]> => {
+      if (maxIterations !== undefined && iterations >= maxIterations) return currentChunk;
 
-      while (true) {
-        if (maxIterations !== undefined && iterations >= maxIterations) {
-          break;
-        }
+      const shouldContinue = conditionIsContextAware
+        ? condition(currentChunk, ctx)
+        : (condition as (chunk: Out[]) => boolean)(currentChunk);
+      if (!shouldContinue) return currentChunk;
 
-        const shouldContinue = conditionIsContextAware
-          ? condition(currentChunk, ctx)
-          : (condition as (chunk: Out[]) => boolean)(currentChunk);
+      return chain(loopedTransform(currentChunk, ctx), (next) => step(next, ctx, iterations + 1));
+    };
 
-        if (!shouldContinue) {
-          break;
-        }
-
-        currentChunk = await loopedTransform(currentChunk, ctx);
-        iterations++;
-      }
-
-      return currentChunk;
-    });
+    return this.pipe((chunk, ctx) => step(chunk, ctx, 0));
   }
 
   /**
@@ -627,12 +631,13 @@ export class Transformer<In, Out> {
    * `[3]` then `[3]` (each chunk's own independent sum).
    */
   reduce<U>(fn: ReduceFunction<U, Out>, initial: U): Transformer<In, U> {
-    return this.pipe(async (chunk, ctx, run) => {
+    return this.pipe((chunk, ctx, run) => {
       if (chunk.length === 0) return [];
       const reducer = new Reducer<U, Out>(fn, initial, run?.rowHandler);
-      const values = await foldChunk(reducer, chunk, ctx);
-      values.push(...reducer.final());
-      return values;
+      return chain(foldChunk(reducer, chunk, ctx), (values) => {
+        values.push(...reducer.final());
+        return values;
+      });
     });
   }
 

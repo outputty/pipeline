@@ -61,3 +61,49 @@ export async function dropOrRethrow(
   if (!runHandler) throw error;
   await runHandler(error, ctx);
 }
+
+/**
+ * True when `value` is a thenable - the one place a "did this stay synchronous?" decision is made
+ * (#90). Structural, not `instanceof Promise`: a caller's own thenable, a `PromiseLike` from another
+ * realm and a native `Promise` all have to widen the chain the same way.
+ *
+ * `isThenable(1)` → `false`. `isThenable(Promise.resolve(1))` → `true`.
+ */
+export function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as PromiseLike<T>).then === "function"
+  );
+}
+
+/**
+ * Runs `next` on `value`, creating NO `Promise` when `value` is not already one (#90) - the
+ * replacement for every `await` on a composition seam, so a chain whose callbacks all return plain
+ * values runs start to finish without a microtask. When `value` IS a thenable the call defers
+ * through `.then`, which is the chain widening to async exactly where the first async link sits.
+ *
+ * `chain(2, (x) => x * 2)` → `4`, no `Promise` created. `chain(Promise.resolve(2), (x) => x * 2)` →
+ * a `Promise` of `4`.
+ */
+export function chain<A, B>(
+  value: A | Promise<A>,
+  next: (resolved: A) => B | Promise<B>,
+): B | Promise<B> {
+  // `Promise.resolve` on an already-native `Promise` returns that same instance, so the async arm
+  // allocates nothing extra; it is here to normalize a caller's own non-native thenable.
+  return isThenable(value) ? Promise.resolve(value).then(next) : next(value);
+}
+
+/**
+ * Collects per-item results into one array, staying synchronous when NO item is pending (#90) -
+ * `Promise.all`'s replacement wherever a chunk's items were mapped one at a time. `Promise.all`
+ * always allocates and always defers, even over an array of plain values, which is what made a
+ * fully-synchronous `.map()` cost a microtask per chunk before this.
+ *
+ * `settleMaybe([1, 2])` → `[1, 2]`, no `Promise` created. `settleMaybe([1, Promise.resolve(2)])` →
+ * a `Promise` of `[1, 2]`.
+ */
+export function settleMaybe<T>(values: (T | PromiseLike<T>)[]): T[] | Promise<T[]> {
+  return values.some((value) => isThenable(value)) ? Promise.all(values) : (values as T[]);
+}
