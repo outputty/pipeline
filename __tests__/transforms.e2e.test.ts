@@ -28,12 +28,12 @@ async function run<I, O>(
   context?: SimpleContextManager,
   bufferSize?: number,
 ): Promise<[O[], Record<string, unknown>]> {
-  let pipeline: Pipeline<I, "sync"> = context
-    ? new Pipeline<number>({ context })(input)
-    : new Pipeline<number>()(input);
+  let pipeline: Pipeline<I, "unset", "shape", I> = context
+    ? new Pipeline<I>({ context })
+    : new Pipeline<I>();
   if (bufferSize !== undefined) pipeline = pipeline.buffer(bufferSize);
   const applied = pipeline.apply(transformer);
-  const results = await applied.toArray();
+  const results = await applied(input).toArray();
   return [results, applied.contextManager.toDict()];
 }
 
@@ -137,7 +137,7 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
     });
     const viaAsyncIteration = await countFor(async (tapped) => {
       const pipeline = new Pipeline<number>().apply(tapped);
-      for await (const _chunk of pipeline) {
+      for await (const _chunk of pipeline([1, 2, 3]).chunks()) {
         // drain
       }
       return pipeline.contextManager.toDict();

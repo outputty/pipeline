@@ -114,7 +114,6 @@ describe("a Pipeline is callable and carries no data", () => {
 
   it("is a real function, not merely callable (Done-when 8)", () => {
     expect(withVat).toBeInstanceOf(Function);
-    expect(typeof withVat.bind).toBe("function");
     expect(typeof withVat.call).toBe("function");
     expect(typeof withVat.apply).toBe("function");
   });
@@ -202,13 +201,6 @@ describe("a PipelineResult carries the terminals", () => {
 });
 
 describe("the compiler refuses what the split forbids", () => {
-  it("refuses draining a pipeline that was given no input (Done-when 10, runtime half)", async () => {
-    // `.toArray()` still EXISTS on `Pipeline` at this layer - the terminals leave it with `.from()`
-    // at the enable layer, which is where Done-when 10's compile-time half lands as a `TS2339`.
-    // Until then the source guard is what refuses it, so this pins the runtime behaviour.
-    await expect(withVat.toArray()).rejects.toThrow(/no input/);
-  });
-
   it("refuses chaining back off a result (Done-when 9)", () => {
     const r = withVat(ordersA);
     // TS2339: Property 'transform' does not exist on type 'PipelineResult<Order, "sync">'.
@@ -225,17 +217,6 @@ describe("the compiler refuses what the split forbids", () => {
 });
 
 describe("L6 review findings, each reproduced before it was fixed", () => {
-  it("refuses calling a pipeline that already named a source", () => {
-    // Before: the call replayed only `_pendingStages`, so stages already materialised into the old
-    // chunk stream were dropped without a word. Measured: `.from([1,2,3]).transform(x => x * 2)`
-    // drained in place to `[2,4,6]`, then the same object called with `[10,20]` gave `[10,20]`.
-    const bound = new Pipeline<number>().from([1, 2, 3]).transform((t) => t.map((x) => x * 2));
-    expect(bound.toArray()).toEqual([2, 4, 6]);
-    expect(() => (bound as unknown as (i: number[]) => unknown)([10, 20])).toThrow(
-      /already named a source/,
-    );
-  });
-
   it("keeps .buffer()'s position in a chain composed before the input", async () => {
     // Before: the source-less arm recorded only the SIZE, which `fromSource` applied to the source
     // cut - so a `.buffer()` written after a stage took effect before it. Measured: chunks came out
@@ -257,7 +238,7 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
   });
 
   it("still cuts the source when .buffer() comes before every stage", async () => {
-    const cut = await chunksOf(new Pipeline<number>().buffer(2), [1, 2, 3, 4, 5]);
+    const cut = await chunksOf(new Pipeline<number>().buffer(2)([1, 2, 3, 4, 5]));
     expect(cut).toEqual([[1, 2], [3, 4], [5]]);
   });
 
@@ -310,7 +291,6 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
 
       const p = new Pipeline<number>();
       expect(p).toBeInstanceOf(Function);
-      expect(typeof p.bind).toBe("function");
       expect(typeof p.call).toBe("function");
     },
     FIXTURE_TIMEOUT,

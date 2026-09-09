@@ -218,7 +218,6 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
       // against, so the worker's own `.transform()` lands at the SAME index the orchestrator's
       // does (architecture.md: "index N means the same transform on both sides").
       const worker = new HttpPipeline<number>({ url: "" })
-        .from<number>([])
         .reduce((acc: number, x: number) => acc + x, 0)
         .transform((t) => t.map((n: number) => n * 10));
       const trackingHandler = async (request: Request): Promise<Response> => {
@@ -340,7 +339,7 @@ describe("#62 an input chunk's emits stay together as one output chunk", () => {
         emit(x * 10);
         return 0;
       }, 0);
-    for await (const chunk of partitioned) {
+    for await (const chunk of partitioned([1, 2, 3, 4, 5]).chunks()) {
       observedChunks.push([...chunk]);
     }
     // buffer(2) over [1,2,3,4,5] -> input chunks [1,2],[3,4],[5]; each item emits its own value,

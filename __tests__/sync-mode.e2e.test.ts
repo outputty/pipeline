@@ -251,7 +251,7 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     // goes above it, and this test becomes the assertion that the removal really landed - alongside
     // the sweep of every other call site across `src/`, `__tests__/`, `README.md` and `.claude/*.md`
     // that the same layer carries.
-    const legacy = new Pipeline<number>().from<number>([1, 2, 3]);
+    const legacy = new Pipeline<number>();
     expect(legacy).toBeInstanceOf(Pipeline);
   });
 
@@ -286,7 +286,7 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     const http = new HttpPipeline<number>({ url: "http://127.0.0.1:1" });
     const cluster = new ClusterPipeline<number>();
 
-    const concurrentOut: Promise<number[]> = concurrent.toArray();
+    const concurrentOut: Promise<number[]> = concurrent([1, 2, 3]).toArray();
     const httpOut: Promise<number[]> = http([1, 2, 3]).toArray();
     const clusterOut: Promise<number[]> = cluster([1, 2, 3]).toArray();
 
@@ -775,7 +775,8 @@ describe("#90 L4 - review findings, each reproduced before it was fixed", () => 
     // for a caller who forgot `.from()`, where composing any stage on it already threw. An
     // `"unset"` pipeline's `.toArray()` is typed `Promise<T[]>`, so the failure arrives as a
     // rejection rather than a synchronous throw.
-    await expect(new Pipeline<number>().toArray()).rejects.toThrow(
+    const drained = new Pipeline<number>() as unknown as { toArray(): Promise<number[]> };
+    await expect(drained.toArray()).rejects.toThrow(
       "no input: call the pipeline with the items to process",
     );
   });

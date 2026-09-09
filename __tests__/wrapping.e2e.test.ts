@@ -63,18 +63,6 @@ describe("a wrapping class takes (pipeline, options) and runs the chain elsewher
     expect(extended).toBeInstanceOf(ConcurrentPipeline);
   });
 
-  it("refuses to wrap a pipeline that already named a source", () => {
-    const bound = new Pipeline<Order>();
-    // TS2345: Argument of type 'Pipeline<Order, "sync", "shape", Order>' is not assignable to
-    // parameter of type 'WrappablePipeline<Order, Order>'. The wrapping overload takes an `"unset"`
-    // Mode, so a bound chain is a compile error - the runtime guard below stays for a caller who
-    // reaches `Pipeline.adopt` directly, or who is not using TypeScript.
-    // @ts-expect-error a bound pipeline has materialised its stages; there is nothing left to adopt
-    expect(() => new ConcurrentPipeline(bound, { maxConcurrency: 2 })).toThrow(
-      /already named a source/,
-    );
-  });
-
   it("keeps the wrapped chain's own input type, not its output type", () => {
     // Before: the constructor parameter was `AnyPipeline<T>`, whose `In` is `any`, so the wrapper
     // fell back to its own `T` - each stage's OUTPUT. Measured on a `number → string` chain, the

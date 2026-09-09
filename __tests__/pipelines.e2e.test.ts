@@ -267,7 +267,7 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
       .transform((t) => t.map((x: number) => x * 2))
       .buffer(10);
     const chunks: number[][] = [];
-    for await (const chunk of p) {
+    for await (const chunk of p([1, 2, 3, 4, 5]).chunks()) {
       chunks.push(chunk);
     }
     expect(chunks.flat()).toEqual([2, 4, 6]);
@@ -308,7 +308,7 @@ describe("#78 the row handler reaches a dispatched stage identically to a local 
     async () => {
       const worker = makeWorker((t) => t.transform((tr) => throwOn3(tr)));
       await withServer(worker.fetch, async (url) => {
-        const out = await new HttpPipeline<string>({ url })
+        const out = await new HttpPipeline<number>({ url })
 
           .buffer(2)
           .transform((t) => throwOn3(t))([1, 2, 3, 4])
@@ -393,7 +393,7 @@ describe("#17 ordered: false streams instead of draining the source first (Done-
     const cp = new ConcurrentPipeline<number>({
       maxConcurrency: 2,
       ordered: false,
-    }).from<number>(source());
+    });
     await cp
       .buffer(1) // one item per chunk, so "not drained first" is actually observable
       .transform((t) =>
@@ -403,7 +403,7 @@ describe("#17 ordered: false streams instead of draining the source first (Done-
           if (x === 1) expect(pulled.length).toBeLessThan(6);
           return x;
         }),
-      )
+      )(source())
       .toArray();
   });
 });

@@ -73,7 +73,11 @@ describe("#39 no .buffer() between two stages means no re-chunk (Done-when 2)", 
 describe("#39 two .buffer() calls back to back collapse to the last one (Done-when 3)", () => {
   it("matches .buffer(4) alone over [1..9]", async () => {
     const chained: number[][] = [];
-    for await (const chunk of new Pipeline<number>().buffer(2).buffer(3).buffer(4)) {
+    for await (const chunk of new Pipeline<number>()
+      .buffer(2)
+      .buffer(3)
+      .buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      .chunks()) {
       chained.push(chunk);
     }
 

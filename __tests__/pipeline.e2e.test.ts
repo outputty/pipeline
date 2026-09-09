@@ -96,9 +96,9 @@ describe("Pipeline", () => {
     it("propagates a manager's own rejection instead of bypassing it (#31, Done-when 2)", () => {
       const sealed = new SealedContext({ known: 1 });
 
-      expect(() =>
-        new Pipeline<number>({ context: sealed }).from([1]).context({ unknown: 2 }),
-      ).toThrow("SealedContext: unknown key 'unknown'");
+      expect(() => new Pipeline<number>({ context: sealed }).context({ unknown: 2 })).toThrow(
+        "SealedContext: unknown key 'unknown'",
+      );
     });
   });
 
@@ -368,7 +368,7 @@ describe("Pipeline", () => {
 
     it("does not carry a context snapshot; .contextManager still resolves it afterward", async () => {
       const context = new SimpleContextManager({ key: "value" });
-      const pipeline = new Pipeline<false>({ context });
+      const pipeline = new Pipeline<number>({ context });
 
       await pipeline.branch({
         all: {
@@ -450,7 +450,7 @@ describe("Pipeline", () => {
       const double = new Transformer<number, number>().map((x: number) => x * 2);
       const toString = new Transformer<number, number>().map((x: number) => `value: ${x}`);
 
-      const results = await new Pipeline<string>()
+      const results = await new Pipeline<number>()
         .apply(double)
         .apply(toString)([1, 2, 3])
         .toArray();
