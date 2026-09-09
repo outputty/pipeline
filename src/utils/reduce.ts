@@ -123,17 +123,26 @@ export function foldChunk<U, T>(
   const items = [...chunk];
 
   // Folds are ORDER-DEPENDENT - one accumulator, one item at a time - so item `i + 1` cannot start
-  // until `i` has settled. `step` expresses that recursively, so a synchronous reducer runs the
-  // whole chunk without a `Promise` and an async one still folds strictly in order (#90).
-  const step = (index: number): U[] | Promise<U[]> => {
-    if (index >= items.length) return emitted;
-    return chain(reducer.fold(items[index], ctx), (values) => {
-      emitted.push(...values);
-      return step(index + 1);
-    });
+  // until `i` has settled. A plain `for` loop carries the synchronous case (#90), and `drain`
+  // re-enters itself ONLY across an async boundary, where the continuation runs on a fresh stack in
+  // its own microtask. Recursing per ITEM instead overflows the stack on a synchronous reducer:
+  // measured, a 5000-item chunk threw `RangeError: Maximum call stack size exceeded`, where the
+  // pre-#90 loop returned its sum, and the ceiling moved with `.buffer()`.
+  const drain = (start: number): U[] | Promise<U[]> => {
+    for (let index = start; index < items.length; index++) {
+      const values = reducer.fold(items[index], ctx);
+      if (isThenable(values)) {
+        return Promise.resolve(values).then((settled) => {
+          emitted.push(...settled);
+          return drain(index + 1);
+        });
+      }
+      emitted.push(...(values as U[]));
+    }
+    return emitted;
   };
 
-  return step(0);
+  return drain(0);
 }
 
 /**

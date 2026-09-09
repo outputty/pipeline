@@ -25,6 +25,7 @@ import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { SimpleContextManager } from "@src/context/simple";
 import { DROP } from "@src/types";
+import { buildSyncChunkGenerator, flattenSyncChunks } from "@src/utils/chunk";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
 import { ClusterPipeline } from "@src/pipelines/cluster";
@@ -116,6 +117,86 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     const foldedOut = folded.runnable()([1, 2, 3], new SimpleContextManager());
     expect(Array.isArray(foldedOut)).toBe(true);
     expect(foldedOut).toEqual([6]);
+  });
+
+  it("L2: a large synchronous fold and a long synchronous loop do not overflow the stack", () => {
+    // Both paths replaced a real loop with per-step recursion at first. Measured on that draft: a
+    // 5000-item fold and a 4000-iteration loop each threw `RangeError: Maximum call stack size
+    // exceeded`, where the pre-#90 code handled 20 000 of each. The sizes below sit above those
+    // ceilings, so this test fails outright if the trampolines are ever undone.
+    const items = Array.from({ length: 20000 }, (_x, i) => i + 1);
+
+    const folded = new Transformer<number, number>({ transform: (chunk) => chunk }).reduce(
+      (acc, x) => acc + x,
+      0,
+    );
+    expect(folded.runnable()(items, new SimpleContextManager())).toEqual([200010000]);
+
+    const looped = new Transformer<number, number>({ transform: (chunk) => chunk }).loop(
+      new Transformer<number, number>({ transform: (chunk) => chunk }).map((x) => x + 1),
+      (chunk) => chunk[0] < 20000,
+    );
+    expect(looped.runnable()([0], new SimpleContextManager())).toEqual([20000]);
+  });
+
+  it("L2: a synchronously-throwing row handler leaves no unhandled rejection behind", async () => {
+    // A user callback can throw SYNCHRONOUSLY for one item after an earlier item in the same chunk
+    // already returned a pending promise. `Array.prototype.map` abandons the array there, and that
+    // earlier promise would never get a rejection handler - fatal under Node's default policy.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    const t = new Transformer<number, number>({ transform: (chunk) => chunk })
+      .onError(() => {
+        throw new Error("handler blew up");
+      })
+      .map((x) => {
+        if (x === 1) return Promise.reject(new Error("slow failure"));
+        if (x === 2) throw new Error("fast failure");
+        return x;
+      });
+
+    expect(() => t.runnable()([1, 2, 3], new SimpleContextManager())).toThrow("handler blew up");
+
+    // One turn of the event loop is enough for an abandoned rejection to surface.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    process.off("unhandledRejection", onUnhandled);
+
+    expect(unhandled).toEqual([]);
+  });
+
+  it("L2: a row handler that returns an array replaces the row, never spreads into it", () => {
+    // `.flatMap()`'s SUCCESS is already an array, so telling success from recovery by sniffing
+    // `Array.isArray` puts a handler's own array into the output flattened - wrong for any item
+    // type that is itself an array.
+    const t = new Transformer<number, number[]>({
+      transform: (chunk) => chunk.map((x) => [x]),
+    })
+      .onError(() => [99, 98])
+      .flatMap((pair) => {
+        if (pair[0] === 2) throw new Error("boom");
+        return [pair, pair];
+      });
+
+    expect(t.runnable()([1, 2, 3], new SimpleContextManager())).toEqual([
+      [1],
+      [1],
+      [99, 98],
+      [3],
+      [3],
+    ]);
+  });
+
+  it("L2: the sync chunk utils cut and flatten the same way their async counterparts do", () => {
+    expect([...buildSyncChunkGenerator<number>(3)([1, 2, 3, 4, 5, 6, 7])]).toEqual([
+      [1, 2, 3],
+      [4, 5, 6],
+      [7],
+    ]);
+    expect([...flattenSyncChunks([[1, 2], [3]])]).toEqual([1, 2, 3]);
+    expect(() => buildSyncChunkGenerator<number>(0)).toThrow("chunkSize must be at least 1");
+    expect(countPromises(() => [...buildSyncChunkGenerator<number>(2)([1, 2, 3])])).toBe(0);
   });
 
   it.fails("Done-when 1: a fully sync chain returns number[] with no await", () => {

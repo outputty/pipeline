@@ -107,3 +107,43 @@ export function chain<A, B>(
 export function settleMaybe<T>(values: (T | PromiseLike<T>)[]): T[] | Promise<T[]> {
   return values.some((value) => isThenable(value)) ? Promise.all(values) : (values as T[]);
 }
+
+/**
+ * Runs `run` over every item of `chunk` and settles the results, staying synchronous when none is
+ * pending (#90) - the ONE per-item map every element-wise link goes through, rather than a bare
+ * `chunk.map(...)` at each site.
+ *
+ * The bare form is unsafe here: `run` is a caller's own callback, so it can throw SYNCHRONOUSLY for
+ * item `i` after items `0..i-1` already returned pending promises. `Array.prototype.map` abandons
+ * the array at that point, leaving those promises with no rejection handler ever attached - one of
+ * them rejecting then crashes the process under Node's default unhandled-rejection policy. Before
+ * #90 the per-item callback was `async`, so a throw became a rejection `Promise.all` always handled;
+ * it cannot be now, because that `async` wrapper is exactly what made a synchronous chain allocate.
+ * This loop attaches a throwaway `.catch` to whatever was already created, then rethrows.
+ *
+ * `mapSettle([1, 2], (x) => x * 2)` → `[2, 4]`, no `Promise` created.
+ */
+export function mapSettle<T, R>(chunk: T[], run: (item: T) => R | Promise<R>): R[] | Promise<R[]> {
+  const results: (R | Promise<R>)[] = [];
+  try {
+    for (const item of chunk) {
+      results.push(run(item));
+    }
+  } catch (error) {
+    disarm(results);
+    throw error;
+  }
+  return settleMaybe(results);
+}
+
+/**
+ * Attaches a throwaway rejection handler to every pending value in `created` (#90) - what
+ * `mapSettle` above owes the siblings of an item whose callback threw synchronously, since nothing
+ * downstream will ever await them. Its own function to keep `mapSettle`'s `catch` at this repo's
+ * `max-depth: 2`.
+ */
+function disarm<R>(created: (R | Promise<R>)[]): void {
+  for (const value of created) {
+    if (isThenable(value)) void Promise.resolve(value).catch(() => {});
+  }
+}
