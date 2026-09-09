@@ -452,46 +452,47 @@ const data = await new ClusterPipeline(["a", "1", "b", "3", "5"])
 console.log(JSON.stringify(data)); // [1,3,5]
 ```
 
-## Case 12 - bounded-concurrency fan-out over a real per-item task
+## Case 12 - same chain, more in flight
 
-The same async task, run with a bounded number of chunks in flight instead of one at a time - the
-task never changes, only the class does. Neither this nor Case 11 uses `.reduce()`:
-`ConcurrentPipeline.reduce()` partitions into `maxConcurrency` independent accumulators by design
-(#62), so a "same output on all four classes" case built on it would contradict itself.
-
-<!-- compiles -->
-
-```ts
-import { Pipeline } from "@outputty/pipeline";
-
-async function fetchScore(id: number): Promise<number> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  return id * 10;
-}
-
-const data = await new Pipeline([1, 2, 3, 4, 5])
-  .transform((t) => t.map(fetchScore))
-  .toArray();
-
-console.log(JSON.stringify(data)); // [10,20,30,40,50]
-```
+An I/O-bound per-item task wastes its wait run one at a time; `ConcurrentPipeline` runs several
+waits at once instead, with no change to the chain - only the class, and `.buffer(1)` so each item
+is its own chunk, change. `.buffer(1)` matters on BOTH sides here: at the default buffer of 1000,
+five items are one chunk and `.map()`'s own `Promise.all` already runs them together, so a plain
+`Pipeline` would look just as "concurrent" as `ConcurrentPipeline` and the comparison would prove
+nothing. Neither this nor Case 11 uses `.reduce()`: `ConcurrentPipeline.reduce()` partitions into
+`maxConcurrency` independent accumulators by design (#62), so a "same output on every class" case
+built on it would contradict itself.
 
 <!-- compiles -->
 
 ```ts
-import { ConcurrentPipeline } from "@outputty/pipeline";
+import { Pipeline, ConcurrentPipeline } from "@outputty/pipeline";
 
 async function fetchScore(id: number): Promise<number> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await new Promise((resolve) => setTimeout(resolve, 5)); // stands in for a real network wait
   return id * 10;
 }
 
-const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+// Pipeline: one item's wait finishes before the next one starts.
+const sequential = await new Pipeline([1, 2, 3, 4, 5])
+  .buffer(1)
   .transform((t) => t.map(fetchScore))
   .toArray();
 
-console.log(JSON.stringify(data)); // [10,20,30,40,50]
+// ConcurrentPipeline: up to 4 items waiting at once - the SAME chain, unchanged.
+const concurrent = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 4 })
+  .buffer(1)
+  .transform((t) => t.map(fetchScore))
+  .toArray();
+
+console.log(JSON.stringify({ sequential, concurrent })); // identical - only the wait overlaps
 ```
+
+```json
+{ "sequential": [10, 20, 30, 40, 50], "concurrent": [10, 20, 30, 40, 50] }
+```
+
+The same chain dispatched over HTTP and to real worker processes, proving the pattern travels:
 
 <!-- compiles -->
 
@@ -513,8 +514,9 @@ const { port } = server.address() as AddressInfo;
 
 const data = await new HttpPipeline([1, 2, 3, 4, 5], {
   url: `http://localhost:${port}`,
-  maxConcurrency: 2,
+  maxConcurrency: 4,
 })
+  .buffer(1)
   .transform((t) => t.map(fetchScore))
   .toArray();
 
@@ -533,7 +535,8 @@ async function fetchScore(id: number): Promise<number> {
   return id * 10;
 }
 
-const data = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const data = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 4 })
+  .buffer(1)
   .transform((t) => t.map(fetchScore))
   .toArray();
 

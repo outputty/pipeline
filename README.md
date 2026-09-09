@@ -25,33 +25,24 @@ console.log(data); // [6, 8, 10]
 
 ## Core Concepts
 
-```
-┌───────────────────────────────────────────────────────────────────────────┐
-│  PIPELINE ARCHITECTURE                                                    │
-├───────────────────────────────────────────────────────────────────────────┤
-│                                                                           │
-│  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐             │
-│  │   Pipeline   │      │ Transformer  │      │   Reducer    │             │
-│  │              │      │              │      │              │             │
-│  │ Data source  │      │ map / filter │      │ Folds chunks │             │
-│  │  + context   │      │flatMap / tap │      │  into state  │             │
-│  └──────────────┘      └──────────────┘      └──────────────┘             │
-│                                                                           │
-│  Data flow (one chunk at a time):                                         │
-│  input[] ──▶ chunk[] ──▶ map/filter/flatMap ──▶ chunk[] ──▶ output[]      │
-│                                        │                                  │
-│                                        └──▶ .reduce() ──▶ folded[]        │
-│                                             (optional, across every chunk)│
-│                                                                           │
-└───────────────────────────────────────────────────────────────────────────┘
+A `Pipeline` wraps a source, cuts it into chunks once, and runs every stage over that same chunk
+stream - a stage is either a `Transformer` chain (chunk in, chunk out) or a reducer (many chunks
+in, fewer chunks out). Nothing here decides WHERE a stage runs; that is the class you construct,
+covered in [Where the work runs](#where-the-work-runs) below.
+
+```text
+new Pipeline(items)
+	.buffer(size)          cuts items into chunks once - In[] chunks, 1000 by default
+	.transform(...)        a Transformer stage: chunk in, chunk out, one call per chunk
+	.reduce(...)           a reducer stage: folds every chunk, emits fewer chunks onward
+	.toArray()             terminal op - the one place chunks become items again
 ```
 
-`Pipeline` wraps a source and decides where its chunks run - the class you construct, not a config
-knob (see [Where the work runs](#where-the-work-runs)). `Transformer` is the chain itself:
-per-chunk operations, chunk-agnostic. `Reducer` is the one exception - it folds STATE across every
-chunk instead of transforming one, which is why it gets its own box; see
-[How a Transformer runs a chunk](#how-a-transformer-runs-a-chunk) for the mechanism and
-[Reducing](#reducing) for the API.
+`Transformer` is the chain itself - `map`/`filter`/`flatMap`/`tap`, chunk-agnostic, one call per
+chunk (see [How a Transformer runs a chunk](#how-a-transformer-runs-a-chunk)). A reducer is not a
+separate class; `Pipeline.reduce()`/`Transformer.reduce()` are stages in that SAME flow, they just
+produce fewer chunks than they receive instead of one chunk per chunk - see
+[Reducing](#reducing).
 
 ### Pipeline
 
@@ -222,20 +213,25 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 
 ### ConcurrentPipeline
 
-Extends `Pipeline`. Runs several chunks of a stage at once, in this process - see
-[Where the work runs](#where-the-work-runs) for a real construction example and items in flight.
-Every `Pipeline` method above applies unchanged; `ConcurrentPipeline` adds no new ones, only its
-own constructor knobs.
+Extends `Pipeline`. Runs several chunks of a stage at once, in this process. Every `Pipeline`
+method above applies unchanged; `ConcurrentPipeline` adds no new ones, only its own constructor
+knobs - see [Where the work runs](#where-the-work-runs) for items in flight.
 
 Internally, `.apply()` never calls `Transformer.process()` here the way `Pipeline` does - it fans
 `this._chunks` (the pipeline's own already-cut chunk stream) out through up to `maxConcurrency`
 concurrent calls of the SAME stage. `ordered: true` keeps them in a sliding window so a slower
 chunk is never overtaken by a faster one; `false` yields whichever chunk finishes first.
 
-<!-- illustrative -->
+<!-- compiles -->
 
 ```typescript
-new ConcurrentPipeline<T>(data: PipelineSource<T>, options?: ConcurrentPipelineOptions)
+import { ConcurrentPipeline } from "@outputty/pipeline";
+
+const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+  .toArray();
+
+console.log(JSON.stringify(data)); // [6,8,10]
 ```
 
 - **`options.maxConcurrency`** - chunks kept in flight at once. Default `4`.
@@ -417,7 +413,10 @@ item by item internally either - each is one recursive call over the chunk array
 The boundary is the `Pipeline`'s own decision, not the `Transformer`'s: `.buffer(size)` sets it
 explicitly, defaulting to `1000` when never called, and every later stage sees those same chunks
 unchanged until another `.buffer()` call declares a new one. Two `.buffer()` calls back to back,
-with nothing between them, collapse to the LAST one - only it is ever actually applied:
+with nothing between them, collapse to the LAST one - only it is ever actually applied. `.reduce()`
+emits one value per chunk, so it is what actually shows which boundary won: `.buffer(2)` would give
+chunks `[1,2] [3,4] [5]` and sums `[3,7,5]`; `.buffer(1)` gives one item per chunk and sums
+`[1,2,3,4,5]` - unchanged from the input, since each chunk is a single number folded with itself:
 
 <!-- compiles -->
 
@@ -427,10 +426,10 @@ import { Pipeline } from "@outputty/pipeline";
 const data = await new Pipeline([1, 2, 3, 4, 5])
   .buffer(2) // never applied - superseded before any stage reads it
   .buffer(1) // this is the boundary every later stage actually sees
-  .transform((t) => t.map((x: number) => x * 2))
+  .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
   .toArray();
 
-console.log(data); // [2, 4, 6, 8, 10]
+console.log(JSON.stringify(data)); // [1,2,3,4,5] - buffer(2) would have printed [3,7,5]
 ```
 
 ## How a Transformer runs a chunk
@@ -481,7 +480,7 @@ result: [ 6, 8, 10 ]
 Every item finishes `map` before `filter` sees any of them - the whole chunk crosses from one link
 to the next as a single array, never one row rejoining a shared queue between operators.
 
-```
+```text
 t.process(chunks())
 	for [1,2,3,4,5] (one chunk)
 		filter's composed function(chunk)        the LAST .filter()/.map() call built
@@ -492,10 +491,10 @@ t.process(chunks())
 	yield [6, 8, 10]
 ```
 
-`Pipeline.reduce()`/`Transformer.reduce()` are the one exception this chunk-in-chunk-out shape
-does not cover: a reducer keeps STATE across chunks instead of producing one output chunk per
-input chunk, which is why it needed its own box in [Core Concepts](#core-concepts) - see
-[Reducing](#reducing).
+`Transformer.reduce()` fits this same chunk-in-chunk-out shape exactly - one chunk in, its fold
+out. `Pipeline.reduce()` is the one stage that genuinely breaks it: it keeps STATE across every
+chunk instead of resetting per chunk, which is why [Core Concepts](#core-concepts) draws it as
+producing FEWER chunks than it receives rather than one-for-one - see [Reducing](#reducing).
 
 ## Reducing
 
@@ -620,11 +619,11 @@ Split processing into multiple paths:
 <!-- compiles -->
 
 ```typescript
-import { Pipeline, createTransformer } from "@outputty/pipeline";
+import { Pipeline, Transformer } from "@outputty/pipeline";
 
 const data = await new Pipeline([1, 2, 3, 4, 5]).branch({
-  evens: { predicate: (x: number) => x % 2 === 0, transformer: createTransformer<number>() },
-  odds: { predicate: (x: number) => x % 2 !== 0, transformer: createTransformer<number>() },
+  evens: { predicate: (x: number) => x % 2 === 0, transformer: new Transformer<number, number>() },
+  odds: { predicate: (x: number) => x % 2 !== 0, transformer: new Transformer<number, number>() },
 });
 
 console.log(data.evens); // [2, 4]
@@ -685,11 +684,10 @@ console.log(data); // [ 200, 300, 400, 500, 1500, 2500 ]
 
 ## Patterns
 
-The chain itself is class-agnostic - a pattern written once runs unchanged on `Pipeline`,
-`ConcurrentPipeline`, `HttpPipeline` or `ClusterPipeline`, so it is shown once here, on plain
-`Pipeline`. Both are pinned first in [`.claude/examples.md`](.claude/examples.md) (Case 11, Case
-12), each with all four classes run and verified for real, for the one time the class actually
-matters: proving the pattern survives the trip over HTTP and a real forked worker unchanged.
+Both are pinned first in [`.claude/examples.md`](.claude/examples.md) (Case 11, Case 12), each
+proven for real on `Pipeline`, `ConcurrentPipeline`, `HttpPipeline` and `ClusterPipeline` - the
+chain itself is class-agnostic, so that proof lives once in `.claude/examples.md` rather than
+repeated per class here.
 
 ### Repairing bad rows without losing the batch
 
@@ -713,23 +711,37 @@ const data = await new Pipeline(["a", "1", "b", "3", "5"])
 console.log(JSON.stringify(data)); // [1,3,5]
 ```
 
-### Bounded-concurrency fan-out over a real per-item task
+### Same chain, more in flight
 
-The same async task, run with a bounded number of chunks in flight instead of one at a time.
+An I/O-bound per-item task - a network call, a query, anything that mostly waits - wastes that
+wait time run one at a time: `Pipeline` never starts item 2's wait until item 1's is over.
+`ConcurrentPipeline` runs several chunks' waits at once instead, with no change to the chain
+itself - only the class, and `.buffer(1)` so each item is its own chunk, change:
 
 <!-- compiles -->
 
 ```typescript
-import { Pipeline } from "@outputty/pipeline";
+import { Pipeline, ConcurrentPipeline } from "@outputty/pipeline";
 
 async function fetchScore(id: number): Promise<number> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await new Promise((resolve) => setTimeout(resolve, 5)); // stands in for a real network wait
   return id * 10;
 }
 
-const data = await new Pipeline([1, 2, 3, 4, 5]).transform((t) => t.map(fetchScore)).toArray();
+// Pipeline: one item's wait finishes before the next one starts.
+const sequential = await new Pipeline([1, 2, 3, 4, 5])
+  .buffer(1)
+  .transform((t) => t.map(fetchScore))
+  .toArray();
 
-console.log(JSON.stringify(data)); // [10,20,30,40,50]
+// ConcurrentPipeline: up to 4 items waiting at once - the SAME chain, unchanged.
+const concurrent = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 4 })
+  .buffer(1)
+  .transform((t) => t.map(fetchScore))
+  .toArray();
+
+console.log(JSON.stringify({ sequential, concurrent })); // identical - only the wait overlaps
+// {"sequential":[10,20,30,40,50],"concurrent":[10,20,30,40,50]}
 ```
 
 ## License
