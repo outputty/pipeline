@@ -534,7 +534,7 @@ either - downstream stages run over every value a reducer produced.
 ```typescript
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline()
+const data = new Pipeline()
   .from([1, 2, 3, 4, 5])
   .reduce((acc: number, x: number) => acc + x, 0)
   .transform((t) => t.map((n: number) => n * 10))
@@ -552,7 +552,7 @@ threshold, with no trailing value when the last item already banked one:
 ```typescript
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline()
+const data = new Pipeline()
   .from([1, 2, 3, 4, 5])
   .reduce((acc: number, x: number, _ctx, emit: (v: number) => void) => {
     acc += x;

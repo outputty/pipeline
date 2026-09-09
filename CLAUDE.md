@@ -194,16 +194,20 @@ none of it survived the hand-trim (#745).
   links. `P` is `SourcePolicy`, a third DEFAULTED class type parameter recording what a class does
   to a source's shape - `"shape"` keeps it, `"async"` overrides it - and exists because without it a
   dispatching class's `.from()` override is not a narrowing of the base's `Iterable` arm and fails
-  `TS2416`. `.transform()` returns `AssignMode<P, M2>`, never the callback's own `M2`: a dispatching
-  class is async whatever its callbacks return. The dispatching classes FIX their Mode
+  `TS2416`. Every stage returns `AssignMode<P, JoinMode<M, M2>>` - the chain's own Mode joined with
+  the stage's, then the class's policy on top - so a sync callback on an async chain stays async and
+  a dispatching class is async whatever its callbacks return. The dispatching classes FIX their Mode
   (`class ConcurrentPipeline<T, M extends "async" = "async">`), which is what lets their narrowing
   overrides compare as concrete types and makes `ConcurrentPipeline<number, "sync">` a compile
-  error. Three consequences, all BREAKING: a failure on a sync chain THROWS out of the terminal op
-  instead of rejecting; `Pipeline.reduce()` always widens to `"async"` (it folds `foldChunkStream`,
-  an async generator, so it can never run synchronously - `Transformer.reduce()` inside
-  `.transform()` is the per-chunk fold that stays sync); and `.merge()` accepts a sync pipeline into
-  an async one but not the reverse. `.apply()` throws "no source" on an `"unset"` pipeline, since a
-  dispatching class has no `"unset"` state for the compile-time guard to test.
+  error. `Pipeline.reduce()` follows the same rule: a fold is order-dependent, not inherently
+  asynchronous, so `foldSyncChunkStream` folds a plain reducer over a sync source with no `Promise`
+  created, and `foldChunkStream`'s `AsyncIterable` arm alone is always `"async"`. An async callback
+  anywhere widens: `.onError(async …)` and `.tap(async …)` each carry an overload pair for it, and a
+  receiver already widened before `.from()` stays widened. Two consequences, both BREAKING: a failure
+  on a sync chain THROWS out of the terminal op instead of rejecting, and a drain with no source
+  throws "no source" rather than resolving to `[]`. `.apply()` throws that same "no source" on an
+  `"unset"` pipeline, since a dispatching class has no `"unset"` state for the compile-time guard to
+  test.
 - **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`
   decision, not a `Transformer` one (#39) - `.buffer(size)` sets it explicitly, defaulting
   to `DEFAULT_CHUNK_SIZE = 1000` when never called; every later stage sees the same chunks unchanged

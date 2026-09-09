@@ -49,15 +49,16 @@ The two older candidates, still not filed:
   it work, each after a simpler shape was measured and failed - `.from()` as a METHOD (a constructor
   cannot vary its own class's generic return from its arguments), a third defaulted class type
   parameter `SourcePolicy` (without it a dispatching class's `.from()` override fails `TS2416`), and
-  `.transform()` returning `AssignMode<P, M2>` rather than the callback's own Mode (a dispatching
-  class is async whatever its callbacks return). BREAKING three ways, no deprecation period: the
+  every stage returning `AssignMode<P, JoinMode<M, M2>>` - the chain's Mode joined with the stage's,
+  then the class's policy on top. `Pipeline.reduce()` keeps the chain's Mode too: a fold is
+  order-dependent, not inherently asynchronous. BREAKING three ways, no deprecation period: the
   two-argument `new Pipeline(data, options)` constructor is deleted in favour of
   `new Pipeline(options).from(data)`; a failure on a synchronous chain THROWS out of the terminal op
-  rather than rejecting, because no `Promise` exists for a rejection to travel on; and
-  `Pipeline.reduce()` always widens to `"async"`, since it folds an async generator. The ticket's own
+  rather than rejecting, because no `Promise` exists for a rejection to travel on; and a drain on a
+  source-less pipeline throws rather than resolving to `[]`. The ticket's own
   Done-when 5 was amended by decision: the throw it asked for on a thenable-returning callback is
   only reachable through a deliberate cast, so the engine widens the run instead. PR #92 (tests),
-  PR #93 (engine), PR #95 (types and call sites), PR #96 (docs).
+  PR #93 (engine), PR #95 (types and call sites), PR #97 (the Mode audit), PR #96 (docs).
 
 - **Error handling moves onto the function that failed** (#78, `feat!`) - `Transformer.onError(fn)`
   is now the ROW handler: returning a value replaces the row, the exported `DROP` sentinel removes

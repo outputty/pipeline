@@ -169,10 +169,20 @@ Two drains recurse only across an async boundary, never per item: `foldChunk` an
 `Transformer.loop`. Per-item recursion overflowed the stack on a synchronous reducer at 5000 items
 and on a synchronous loop body at 4000 iterations, where the pre-#90 loops handled 20 000 of each.
 
-`Pipeline.reduce()` is the one stage that always widens: it folds `foldChunkStream`, an async
-generator over an `AsyncIterable`, so it cannot run synchronously whatever the reducer does, and its
-return type says `"async"` rather than promising an array. `Transformer.reduce()` inside
-`.transform()` is the per-chunk fold that keeps a chain synchronous.
+Every stage joins two Modes: the chain's own, and the stage's. `JoinMode<M, S>` is `"sync"` only
+when both are, and `AssignMode<P, S>` then applies the class's policy on top. A stage that read only
+its own Mode typed a chain `number[]` while the runtime handed back a pending `Promise`.
+
+`Pipeline.reduce()` follows that rule too. A fold is order-dependent, not inherently asynchronous:
+`foldSyncChunkStream` folds the same `Reducer` over the sync chunk stream and defers only at the
+first thenable, so a plain reducer over a plain source creates no `Promise` at all.
+`foldChunkStream` is that fold over an `AsyncIterable`, which is why that arm alone is always
+`"async"`.
+
+`.buffer(size)` cuts at `size` past a pending chunk as well. `MaybeAsyncChunks` is a synchronous
+iterable, so the number of cuts is unknowable up front once the tail is pending; `recutPending`
+yields one promise per cut instead, relying on every consumer settling a chunk before pulling the
+next. A recut that collapsed there made a sync-sourced chain and an async-sourced one disagree.
 
 ## Error handling
 

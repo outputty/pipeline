@@ -53,8 +53,14 @@ and no `Promise` created anywhere in the run. A single asynchronous callback any
 changes that type to a `Promise`, and the compiler reports it before anything runs.
 
 Building a pipeline is two steps, and the first one has nothing to run yet: `.transform()` is
-unavailable until `.from()` has named a source. `ConcurrentPipeline`, `HttpPipeline` and
+unavailable until `.from()` has named a source, and a terminal op on a pipeline with no source
+fails rather than returning an empty result. `ConcurrentPipeline`, `HttpPipeline` and
 `ClusterPipeline` exist for I/O-bound work and are asynchronous whatever their source's shape.
+
+The rule is the same at every stage, including a fold: a stage runs synchronously when the chain
+reaching it does and its own callback does. `.reduce()` over an in-memory source with a plain
+reducer returns its values directly; one asynchronous reducer widens the whole chain, exactly as an
+asynchronous `.map()` does.
 
 > **Mode** - whether a chain runs synchronously. Decided by `.from()` from the source's shape, then
 > widened by any callback that returns a `Promise`. Every terminal op's return type follows it.
