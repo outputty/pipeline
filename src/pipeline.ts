@@ -710,7 +710,15 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * .transform((t) => t.map(parseStrict)).toArray()` → `[1, 3, 4]` - the chunk holding `"x"` is
    * dropped, every other chunk survives.
    */
-  onError(handler: PipelineErrorHandler): this {
+  onError(handler: (error: Error, ctx: IContextManager) => Promise<void>): Pipeline<T, "async", P>;
+  onError(handler: (error: Error, ctx: IContextManager) => void): this;
+  onError(handler: PipelineErrorHandler): this | Pipeline<T, "async", P> {
+    // An ASYNC handler widens the chain (#90), the same rule `.tap()` follows. `PipelineErrorHandler`
+    // declares a bare `void` return, which accepts an `async` function silently, so without the
+    // overload above the chain kept its `"sync"` type while `dropOrRethrow` deferred on the handler's
+    // own promise - a chain typed `number[]` handed back a pending `Promise` the moment an error
+    // actually fired. A handler that never fires makes the widening pessimistic, never wrong: an
+    // `await` on the array it still returns is a no-op.
     return this.createPipeline<T>(this._chunks, {
       ...this.carriedOptions(),
       runHandler: handler,
@@ -755,7 +763,9 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    */
   merge(
     ...others: Pipeline<T, M extends "async" ? "sync" | "async" : "sync", SourcePolicy>[]
-  ): this {
+  ): this;
+  merge(...others: Pipeline<T, "sync" | "async", SourcePolicy>[]): Pipeline<T, "async", P>;
+  merge(...others: Pipeline<T, "sync" | "async", SourcePolicy>[]): this | Pipeline<T, "async", P> {
     mergeContextsInto(
       this._context,
       others.map((other) => other._context),
@@ -764,7 +774,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     // Every pipeline is read through `chunkStream()`, never `_chunks` directly: a `"sync"` one
     // carries its chunks in `_syncChunks` and leaves `_chunks` empty, so reading the field would
     // silently merge nothing (#90).
-    if (this._mode === "sync" && this._syncChunks !== null) {
+    //
+    // ONE async pipeline anywhere in `others` sends the whole merge down the async arm (#90), which
+    // is what makes merging widen rather than refuse - the same rule every other stage follows, and
+    // the reason the second overload above exists. `chunkStream()` converts a sync pipeline's own
+    // chunks on the way in, so that arm already handles the mixed case unchanged.
+    if (this._mode === "sync" && this._syncChunks !== null && others.every((o) => o.isSync())) {
       const streams = [this._syncChunks, ...others.map((other) => other.syncChunkStream())];
       function* concatSync(): Generator<T[] | Promise<T[]>> {
         for (const stream of streams) yield* stream;
@@ -816,7 +831,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    */
   apply<U, M2 extends "sync" | "async">(
     transformer: Transformer<T, U, M2>,
-  ): Pipeline<U, AssignMode<P, M2>, P> {
+  ): Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P> {
     this.requireSource();
     const runnable = transformer.runnable();
     const carried = {
@@ -844,7 +859,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
       return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
         ...carried,
         syncChunks: stageChunks(),
-      }) as Pipeline<U, AssignMode<P, M2>, P>;
+      }) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P>;
     }
 
     return this.createPipeline<U>(
@@ -853,7 +868,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
         ...carried,
         syncChunks: null,
       },
-    ) as Pipeline<U, AssignMode<P, M2>, P>;
+    ) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P>;
   }
 
   /**
@@ -869,11 +884,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
   transform<U, M2 extends "sync" | "async">(
     this: M extends "unset" ? never : Pipeline<T, M, P>,
     t: (transformer: Transformer<T, T, M & ("sync" | "async")>) => Transformer<T, U, M2>,
-  ): Pipeline<U, AssignMode<P, M2>, P> {
+  ): Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P> {
     const transformer = t(
       new Transformer<T, T, M & ("sync" | "async")>({ transform: (chunk) => chunk }),
     );
-    return this.apply(transformer) as unknown as Pipeline<U, AssignMode<P, M2>, P>;
+    return this.apply(transformer) as unknown as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P>;
   }
 
   /**
@@ -1007,7 +1022,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    */
   local<U, M2 extends "sync" | "async">(
     build: (p: Pipeline<T, M, "shape">) => Pipeline<U, M2, "shape">,
-  ): Pipeline<U, AssignMode<P, M2>, P> {
+  ): Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P> {
     const region = new Pipeline<T, "sync" | "async", SourcePolicy>({
       context: this._context,
       chunkTransforms: this._chunkTransforms,
@@ -1029,7 +1044,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
       runHandler: built._runHandler,
       mode: built._mode,
       syncChunks: built._syncChunks,
-    }) as Pipeline<U, AssignMode<P, M2>, P>;
+    }) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P>;
   }
 
   /**

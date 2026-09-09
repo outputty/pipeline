@@ -572,3 +572,134 @@ describe("#90 L4 - a fold keeps the chain's Mode instead of always widening it",
     expect(data.plain).toEqual([1, 3, 5]);
   });
 });
+
+describe("#90 L4 - every fluent method widens, and none of them under-reports its Mode", () => {
+  async function* asyncSource(): AsyncGenerator<number> {
+    yield 1;
+    yield 2;
+    yield 3;
+  }
+
+  it(".apply() with a sync transformer on an async chain stays async", async () => {
+    // Measured before the fix: this typed `number[]` and returned `Promise { <pending> }`.
+    // `.apply()`'s return read only the TRANSFORMER's Mode and ignored the chain's own.
+    const out: Promise<number[]> = new Pipeline()
+      .from(asyncSource())
+      .apply(new Transformer<number, number>().map((x: number) => x * 2))
+      .toArray();
+
+    expect(await out).toEqual([2, 4, 6]);
+  });
+
+  it(".local() with a sync region inside an async chain stays async", async () => {
+    const out: Promise<number[]> = new Pipeline()
+      .from(asyncSource())
+      .local((p) => p.transform((t) => t.map((x: number) => x * 2)))
+      .toArray();
+
+    expect(await out).toEqual([2, 4, 6]);
+  });
+
+  it(".local() with an async region inside a sync chain widens", async () => {
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .local((p) => p.transform((t) => t.map(async (x: number) => x * 2)))
+      .toArray();
+
+    expect(await out).toEqual([2, 4, 6]);
+  });
+
+  it(".onError() with an async handler widens", async () => {
+    // Measured before the fix: `PipelineErrorHandler` declares a bare `void` return, which accepts
+    // an `async` function silently, so the chain stayed typed `number[]` while `dropOrRethrow`
+    // deferred - a real `Promise { <pending> }` the moment an error fired.
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .onError(async () => {
+        await Promise.resolve();
+      })
+      .buffer(1)
+      .transform((t) =>
+        t.map((x: number) => {
+          if (x === 2) throw new Error("boom");
+          return x;
+        }),
+      )
+      .toArray();
+
+    expect(await out).toEqual([1, 3]);
+  });
+
+  it("instance .merge() of a sync pipeline with an async one widens instead of refusing", async () => {
+    // Measured before the fix: a compile error, and past it a runtime throw from
+    // `syncChunkStream()`. The static `Pipeline.merge()` already widened the same pair, so the two
+    // spellings of one operation gave two answers.
+    const out: Promise<number[]> = new Pipeline()
+      .from([10, 20])
+      .merge(new Pipeline().from(asyncSource()))
+      .toArray();
+
+    expect(await out).toEqual([10, 20, 1, 2, 3]);
+  });
+
+  it("instance .merge() of two sync pipelines stays sync", () => {
+    const out: number[] = new Pipeline()
+      .from([10, 20])
+      .merge(new Pipeline().from([30]))
+      .toArray();
+
+    expect(Array.isArray(out)).toBe(true);
+    expect(out).toEqual([10, 20, 30]);
+  });
+
+  it("a sync link after an async one inside one .transform() stays async", async () => {
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .transform((t) => t.map(async (x: number) => x * 2).filter((x: number) => x > 2))
+      .toArray();
+
+    expect(await out).toEqual([4, 6]);
+  });
+
+  it("a stage after one that widened stays async", async () => {
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .transform((t) => t.map(async (x: number) => x * 2))
+      .buffer(2)
+      .transform((t) => t.map((x: number) => x + 1))
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(await out).toEqual([15]);
+  });
+
+  it(".tap() with an async transformer widens", async () => {
+    const seen: number[] = [];
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .tap(
+        new Transformer<number, number>().map(async (x: number) => {
+          seen.push(x);
+          return x;
+        }),
+      )
+      .toArray();
+
+    expect(await out).toEqual([1, 2, 3]);
+    expect(seen).toEqual([1, 2, 3]);
+  });
+
+  it(".first() and .consume() follow the same Mode as .toArray()", async () => {
+    const head: number[] = new Pipeline().from([1, 2, 3]).first(2);
+    expect(head).toEqual([1, 2]);
+
+    const drained: void = new Pipeline().from([1, 2, 3]).consume();
+    expect(drained).toBeUndefined();
+
+    const widened: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .transform((t) => t.map(async (x: number) => x))
+      .first(2);
+    expect(await widened).toEqual([1, 2]);
+  });
+});
