@@ -305,7 +305,7 @@ export function* recutSyncChunks<T>(
 
     const chunk = step.value;
     if (isThenable(chunk)) {
-      yield collectRest(carry, chunk, iterator);
+      yield* recutPending(carry, chunk, iterator, size);
       return;
     }
 
@@ -321,19 +321,49 @@ export function* recutSyncChunks<T>(
   }
 }
 
-/** Everything left in a re-cut once a pending chunk is met: the carry, that chunk, and every chunk
- * after it, as one settled array. Its own function to keep `recutSyncChunks` at this repo's
- * `max-depth: 2`. */
-async function collectRest<T>(
+/**
+ * Keeps re-cutting at `size` once a pending chunk is met, yielding one promise per cut instead of
+ * one promise for the whole remaining stream (#90).
+ *
+ * The earlier shape collapsed here: it returned the carry, the pending chunk and every chunk after
+ * it as ONE settled array, so `.buffer(2)` after an async stage stopped cutting entirely. Measured,
+ * a seven-item source summed per chunk gave `[28]` where the identical chain over an `AsyncIterable`
+ * source gave `[3,7,11,7]` - two engines disagreeing on user code that differed only in its source.
+ *
+ * `MaybeAsyncChunks` is a SYNCHRONOUS iterable, so the number of cuts is not knowable up front once
+ * the tail is pending. This works because every consumer of a chunk stream settles a chunk before
+ * pulling the next one (`drainSync`, `drainSyncSettled`, `flattenSyncChunks`, `asyncItems` and this
+ * function itself all await or `chain` on the pending chunk first), so `state` is already current
+ * when the generator decides whether to yield again.
+ */
+function* recutPending<T>(
   carry: T[],
   pending: Promise<T[]>,
   iterator: Iterator<T[] | Promise<T[]>>,
-): Promise<T[]> {
-  const rest = [...carry, ...(await pending)];
-  for (;;) {
-    const step = iterator.next();
-    if (step.done === true) return rest;
-    rest.push(...(await step.value));
+  size: number,
+): Generator<Promise<T[]>> {
+  const state = { buffer: [...carry], exhausted: false };
+  let first: Promise<T[]> | null = pending;
+
+  const cut = async (): Promise<T[]> => {
+    while (state.buffer.length < size && !state.exhausted) {
+      if (first !== null) {
+        state.buffer.push(...(await first));
+        first = null;
+        continue;
+      }
+      const step = iterator.next();
+      if (step.done === true) {
+        state.exhausted = true;
+        break;
+      }
+      state.buffer.push(...(await step.value));
+    }
+    return state.buffer.splice(0, size);
+  };
+
+  while (!state.exhausted || state.buffer.length > 0) {
+    yield cut();
   }
 }
 

@@ -784,4 +784,55 @@ describe("#90 L4 - review findings, each reproduced before it was fixed", () => 
       "no source: call .from(data) before composing",
     );
   });
+
+  it(".buffer() keeps cutting after an async stage, and both engines agree", async () => {
+    // Measured before the fix: the sync-sourced chain gave `[28]` - `recutSyncChunks` met a pending
+    // chunk and yielded the whole remaining stream as one array - where the identical chain over an
+    // `AsyncIterable` source gave `[3,7,11,7]`. Two engines, one piece of user code, two answers.
+    async function* asyncSeven(): AsyncGenerator<number> {
+      for (const x of [1, 2, 3, 4, 5, 6, 7]) yield x;
+    }
+
+    const fromSync: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3, 4, 5, 6, 7])
+      .transform((t) => t.map(async (x: number) => x))
+      .buffer(2)
+      .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+      .toArray();
+
+    const fromAsync: Promise<number[]> = new Pipeline()
+      .from(asyncSeven())
+      .transform((t) => t.map(async (x: number) => x))
+      .buffer(2)
+      .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+      .toArray();
+
+    expect(await fromSync).toEqual([3, 7, 11, 7]);
+    expect(await fromSync).toEqual(await fromAsync);
+  });
+
+  it("a cut that does not divide evenly keeps its trailing partial chunk", async () => {
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3, 4, 5, 6, 7])
+      .transform((t) => t.map(async (x: number) => x))
+      .buffer(3)
+      .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+      .toArray();
+
+    expect(await out).toEqual([6, 15, 7]);
+  });
+
+  it("an all-sync chain with a stage before .buffer() stays synchronous", () => {
+    // The negative control: the recut above must not widen a chain whose callbacks are all
+    // synchronous, which is the divergence this whole ticket exists to remove.
+    const out: number[] = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .transform((t) => t.map((x: number) => x * 2))
+      .buffer(2)
+      .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+      .toArray();
+
+    expect(Array.isArray(out)).toBe(true);
+    expect(out).toEqual([6, 14, 10]);
+  });
 });
