@@ -24,7 +24,7 @@ input was cut. Splitting the two means a transform chain tested once (`Transform
 unchanged inside a `Pipeline`, over an HTTP paginator, or inside a laygo `Source`; a caller running a
 `Transformer` standalone supplies its own already-cut chunks.
 
-> **Pipeline** - the high-level API: `new Pipeline(source, options?)`, `.context()` to seed shared
+> **Pipeline** - the high-level API: `new Pipeline(options?)` then `.from(source)`, `.context()` to seed shared
 > state, `.buffer(size)` to set the chunk boundary, `.apply()`/`.transform()` to run a `Transformer`,
 > `.tap()` to observe without changing the data, and one of five terminal ops (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`) to
 > drain it.
@@ -36,7 +36,7 @@ unchanged inside a `Pipeline`, over an HTTP paginator, or inside a laygo `Source
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = new Pipeline().from([1, 2, 3, 4, 5])
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
   .toArray();
 ```
@@ -44,6 +44,43 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 ```json
 [6, 8, 10]
 ```
+
+### Synchronous and asynchronous chains
+
+A chain says in its own type whether it runs synchronously. `.from()` names the source: an in-memory
+collection makes the chain synchronous, so `.toArray()` returns the values directly with no `await`
+and no `Promise` created anywhere in the run. A single asynchronous callback anywhere in the chain
+changes that type to a `Promise`, and the compiler reports it before anything runs.
+
+Building a pipeline is two steps, and the first one has nothing to run yet: `.transform()` is
+unavailable until `.from()` has named a source. `ConcurrentPipeline`, `HttpPipeline` and
+`ClusterPipeline` exist for I/O-bound work and are asynchronous whatever their source's shape.
+
+> **Mode** - whether a chain runs synchronously. Decided by `.from()` from the source's shape, then
+> widened by any callback that returns a `Promise`. Every terminal op's return type follows it.
+> **`.from(data)`** - names the source and the engine together. Replaces the source argument the
+> constructor used to take, which could not decide the Mode: a constructor cannot vary its own
+> class's type from its arguments, and a method can.
+
+```ts
+import { Pipeline } from "@outputty/pipeline";
+
+const sync = new Pipeline().from([1, 2, 3, 4, 5])
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+  .toArray();
+
+const widened = await new Pipeline().from([1, 2, 3, 4, 5])
+  .transform((t) => t.map(async (x: number) => x * 2).filter((x: number) => x > 4))
+  .toArray();
+```
+
+```json
+{ "sync": [6, 8, 10], "widened": [6, 8, 10] }
+```
+
+`sync` is typed `number[]` and `widened` is typed `Promise<number[]>`. The two produce the same
+values; the difference is that the first creates no `Promise` at all, which a test measures with
+`node:async_hooks` rather than a wall-clock threshold.
 
 ### Chunking
 
@@ -61,7 +98,7 @@ input was cut, and just processes whatever chunk arrives.
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = new Pipeline().from([1, 2, 3, 4, 5])
   .buffer(2)
   .transform((t) => t.map((x: number) => x * 2))
   .toArray();
@@ -109,7 +146,7 @@ ran 27 ms and 63 ms, because a narrow chunk pays the per-chunk cost more often.
 ```ts
 import { ClusterPipeline } from "@outputty/pipeline";
 
-const data = await new ClusterPipeline([1, 2, 3, 4, 5])
+const data = await new ClusterPipeline().from([1, 2, 3, 4, 5])
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
   .toArray();
 ```
@@ -126,7 +163,7 @@ put are written once, not repeated on every one of them:
 ```ts
 import { HttpPipeline } from "@outputty/pipeline";
 
-const pipeline = new HttpPipeline(rows, { url: process.env.SELF_URL! })
+const pipeline = new HttpPipeline({ url: process.env.SELF_URL! }).from(rows)
   .transform((t) => t.map(expensiveScore))
   .local((p) => p.transform((t) => t.filter((r) => r.ok)));
 
@@ -160,7 +197,7 @@ rejected write propagates instead of being silently bypassed (#31).
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = new Pipeline().from([1, 2, 3, 4, 5])
   .context({ multiplier: 10 })
   .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))
   .toArray();
@@ -177,10 +214,10 @@ worker's writes back.
 ```ts
 import { ClusterPipeline } from "@outputty/pipeline";
 
-const data = await new ClusterPipeline([1, 2, 3, 4, 5], {
+const data = await new ClusterPipeline({
   workers: 3,
   contextFactory: () => new PgContext(pool),
-})
+}).from([1, 2, 3, 4, 5])
   .context({ multiplier: 10 })
   .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))
   .toArray();
@@ -222,7 +259,7 @@ into one - the two directions of composing whole pipelines rather than chaining 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5]).branch({
+const data = await new Pipeline().from([1, 2, 3, 4, 5]).branch({
   evens: { predicate: (x: number) => x % 2 === 0, transformer: createTransformer<number>() },
   odds: { predicate: (x: number) => x % 2 !== 0, transformer: createTransformer<number>() },
 });
@@ -253,7 +290,7 @@ per chunk and not per item.
 ```ts
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
-const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const pipeline = new ConcurrentPipeline({ maxConcurrency: 2 }).from([1, 2, 3, 4, 5])
   .buffer(2)
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
   .tap((x: number, ctx) => {
@@ -287,7 +324,7 @@ pipeline's own handler, which decides whether the run continues without that chu
 ```ts
 import { Pipeline, DROP } from "@outputty/pipeline";
 
-const data = await new Pipeline(["a", "b", "3", "d", "5"])
+const data = new Pipeline().from(["a", "b", "3", "d", "5"])
   .transform((t) =>
     t
       .onError(() => DROP)
@@ -307,7 +344,7 @@ const data = await new Pipeline(["a", "b", "3", "d", "5"])
 A row the handler replaces keeps its place in the output, so a chunk is repaired rather than lost:
 
 ```ts
-const repaired = await new Pipeline(["a", "b", "3", "d", "5"])
+const repaired = new Pipeline().from(["a", "b", "3", "d", "5"])
   .transform((t) => t.onError(() => -1).map(parseStrict))
   .toArray();
 ```
@@ -319,7 +356,7 @@ const repaired = await new Pipeline(["a", "b", "3", "d", "5"])
 The run handler is what keeps a stream alive past a chunk nothing could repair:
 
 ```ts
-const survived = await new Pipeline(["1", "x", "3", "4"])
+const survived = new Pipeline().from(["1", "x", "3", "4"])
   .buffer(1)
   .onError((err) => console.warn(err.message))
   .transform((t) => t.map(parseStrict))
@@ -351,7 +388,7 @@ produced, never assuming there was one.
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = await new Pipeline().from([1, 2, 3, 4, 5])
   .reduce((acc: number, x: number) => acc + x, 0)
   .transform((t) => t.map((n: number) => n * 10))
   .toArray();
@@ -367,7 +404,7 @@ banked whenever it crosses a threshold, and no trailing value when the last item
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = await new Pipeline().from([1, 2, 3, 4, 5])
   .reduce((acc: number, x: number, _ctx, emit) => {
     acc += x;
     if (acc >= 6) {
@@ -390,7 +427,7 @@ Nothing merges them automatically - each partition's own result flows downstream
 ```ts
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
-const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const data = await new ConcurrentPipeline({ maxConcurrency: 2 }).from([1, 2, 3, 4, 5])
   .buffer(2)
   .reduce((acc: number, x: number) => acc + x, 0)
   .toArray();
@@ -407,7 +444,7 @@ reducer output:
 ```ts
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
-const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const data = await new ConcurrentPipeline({ maxConcurrency: 2 }).from([1, 2, 3, 4, 5])
   .buffer(2)
   .reduce((acc: number, x: number) => acc + x, 0)
   .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))

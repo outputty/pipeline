@@ -7,6 +7,52 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-09 Predicted how a caller might misuse the library, and priced defences for it
+
+Building #90 (the synchronous fast path), Done-when 5 asked for a runtime throw when a callback typed
+`number` returns a thenable. Rather than construct the input that reaches it, I invented the misuse -
+an `as unknown as` cast, then an `any` boundary, an untyped import, a `JSON.parse` result - and spent
+three `AskUserQuestion` rounds pricing a per-chunk guard, an `AsyncFunction` classifier and a new
+`.async()` method against each other. The user ended it: "if we just not attempt to protect ourselves
+from potential lies like this, it will just work as is", and later named the habit itself - "you
+shouldn't be trying to predict misuse of library so you don't need to be as defensive about the
+implementation as you generally are". Dropping the cast showed TypeScript already widened the chain,
+so the guard protected nothing a caller could mean. No guard shipped, the implementation got smaller,
+and Done-when 5 was amended on the ticket. `~/.claude/rules/code.md`'s caller-intent line is rewritten
+prescription-first: "Trust the caller's intent: write the straightforward implementation, and add a
+guard only where the caller could mean the input."
+
+## 2026-09-09 Read a type error's deepest frame as its cause, and called the ticket impossible
+
+Same build, L3. Six narrowing overrides on `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` failed
+`TS2416`, and every message bottomed out on `transform`'s conditional `this`. Nine measured `tsc` runs
+attacked that frame - removing the `this`, un-narrowing `createPipeline`, a concrete copy-on-write
+seam, fixing the subclass Mode, five combinations - reaching a floor of 8 errors. I then reported two
+of the ticket's own requirements as mutually exclusive, labelled #90 `needs-planning`, unassigned
+myself and posted two candidate interfaces. The tenth attempt took `src/` to zero: `transform` had
+promised the CALLBACK's Mode, `Pipeline<U, M2, P>`, where a dispatching class is async whatever its
+callbacks return; `AssignMode<P, M2>` fixed it with the conditional `this` untouched. The ticket was
+corrected and reclaimed. `~/.claude/rules/code.md` gains "Look upstream of where a type error surfaces
+for its cause."
+
+## 2026-09-09 Copied a ticket's example spelling into the shipped API
+
+Same build. #90's Done-when cases spell `new Pipeline({})`, and I carried that `{}` into the type
+design, every test and the migration script without reading the constructor I had just written -
+`constructor(options?: PipelineOptions)`, where the argument was never required. The user caught it
+after 17 files: "Pipeline({}) shouldn't require a {}. If nothing is passed, all defaults are used."
+`~/.claude/rules/issues.md`'s "read it as a shape" line is sharpened to cover a spelling, not just a
+decision.
+
+## 2026-09-09 Wrote rules that led with description instead of the action
+
+Same build's retro. Both rules I drafted opened with a description carrying its own qualifications
+inline, and the user rewrote the brief twice: "simplify them to be prescriptive not descriptive", then
+"start with the prescription. After that you can have examples listed out that are as precise as
+possible." Generalised on the user's own ruling to every kind of communication rather than to rule
+files alone: `~/.claude/output-styles/outputty.md`'s **Structure every response** now opens with "Lead
+with the prescription", and its first level states the answer before restating the problem.
+
 ## 2026-09-09 Verified README/examples.md fences by hand, then Prettier's format gate rewrote them
 
 Building #84 (README/examples.md docs pass), 8 new runnable Pattern fences plus the Merging example

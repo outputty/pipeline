@@ -140,7 +140,10 @@ none of it survived the hand-trim (#745).
 ## Language
 
 - **Pipeline** - the high-level API composing a data source with a `Transformer` chain: `new
-  Pipeline(source, options?)`, `.context()`, `.apply()`/`.transform()`, `.tap()` (#72), the terminal ops
+  Pipeline(options?)` then `.from(source)` (#90, BREAKING - the two-argument
+  `new Pipeline(data, options)` constructor is deleted; a constructor cannot vary its own class's
+  generic return from its arguments, which is why naming the source is a METHOD now),
+  `.context()`, `.apply()`/`.transform()`, `.tap()` (#72), the terminal ops
   (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`), the static
   `Pipeline.merge(pipelines, options?)` concatenating several pipelines' sources and contexts into a
   FRESH plain `Pipeline` - `pipelines` is an array, not a rest param (#31, BREAKING), and
@@ -181,6 +184,26 @@ none of it survived the hand-trim (#745).
   automatically (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
   callable `Transformer.reduce`'s old per-chunk-toggle overload are deleted -
   `ReduceFunction` is the one type, `Pipeline.reduce` the whole-dataset replacement).
+- **Mode** - whether a chain runs synchronously, carried in `Pipeline<T, M, P>`'s own type (#90).
+  `M` is `PipelineMode`: `"unset"` before `.from()` (where `.transform()` refuses the receiver via a
+  conditional `this`, `TS2684`), then `"sync"` or `"async"`. Every terminal op returns
+  `M extends "sync" ? T[] : Promise<T[]>`, so `.toArray()` on an all-sync chain hands back an array
+  with no `await` and no `Promise` created anywhere - measured at 0 with `node:async_hooks`, not a
+  wall-clock threshold. `.from(Iterable)` is `"sync"`, `.from(AsyncIterable)` is `"async"`, and ONE
+  callback returning a `Promise` widens the whole chain through `.transform()`'s own three-overload
+  links. `P` is `SourcePolicy`, a third DEFAULTED class type parameter recording what a class does
+  to a source's shape - `"shape"` keeps it, `"async"` overrides it - and exists because without it a
+  dispatching class's `.from()` override is not a narrowing of the base's `Iterable` arm and fails
+  `TS2416`. `.transform()` returns `AssignMode<P, M2>`, never the callback's own `M2`: a dispatching
+  class is async whatever its callbacks return. The dispatching classes FIX their Mode
+  (`class ConcurrentPipeline<T, M extends "async" = "async">`), which is what lets their narrowing
+  overrides compare as concrete types and makes `ConcurrentPipeline<number, "sync">` a compile
+  error. Three consequences, all BREAKING: a failure on a sync chain THROWS out of the terminal op
+  instead of rejecting; `Pipeline.reduce()` always widens to `"async"` (it folds `foldChunkStream`,
+  an async generator, so it can never run synchronously - `Transformer.reduce()` inside
+  `.transform()` is the per-chunk fold that stays sync); and `.merge()` accepts a sync pipeline into
+  an async one but not the reverse. `.apply()` throws "no source" on an `"unset"` pipeline, since a
+  dispatching class has no `"unset"` state for the compile-time guard to test.
 - **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`
   decision, not a `Transformer` one (#39) - `.buffer(size)` sets it explicitly, defaulting
   to `DEFAULT_CHUNK_SIZE = 1000` when never called; every later stage sees the same chunks unchanged

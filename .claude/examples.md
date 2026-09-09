@@ -22,7 +22,7 @@ One source, one transform, one terminal op. Every later example is a change to t
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = new Pipeline().from([1, 2, 3, 4, 5])
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
   .toArray();
 ```
@@ -30,6 +30,31 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 ```json
 [6, 8, 10]
 ```
+
+## Widening to async
+
+The base pipeline above runs synchronously: `data` is `number[]` and no `Promise` is created. One
+async callback anywhere changes the type of the whole chain, and the compiler reports it.
+
+<!-- compiles -->
+
+```ts
+import { Pipeline } from "@outputty/pipeline";
+
+const widened = await new Pipeline().from([1, 2, 3, 4, 5])
+  .transform((t) => t.map(async (x: number) => x * 2).filter((x: number) => x > 4))
+  .toArray();
+
+console.log(widened);
+```
+
+```json
+[6, 8, 10]
+```
+
+`widened` is typed `Promise<number[]>`; the base pipeline's own `data` is typed `number[]`. A
+dispatching class is asynchronous whatever its source's shape, so `new ConcurrentPipeline().from([1,
+2, 3])` is `ConcurrentPipeline<number, "async">` and its terminal ops always return a `Promise`.
 
 ## Case 1 - context
 
@@ -41,7 +66,7 @@ parameter.
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = new Pipeline().from([1, 2, 3, 4, 5])
   .context({ multiplier: 10 })
   .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))
   .toArray();
@@ -60,10 +85,10 @@ per worker rather than one per chunk.
 ```ts
 import { ClusterPipeline } from "@outputty/pipeline";
 
-const data = await new ClusterPipeline([1, 2, 3, 4, 5], {
+const data = await new ClusterPipeline({
   workers: 3,
   contextFactory: () => new PgContext(pool),
-})
+}).from([1, 2, 3, 4, 5])
   .context({ multiplier: 10 })
   .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))
   .toArray();
@@ -84,7 +109,7 @@ The same chain shape, run with a bounded concurrency instead of sequentially - t
 ```ts
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
-const data = await new ConcurrentPipeline(["a", "b", "c"], { maxConcurrency: 10 })
+const data = await new ConcurrentPipeline({ maxConcurrency: 10 }).from(["a", "b", "c"])
   .transform((t) => t.map((s: string) => s.toUpperCase()))
   .toArray();
 ```
@@ -104,7 +129,7 @@ later pipeline in the process reuses them - there is no server, port, url or for
 ```ts
 import { ClusterPipeline } from "@outputty/pipeline";
 
-const data = await new ClusterPipeline([1, 2, 3, 4, 5])
+const data = await new ClusterPipeline().from([1, 2, 3, 4, 5])
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
   .toArray();
 ```
@@ -120,7 +145,7 @@ Across machines instead of processes, the same chain takes a url and mounts its 
 ```ts
 import { HttpPipeline } from "@outputty/pipeline";
 
-const pipeline = new HttpPipeline([1, 2, 3, 4, 5], { url: process.env.SELF_URL! })
+const pipeline = new HttpPipeline({ url: process.env.SELF_URL! }).from([1, 2, 3, 4, 5])
   .buffer(2)
   .transform((t) => t.map((x: number) => x * 2))
   .local((p) => p.transform((t) => t.filter((x: number) => x > 4)));
@@ -141,7 +166,7 @@ One source, several named sub-chains, routed by predicate.
 ```ts
 import { Pipeline, createTransformer } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5]).branch({
+const data = await new Pipeline().from([1, 2, 3, 4, 5]).branch({
   evens: { predicate: (x: number) => x % 2 === 0, transformer: createTransformer<number>() },
   odds: { predicate: (x: number) => x % 2 !== 0, transformer: createTransformer<number>() },
 });
@@ -163,8 +188,8 @@ gets a fresh `SimpleContextManager`.
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const pipeline1 = new Pipeline([1, 2, 3]);
-const pipeline2 = new Pipeline([4, 5, 6]);
+const pipeline1 = new Pipeline().from([1, 2, 3]);
+const pipeline2 = new Pipeline().from([4, 5, 6]);
 
 const merged = Pipeline.merge([pipeline1, pipeline2]);
 const data = await merged.toArray(); // [1,2,3,4,5,6]
@@ -192,7 +217,7 @@ const parseStrict = (s: string): number => {
   return n;
 };
 
-const dropped = await new Pipeline(["a", "b", "3", "d", "5"])
+const dropped = new Pipeline().from(["a", "b", "3", "d", "5"])
   .transform((t) => t.onError(() => DROP).map(parseStrict))
   .toArray();
 ```
@@ -206,7 +231,7 @@ Returning a value repairs the row in place instead of removing it:
 <!-- compiles -->
 
 ```ts
-const repaired = await new Pipeline(["a", "b", "3", "d", "5"])
+const repaired = new Pipeline().from(["a", "b", "3", "d", "5"])
   .transform((t) => t.onError(() => -1).map(parseStrict))
   .toArray();
 ```
@@ -222,7 +247,7 @@ so the chunk carrying `"x"` is the only one lost.
 <!-- compiles -->
 
 ```ts
-const survived = await new Pipeline(["1", "x", "3", "4"])
+const survived = new Pipeline().from(["1", "x", "3", "4"])
   .buffer(1)
   .onError((err) => console.warn(err.message))
   .transform((t) => t.map(parseStrict))
@@ -245,12 +270,12 @@ finished result is; the final accumulator is emitted only if items were folded s
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const total = await new Pipeline([1, 2, 3, 4, 5])
+const total = await new Pipeline().from([1, 2, 3, 4, 5])
   .reduce((acc: number, x: number) => acc + x, 0)
   .transform((t) => t.map((n: number) => n * 10))
   .toArray(); // [150]
 
-const banked = await new Pipeline([1, 2, 3, 4, 5])
+const banked = await new Pipeline().from([1, 2, 3, 4, 5])
   .reduce((acc: number, x: number, _ctx, emit) => {
     acc += x;
     if (acc >= 6) {
@@ -279,11 +304,11 @@ restarting at 0 and colliding with its own first stage.
 ```ts
 import { HttpPipeline, ConcurrentPipeline } from "@outputty/pipeline";
 
-const remote = new HttpPipeline([1, 2, 3, 4], { url: process.env.WORKER_URL! })
+const remote = new HttpPipeline({ url: process.env.WORKER_URL! }).from([1, 2, 3, 4])
   .buffer(1)
   .transform((t) => t.map((x: number) => x + 1)); // stage 0, dispatched over HTTP
 
-const local = new ConcurrentPipeline([10, 20])
+const local = new ConcurrentPipeline().from([10, 20])
   .buffer(1)
   .transform((t) => t.map((x: number) => x + 5)); // its own in-process fan-out, never the wire
 
@@ -310,7 +335,7 @@ stage runs. Everything else here is the base program with `.buffer(2)` and a fan
 ```ts
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
-const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const pipeline = new ConcurrentPipeline({ maxConcurrency: 2 }).from([1, 2, 3, 4, 5])
   .buffer(2)
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
   .tap((x: number, ctx) => {
@@ -345,7 +370,7 @@ value writes an ordinary second reduce as the next stage.
 ```ts
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
-const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const data = await new ConcurrentPipeline({ maxConcurrency: 2 }).from([1, 2, 3, 4, 5])
   .buffer(2)
   .reduce((acc: number, x: number) => acc + x, 0)
   .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
@@ -374,7 +399,7 @@ const parseStrict = (s: string): number => {
   return n;
 };
 
-const data = await new Pipeline(["a", "1", "b", "3", "5"])
+const data = new Pipeline().from(["a", "1", "b", "3", "5"])
   .transform((t) => t.onError(() => DROP).map(parseStrict))
   .toArray();
 
@@ -392,7 +417,7 @@ const parseStrict = (s: string): number => {
   return n;
 };
 
-const data = await new ConcurrentPipeline(["a", "1", "b", "3", "5"], { maxConcurrency: 2 })
+const data = await new ConcurrentPipeline({ maxConcurrency: 2 }).from(["a", "1", "b", "3", "5"])
   .transform((t) => t.onError(() => DROP).map(parseStrict))
   .toArray();
 
@@ -414,7 +439,7 @@ const parseStrict = (s: string): number => {
 
 // The "another instance" side: an empty-source pipeline holding the SAME chain, so its
 // .fetch can serve it.
-const worker = new HttpPipeline<string>([], { url: "" }).transform((t) =>
+const worker = new HttpPipeline({ url: "" }).from<string>([]).transform((t) =>
   t.onError(() => DROP).map(parseStrict),
 );
 
@@ -422,9 +447,9 @@ const server = createServer(toNodeHandler(worker.fetch));
 await new Promise<void>((resolve) => server.listen(0, resolve));
 const { port } = server.address() as AddressInfo;
 
-const data = await new HttpPipeline(["a", "1", "b", "3", "5"], {
+const data = await new HttpPipeline({
   url: `http://localhost:${port}`,
-})
+}).from(["a", "1", "b", "3", "5"])
   .transform((t) => t.onError(() => DROP).map(parseStrict))
   .toArray();
 
@@ -444,7 +469,7 @@ const parseStrict = (s: string): number => {
   return n;
 };
 
-const data = await new ClusterPipeline(["a", "1", "b", "3", "5"])
+const data = await new ClusterPipeline().from(["a", "1", "b", "3", "5"])
   .transform((t) => t.onError(() => DROP).map(parseStrict))
   .toArray();
 
@@ -474,13 +499,13 @@ async function fetchScore(id: number): Promise<number> {
 }
 
 // Pipeline: one item's wait finishes before the next one starts.
-const sequential = await new Pipeline([1, 2, 3, 4, 5])
+const sequential = new Pipeline().from([1, 2, 3, 4, 5])
   .buffer(1)
   .transform((t) => t.map(fetchScore))
   .toArray();
 
 // ConcurrentPipeline: up to 4 items waiting at once - the SAME chain, unchanged.
-const concurrent = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 4 })
+const concurrent = await new ConcurrentPipeline({ maxConcurrency: 4 }).from([1, 2, 3, 4, 5])
   .buffer(1)
   .transform((t) => t.map(fetchScore))
   .toArray();
@@ -506,16 +531,16 @@ async function fetchScore(id: number): Promise<number> {
   return id * 10;
 }
 
-const worker = new HttpPipeline<number>([], { url: "" }).transform((t) => t.map(fetchScore));
+const worker = new HttpPipeline({ url: "" }).from<number>([]).transform((t) => t.map(fetchScore));
 
 const server = createServer(toNodeHandler(worker.fetch));
 await new Promise<void>((resolve) => server.listen(0, resolve));
 const { port } = server.address() as AddressInfo;
 
-const data = await new HttpPipeline([1, 2, 3, 4, 5], {
+const data = await new HttpPipeline({
   url: `http://localhost:${port}`,
   maxConcurrency: 4,
-})
+}).from([1, 2, 3, 4, 5])
   .buffer(1)
   .transform((t) => t.map(fetchScore))
   .toArray();
@@ -535,7 +560,7 @@ async function fetchScore(id: number): Promise<number> {
   return id * 10;
 }
 
-const data = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 4 })
+const data = await new ClusterPipeline({ maxConcurrency: 4 }).from([1, 2, 3, 4, 5])
   .buffer(1)
   .transform((t) => t.map(fetchScore))
   .toArray();

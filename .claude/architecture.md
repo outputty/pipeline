@@ -69,13 +69,14 @@ src/
 
 ## How a chunk flows
 
-The cut lives on `Pipeline`, never `Transformer` (#39). `Pipeline` owns a persisted chunk stream
-(`_chunks`), cut once - either by the constructor's own default the moment one is first needed, or
-by `.buffer(size)` - and carried unchanged through every later stage; `Transformer.process()` never
-cuts, only processes whatever chunk it is handed:
+The cut lives on `Pipeline`, never `Transformer` (#39). `Pipeline` owns a persisted chunk stream,
+cut once - either by `.from()`'s own default or by `.buffer(size)` - and carried unchanged through
+every later stage; `Transformer.process()` never cuts, only processes whatever chunk it is handed.
+The graph below is the `"async"` engine; the `"sync"` one is in "Mode", above, and reaches
+`Transformer.process()` not at all.
 
 ```text
-Pipeline constructor / .buffer(size)              the ONLY place a cut happens
+Pipeline.from(data) / .buffer(size)               the ONLY place a cut happens
 	buildChunkGenerator(size)(preBufferItems)       cuts the flattened item stream into In[] chunks
 Pipeline.apply(transformer) (every later stage)
 	Transformer.process(this._chunks, context)      NO cut here - runs the chunks it is handed
@@ -98,6 +99,80 @@ entirely - see "The pipeline family", below - but shares the SAME `_chunks` stat
 reads `this._chunks` directly and cuts none of its own, so a custom `.buffer()` boundary reaches a
 dispatched stage exactly like a local one. Wrap the chain in one of those classes for concurrency
 instead of configuring the `Transformer`.
+
+## Mode - whether a chain runs synchronously
+
+`Pipeline<T, M, P>` carries the engine in its own type (#90). `M` is `PipelineMode` - `"unset"`,
+`"sync"` or `"async"` - and every terminal op returns `M extends "sync" ? T[] : Promise<T[]>`, so a
+caller reads the answer from `tsc` rather than from the code.
+
+```text
+new Pipeline(options)                             M = "unset": .transform() refuses the receiver
+	.from(Iterable)                                 M = "sync"  - a plain generator cuts the chunks
+	.from(AsyncIterable)                            M = "async" - buildChunkGenerator, as before
+	.transform((t) => t.map(fn))                    M2 from the CALLBACK: a Promise return widens
+	.toArray()                                      T[] when M is "sync", Promise<T[]> otherwise
+```
+
+Three pieces make it work, and each exists because a simpler shape was measured and failed:
+
+1. **`.from()` is a method, not a constructor parameter.** A constructor overload cannot vary its
+   own class's generic return, so `new Pipeline(data)` could never infer the Mode from the source's
+   shape. An ordinary method can. This is what removed the two-argument constructor.
+2. **`P extends SourcePolicy` is a third, defaulted class type parameter.** It records what a class
+   does to a source's own shape: the base keeps it, and every dispatching class overrides it to
+   `"async"`. Without it, `ConcurrentPipeline.from()` is not a narrowing of the base's `Iterable`
+   arm and fails `TS2416`. `P` defaults, so no caller writes it.
+3. **`.transform()` returns `AssignMode<P, M2>`, not `M2`.** A dispatching class is asynchronous
+   whatever its callbacks return; promising the callback's own Mode made every one of its narrowing
+   overrides unassignable to the base, and the resulting error surfaced at the conditional `this`
+   rather than at the return that caused it.
+
+The dispatching classes fix their own Mode - `class ConcurrentPipeline<T, M extends "async" =
+"async">` - rather than parameterising it. That is what lets their narrowing overrides compare as
+concrete types, and it makes `ConcurrentPipeline<number, "sync">` a compile error.
+
+> **Mode** - `"unset"` before `.from()`, then `"sync"` or `"async"`. A type-level fact with a runtime
+> counterpart (`_mode`); the two never disagree, and the tests in
+> `__tests__/sync-mode.e2e.test.ts` under "the Mode a chain reports and the engine it runs on never
+> disagree" are what hold them together.
+>
+> **`SourcePolicy`** - `"shape"` keeps a source's own shape, `"async"` overrides it. One value per
+> class, not per instance.
+
+### The synchronous engine
+
+A `"sync"` chain carries `_syncChunks`, an `Iterable<T[] | Promise<T[]>>`, beside the async
+`_chunks` that stays empty. Its chunks may individually be pending, which is how a chain that widens
+mid-run is represented: a stage whose callbacks all returned plain values puts an array in, and one
+that returned a thenable puts a `Promise` in.
+
+```text
+Pipeline.from(Iterable)
+	buildSyncChunkGenerator(size)(items)            a plain generator - no async iterator anywhere
+Pipeline.apply(transformer)
+	stageChunks()                                   a sync generator over the prior sync stream
+		runStageChunk(runnable, chunk, ctx)           one stage, one chunk, .onError() applied
+			chain(...)                                 defers ONLY if the chunk is already pending
+Pipeline.toArray()
+	drainSync(_syncChunks, onItem)                  loops while every chunk is settled
+		Promise.resolve(chunk).then(...)             the first pending chunk, and only then
+```
+
+`chain`, `settleMaybe`, `mapSettle` and `isThenable` (`src/utils/helpers.ts`) are what keep a link
+synchronous: each returns a plain value when nothing is pending and defers through `.then` at the
+first thenable. `mapSettle` additionally disarms every promise already created for a chunk when a
+later item's callback throws synchronously - without it those promises have no rejection handler and
+one of them rejecting crashes the process.
+
+Two drains recurse only across an async boundary, never per item: `foldChunk` and
+`Transformer.loop`. Per-item recursion overflowed the stack on a synchronous reducer at 5000 items
+and on a synchronous loop body at 4000 iterations, where the pre-#90 loops handled 20 000 of each.
+
+`Pipeline.reduce()` is the one stage that always widens: it folds `foldChunkStream`, an async
+generator over an `AsyncIterable`, so it cannot run synchronously whatever the reducer does, and its
+return type says `"async"` rather than promising an array. `Transformer.reduce()` inside
+`.transform()` is the per-chunk fold that keeps a chain synchronous.
 
 ## Error handling
 
@@ -210,7 +285,7 @@ silently, which is why atomic deploys are a documented requirement rather than a
 
 `pipeline.merge(...others)` (#41) is the instance-method sibling of the static `Pipeline.merge()`,
 and goes through the SAME `createPipeline()` seam - the reason it never restarts `_chunkTransforms`
-at 0 the way the static's own hard-coded `new Pipeline(...)` does. The static builds a fresh, class-
+at 0 the way the static's own hard-coded `new Pipeline().from(...)` does. The static builds a fresh, class-
 less pipeline because it has no instance of its own to continue; the instance method has one, so it
 carries THIS pipeline's own class, knobs and stage table forward instead of starting over. Both
 share one context-merge loop and one chunk-concatenation generator (`mergeContextsInto()`/

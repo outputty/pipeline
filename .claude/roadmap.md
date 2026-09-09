@@ -40,6 +40,25 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **A synchronous fast path, with the type to prove it** (#90, `feat!`) - a `Pipeline` now carries
+  its engine in its own type. `.from()` names the source and decides it: an `Iterable` makes the
+  chain `"sync"`, so every terminal op returns `T[]` and the run creates no `Promise` at all; an
+  `AsyncIterable`, or any callback that returns one, makes it `"async"` and the terminal ops return
+  `Promise<T[]>`. Measured with `node:async_hooks` rather than a wall-clock threshold: the canonical
+  five-item chain creates 0 promises where it previously created several per chunk. Three seams made
+  it work, each after a simpler shape was measured and failed - `.from()` as a METHOD (a constructor
+  cannot vary its own class's generic return from its arguments), a third defaulted class type
+  parameter `SourcePolicy` (without it a dispatching class's `.from()` override fails `TS2416`), and
+  `.transform()` returning `AssignMode<P, M2>` rather than the callback's own Mode (a dispatching
+  class is async whatever its callbacks return). BREAKING three ways, no deprecation period: the
+  two-argument `new Pipeline(data, options)` constructor is deleted in favour of
+  `new Pipeline(options).from(data)`; a failure on a synchronous chain THROWS out of the terminal op
+  rather than rejecting, because no `Promise` exists for a rejection to travel on; and
+  `Pipeline.reduce()` always widens to `"async"`, since it folds an async generator. The ticket's own
+  Done-when 5 was amended by decision: the throw it asked for on a thenable-returning callback is
+  only reachable through a deliberate cast, so the engine widens the run instead. PR #92 (tests),
+  PR #93 (engine), PR #95 (types and call sites), PR #96 (docs).
+
 - **Error handling moves onto the function that failed** (#78, `feat!`) - `Transformer.onError(fn)`
   is now the ROW handler: returning a value replaces the row, the exported `DROP` sentinel removes
   it, throwing escalates. It reaches every element-wise call - `.map()`, `.filter()`, `.flatMap()`,
