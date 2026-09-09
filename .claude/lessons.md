@@ -7,6 +7,17 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-09 Retro's own "newest transcript" step read a different session's file
+
+Planning #84, retro's `ls -t <dir>/*.jsonl | head -1` reused the scratch file's own project
+directory (the repo root, per `plan`'s "the one holding `memory/`" convention) instead of
+computing the directory fresh from this worktree's actual `pwd`. It returned a real, parseable
+transcript - the PARENT session that opened this planning tab, not this one - and the mismatch
+surfaced only after a full 485-line read, on noticing it named a different worktree launch.
+`~/.claude/rules/code.md` gains a line: compute a session-transcript project directory fresh from
+`pwd` every time, never reuse a project-directory path already in hand from a different
+convention in the same session.
+
 ## 2026-09-08 A rejected `AskUserQuestion` got two "still waiting" replies before switching to stated assumptions
 
 Building #78, an `AskUserQuestion` about two ticket-scoping ambiguities came back rejected -
