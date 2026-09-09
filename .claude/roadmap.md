@@ -57,7 +57,10 @@ The two older candidates, still not filed:
   rather than rejecting, because no `Promise` exists for a rejection to travel on; and a drain on a
   source-less pipeline throws rather than resolving to `[]`. The ticket's own
   Done-when 5 was amended by decision: the throw it asked for on a thenable-returning callback is
-  only reachable through a deliberate cast, so the engine widens the run instead. PR #92 (tests),
+  only reachable through a deliberate cast, so the engine widens the run instead. Done-when 9 was
+  amended the same way: `.branch()`'s parameter type widens to `Transformer<T, U, "sync" | "async">`,
+  because `Transformer`'s new Mode parameter defaults to `"sync"` and the untouched spelling would
+  have silently rejected an async branch transformer that compiled before. PR #92 (tests),
   PR #93 (engine), PR #95 (types and call sites), PR #97 (the Mode audit), PR #96 (docs).
 
 - **Error handling moves onto the function that failed** (#78, `feat!`) - `Transformer.onError(fn)`
