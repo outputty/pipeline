@@ -209,10 +209,12 @@ describe("Pipeline", () => {
       expect(results).toEqual([1, 2]);
     });
 
-    it("throws if N < 1", async () => {
+    it("throws if N < 1", () => {
       const pipeline = new Pipeline().from([1, 2, 3]);
 
-      await expect(pipeline.first(0)).rejects.toThrow(new Error("n must be at least 1"));
+      // Synchronously, not as a rejection (#90): a `"sync"` chain creates no `Promise`, so there is
+      // nothing for a rejection to travel on. The same call on an async chain still rejects.
+      expect(() => pipeline.first(0)).toThrow(new Error("n must be at least 1"));
     });
 
     it("does not carry a context snapshot; .contextManager still resolves it afterward", async () => {
@@ -474,8 +476,10 @@ describe("Pipeline", () => {
       expect(logged).toEqual(["Invalid: x"]);
     });
 
-    it("Done-when 8: a handler that rethrows stops the run, rejecting with what it threw", async () => {
-      await expect(
+    it("Done-when 8: a handler that rethrows stops the run, throwing what it threw", () => {
+      // Synchronously on a `"sync"` chain (#90) - every callback here is synchronous, so the throw
+      // escapes `.toArray()` directly rather than as a rejected `Promise`.
+      expect(() =>
         new Pipeline()
           .from(["1", "x", "3", "4"])
           .buffer(1)
@@ -484,7 +488,7 @@ describe("Pipeline", () => {
           })
           .transform((t) => t.map(parseStrict))
           .toArray(),
-      ).rejects.toThrow("Invalid: x");
+      ).toThrow("Invalid: x");
     });
 
     it("Done-when 10: a rethrowing ROW handler escalates to the RUN handler, which drops the chunk", async () => {
@@ -512,7 +516,8 @@ describe("Pipeline", () => {
       // .onError() here is registered on a FRESH pipeline built by .transform() below, applied to
       // an ALREADY-DISPATCHED stage - too late for THIS run to see it, so the chunk failure still
       // propagates uncaught. Contrast with Done-when 7, where .onError() precedes .transform().
-      await expect(
+      // Thrown, not rejected (#90): every callback here is synchronous, so the whole chain is.
+      expect(() =>
         new Pipeline()
           .from(["1", "x", "3", "4"])
           .buffer(1)
@@ -521,7 +526,7 @@ describe("Pipeline", () => {
             /* registered too late to catch the stage above */
           })
           .toArray(),
-      ).rejects.toThrow("Invalid: x");
+      ).toThrow("Invalid: x");
     });
 
     it("the upstream source itself rejecting, before any chunk is pulled, has no chunk to drop — it still propagates", async () => {

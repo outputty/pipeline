@@ -6,17 +6,11 @@
  * adds a Mode dimension every case shares, and the existing file is already the home of the
  * pre-Mode constructor's own suite, which L3 rewrites wholesale.
  *
- * L1 of the stack: every case is expected-to-fail. A runtime case is marked with vitest's own
- * `it.fails`; the not-yet-built API it calls is marked with `@ts-expect-error`, since `tsc --noEmit`
- * covers `__tests__/` and an un-suppressed error breaks `pnpm check` outright. For most cases the
- * flip is REMOVING a directive, and `TS2578: Unused '@ts-expect-error' directive` is the signal that
- * one started passing early. Cases 4 and 7 flip the other way - L3 ADDS a directive to each, on the
- * `.transform()` call and on the two-arg constructor - so each carries its own note below saying so.
- *
- * Under a suppressed line the expression degrades to `any`, which is why each callback below spells
- * its own parameter types out. The CALLBACK PARAMETER annotations are the redundant ones L3 deletes;
- * the `: number[]` and `: Promise<number[]>` annotations on each result stay, and are what carry
- * Done-when 1, 2, 5, 6 and 8's compile-time half once the directives above them are gone.
+ * Every case is LIVE as of L3. The `: number[]` and `: Promise<number[]>` annotations on each
+ * result carry the compile-time half - `tsc --noEmit` is what asserts them, and a Mode that came
+ * out wrong fails the build rather than the run. Cases 4 and 7 are the two that assert a REFUSAL,
+ * so each carries a `@ts-expect-error` whose own removal (`TS2578`) is the signal that the refusal
+ * broke.
  */
 
 import { describe, it, expect } from "vitest";
@@ -199,7 +193,7 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     expect(countPromises(() => [...buildSyncChunkGenerator<number>(2)([1, 2, 3])])).toBe(0);
   });
 
-  it.fails("Done-when 1: a fully sync chain returns number[] with no await", () => {
+  it("Done-when 1: a fully sync chain returns number[] with no await", () => {
     const builder = new Pipeline<number>();
     const out: number[] = builder
       .from([1, 2, 3, 4, 5])
@@ -211,7 +205,7 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     expect(out).toEqual([6, 8, 10]);
   });
 
-  it.fails("Done-when 2: one async callback widens the chain to Promise<number[]>", async () => {
+  it("Done-when 2: one async callback widens the chain to Promise<number[]>", async () => {
     const builder = new Pipeline<number>();
     const out: Promise<number[]> = builder
       .from([1, 2, 3, 4, 5])
@@ -223,7 +217,7 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     expect(await out).toEqual([6, 8, 10]);
   });
 
-  it.fails("Done-when 3: zero promises are created between .from() and .toArray()", () => {
+  it("Done-when 3: zero promises are created between .from() and .toArray()", () => {
     const builder = new Pipeline<number>();
     const created = countPromises(() =>
       builder
@@ -269,54 +263,48 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     expect(legacy).toBeInstanceOf(Pipeline);
   });
 
-  it.fails(
-    "Done-when 5: a thenable-returning link widens the run rather than throwing",
-    async () => {
-      // Amended from the ticket's own text by this build's F2 finding, on the user's ruling: the
-      // engine widens the run instead of throwing. Where the callback's return type is visible,
-      // TypeScript widens the chain to `Promise<number[]>` on its own, and the two agree - this
-      // case. Where it is `any` (an untyped import, a `JSON.parse` result), the type says
-      // `number[]` and the run still returns a Promise resolving to the right values: a wrong
-      // static type at an `any` boundary, never wrong data, and never a `Promise` left unawaited
-      // in the output. `code.md` rules out a guard against a misuse the caller could mean, which
-      // is what the ticket's own per-chunk throw would have been.
-      const builder = new Pipeline<number>();
-      const out: Promise<number[]> = builder
-        .from([1, 2, 3])
-        .transform((t: Transformer<number, number>) => t.map((x: number) => Promise.resolve(x * 2)))
-        .toArray();
+  it("Done-when 5: a thenable-returning link widens the run rather than throwing", async () => {
+    // Amended from the ticket's own text by this build's F2 finding, on the user's ruling: the
+    // engine widens the run instead of throwing. Where the callback's return type is visible,
+    // TypeScript widens the chain to `Promise<number[]>` on its own, and the two agree - this
+    // case. Where it is `any` (an untyped import, a `JSON.parse` result), the type says
+    // `number[]` and the run still returns a Promise resolving to the right values: a wrong
+    // static type at an `any` boundary, never wrong data, and never a `Promise` left unawaited
+    // in the output. `code.md` rules out a guard against a misuse the caller could mean, which
+    // is what the ticket's own per-chunk throw would have been.
+    const builder = new Pipeline<number>();
+    const out: Promise<number[]> = builder
+      .from([1, 2, 3])
+      .transform((t: Transformer<number, number>) => t.map((x: number) => Promise.resolve(x * 2)))
+      .toArray();
 
-      expect(await out).toEqual([2, 4, 6]);
-    },
-  );
+    expect(await out).toEqual([2, 4, 6]);
+  });
 
-  it.fails(
-    "Done-when 6: a dispatching class forces async whatever the source's shape",
-    async () => {
-      // The criterion is compile-time: an ARRAY source, whose shape says "sync", must still come
-      // out "async" on every dispatching class. `instanceof` alone cannot see that - a subclass
-      // that never got its own `.from()` override inherits the base's `Iterable → "sync"` arm,
-      // `toArray()` then returns a plain array, `await` on one is a no-op, and both the
-      // `instanceof` and the `toEqual` still pass. The three `: Promise<number[]>` annotations
-      // below are the assertion; each fails to compile if its class's Mode came out "sync".
-      const concurrent = new ConcurrentPipeline<number>().from([1, 2, 3]);
-      const http = new HttpPipeline<number>({ url: "http://127.0.0.1:1" }).from([1, 2, 3]);
-      const cluster = new ClusterPipeline<number>().from([1, 2, 3]);
+  it("Done-when 6: a dispatching class forces async whatever the source's shape", async () => {
+    // The criterion is compile-time: an ARRAY source, whose shape says "sync", must still come
+    // out "async" on every dispatching class. `instanceof` alone cannot see that - a subclass
+    // that never got its own `.from()` override inherits the base's `Iterable → "sync"` arm,
+    // `toArray()` then returns a plain array, `await` on one is a no-op, and both the
+    // `instanceof` and the `toEqual` still pass. The three `: Promise<number[]>` annotations
+    // below are the assertion; each fails to compile if its class's Mode came out "sync".
+    const concurrent = new ConcurrentPipeline<number>().from([1, 2, 3]);
+    const http = new HttpPipeline<number>({ url: "http://127.0.0.1:1" }).from([1, 2, 3]);
+    const cluster = new ClusterPipeline<number>().from([1, 2, 3]);
 
-      const concurrentOut: Promise<number[]> = concurrent.toArray();
-      const httpOut: Promise<number[]> = http.toArray();
-      const clusterOut: Promise<number[]> = cluster.toArray();
+    const concurrentOut: Promise<number[]> = concurrent.toArray();
+    const httpOut: Promise<number[]> = http.toArray();
+    const clusterOut: Promise<number[]> = cluster.toArray();
 
-      expect(concurrent).toBeInstanceOf(ConcurrentPipeline);
-      expect(http).toBeInstanceOf(HttpPipeline);
-      expect(cluster).toBeInstanceOf(ClusterPipeline);
-      expect(typeof httpOut.then).toBe("function");
-      expect(typeof clusterOut.then).toBe("function");
-      expect(await concurrentOut).toEqual([1, 2, 3]);
-    },
-  );
+    expect(concurrent).toBeInstanceOf(ConcurrentPipeline);
+    expect(http).toBeInstanceOf(HttpPipeline);
+    expect(cluster).toBeInstanceOf(ClusterPipeline);
+    expect(typeof httpOut.then).toBe("function");
+    expect(typeof clusterOut.then).toBe("function");
+    expect(await concurrentOut).toEqual([1, 2, 3]);
+  });
 
-  it.fails("Done-when 8: .buffer()/.onError()/.local() all preserve the sync Mode", () => {
+  it("Done-when 8: .buffer()/.onError()/.local() all preserve the sync Mode", () => {
     const builder = new Pipeline<number>();
     const out: number[] = builder
       .from([1, 2, 3])

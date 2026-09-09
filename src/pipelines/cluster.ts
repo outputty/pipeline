@@ -187,7 +187,9 @@ export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipelin
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
   ): ClusterPipeline<U, M> {
-    const Ctor = this.constructor as new (options?: ClusterPipelineConstructorOptions & { url: string }) => ClusterPipeline<U, M>;
+    const Ctor = this.constructor as new (
+      options?: ClusterPipelineConstructorOptions & { url: string },
+    ) => ClusterPipeline<U, M>;
     const merged = {
       ...options,
       ...this.concurrentOptions(),

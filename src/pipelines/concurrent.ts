@@ -223,7 +223,9 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
   ): ConcurrentPipeline<U, M> {
-    const Ctor = this.constructor as new (options?: ConcurrentPipelineConstructorOptions) => ConcurrentPipeline<U, M>;
+    const Ctor = this.constructor as new (
+      options?: ConcurrentPipelineConstructorOptions,
+    ) => ConcurrentPipeline<U, M>;
     return new Ctor({ ...options, ...this.concurrentOptions(), chunks });
   }
 
