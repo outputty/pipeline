@@ -352,3 +352,34 @@ const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 }
 ```json
 [15]
 ```
+
+## Case 11 - a custom buffering window (pending #88)
+
+`.buffer()` also takes a callback, for a chunk boundary decided by something other than count - the
+same "bank when the running total crosses 6" rule as Case 7's `.reduce()` example, cutting the
+pipeline's own chunks this time instead of the downstream values. `emit()` takes no value, since the
+pending chunk is the framework's own state, not the caller's; returning a value joins that chunk.
+
+<!-- illustrative -->
+
+```ts
+import { Pipeline, createTransformer } from "@outputty/pipeline";
+
+let sum = 0;
+const seen: number[][] = [];
+const data = await new Pipeline([1, 2, 3, 4, 5])
+  .buffer((item: number, _ctx, emit) => {
+    sum += item;
+    if (sum >= 6) {
+      emit();
+      sum = 0;
+    }
+    return item;
+  })
+  .transform((t) => t.tap(createTransformer<number[]>().tap((chunk) => seen.push(chunk))))
+  .toArray(); // [1,2,3,4,5] - a window changes how items are grouped in flight, never what they are
+```
+
+```json
+{ "data": [1, 2, 3, 4, 5], "seen": [[1, 2], [3, 4], [5]] }
+```

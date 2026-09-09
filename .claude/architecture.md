@@ -99,6 +99,25 @@ reads `this._chunks` directly and cuts none of its own, so a custom `.buffer()` 
 dispatched stage exactly like a local one. Wrap the chain in one of those classes for concurrency
 instead of configuring the `Transformer`.
 
+**Pending #88**: `.buffer()` gains a second overload, `.buffer(fn: BufferFunction<T>)`, for a chunk
+boundary decided by something other than count. `buildChunkGenerator(size)` is a `T[]` fold with an
+implicit accumulator (push, flush at `size`, reset) - the same shape `Reducer<T[], T>` (`src/utils/
+reduce.ts`, "The reduce stage" section below) already runs for `.reduce()`. `.buffer(fn)` reuses that
+class directly: the pending `T[]` is framework-owned, never handed to `fn`; `fn`'s own three
+parameters are `(item, ctx, emit)`, `emit()` taking no value since there is nothing for the caller to
+choose beyond "flush now." `.buffer(size)` becomes the same mechanism with an identity `fn` and an
+internal auto-flush at `pending.length >= size` - one engine behind both overloads, spiked for real
+during planning (a hand-rolled adapter over the unmodified `Reducer` class reproduced both a
+five-minute, item-triggered window and a size-3 buffer from the identical fold). `ChunkerFunction<T>`
+(`src/types.ts`) - the raw `(data: AsyncIterable<T>) => AsyncGenerator<T[]>` shape
+`Transformer.setChunker()` left behind, exported with zero consumers since #39 - is deleted from the
+public surface rather than reused: it carries no `ctx` parameter, so it cannot express a windowing
+rule that reads shared context. `buildChunkGenerator` itself stays, now only as branch dispatch's own
+internal single-item-chunk helper (`pushBranchOutput`, below). Out of reach by construction: a window
+that must close after real time elapses with no new item arriving, since `fn` only ever runs from
+inside the item loop, never while parked on the source's own `next()` - unaddressed by #88, a
+different mechanism if ever wanted.
+
 ## Error handling
 
 Error handling sits on the function that failed, at two levels, and `.catch()` is deleted with the

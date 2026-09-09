@@ -9,6 +9,12 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
+- **`.buffer()` accepts a callback for custom buffering windows** (#88) - `.buffer(size)` only cuts a
+  chunk boundary by count; a caller who needs it decided by something else (a running total, an
+  item's own field) has no way to express it today. Now, because planning found `.buffer()` is
+  already shaped like a reducer - the same `Reducer<T[], T>` class `.reduce()` runs, spiked for real
+  and confirmed - and the existing `ChunkerFunction<T>` escape hatch it could have reused instead is
+  dead exported surface with zero consumers, deleted alongside it rather than resurrected.
 - **A conformance suite every `Pipeline` and Context class runs** (#37) - one set of behaviour
   cases, defined once in `__tests__/conformance/cases.ts`, run by thin wrapper files, one per class.
   `product.md` promises the chain "is identical in all four" and only the base class was ever tested

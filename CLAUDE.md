@@ -187,6 +187,14 @@ none of it survived the hand-trim (#745).
   until another `.buffer()` call declares a new one. Two `.buffer()` calls back to back, with no
   stage between them, collapse to the last - only it is ever actually applied. An
   `InternalTransformer<In, Out>` processes one chunk at a time.
+- **`BufferFunction<T>`** (#88, pending) - `.buffer()`'s callback form, `(item, ctx, emit) => T |
+  typeof DROP`, for a chunk boundary decided by something other than count. One mechanism with
+  `.buffer(size)`: both fold through the SAME `Reducer<T[], T>` `.reduce()` already uses, the pending
+  chunk owned by the framework, never handed to the caller. `emit()` takes no value - it flushes
+  whatever is pending; a returned value joins the (possibly just-flushed) chunk; `DROP` skips the
+  item, same sentinel `.onError()`'s row handler already uses. `ChunkerFunction<T>` - the exported,
+  zero-consumer raw-generator type `Transformer.setChunker()` left behind (#39) - is deleted with it,
+  BREAKING, no deprecation period.
 - **Pipeline family** - WHERE a chain's chunks run is chosen by CONSTRUCTING A CLASS, not by
   configuring a `Transformer` (#17 - replaced `ExecutionStrategy`, `.withExecutor()`, `sequential`,
   `concurrent()` and `ConcurrentStrategyOptions` entirely, deleted with `src/strategies/`).
