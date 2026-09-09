@@ -9,6 +9,15 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
+- **A synchronous fast path for an all-sync `Pipeline` chain** (#90) - `.map()`/`.filter()` always
+  run `Promise.all`, and a plain in-memory array is always converted to an `AsyncIterable` at item
+  granularity before any stage runs - measured at ~430 ns/row against a plain `Array.prototype`
+  chain's ~20 ns/row, most of the gap paid before any stage even runs. Now, because a hand-written
+  engine of plain generators over the identical chain measured ~35-46 ns/row - about 90% of the gap
+  recoverable. `new Pipeline(options?)` drops the `data` argument (BREAKING); `.from(source)`
+  attaches it and infers whether the chain runs synchronously (a plain `Iterable`) or asynchronously
+  (an `AsyncIterable`), widening automatically the first time an async function or async source
+  appears. `.branch()` is out of scope, blocked conceptually by #87's own signature redesign.
 - **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
   `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
   change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results

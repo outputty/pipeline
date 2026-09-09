@@ -24,10 +24,11 @@ input was cut. Splitting the two means a transform chain tested once (`Transform
 unchanged inside a `Pipeline`, over an HTTP paginator, or inside a laygo `Source`; a caller running a
 `Transformer` standalone supplies its own already-cut chunks.
 
-> **Pipeline** - the high-level API: `new Pipeline(source, options?)`, `.context()` to seed shared
-> state, `.buffer(size)` to set the chunk boundary, `.apply()`/`.transform()` to run a `Transformer`,
-> `.tap()` to observe without changing the data, and one of five terminal ops (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`) to
-> drain it.
+> **Pipeline** - the high-level API: `new Pipeline(options?)` to seed context/defaults, `.from(source)`
+> to attach the data (below) and start the chain, `.context()` to seed shared state, `.buffer(size)`
+> to set the chunk boundary, `.apply()`/`.transform()` to run a `Transformer`, `.tap()` to observe
+> without changing the data, and one of five terminal ops
+> (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`) to drain it.
 > **Transformer** - the chainable, reusable chunk-transform: `new Transformer<In, Out>(options?)`,
 > `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.onError()`. `.process(chunks, context?)` runs
 > it directly over an `AsyncIterable` of already-cut chunks, independent of `Pipeline` - it takes no
@@ -36,8 +37,45 @@ unchanged inside a `Pipeline`, over an HTTP paginator, or inside a laygo `Source
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
-  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+const data = new Pipeline()
+  .from([1, 2, 3, 4, 5])
+  .transform((t) => t.map((x) => x * 2).filter((x) => x > 4))
+  .toArray();
+```
+
+```json
+[6, 8, 10]
+```
+
+### Synchronous execution
+
+A chain built over a plain, synchronous source with only synchronous functions never touches
+`Promise`, `async` or an event-loop tick until a terminal op is called - `.toArray()` above returns
+`number[]` directly, no `await`, because `.from()` reads the source's own shape and every stage
+after it stayed synchronous. The chain widens to asynchronous automatically the moment an actual
+async function or an async source is introduced anywhere in it, from there on: the same chain with
+`.map(async (x) => x * 2)` instead returns `Promise<number[]>`. `.transform()` cannot be called
+before `.from()` at all - a compile error, not a runtime one, since there is no source yet to decide
+sync or async against.
+
+> **`.from(source)`** - attaches the data a `Pipeline` runs over and decides whether the chain runs
+> synchronously or asynchronously from the source's own shape: a plain array or other synchronous
+> `Iterable` stays synchronous, an `AsyncIterable` starts asynchronous. `new Pipeline(options?)` holds
+> no source and offers no chain methods - only `.from()` - until one is attached.
+> **Widening** - a chain started synchronous stays synchronous through every stage
+> (`.map()`/`.filter()`/`.flatMap()`/`.reduce()`/`.tap()`/`.onError()`/`.buffer()`/`.local()`/`.merge()`)
+> until a stage's own function returns a `Promise`, or a `.merge()` combines in a pipeline that is
+> already asynchronous - from that point on the whole chain, and every terminal op draining it,
+> is asynchronous. `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` are always asynchronous:
+> each dispatches a chunk across a real boundary (in-process fan-out, HTTP, another process), so
+> there is no synchronous case for any of the three.
+
+```ts
+import { Pipeline } from "@outputty/pipeline";
+
+const widened = new Pipeline()
+  .from([1, 2, 3, 4, 5])
+  .transform((t) => t.map(async (x) => x * 2).filter((x) => x > 4))
   .toArray();
 ```
 

@@ -99,6 +99,34 @@ reads `this._chunks` directly and cuts none of its own, so a custom `.buffer()` 
 dispatched stage exactly like a local one. Wrap the chain in one of those classes for concurrency
 instead of configuring the `Transformer`.
 
+## Synchronous execution - pending #90
+
+Every piece above (`buildChunkGenerator`, `flattenChunks`, `Transformer.process()`/
+`runSequentially`, `.pipe()`'s own `await currentTransform(...)`) is unconditionally async, so a
+`Pipeline` over a plain in-memory array with only synchronous functions still pays a full
+async-generator round trip per item to convert its source into `_chunks`, before any stage or
+`Promise.all` ever runs - measured at ~430 ns/row end to end against a plain `Array.prototype`
+chain's ~20 ns/row, ~290 ns/row of it paid with zero transform stages at all (#90's own ticket).
+
+`.from(source)` becomes the one place `PipelineMode` (`"unset" | "sync" | "async"`) is decided -
+`Symbol.asyncIterator in Object(source)` the same way `toAsyncIterable()` already checks today. A
+`"sync"` `Pipeline` runs a SECOND, parallel set of chunk/transform utilities - plain `function*`
+counterparts to `buildChunkGenerator`/`flattenChunks`, and a plain (non-`async`) composed transform
+function mirroring `pipe()` - so nothing async-shaped is ever constructed until a stage's own
+function returns a `Promise`, or `.from()` is given an `AsyncIterable`, or `.merge()` combines in an
+already-async pipeline. `Transformer<In, Out, M extends "sync" | "async">`'s 3-overload
+`map()`/`filter()`/`flatMap()`/`reduce()`/`tap()` (async arm, a sync arm constrained
+`U extends Promise<unknown> ? never : U`, a generic fallback returning `"async"` for a call site
+generic in its own type parameters) is the seam that keeps a chain typed `"sync"` for exactly as
+long as every stage's callback is provably synchronous, and silently (never a compile error) falls
+back to `"async"` at a site TypeScript cannot prove sync-ness for. A stage whose callback is typed
+sync but returns a thenable at runtime is caught by a per-chunk fail-loud check on the sync engine's
+own output, at no measurable cost (~35 ns/row guarded, within noise of unguarded).
+
+`ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` each override `.from()` to return `"async"`
+unconditionally - none has a synchronous case, since each dispatches a chunk across a real boundary
+regardless of how synchronous the caller's own callbacks are.
+
 ## Error handling
 
 Error handling sits on the function that failed, at two levels, and `.catch()` is deleted with the
