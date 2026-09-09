@@ -71,6 +71,44 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
 [2, 4, 6, 8, 10]
 ```
 
+`.buffer()` also takes a `BufferFunction`, for a chunk boundary decided by something other than
+count - a caller-managed running total, a field on the item, a window. `.buffer(size)` and
+`.buffer(fn)` are one mechanism: the same internal fold `.reduce()` already runs, with the pending
+chunk owned by the framework rather than handed to the caller. Calling `emit()` flushes whatever is
+currently pending; returning a value appends it to the (possibly just-flushed) chunk; returning
+`DROP` skips the item entirely, same as `.onError()`'s row handler.
+
+> **`BufferFunction<T>`** - `(item, ctx, emit) => T | typeof DROP`. `emit()` takes no value - unlike
+> `.reduce()`'s `emit(value)`, there is nothing for the caller to choose, since the pending chunk is
+> already the framework's own state.
+
+```ts
+import { Pipeline, createTransformer } from "@outputty/pipeline";
+
+let sum = 0;
+const seen: number[][] = [];
+await new Pipeline([1, 2, 3, 4, 5])
+  .buffer((item: number, _ctx, emit) => {
+    sum += item;
+    if (sum >= 6) {
+      emit();
+      sum = 0;
+    }
+    return item;
+  })
+  .transform((t) => t.tap(createTransformer<number[]>().tap((chunk) => seen.push(chunk))))
+  .toArray();
+```
+
+```json
+[[1, 2], [3, 4], [5]]
+```
+
+(`seen`, the real chunk boundary - the same "bank when the running total crosses 6" rule as the
+`.reduce()` example below, cutting the pipeline's own chunks this time instead of the downstream
+values. `.toArray()` itself still prints `[1, 2, 3, 4, 5]`, unchanged - a window changes how items are
+grouped in flight, never what they are.)
+
 ### Where the work runs
 
 The class you construct decides where a chain's chunks are processed. The chain itself - the
