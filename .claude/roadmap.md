@@ -25,6 +25,17 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   committed as JSON; the second table controls measured ITEMS IN FLIGHT rather than any declared
   concurrency option, because no two libraries name that knob the same way. Layout and rationale in
   `.claude/architecture.md`'s Benchmarks section.
+- **`README.md` brought up to date with everything the package supports** (#84) - seven tickets
+  (#31, #39-#41, #62, #72, #78) shipped since the README was last swept; its Core Concepts diagram
+  still names the `ExecutionStrategy` class #17 deleted, it has no `Merging` section and no API
+  Reference entry for `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`/`createTransformer`/
+  `SimpleContextManager`/`IContextManager`, and two of its four Real-World Examples don't run for
+  real despite carrying `<!-- compiles -->`. Now, because the drift is no longer cosmetic - a
+  reader can't find `.merge()` at all, and one example throws on copy-paste. Replaces
+  "Real-World Examples" with a `Patterns` section (repair-bad-rows, bounded-concurrency fan-out),
+  each shown on all four `Pipeline` classes; deletes the "Comparison with JSON Graph" section
+  (#11's own docs layer owns any future comparator numbers); moves this file's own stale `#37`
+  entry, below, out of Building.
 
 ### Later - not yet filed
 
