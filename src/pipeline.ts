@@ -733,7 +733,9 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * .transform((t) => t.map(parseStrict)).toArray()` → `[1, 3, 4]` - the chunk holding `"x"` is
    * dropped, every other chunk survives.
    */
-  onError(handler: (error: Error, ctx: IContextManager) => Promise<void>): Pipeline<T, "async", P>;
+  onError(
+    handler: (error: Error, ctx: IContextManager) => Promise<void>,
+  ): M extends "async" ? this : Pipeline<T, "async", P>;
   onError(handler: (error: Error, ctx: IContextManager) => void): this;
   onError(handler: PipelineErrorHandler): this | Pipeline<T, "async", P> {
     // An ASYNC handler widens the chain (#90), the same rule `.tap()` follows. `PipelineErrorHandler`
@@ -787,7 +789,9 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
   merge(
     ...others: Pipeline<T, M extends "async" ? "sync" | "async" : "sync", SourcePolicy>[]
   ): this;
-  merge(...others: Pipeline<T, "sync" | "async", SourcePolicy>[]): Pipeline<T, "async", P>;
+  merge(
+    ...others: Pipeline<T, "sync" | "async", SourcePolicy>[]
+  ): M extends "async" ? this : Pipeline<T, "async", P>;
   merge(...others: Pipeline<T, "sync" | "async", SourcePolicy>[]): this | Pipeline<T, "async", P> {
     mergeContextsInto(
       this._context,
@@ -1005,6 +1009,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     initial: U,
   ): Pipeline<U, AssignMode<P, JoinMode<M, "sync">>, P>;
   reduce<U>(fn: ReduceFunction<U, T>, initial: U): AnyPipeline<U> {
+    // A reduce stage is a stage, so it refuses a source-less pipeline like `apply()` does. Without
+    // this the drain's own guard never fires either: this method sets the Mode explicitly, so
+    // `asyncItems()` sees `"async"` rather than `"unset"` and `new Pipeline().reduce(f, 0)
+    // .toArray()` resolved to `[]`.
+    this.requireSource();
     const { chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const carried = {
       context: this._context,
@@ -1099,9 +1108,13 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * `new Pipeline([1, 2, 3]).tap((x) => seen.push(x)).transform((t) => t.map((x) => x *
    * 2)).toArray()` → `[2, 4, 6]`, with `seen` `[1, 2, 3]`.
    */
-  tap(fn: (item: T, ctx: IContextManager) => Promise<unknown>): Pipeline<T, "async", P>;
+  tap(
+    fn: (item: T, ctx: IContextManager) => Promise<unknown>,
+  ): M extends "async" ? this : Pipeline<T, "async", P>;
   tap(fn: (item: T, ctx: IContextManager) => unknown): this;
-  tap(transformer: Transformer<T, unknown, "async">): Pipeline<T, "async", P>;
+  tap(
+    transformer: Transformer<T, unknown, "async">,
+  ): M extends "async" ? this : Pipeline<T, "async", P>;
   tap(transformer: Transformer<T, unknown, "sync">): this;
   tap(
     arg: PipelineFunction<T, unknown> | Transformer<T, unknown, "sync" | "async">,

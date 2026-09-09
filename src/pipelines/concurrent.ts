@@ -326,6 +326,9 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
    * .local((p)=>p.reduce((a,v)=>a+v,0)).toArray()` → `[15]`.
    */
   override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U, M> {
+    // A dispatching class has no `"unset"` Mode for a compile-time guard to test, so the refusal is
+    // this call - the same reason `apply()` above makes it (#90).
+    this.requireSource();
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
 

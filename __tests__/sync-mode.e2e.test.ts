@@ -775,6 +775,31 @@ describe("#90 L4 - review findings, each reproduced before it was fixed", () => 
     expect(out).toEqual([3, 7, 5]);
   });
 
+  it("a widening call keeps the subclass it was made on", () => {
+    // `.onError(async …)`, `.tap(async …)` and the widening `.merge()` each returned a bare
+    // `Pipeline<T, "async", P>`, so `.fetch` and every other subclass member vanished from the type
+    // on a chain that compiled on `main`. Measured: `error TS2339: Property 'fetch' does not exist
+    // on type 'Pipeline<number, "async", "async">'`. A receiver already async gains nothing from
+    // widening, so it keeps its own class.
+    const url = "http://localhost:1";
+    const withHandler = new HttpPipeline<number>({ url }).from([1, 2, 3]).onError(async () => {});
+    const withTap = new HttpPipeline<number>({ url }).from([1, 2, 3]).tap(async () => {});
+
+    expect(typeof withHandler.fetch).toBe("function");
+    expect(typeof withTap.fetch).toBe("function");
+  });
+
+  it("a reduce stage refuses a source-less pipeline", () => {
+    // `.reduce()` sets the Mode explicitly, so the drain's own guard saw `"async"` rather than
+    // `"unset"`: measured before the fix, `new Pipeline().reduce(f, 0).toArray()` resolved to `[]`.
+    expect(() => new Pipeline<number>().reduce((acc: number, x: number) => acc + x, 0)).toThrow(
+      "no source: call .from(data) before composing",
+    );
+    expect(() =>
+      new ConcurrentPipeline<number>().reduce((acc: number, x: number) => acc + x, 0),
+    ).toThrow("no source: call .from(data) before composing");
+  });
+
   it("a drain with no source fails instead of resolving to an empty array", async () => {
     // Measured before the fix: `await new Pipeline().toArray()` → `[]`, a plausible-looking answer
     // for a caller who forgot `.from()`, where composing any stage on it already threw. An
