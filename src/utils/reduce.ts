@@ -204,6 +204,9 @@ export function* foldSyncChunkStream<U, T>(
 
     if (isThenable(out)) {
       tail = out as Promise<U[]>;
+      // NOT guarded on length, unlike the settled arm below: a pending chunk's emptiness is not
+      // knowable until it settles, and a generator cannot un-yield. `PipelineResult.chunks()`
+      // drops the empties instead, which is where they are observable.
       yield out as Promise<U[]>;
       continue;
     }

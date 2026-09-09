@@ -153,7 +153,7 @@ export function buildSyncChunkGenerator<T>(
 
 /**
  * `flattenChunks`'s synchronous counterpart (#90) - the one place a sync chunk stream becomes its
- * items again, shared by the sync terminal ops and `.buffer()`'s own sync re-cut fallback.
+ * items again, used by `__tests__/sync-mode.e2e.test.ts` alone - the sync terminals drain through `drainSync` and `.buffer()`'s sync fallback re-cuts through `recutSyncChunks`.
  *
  * `[...flattenSyncChunks([[1, 2], [3]])]` → `[1, 2, 3]`.
  */
@@ -198,10 +198,10 @@ export function drainSync<T>(
       const chunk = step.value;
       if (isThenable(chunk)) {
         return Promise.resolve(chunk).then((settled) =>
-          pushAll(settled, onItem) ? undefined : resume(),
+          pushAll(settled, onItem) ? close(iterator) : resume(),
         );
       }
-      if (pushAll(chunk, onItem)) return;
+      if (pushAll(chunk, onItem)) return close(iterator);
     }
   };
 
@@ -267,6 +267,13 @@ export function drainSyncSettled<T>(
 
 /** `chain` for a `void`-producing step, kept here rather than imported so `chunk.ts` owns its own
  * drain helpers. Runs `next` once `value` has settled, creating no `Promise` when it already has. */
+/** Closes a source iterator that a consumer stopped reading early, so a generator's own `finally`
+ * runs and whatever it holds - a file handle, a cursor - is released. `for await`/`break` does this
+ * for the async engine; the sync drains have to do it themselves. */
+function close(iterator: Iterator<unknown>): void {
+  iterator.return?.();
+}
+
 function chainVoid(
   value: void | Promise<void>,
   next: () => void | Promise<void>,
@@ -362,6 +369,11 @@ function* recutPending<T>(
     return state.buffer.splice(0, size);
   };
 
+  // A buffer that drains exactly on a boundary costs one more `cut()`, which discovers exhaustion
+  // and returns `[]` - `[...recutSyncChunks([Promise.resolve([1,2,3,4])], 2)]` yields
+  // `[[1,2],[3,4],[]]` where the settled path yields `[[1,2],[3,4],[5]]`. Not knowable before the
+  // cut settles, and a generator cannot un-yield; `PipelineResult.chunks()` drops the empties,
+  // which is where a consumer can see them. Every other consumer pushes nothing for one.
   while (!state.exhausted || state.buffer.length > 0) {
     yield cut();
   }

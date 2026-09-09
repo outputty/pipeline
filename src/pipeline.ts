@@ -141,12 +141,10 @@ export type PendingStage = (pipeline: AnyPipeline<any>) => AnyPipeline<any>;
  *
  * `split(orders)` → `{ big: ["BIG:2", "BIG:4"], eu: ["EU:1", "EU:3"], rest: [] }`.
  */
-export type BranchRunner<In, R, M extends PipelineMode> = M extends "unset"
-  ? {
-      (input: AsyncIterable<In>): Promise<R>;
-      (input: Iterable<In>): Promise<R>;
-    }
-  : () => Promise<R>;
+export interface BranchRunner<In, R> {
+  (input: AsyncIterable<In>): Promise<R>;
+  (input: Iterable<In>): Promise<R>;
+}
 
 /** The branch map `.branch()` accepts - a name per branch, each pairing a predicate with an
  * optional transformer (#87). Inferred from the caller's own object literal rather than declared,
@@ -1053,7 +1051,8 @@ export class Pipeline<
     // written BEFORE any stage must also cut the source itself, which is what it now does by
     // replaying against a pipeline whose source is already cut at that size.
     if (this.isDeferred()) {
-      return this.defer<T>((p) => p.buffer(size), { chunkSize: size }) as this;
+      const cutsTheSource = this._pendingStages.length === 0;
+      return this.defer<T>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {}) as this;
     }
 
     // The `"sync"` arm recuts with the sync chunker (#90) - going through the async one here would
@@ -1362,28 +1361,17 @@ export class Pipeline<
     // awaits every branch's own result regardless, so accepting both is the behaviour it always had.
     branches: B,
     options?: BranchOptions,
-  ): BranchRunner<In, BranchResults<T, B>, M> {
+  ): BranchRunner<In, BranchResults<T, B>> {
     const firstMatch = options?.firstMatch !== false; // Default to true (router mode)
     const owner = this;
 
     const run = async (input?: PipelineSource<In>): Promise<BranchResults<T, B>> => {
-      // One binding per call, and each side refuses what it cannot honour. A bound pipeline handed
-      // an input silently DISCARDED it before: `.from([1,2,3]).branch(…)([9,9,9])` returned
-      // `{ all: [1,2,3] }`, then `{ all: [] }` on the second call as the bound stream ran dry.
-      if (!owner.isDeferred() && input !== undefined) {
+      if (input === undefined) {
         throw new Error(
-          "this pipeline already named a source with .from(), so .branch()'s runner takes no input - call it with no arguments, or build the chain without .from()",
+          "no input: a pipeline holds no data, so .branch()'s runner needs one - call it with the items to route",
         );
       }
-      if (owner.isDeferred() && input === undefined) {
-        throw new Error(
-          "no input: this pipeline holds no data, so .branch()'s runner needs one - call it with the items to route",
-        );
-      }
-      const source =
-        input === undefined
-          ? (owner as unknown as AnyPipeline<T>)
-          : (owner.bind(input as Iterable<In>) as unknown as AnyPipeline<T>);
+      const source = owner.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
 
       const results: Record<string, unknown[]> = {};
       for (const key of Object.keys(branches)) {
@@ -1399,7 +1387,7 @@ export class Pipeline<
       return results as BranchResults<T, B>;
     };
 
-    return run as BranchRunner<In, BranchResults<T, B>, M>;
+    return run as BranchRunner<In, BranchResults<T, B>>;
   }
 
   /**

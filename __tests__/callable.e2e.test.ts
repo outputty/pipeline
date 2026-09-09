@@ -353,3 +353,85 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
     expect(wrapped.apply(null, [[1, 2, 3]])).toEqual([2, 4, 6]);
   });
 });
+
+describe("L8 review findings, each reproduced before it was fixed", () => {
+  it("keeps a trailing .buffer() from re-cutting the source", () => {
+    // Before: the deferred arm set `chunkSize` unconditionally, and `fromSource` reads it for the
+    // SOURCE cut - so a `.buffer()` written after a stage re-cut the source retroactively.
+    // Measured: `.transform(t => t.reduce(sum, 0)).buffer(3)` over `[1..6]` gave `[6, 15]` where
+    // the same chain without the trailing `.buffer(3)` gave `[21]`.
+    const folded = new Pipeline<number>().transform((t) =>
+      t.reduce((a: number, x: number) => a + x, 0),
+    );
+    expect(folded([1, 2, 3, 4, 5, 6]).toArray()).toEqual([21]);
+    expect(folded.buffer(3)([1, 2, 3, 4, 5, 6]).toArray()).toEqual([21]);
+
+    // A `.buffer()` ahead of every stage still cuts the source, which is the case that needs it.
+    const cut = new Pipeline<number>()
+      .buffer(3)
+      .transform((t) => t.reduce((a: number, x: number) => a + x, 0));
+    expect(cut([1, 2, 3, 4, 5, 6]).toArray()).toEqual([6, 15]);
+  });
+
+  it("gives .branch()'s runner its input on an async chain too", async () => {
+    // Before: `BranchRunner` keyed on Mode while the runtime keyed on boundness. With `.from()`
+    // gone every pipeline is deferred, so an async chain typed the runner `() => Promise<R>` -
+    // `TS2554` on the call that works, and `no input:` thrown by the call that compiled.
+    const asyncChain = new Pipeline<number>().transform((t) => t.map(async (x) => x * 2));
+    const split = asyncChain.branch({ big: { predicate: (x: number) => x > 2 } });
+    expect(await split([1, 2, 3])).toEqual({ big: [4, 6] });
+
+    const runner = new Pipeline<number>().branch({ all: { predicate: () => true } });
+    await expect((runner as unknown as () => Promise<unknown>)()).rejects.toThrow(/no input/);
+  });
+
+  it("runs a .local() region once per terminal, not twice", async () => {
+    // Before: each async terminal bound the chain twice - once to test for a sync chunk stream,
+    // once inside its own async arm - so a user's `build` callback ran twice per call.
+    let builds = 0;
+    const chain = new Pipeline<number>().local((p) => {
+      builds++;
+      return p.transform((t) => t.map(async (x) => x * 2));
+    });
+    await chain([1, 2, 3]).toArray();
+    expect(builds).toBe(1);
+  });
+
+  it("closes a sync source that a terminal stopped reading early", () => {
+    // Before: `drainSync`'s early exit abandoned the iterator, so a generator's `finally` never
+    // ran - a file handle or cursor held by a sync source leaked on `.first()` alone.
+    let closed = false;
+    function* source(): Generator<number> {
+      try {
+        yield 1;
+        yield 2;
+        yield 3;
+      } finally {
+        closed = true;
+      }
+    }
+    expect(new Pipeline<number>().buffer(1)(source()).first(1)).toEqual([1]);
+    expect(closed).toBe(true);
+  });
+
+  it("shows the same chunks whichever engine folded them", async () => {
+    // Before: the sync fold's deferred arms yielded unguarded, where the async engine guards on
+    // length - `[[],[],[],[15]]` against `[[15]]` for the identical chain.
+    const folded = new Pipeline<number>()
+      .buffer(2)
+      .transform((t) => t.map(async (x) => x))
+      .reduce((a: number, x: number) => a + x, 0);
+
+    const viaSync: number[][] = [];
+    for await (const chunk of folded([1, 2, 3, 4, 5]).chunks()) viaSync.push(chunk);
+
+    async function* stream(): AsyncGenerator<number> {
+      for (const x of [1, 2, 3, 4, 5]) yield x;
+    }
+    const viaAsync: number[][] = [];
+    for await (const chunk of folded(stream()).chunks()) viaAsync.push(chunk);
+
+    expect(viaSync).toEqual(viaAsync);
+    expect(viaSync).toEqual([[15]]);
+  });
+});
