@@ -12,6 +12,15 @@ import { createHook } from "node:async_hooks";
 
 import { Pipeline } from "@src/pipeline";
 import { PipelineResult } from "@src/result";
+import { SimpleContextManager } from "@src/context/simple";
+import { runFixture, expectFixtureOk, lastJsonLine, FIXTURE_TIMEOUT } from "./helpers/fixtures";
+
+/** Every chunk a pipeline yields, for the cases that assert a chunk BOUNDARY rather than items. */
+async function chunksOf(pipeline: unknown): Promise<unknown[]> {
+  const out: unknown[] = [];
+  for await (const chunk of pipeline as AsyncIterable<unknown>) out.push(chunk);
+  return out;
+}
 
 /** Counts every `Promise` created while `fn` runs, via `node:async_hooks`'s `PROMISE` resource
  * type - the same instrument `sync-mode.e2e.test.ts` uses, and for the same reason: patching
@@ -212,5 +221,165 @@ describe("the compiler refuses what the split forbids", () => {
     // returns an iterator.
     // @ts-expect-error an async result is not a sync iterable
     expect(() => [...withVat(asStream(ordersA))]).toThrow();
+  });
+});
+
+describe("L6 review findings, each reproduced before it was fixed", () => {
+  it("refuses calling a pipeline that already named a source", () => {
+    // Before: the call replayed only `_pendingStages`, so stages already materialised into the old
+    // chunk stream were dropped without a word. Measured: `.from([1,2,3]).transform(x => x * 2)`
+    // drained in place to `[2,4,6]`, then the same object called with `[10,20]` gave `[10,20]`.
+    const bound = new Pipeline<number>().from([1, 2, 3]).transform((t) => t.map((x) => x * 2));
+    expect(bound.toArray()).toEqual([2, 4, 6]);
+    expect(() => (bound as unknown as (i: number[]) => unknown)([10, 20])).toThrow(
+      /already named a source/,
+    );
+  });
+
+  it("keeps .buffer()'s position in a chain composed before the input", async () => {
+    // Before: the source-less arm recorded only the SIZE, which `fromSource` applied to the source
+    // cut - so a `.buffer()` written after a stage took effect before it. Measured: chunks came out
+    // `[[1,1,2,2],[3,3,4,4]]` against `[[1,1],[2,2],[3,3],[4,4]]` for the same chain after
+    // `.from()`.
+    const viaFrom = await chunksOf(
+      new Pipeline<number>()
+        .from([1, 2, 3, 4])
+        .transform((t) => t.flatMap((x) => [x, x]))
+        .buffer(2),
+    );
+    const viaCall = await chunksOf(
+      new Pipeline<number>()
+        .transform((t) => t.flatMap((x) => [x, x]))
+        .buffer(2)
+        .from([1, 2, 3, 4]),
+    );
+    expect(viaCall).toEqual(viaFrom);
+    expect(viaFrom).toEqual([
+      [1, 1],
+      [2, 2],
+      [3, 3],
+      [4, 4],
+    ]);
+  });
+
+  it("still cuts the source when .buffer() comes before every stage", async () => {
+    const cut = await chunksOf(new Pipeline<number>().buffer(2).from([1, 2, 3, 4, 5]));
+    expect(cut).toEqual([[1, 2], [3, 4], [5]]);
+  });
+
+  it("gives each call its own context, and keeps a caller-supplied one", () => {
+    // Before: one default manager was shared by every call of a reusable chain, so a counting map
+    // reported `6` after two three-item calls instead of `3` per run.
+    const counting = new Pipeline<number>().transform((t) =>
+      t.map((x, ctx) => {
+        ctx?.set("n", ((ctx.get("n") as number) ?? 0) + 1);
+        return x;
+      }),
+    );
+    counting([1, 2, 3]).toArray();
+    counting([1, 2, 3]).toArray();
+    expect(counting.contextManager.get("n")).toBeUndefined();
+
+    // A manager the caller named is theirs, and still accumulates across calls by design (#31).
+    const mine = new SimpleContextManager();
+    const owned = new Pipeline<number>({ context: mine }).transform((t) =>
+      t.map((x, ctx) => {
+        ctx?.set("n", ((ctx.get("n") as number) ?? 0) + 1);
+        return x;
+      }),
+    );
+    owned([1, 2, 3]).toArray();
+    owned([1, 2, 3]).toArray();
+    expect(mine.get("n")).toBe(6);
+  });
+
+  it(
+    "constructs where code generation from strings is banned",
+    async () => {
+      // Before: `class Pipeline extends Function` called `super()`, which runs
+      // `CreateDynamicFunction`. Measured under `node --disallow-code-generation-from-strings`:
+      // `EvalError: Code generation from strings disallowed for this context` on the FIRST
+      // `new Pipeline()`. That contradicted the package's own runtime-neutrality claim, so the
+      // prototype is reparented onto `Function.prototype` once instead.
+      //
+      // The ban is a process-level flag, so this runs in a child process. It is the real assertion;
+      // the in-process checks below only say what the reparenting buys.
+      const fixture = await runFixture("__tests__/fixtures/no-codegen.ts", [
+        "--disallow-code-generation-from-strings",
+      ]);
+      expectFixtureOk(fixture);
+      expect(lastJsonLine(fixture)).toEqual({
+        values: [2, 4, 6],
+        isFunction: true,
+        hasBind: true,
+      });
+
+      const p = new Pipeline<number>();
+      expect(p).toBeInstanceOf(Function);
+      expect(typeof p.bind).toBe("function");
+      expect(typeof p.call).toBe("function");
+    },
+    FIXTURE_TIMEOUT,
+  );
+
+  it("leaves no unhandled rejection when sync iteration refuses an async result", async () => {
+    // Before: `[Symbol.iterator]` started the drain, then threw and abandoned its promise -
+    // `UNHANDLED REJECTION: boom` killed the process under Node's default.
+    const failing = new Pipeline<number>().transform((t) =>
+      t.map((x) => {
+        if (x === 1) throw new Error("boom");
+        return x;
+      }),
+    );
+    let unhandled: unknown;
+    const record = (reason: unknown): void => void (unhandled = reason);
+    process.on("unhandledRejection", record);
+    try {
+      expect(() => [...(failing(asStream([1, 2, 3])) as unknown as Iterable<number>)]).toThrow(
+        /not a sync iterable/,
+      );
+      await new Promise((r) => setTimeout(r, 60));
+    } finally {
+      process.off("unhandledRejection", record);
+    }
+    expect(unhandled).toBeUndefined();
+  });
+
+  it("captures a reduce seed once, so a mutable seed accumulates across calls", () => {
+    // Not a fix - a recorded constraint. `initial` is captured when the stage is composed, which is
+    // invisible for an immutable seed and wrong for a mutable one. `.reduce()`'s own docstring says
+    // to fold into a fresh value instead; this pins the behaviour so the docs cannot drift from it.
+    const mutating = new Pipeline<number>().reduce(
+      (acc: number[], x: number) => (acc.push(x), acc),
+      [] as number[],
+    );
+    expect(mutating([1, 2, 3]).toArray()).toEqual([[1, 2, 3]]);
+    expect(mutating([1, 2, 3]).toArray()).toEqual([[1, 2, 3, 1, 2, 3]]);
+
+    const immutable = new Pipeline<number>().reduce(
+      (acc: number[], x: number) => [...acc, x],
+      [] as number[],
+    );
+    expect(immutable([1, 2, 3]).toArray()).toEqual([[1, 2, 3]]);
+    expect(immutable([1, 2, 3]).toArray()).toEqual([[1, 2, 3]]);
+  });
+
+  it("shadows Function.prototype.apply, the one break in substitutability", () => {
+    const doubled = new Pipeline<number>().transform((t) => t.map((x) => x * 2));
+    // `.call` reaches the call signature and produces a result.
+    const viaCall = (doubled as unknown as { call: (t: unknown, i: number[]) => unknown }).call(
+      null,
+      [1, 2, 3],
+    );
+    expect(viaCall).toBeInstanceOf(PipelineResult);
+    // `.apply` reaches `Pipeline.apply()`, the stage method, and produces a pipeline.
+    const viaApply = (doubled as unknown as { apply: (t: unknown, a: unknown[]) => unknown }).apply(
+      null,
+      [[1, 2, 3]],
+    );
+    expect(viaApply).toBeInstanceOf(Pipeline);
+    // The wrapper the docstring recommends works everywhere.
+    const wrapped = (input: number[]): number[] => doubled(input).toArray();
+    expect(wrapped.apply(null, [[1, 2, 3]])).toEqual([2, 4, 6]);
   });
 });

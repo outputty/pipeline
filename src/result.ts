@@ -105,6 +105,12 @@ export class PipelineResult<T, M extends PipelineMode> {
   [Symbol.iterator](): M extends "sync" ? Iterator<T> : never {
     const drained = this.bound().toArray();
     if (isThenable(drained)) {
+      // The drain has already STARTED, so abandoning its promise here leaves a rejection nobody
+      // handles - fatal under Node's default. Measured on an async chain whose map throws: the
+      // `TypeError` below printed, then `UNHANDLED REJECTION: boom` killed the process. The
+      // throwaway handler marks it handled; the caller learns about the failure through the
+      // `for await` or `.toArray()` they were supposed to use.
+      drained.catch(() => {});
       throw new TypeError(
         "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
       );

@@ -192,11 +192,13 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    * `createPipeline()` (above) already makes the RUNTIME value an `HttpPipeline`.
    */
   override transform<U, M2 extends "sync" | "async">(
-    // The same `"unset"` refusal the base carries (#90). Without it here, an override re-declares
-    // `transform` WITHOUT the guard and a source-less dispatching chain compiles, then resolves to
-    // `[]` at runtime - a chain composed with no engine decided, which is what the guard exists to
-    // make impossible.
-    this: M extends "unset" ? never : Pipeline<T, "async", "async">,
+    // The conditional `this` this override used to carry is deleted with the base's own (#90). It
+    // read `M extends "unset"`, and this class fixes `M` at `"async"`, so it never once refused
+    // anything - and once `In` existed it actively broke a SECOND type-changing `.transform()`,
+    // because the guard's own type pins `In` to `T` while the two diverge at the first stage that
+    // changes the item type: `TS2684: The 'this' context of type 'HttpPipeline<string, "async",
+    // number>' is not assignable to method's 'this' of type 'Pipeline<string, "async", "async",
+    // string>'`.
     builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
   ): HttpPipeline<U, M, In> {
     return super.transform(builder) as unknown as HttpPipeline<U, M, In>;

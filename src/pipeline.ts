@@ -221,6 +221,14 @@ export interface PipelineOptions {
    * `.from()` once an input arrives (#90). Not intended for direct external use.
    */
   pendingStages?: PendingStage[];
+  /**
+   * Internal: whether `context` was invented by a `Pipeline` rather than named by the caller (#90).
+   * A default-built manager belongs to one run, so a reusable chain gets a fresh one per call; a
+   * `context` or `contextFactory` the caller named is theirs and is kept. Carried explicitly
+   * through copy-on-write, since every such call passes an already-resolved `context` and would
+   * otherwise look caller-supplied. Not intended for direct external use.
+   */
+  contextIsDefault?: boolean;
 }
 
 /** A registered reduce stage's own definition - `pushReduceStage()` (below) is the one place that
@@ -335,7 +343,7 @@ export class Pipeline<
   M extends PipelineMode = "unset",
   P extends SourcePolicy = "shape",
   In = T,
-> extends Function {
+> {
   // Protected (#17), not private: a dispatching subclass's own overridden `createPipeline()`
   // (below) reads these to carry them into the next instance the same way this base
   // implementation does - `private` would put them out of reach from `src/pipelines/`.
@@ -368,6 +376,9 @@ export class Pipeline<
   protected _chunkSize!: number;
   /** Stages composed before a source existed - see `PipelineOptions.pendingStages`. */
   protected _pendingStages!: PendingStage[];
+  /** Whether `_context` was invented here rather than named by the caller - see
+   * `PipelineOptions.contextIsDefault`. */
+  protected _contextIsDefault!: boolean;
 
   /**
    * Create a new Pipeline from a data source.
@@ -376,25 +387,46 @@ export class Pipeline<
    * @param options - Optional pipeline configuration
    */
   constructor(options?: PipelineOptions) {
-    // `extends Function` plus a constructor that RETURNS a function is what makes an instance
-    // callable (#90). Two halves, both load-bearing:
+    // A constructor that RETURNS a function is what makes an instance callable (#90). Two halves,
+    // both load-bearing:
     //
     // - Returning `self` makes the instance a function. A derived class's own `this` becomes
-    //   whatever `super()` returned, so `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` set
-    //   their extra knobs onto this same object without changing a line.
+    //   whatever the base constructor returned, so `ConcurrentPipeline`/`HttpPipeline`/
+    //   `ClusterPipeline` set their extra knobs onto this same object without changing a line.
     // - `setPrototypeOf(self, new.target.prototype)` restores the methods and `instanceof` that a
     //   bare function would not have, AND resolves `this.constructor` to the real subclass, which
     //   is what `createPipeline()`'s copy-on-write depends on.
     //
-    // `extends Function` is what keeps it a REAL function. Without it the prototype chain reaches
-    // `Object.prototype` instead, leaving `instanceof Function` false and `.bind`/`.call`/`.apply`
-    // undefined - callable, but not substitutable for a function anywhere a caller passes one on.
-    super();
-    const self = ((input: PipelineSource<unknown>) =>
-      new PipelineResult<T, PipelineMode>(
+    // `Pipeline.prototype` is reparented onto `Function.prototype` ONCE, below this class, which is
+    // what keeps every instance a real function - `instanceof Function`, `.bind`, `.call`. The
+    // obvious `class Pipeline extends Function` does the same thing but calls `super()`, which runs
+    // `CreateDynamicFunction`: banned wherever code generation from strings is, so `new Pipeline()`
+    // threw `EvalError: Code generation from strings disallowed for this context` under
+    // `node --disallow-code-generation-from-strings`, and would on a CSP page or a Cloudflare
+    // Worker. Reparenting the prototype costs nothing and runs everywhere.
+    //
+    // ⚠ One exception to substitutability: `.apply` is a STAGE method here, so it shadows
+    // `Function.prototype.apply`. Measured: `score.call(null, [1,2,3])` returns a `PipelineResult`,
+    // `score.apply(null, [[1,2,3]])` returns a `Pipeline` - it reached `Pipeline.apply()`. `.bind`
+    // and `.call` are unaffected. A consumer that invokes callbacks via `fn.apply(ctx, args)` needs
+    // a wrapper: `(input) => score(input)`.
+    const self = ((input: PipelineSource<unknown>) => {
+      // A pipeline that already named a source through `.from()` has materialised its stages into
+      // a chunk stream, and only stages recorded SINCE then can be replayed onto a new input - so
+      // calling one silently dropped every earlier stage. Measured: `.from([1,2,3]).transform(x =>
+      // x * 2)` drained in place to `[2,4,6]`, then the same object called with `[10,20]` returned
+      // `[10,20]`. Refused rather than half-honoured; the state disappears entirely once `.from()`
+      // does, at which point every pipeline is callable and none is bound.
+      if (self._mode !== "unset") {
+        throw new Error(
+          "cannot call a pipeline that already named a source with .from() - build the chain without .from() and call it with the input instead",
+        );
+      }
+      return new PipelineResult<T, PipelineMode>(
         self as unknown as Pipeline<unknown, "sync" | "async", SourcePolicy, unknown>,
         input,
-      )) as unknown as Pipeline<T, M, P, In>;
+      );
+    }) as unknown as Pipeline<T, M, P, In>;
     Object.setPrototypeOf(self, new.target.prototype);
 
     // `contextFactory` runs ONLY when `context` is absent, and only HERE - every copy-on-write
@@ -402,6 +434,14 @@ export class Pipeline<
     // `context`, so a `ClusterPipeline` chain's later `.transform()` calls never re-invoke it
     // (#31, Done-when 6: once per process, not once per stage or per request).
     self._context = options?.context ?? options?.contextFactory?.() ?? new SimpleContextManager();
+    // Whether the context above is one this pipeline INVENTED, rather than one the caller named.
+    // A caller who passes `context` or `contextFactory` owns the instance and keeps it across every
+    // call; a default-built one belongs to a single run, and is replaced per call by `fromSource`.
+    // Without that, one reusable chain accumulated: a `ctx.set("n", n + 1)` map reported `n === 6`
+    // after two three-item calls, where each run should have seen `3`.
+    self._contextIsDefault =
+      options?.contextIsDefault ??
+      (options?.context === undefined && options?.contextFactory === undefined);
     self._chunkTransforms = options?.chunkTransforms ?? [];
     self._reduceStages = options?.reduceStages ?? new Map();
     self._runHandler = options?.runHandler;
@@ -467,6 +507,7 @@ export class Pipeline<
           ...this.carriedOptions(),
           mode,
           pendingStages: [],
+          context: this.contextForRun(),
           syncChunks: buildSyncChunkGenerator<U>(this._chunkSize)(items),
           syncPreBufferItems: items,
           preBufferItems: null,
@@ -480,6 +521,7 @@ export class Pipeline<
         ...this.carriedOptions(),
         mode,
         pendingStages: [],
+        context: this.contextForRun(),
         preBufferItems: items,
         syncChunks: null,
         syncPreBufferItems: null,
@@ -560,7 +602,16 @@ export class Pipeline<
       mode: this._mode,
       syncChunks: this._syncChunks,
       pendingStages: this._pendingStages,
+      contextIsDefault: this._contextIsDefault,
     };
+  }
+
+  /** The context manager one RUN gets. A caller who named a `context` or a `contextFactory` keeps
+   * the instance they own across every call; a default-built manager is per-run, so two calls of
+   * one reusable chain never see each other's writes (#90). */
+  protected contextForRun(): IContextManager {
+    if (!this._contextIsDefault) return this._context;
+    return this.isDeferred() ? new SimpleContextManager() : this._context;
   }
 
   /**
@@ -574,9 +625,10 @@ export class Pipeline<
    * `new Pipeline<number>().transform((t) => t.map((x) => x * 2))` records one stage; calling that
    * pipeline with `[1, 2, 3]` replays it and yields `[2, 4, 6]`.
    */
-  protected defer<U>(run: PendingStage): AnyPipeline<U> {
+  protected defer<U>(run: PendingStage, extra?: PipelineOptions): AnyPipeline<U> {
     return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
       ...this.carriedOptions(),
+      ...extra,
       pendingStages: [...this._pendingStages, run],
     });
   }
@@ -864,8 +916,15 @@ export class Pipeline<
     // declares a bare `void` return, which accepts an `async` function silently, so without the
     // overload above the chain kept its `"sync"` type while `dropOrRethrow` deferred on the handler's
     // own promise - a chain typed `number[]` handed back a pending `Promise` the moment an error
-    // actually fired. A handler that never fires makes the widening pessimistic, never wrong: an
-    // `await` on the array it still returns is a no-op.
+    // actually fired.
+    //
+    // ⚠ The widening is TYPE-ONLY: `_mode` still comes from the input's own shape, so a chain over
+    // a sync input hands back a plain array while its type says `Promise<T[]>`. Measured:
+    // `new Pipeline<number>().onError(async () => {}).transform(t => t.map(x => x * 2))` called
+    // with `[1,2,3]` returns `[2,4,6]` with `typeof result.then === "undefined"`. `await` on that
+    // array is a no-op, so the pessimism is safe there; `.then(…)` on it is a `TypeError`. The
+    // handler cannot be inspected for asynchrony without guessing (a plain function returning a
+    // promise is indistinguishable from a sync one), so the type stays pessimistic by decision.
     return this.createPipeline<T>(this._chunks, {
       ...this.carriedOptions(),
       runHandler: handler,
@@ -1081,16 +1140,18 @@ export class Pipeline<
    * intermediate 2- or 3-cut.
    */
   buffer(size: number): this {
-    // Before `.from()` there is no stream to cut, so the size is only RECORDED (#90) - `fromSource`
-    // reads it in place of `DEFAULT_CHUNK_SIZE` when the source finally arrives. Without this arm
-    // the call built an empty generator that `.from()` then overwrote, so `new
-    // Pipeline().buffer(2).from([1,2,3,4,5])` yielded one chunk of five and the declared boundary
-    // of 2 never applied, with no error.
-    if (this._mode === "unset") {
-      return this.createPipeline<T>(this._chunks, {
-        ...this.carriedOptions(),
-        chunkSize: size,
-      }) as this;
+    // Before an input there is no stream to cut, so the call is recorded and replayed in PLACE
+    // (#90) - the same deferral `.apply()`/`.reduce()`/`.local()` use, for the same reason.
+    //
+    // Recording only the size, as an earlier form did, loses the call's position: `fromSource` then
+    // applied it to the SOURCE cut, so a `.buffer()` written after a stage took effect before it.
+    // Measured on `.transform(t => t.flatMap(x => [x, x])).buffer(2)` over `[1,2,3,4]` - chunks
+    // came out `[[1,1,2,2],[3,3,4,4]]` where the same chain after `.from()` gives
+    // `[[1,1],[2,2],[3,3],[4,4]]`. `chunkSize` is still carried alongside, because a `.buffer()`
+    // written BEFORE any stage must also cut the source itself, which is what it now does by
+    // replaying against a pipeline whose source is already cut at that size.
+    if (this.isDeferred()) {
+      return this.defer<T>((p) => p.buffer(size), { chunkSize: size }) as this;
     }
 
     // The `"sync"` arm recuts with the sync chunker (#90) - going through the async one here would
@@ -1132,6 +1193,12 @@ export class Pipeline<
    * reducer folds with no `Promise` created, so the stage keeps the chain's own Mode. A
    * `Promise`-returning reducer takes the first overload and widens the whole chain, the same rule
    * `.transform()` follows.
+   *
+   * ⚠ `initial` is captured ONCE, when the stage is composed, so a reusable chain hands every call
+   * the same value. That is invisible for an immutable seed and wrong for a mutable one: measured,
+   * `new Pipeline<number>().reduce((acc, x) => (acc.push(x), acc), [])` returns `[[1,2,3]]` on its
+   * first call and `[[1,2,3,1,2,3]]` on its second. Fold into a fresh value (`[...acc, x]`), or
+   * build the chain inside a function so each call gets its own seed.
    *
    * `new Pipeline().from([1,2,3,4,5]).reduce((acc, x) => acc + x, 0).transform((t) => t.map((n) => n *
    * 10)).toArray()` → `[1500]`, a `number[]` with no `await`.
@@ -1556,3 +1623,13 @@ export class Pipeline<
     }
   }
 }
+
+// Every `Pipeline` instance IS a function (#90, see the constructor), so its prototype chain must
+// reach `Function.prototype` - that is what makes `instanceof Function`, `.bind` and `.call` work
+// on one. Done here, once, rather than via `class Pipeline extends Function`: `super()` on a
+// `Function` subclass runs `CreateDynamicFunction`, which throws `EvalError: Code generation from
+// strings disallowed for this context` wherever code generation is banned (a CSP page, a Cloudflare
+// Worker, `node --disallow-code-generation-from-strings`). Every subclass inherits the reparenting
+// through its own prototype chain, so this line covers `ConcurrentPipeline`, `HttpPipeline` and
+// `ClusterPipeline` too.
+Object.setPrototypeOf(Pipeline.prototype, Function.prototype);
