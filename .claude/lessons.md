@@ -7,6 +7,18 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-09 Verified README/examples.md fences by hand, then Prettier's format gate rewrote them
+
+Building #84 (README/examples.md docs pass), 8 new runnable Pattern fences plus the Merging example
+were hand-verified with real `node --import tsx` runs before `pnpm check` ever ran. `pnpm check`
+then failed at `prettier --check .` on `README.md`; `prettier --write` (embedded-language formatting
+reformats recognized languages inside markdown fences) collapsed one chain from three lines to one
+and touched several other blocks, so every block Prettier rewrote needed a second, identical
+verification pass for no reason but sequencing. Recorded as `~/.claude/rules/code.md`: "Run the
+repo's format and lint step over edited files before hand-verifying their behavior, never after - an
+auto-fixer (a formatter's embedded-code rewrite, a lint `--fix`) can rewrite the exact bytes just
+verified, forcing a second verification pass."
+
 ## 2026-09-08 A rejected `AskUserQuestion` got two "still waiting" replies before switching to stated assumptions
 
 Building #78, an `AskUserQuestion` about two ticket-scoping ambiguities came back rejected -
