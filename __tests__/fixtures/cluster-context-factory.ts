@@ -66,7 +66,7 @@ const out = await pipeline
       builtPid: (ctx as PoolContext).builtPid,
       ctxClass: ctx.constructor.name,
     })),
-  )
+  )(items)
   .toArray();
 
 console.log(

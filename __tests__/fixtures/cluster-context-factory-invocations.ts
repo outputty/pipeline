@@ -49,7 +49,7 @@ const out = await pipeline
   .buffer(1)
   .transform((t) =>
     t.map((_x: number, _ctx) => ({ pid: process.pid, factoryCallsSoFar: factoryCalls })),
-  )
+  )(items)
   .toArray();
 
 const maxCallsByPid = new Map<number, number>();

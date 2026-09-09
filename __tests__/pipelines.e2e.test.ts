@@ -422,7 +422,7 @@ describe("#17 ordered: true restores source order under a slow first chunk (Done
           await delay(x === 1 ? 120 : 10);
           return x;
         }),
-      )
+      )([1, 2, 3, 4])
       .toArray();
     expect(out).toEqual([1, 2, 3, 4]);
   });

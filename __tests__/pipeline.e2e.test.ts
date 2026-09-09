@@ -86,7 +86,7 @@ describe("Pipeline", () => {
       expect(afterContext.contextManager).toBe(mine);
 
       await afterContext
-        .transform((t) => t.map((x: number, ctx) => (ctx.set("k", x), x)))
+        .transform((t) => t.map((x: number, ctx) => (ctx.set("k", x), x)))([1, 2])
         .toArray();
 
       expect(mine.constructor.name).toBe("LoggingContext");
@@ -96,9 +96,9 @@ describe("Pipeline", () => {
     it("propagates a manager's own rejection instead of bypassing it (#31, Done-when 2)", () => {
       const sealed = new SealedContext({ known: 1 });
 
-      expect(() => new Pipeline<number>({ context: sealed }).context({ unknown: 2 })).toThrow(
-        "SealedContext: unknown key 'unknown'",
-      );
+      expect(() =>
+        new Pipeline<number>({ context: sealed }).from([1]).context({ unknown: 2 }),
+      ).toThrow("SealedContext: unknown key 'unknown'");
     });
   });
 
@@ -128,7 +128,7 @@ describe("Pipeline", () => {
       const pipeline = new Pipeline<number>();
 
       const results = await pipeline
-        .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 2))
+        .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 2))([1, 2, 3])
         .toArray();
 
       expect(results).toEqual([4, 6]);
@@ -139,7 +139,7 @@ describe("Pipeline", () => {
 
       const results = await pipeline
         .transform((t) => t.map((s: string) => s.toUpperCase()))
-        .transform((t) => t.map((s: string) => s + "!"))
+        .transform((t) => t.map((s: string) => s + "!"))(["hello", "world"])
         .toArray();
 
       expect(results).toEqual(["HELLO!", "WORLD!"]);
