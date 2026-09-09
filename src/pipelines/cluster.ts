@@ -147,7 +147,7 @@ async function* emptyAsyncIterable(): AsyncGenerator<never> {}
  * `new ClusterPipeline([1,2,3,4,5]).transform((t) => t.map((x) => x * 2)).toArray()` →
  * `[2,4,6,8,10]`, served by real worker processes.
  */
-export class ClusterPipeline<T, M extends PipelineMode = "unset"> extends HttpPipeline<T, M> {
+export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipeline<T> {
   /** Worker processes to bring up on first drain. Default `os.availableParallelism()`. */
   readonly workers: number;
   /** This pipeline's stable position among every `ClusterPipeline` constructed in this process -
@@ -184,11 +184,11 @@ export class ClusterPipeline<T, M extends PipelineMode = "unset"> extends HttpPi
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
-  ): ClusterPipeline<U, "sync" | "async"> {
+  ): ClusterPipeline<U, M> {
     const Ctor = this.constructor as new (
       data: PipelineSource<U>,
       options?: ClusterPipelineConstructorOptions & { url: string },
-    ) => ClusterPipeline<U, "sync" | "async">;
+    ) => ClusterPipeline<U, M>;
     const merged = {
       ...options,
       ...this.concurrentOptions(),
@@ -201,20 +201,19 @@ export class ClusterPipeline<T, M extends PipelineMode = "unset"> extends HttpPi
   }
 
   override transform<U, M2 extends "sync" | "async">(
-    this: M extends "unset" ? never : Pipeline<T, M, "async">,
-    builder: (t: Transformer<T, T, M & ("sync" | "async")>) => Transformer<T, U, M2>,
-  ): ClusterPipeline<U, "async"> {
-    return super.transform(builder) as unknown as ClusterPipeline<U, "async">;
+    builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
+  ): ClusterPipeline<U, M> {
+    return super.transform(builder) as unknown as ClusterPipeline<U, M>;
   }
 
-  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ClusterPipeline<U, "async"> {
-    return super.apply(transformer) as unknown as ClusterPipeline<U, "async">;
+  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ClusterPipeline<U, M> {
+    return super.apply(transformer) as unknown as ClusterPipeline<U, M>;
   }
 
   /** Re-declared ONLY to narrow the static return type back to `ClusterPipeline<U>` - same reason
    * as `.transform()`/`.apply()` above. `HttpPipeline.reduce()`'s own logic runs unchanged. */
-  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ClusterPipeline<U, "async"> {
-    return super.reduce(fn, initial) as unknown as ClusterPipeline<U, "async">;
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ClusterPipeline<U, M> {
+    return super.reduce(fn, initial) as unknown as ClusterPipeline<U, M>;
   }
 
   /**
@@ -231,16 +230,16 @@ export class ClusterPipeline<T, M extends PipelineMode = "unset"> extends HttpPi
    *
    * `new ClusterPipeline({}).from([1, 2, 3])` → `ClusterPipeline<number, "async">`.
    */
-  override from<U>(data: PipelineSource<U>): ClusterPipeline<U, "async"> {
-    return this.fromSource<U>(data, "async") as unknown as ClusterPipeline<U, "async">;
+  override from<U>(data: PipelineSource<U>): ClusterPipeline<U, M> {
+    return this.fromSource<U>(data, "async") as unknown as ClusterPipeline<U, M>;
   }
 
   protected override sourcePolicy(): SourcePolicy {
     return "async";
   }
 
-  override local<U>(build: (p: AnyPipeline<T>) => AnyPipeline<U>): ClusterPipeline<U, "async"> {
-    return super.local(build) as unknown as ClusterPipeline<U, "async">;
+  override local<U>(build: (p: AnyPipeline<T>) => AnyPipeline<U>): ClusterPipeline<U, M> {
+    return super.local(build) as unknown as ClusterPipeline<U, M>;
   }
 
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain
@@ -264,7 +263,7 @@ export class ClusterPipeline<T, M extends PipelineMode = "unset"> extends HttpPi
   }
 
   protected override stageWork<U>(
-    transformer: Transformer<T, U>,
+    transformer: Transformer<T, U, "sync" | "async">,
     stageIndex: number,
   ): InternalTransformer<T, U> {
     const dispatch = super.stageWork(transformer, stageIndex);

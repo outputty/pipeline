@@ -789,11 +789,11 @@ export class Pipeline<
     t: (
       transformer: Transformer<T, T, M & ("sync" | "async")>,
     ) => Transformer<T, U, M2>,
-  ): Pipeline<U, M2, P> {
+  ): Pipeline<U, AssignMode<P, M2>, P> {
     const transformer = t(
       new Transformer<T, T, M & ("sync" | "async")>({ transform: (chunk) => chunk }),
     );
-    return this.apply(transformer) as unknown as Pipeline<U, M2, P>;
+    return this.apply(transformer) as unknown as Pipeline<U, AssignMode<P, M2>, P>;
   }
 
   /**
@@ -941,9 +941,19 @@ export class Pipeline<
     // it internally. Collapsing this to one arm - `p.transform((t) => t.tap(arg))` - fails to
     // typecheck. Never edit one arm without the other; a real behavior change belongs in
     // `Transformer.tap` itself, which both arms delegate to unconditionally.
-    return this.local((p) =>
-      arg instanceof Transformer ? p.transform((t) => t.tap(arg)) : p.transform((t) => t.tap(arg)),
-    ) as this;
+    // The region is typed at a CONCRETE Mode before `.transform()` is called on it: inside this
+    // generic method `M` is still abstract, so `.transform()`'s own `M extends "unset" ? never`
+    // guard cannot resolve and refuses the receiver. The guard is for a CALLER who has not called
+    // `.from()` yet; `.tap()` is only reachable from a pipeline that already has a source, so the
+    // narrowing is sound - `M` here is never `"unset"`.
+    return this.local((p) => {
+      const sourced = p as Pipeline<T, "sync" | "async", "shape"> as Pipeline<T, "sync", "shape">;
+      return (
+        arg instanceof Transformer
+          ? sourced.transform((t) => t.tap(arg))
+          : sourced.transform((t) => t.tap(arg))
+      ) as unknown as AnyPipeline<T>;
+    }) as this;
   }
 
   /**
