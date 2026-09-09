@@ -243,24 +243,25 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     // argument mismatch, by deleting the new directive once and reading what tsc prints.
     function typeOnlyCheck() {
       const builder = new Pipeline<number>();
-      // @ts-expect-error - TS2684: the "unset" Mode refuses `.transform()`'s receiver until
-      // `.from()` has named a source (#90, Done-when 4)
+      // @ts-expect-error - TS2684: The 'this' context of type 'Pipeline<number, "unset", "shape">'
+      // is not assignable to method's 'this' of type 'never' - the refusal until `.from()` has
+      // named a source (#90, Done-when 4)
       builder.transform((t) => t.map((x) => x));
     }
     expect(typeof typeOnlyCheck).toBe("function");
   });
 
-  it("Done-when 7: the two-arg constructor still compiles - L3 is what removes it", () => {
-    // The BEFORE state, recorded so case 7 has a home. It cannot be `@ts-expect-error`'d at L1:
-    // the two-arg constructor is exactly what still works today, so a directive here would be
-    // `TS2578` and fail the gate.
-    //
-    // THIS CASE FLIPS BY ADDING A DIRECTIVE too. At L3 the call below stops compiling, a directive
-    // goes above it, and this test becomes the assertion that the removal really landed - alongside
-    // the sweep of every other call site across `src/`, `__tests__/`, `README.md` and `.claude/*.md`
-    // that the same layer carries.
-    const legacy = new Pipeline().from<number>([1, 2, 3]);
-    expect(legacy).toBeInstanceOf(Pipeline);
+  it("Done-when 7: the two-arg constructor no longer compiles", () => {
+    // Type-only: never executed. The directive below is the whole assertion, and `TS2578: Unused
+    // '@ts-expect-error' directive` is what fires if the old constructor is ever restored. The
+    // sweep this case also names - every call site in `src/`, `__tests__/`, `README.md` and
+    // `.claude/*.md` - is verified by `pnpm check` passing at all, since not one of them could
+    // compile against the new signature otherwise.
+    function typeOnlyCheck() {
+      // @ts-expect-error - TS2554: the constructor takes 0-1 arguments; the source moves to .from()
+      new Pipeline<number>([1, 2, 3], {});
+    }
+    expect(typeof typeOnlyCheck).toBe("function");
   });
 
   it("Done-when 5: a thenable-returning link widens the run rather than throwing", async () => {
