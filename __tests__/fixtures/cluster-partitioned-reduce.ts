@@ -7,32 +7,38 @@
  */
 import { ClusterPipeline } from "../../src";
 
-const sum = await new ClusterPipeline({ maxConcurrency: 2 })
-  .from([1, 2, 3, 4, 5])
+const sum = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+
   .buffer(2)
-  .reduce((acc: number, x: number) => acc + x, 0)
+  .reduce(
+    (acc: number, x: number) => acc + x,
+    0,
+  )([1, 2, 3, 4, 5])
   .toArray();
 
-const count = await new ClusterPipeline({ maxConcurrency: 2 })
-  .from([1, 2, 3, 4, 5])
+const count = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+
   .buffer(2)
-  .reduce((acc: number, _x: number) => acc + 1, 0)
+  .reduce(
+    (acc: number, _x: number) => acc + 1,
+    0,
+  )([1, 2, 3, 4, 5])
   .toArray();
 
-const merged = await new ClusterPipeline({ maxConcurrency: 2 })
-  .from([1, 2, 3, 4, 5])
+const merged = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+
   .buffer(2)
   .reduce((acc: number, x: number) => acc + x, 0)
-  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
+  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))([1, 2, 3, 4, 5])
   .toArray();
 
 // The count case merged, too - proves .local() isn't just adding numbers back together, it runs
 // the CALLER's own merge function, which here still sums (partial counts), not counts-of-counts.
-const countMerged = await new ClusterPipeline({ maxConcurrency: 2 })
-  .from([1, 2, 3, 4, 5])
+const countMerged = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+
   .buffer(2)
   .reduce((acc: number, _x: number) => acc + 1, 0)
-  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
+  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))([1, 2, 3, 4, 5])
   .toArray();
 
 if (sum.length > 0 || count.length > 0 || merged.length > 0 || countMerged.length > 0) {

@@ -4,7 +4,7 @@
  *
  * Run as a child process by `__tests__/callable.e2e.test.ts`, because the ban is a process-level
  * flag. `class Pipeline extends Function` failed here with `EvalError: Code generation from strings
- * disallowed for this context`, thrown by `super()` on the first `new Pipeline()`.
+ * disallowed for this context`, thrown by `super()` on the first `new Pipeline<number>()`.
  */
 import { Pipeline } from "../../src";
 

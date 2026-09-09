@@ -29,16 +29,16 @@ class CountingContext implements IContextManager {
 
 const workers = 2;
 const chunkCount = 20;
-const items = Array.from({ length: chunkCount }, (_, i) => i);
+const items = Array;
 
-const pipeline = new ClusterPipeline({
+const pipeline = new ClusterPipeline<number>({
   workers,
   maxConcurrency: workers,
   contextFactory: () => {
     factoryCalls++;
     return new CountingContext();
   },
-}).from(items);
+});
 
 // Read right after construction, before any dispatch - the orchestrator's OWN process count,
 // never touched again by a later copy-on-write call (`.buffer()`/`.transform()` always pass the

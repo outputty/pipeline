@@ -13,7 +13,9 @@
 
 import type { PipelineMode, SourcePolicy } from "./types";
 import type { Pipeline, PipelineSource } from "./pipeline";
-import { isThenable } from "./utils/helpers";
+import type { MaybeAsyncChunks } from "./utils/chunk";
+import { chain, isThenable } from "./utils/helpers";
+import { drainSync, drainSyncSettled } from "./utils/chunk";
 
 /** The pipeline shape a result drains, with the Mode and policy erased - a result is handed its
  * pipeline by `Pipeline`'s own call signature, which has already fixed both. */
@@ -43,10 +45,16 @@ export class PipelineResult<T, M extends PipelineMode> {
     this._input = input;
   }
 
-  /** Binds the input to the chain, producing a drainable pipeline. Runs once per terminal call,
-   * which is what makes every terminal re-drain. */
-  private bound(): BoundPipeline<T> {
-    return this._pipeline.from(this._input as Iterable<unknown>) as unknown as BoundPipeline<T>;
+  /** Binds the input to the chain and returns the two views a terminal drains through. Runs once
+   * per terminal call, which is what makes every terminal re-drain. */
+  private drainable(): {
+    syncChunks: MaybeAsyncChunks<T> | null;
+    items: () => AsyncIterable<T>;
+  } {
+    return this._pipeline.drainable(this._input) as {
+      syncChunks: MaybeAsyncChunks<T> | null;
+      items: () => AsyncIterable<T>;
+    };
   }
 
   /**
@@ -56,7 +64,25 @@ export class PipelineResult<T, M extends PipelineMode> {
    * `score([1, 2, 3]).toArray()` → `[2, 4, 6]`, typed `number[]`, no `await`.
    */
   toArray(): M extends "sync" ? T[] : Promise<T[]> {
-    return this.bound().toArray() as M extends "sync" ? T[] : Promise<T[]>;
+    const results: T[] = [];
+    const { syncChunks } = this.drainable();
+    if (syncChunks !== null) {
+      return chain(
+        drainSync(syncChunks, (item) => void results.push(item)),
+        () => results,
+      ) as M extends "sync" ? T[] : Promise<T[]>;
+    }
+    return this.collectAsync(results, undefined) as M extends "sync" ? T[] : Promise<T[]>;
+  }
+
+  /** The async engine's own collect loop, shared by `toArray` and `first` (#90) - `limit` is
+   * `first`'s early exit, `undefined` for the whole stream. */
+  private async collectAsync(results: T[], limit: number | undefined): Promise<T[]> {
+    for await (const item of this.drainable().items()) {
+      results.push(item);
+      if (limit !== undefined && results.length >= limit) break;
+    }
+    return results;
   }
 
   /**
@@ -66,7 +92,22 @@ export class PipelineResult<T, M extends PipelineMode> {
    * `score([1, 2, 3]).first(2)` → `[2, 4]`.
    */
   first(n = 1): M extends "sync" ? T[] : Promise<T[]> {
-    return this.bound().first(n) as M extends "sync" ? T[] : Promise<T[]>;
+    if (n < 1) {
+      throw new Error("n must be at least 1");
+    }
+
+    const results: T[] = [];
+    const { syncChunks } = this.drainable();
+    if (syncChunks !== null) {
+      return chain(
+        drainSync(syncChunks, (item) => {
+          results.push(item);
+          return results.length >= n;
+        }),
+        () => results,
+      ) as M extends "sync" ? T[] : Promise<T[]>;
+    }
+    return this.collectAsync(results, n) as M extends "sync" ? T[] : Promise<T[]>;
   }
 
   /**
@@ -76,15 +117,26 @@ export class PipelineResult<T, M extends PipelineMode> {
    * `score([1, 2, 3]).consume()` → `undefined`, every stage having run.
    */
   consume(): M extends "sync" ? void : Promise<void> {
-    return this.bound().consume() as M extends "sync" ? void : Promise<void>;
+    const { syncChunks } = this.drainable();
+    if (syncChunks !== null) {
+      return drainSync(syncChunks, () => {}) as M extends "sync" ? void : Promise<void>;
+    }
+    return this.consumeAsync() as M extends "sync" ? void : Promise<void>;
+  }
+
+  /** `consume`'s async arm, split out so the method above stays a single expression per engine. */
+  private async consumeAsync(): Promise<void> {
+    for await (const _ of this.drainable().items()) {
+      // Just consume, don't collect
+    }
   }
 
   /**
    * Call `fn` for each item, in order.
    *
-   * The `Promise<void>` arm is declared FIRST for the reason `Pipeline.forEach` records: the
-   * void-return rule makes an `async` callback assignable to `(item: T) => void`, so a `void` arm
-   * listed first would swallow it and type the call `void` while every callback fired undrained.
+   * The `Promise<void>` arm is declared FIRST because the void-return rule makes an `async` callback
+   * assignable to `(item: T) => void`: a `void` arm listed first would swallow it, type the call
+   * `void`, and leave every callback fired and undrained.
    *
    * @example
    * `score([1, 2, 3]).forEach(write)` → `undefined`, `write` called with `2`, `4`, `6`.
@@ -92,7 +144,20 @@ export class PipelineResult<T, M extends PipelineMode> {
   forEach(fn: (item: T) => Promise<void>): Promise<void>;
   forEach(fn: (item: T) => void): M extends "sync" ? void : Promise<void>;
   forEach(fn: (item: T) => void | Promise<void>): void | Promise<void> {
-    return this.bound().forEach(fn as (item: T) => void);
+    const { syncChunks } = this.drainable();
+    if (syncChunks !== null) {
+      // Each callback's own return is settled before the next item, so a `forEach` that turns out
+      // to be async still runs strictly in order and still reports its own failures.
+      return drainSyncSettled(syncChunks, fn);
+    }
+    return this.forEachAsync(fn);
+  }
+
+  /** `forEach`'s async arm, which awaits each callback in turn. */
+  private async forEachAsync(fn: (item: T) => void | Promise<void>): Promise<void> {
+    for await (const item of this.drainable().items()) {
+      await fn(item);
+    }
   }
 
   /**
@@ -103,13 +168,11 @@ export class PipelineResult<T, M extends PipelineMode> {
    * `[...score([1, 2, 3])]` → `[2, 4, 6]`.
    */
   [Symbol.iterator](): M extends "sync" ? Iterator<T> : never {
-    const drained = this.bound().toArray();
+    const drained = this.toArray();
     if (isThenable(drained)) {
       // The drain has already STARTED, so abandoning its promise here leaves a rejection nobody
       // handles - fatal under Node's default. Measured on an async chain whose map throws: the
-      // `TypeError` below printed, then `UNHANDLED REJECTION: boom` killed the process. The
-      // throwaway handler marks it handled; the caller learns about the failure through the
-      // `for await` or `.toArray()` they were supposed to use.
+      // `TypeError` below printed, then `UNHANDLED REJECTION: boom` killed the process.
       drained.catch(() => {});
       throw new TypeError(
         "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
@@ -130,6 +193,6 @@ export class PipelineResult<T, M extends PipelineMode> {
    * `for await (const x of score([1, 2, 3]))` yields `2`, `4`, `6`.
    */
   async *[Symbol.asyncIterator](): AsyncGenerator<T> {
-    for await (const chunk of this.bound()) yield* chunk;
+    yield* this.drainable().items();
   }
 }

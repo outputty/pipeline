@@ -1,6 +1,6 @@
 /**
  * transforms.e2e.test.ts — every `Transformer` operation proven through an ENTIRE PIPELINE RUN
- * (`new Pipeline().from(input).apply(transformer).toArray()`), never by poking a strategy/util/context
+ * (`new Pipeline<number>().from(input).apply(transformer).toArray()`), never by poking a strategy/util/context
  * function in isolation. A behavior is only "covered" here if it changes the output (or context) of
  * a full run — the same way a caller would observe it. Chunk-level ops (`reduce`/`loop`) pass
  * `run()` an explicit `bufferSize` so the run actually crosses chunk boundaries (#39: the
@@ -29,8 +29,8 @@ async function run<I, O>(
   bufferSize?: number,
 ): Promise<[O[], Record<string, unknown>]> {
   let pipeline: Pipeline<I, "sync"> = context
-    ? new Pipeline({ context }).from(input)
-    : new Pipeline().from(input);
+    ? new Pipeline<number>({ context })(input)
+    : new Pipeline<number>()(input);
   if (bufferSize !== undefined) pipeline = pipeline.buffer(bufferSize);
   const applied = pipeline.apply(transformer);
   const results = await applied.toArray();
@@ -131,20 +131,20 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
     }
 
     const viaToArray = await countFor(async (tapped) => {
-      const pipeline = new Pipeline().from([1, 2, 3]).apply(tapped);
-      await pipeline.toArray();
+      const pipeline = new Pipeline<number>().apply(tapped);
+      await pipeline([1, 2, 3]).toArray();
       return pipeline.contextManager.toDict();
     });
     const viaAsyncIteration = await countFor(async (tapped) => {
-      const pipeline = new Pipeline().from([1, 2, 3]).apply(tapped);
+      const pipeline = new Pipeline<number>().apply(tapped);
       for await (const _chunk of pipeline) {
         // drain
       }
       return pipeline.contextManager.toDict();
     });
     const viaLocalStage = await countFor(async (tapped) => {
-      const pipeline = new ConcurrentPipeline().from([1, 2, 3]).local((p) => p.apply(tapped));
-      await pipeline.toArray();
+      const pipeline = new ConcurrentPipeline<number>().local((p) => p.apply(tapped));
+      await pipeline([1, 2, 3]).toArray();
       return pipeline.contextManager.toDict();
     });
 

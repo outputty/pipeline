@@ -5,9 +5,9 @@
  */
 import { ClusterPipeline } from "../../src";
 
-const data = await new ClusterPipeline()
-  .from([1, 2, 3, 4, 5])
-  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+const data = await new ClusterPipeline<number>()
+
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))([1, 2, 3, 4, 5])
   .toArray();
 
 console.log(JSON.stringify(data));

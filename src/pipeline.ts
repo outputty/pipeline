@@ -497,14 +497,16 @@ export class Pipeline<
    * `new Pipeline().from([1, 2, 3]).toArray()` → `[1, 2, 3]`, typed `number[]`, no `await`.
    * `new Pipeline().from(asyncSource).toArray()` → typed `Promise<number[]>`.
    */
-  from<U>(data: AsyncIterable<U>): Pipeline<U, "async", P, In>;
+  protected bind<U>(data: AsyncIterable<U>): Pipeline<U, "async", P, In>;
   // A receiver already widened to `"async"` stays async whatever the source's own shape (#90):
   // `.onError()` and `.context()` are both callable BEFORE `.from()`, so an async run handler
   // registered there had its widening discarded here - the chain typed `number[]` while
   // `dropOrRethrow` deferred on that handler the moment a chunk failed. `"unset"` is the ordinary
   // case and still takes the source's own shape, which is what keeps `.from([1,2,3])` synchronous.
-  from<U>(data: Iterable<U>): Pipeline<U, M extends "async" ? "async" : AssignMode<P, "sync">, P>;
-  from<U>(data: PipelineSource<U>): Pipeline<U, "sync" | "async", P> {
+  protected bind<U>(
+    data: Iterable<U>,
+  ): Pipeline<U, M extends "async" ? "async" : AssignMode<P, "sync">, P>;
+  protected bind<U>(data: PipelineSource<U>): Pipeline<U, "sync" | "async", P> {
     return this.fromSource<U>(data, this.sourcePolicy()) as Pipeline<U, "sync" | "async", P>;
   }
 
@@ -692,7 +694,7 @@ export class Pipeline<
       return { chunkTransforms: this._chunkTransforms, reduceStages: this._reduceStages };
     }
     this._registries ??= (() => {
-      const materialised = this.from([] as T[]) as unknown as AnyPipeline<T>;
+      const materialised = this.bind([] as T[]) as unknown as AnyPipeline<T>;
       return {
         chunkTransforms: materialised._chunkTransforms,
         reduceStages: materialised._reduceStages,
@@ -715,7 +717,7 @@ export class Pipeline<
    * `new HttpPipeline(scored, { url })` runs `scored`'s stages over HTTP, where `scored([1,2,3])`
    * runs the identical stages in this process.
    */
-  static adopt(pipeline: AnyPipeline<any>): PipelineOptions {
+  protected static adopt(pipeline: AnyPipeline<any>): PipelineOptions {
     if (pipeline._bound) {
       throw new Error(
         "cannot wrap a pipeline that already named a source with .from() - build the chain without .from() and wrap that",
@@ -1311,119 +1313,27 @@ export class Pipeline<
   // ===== Terminal Operations =====
 
   /**
-   * Collect all results to an array. Read context via `.contextManager` afterward if needed - a
-   * terminal op's return no longer carries a context snapshot (#744).
+   * What a `PipelineResult` needs to drain this pipeline (#90) - the ONE seam the terminal ops read.
    *
-   * Python equivalent:
-   * ```python
-   * def to_list(self) -> list[T]:
-   *   return list(self.processed_data)
-   * ```
-   */
-  toArray(): M extends "sync" ? T[] : Promise<T[]> {
-    const results: T[] = [];
-    if (this._mode === "sync" && this._syncChunks !== null) {
-      return chain(
-        drainSync(this._syncChunks, (item) => void results.push(item)),
-        () => results,
-      ) as M extends "sync" ? T[] : Promise<T[]>;
-    }
-    return this.collectAsync(results, undefined) as M extends "sync" ? T[] : Promise<T[]>;
-  }
-
-  /** The async engine's own collect loop, shared by `toArray` and `first` (#90) - `limit` is
-   * `first`'s early exit, `undefined` for the whole stream. */
-  private async collectAsync(results: T[], limit: number | undefined): Promise<T[]> {
-    for await (const item of this.asyncItems()) {
-      results.push(item);
-      if (limit !== undefined && results.length >= limit) break;
-    }
-    return results;
-  }
-
-  /**
-   * Get the first N elements. Read context via `.contextManager` afterward if needed (#744).
+   * `toArray`/`first`/`consume`/`forEach` used to live here, which meant a chain could be drained
+   * with no input at all: `new Pipeline().toArray()` compiled and resolved to `[]`. They belong to
+   * a result, and a result exists only once an input has been given. This exposes the two views
+   * they need - the sync chunk stream where there is one, and the item stream otherwise - so
+   * neither class has to reach into the other's fields.
    *
-   * Python equivalent:
-   * ```python
-   * def first(self, n: int = 1) -> list[T]:
-   *   assert n >= 1, "n must be at least 1"
-   *   return list(itertools.islice(self.processed_data, n))
-   * ```
+   * @example
+   * A bound sync pipeline over `[1, 2, 3]` returns `{ syncChunks: <generator>, … }`; an async one
+   * returns `{ syncChunks: null, … }` and the caller reads `items()` instead.
    */
-  first(n = 1): M extends "sync" ? T[] : Promise<T[]> {
-    if (n < 1) {
-      throw new Error("n must be at least 1");
-    }
-
-    const results: T[] = [];
-    if (this._mode === "sync" && this._syncChunks !== null) {
-      return chain(
-        drainSync(this._syncChunks, (item) => {
-          results.push(item);
-          return results.length >= n;
-        }),
-        () => results,
-      ) as M extends "sync" ? T[] : Promise<T[]>;
-    }
-    return this.collectAsync(results, n) as M extends "sync" ? T[] : Promise<T[]>;
-  }
-
-  /**
-   * Consume all items without collecting them. Read context via `.contextManager` afterward if
-   * needed (#744).
-   *
-   * Python equivalent:
-   * ```python
-   * def consume(self) -> None:
-   *   for _ in self.processed_data:
-   *     pass
-   * ```
-   */
-  consume(): M extends "sync" ? void : Promise<void> {
-    if (this._mode === "sync" && this._syncChunks !== null) {
-      return drainSync(this._syncChunks, () => {}) as M extends "sync" ? void : Promise<void>;
-    }
-    return this.consumeAsync() as M extends "sync" ? void : Promise<void>;
-  }
-
-  /** `consume`'s async arm, split out so the method above stays a single expression per engine. */
-  private async consumeAsync(): Promise<void> {
-    for await (const _ of this.asyncItems()) {
-      // Just consume, don't collect
-    }
-  }
-
-  /**
-   * Apply a side-effect function to each item. Read context via `.contextManager` afterward if
-   * needed (#744).
-   *
-   * Python equivalent:
-   * ```python
-   * def each(self, function: PipelineFunction[T]) -> None:
-   *   for item in self.processed_data:
-   *     function(item)
-   * ```
-   */
-  forEach(fn: (item: T) => Promise<void>): Promise<void>;
-  forEach(fn: (item: T) => void): M extends "sync" ? void : Promise<void>;
-  forEach(fn: (item: T) => void | Promise<void>): void | Promise<void> {
-    if (this.isSync() && this._syncChunks !== null) {
-      // Each callback's own return is settled before the next item, so a `forEach` that turns out
-      // to be async still runs strictly in order and still reports its own failures. The overload
-      // above is why the ASYNC arm is declared first: TypeScript's void-return rule makes an
-      // `async` callback assignable to `(item: T) => void`, so a `void`-returning arm listed first
-      // would swallow it, type the call `void`, and leave every callback fired and dropped.
-      return drainSyncSettled(this._syncChunks, fn);
-    }
-    return this.forEachAsync(fn);
-  }
-
-  /** `forEach`'s async arm, which awaits each callback in turn. */
-  private async forEachAsync(fn: (item: T) => void | Promise<void>): Promise<void> {
-    for await (const item of this.asyncItems()) {
-      await fn(item);
-    }
+  drainable(input: PipelineSource<In>): {
+    syncChunks: MaybeAsyncChunks<T> | null;
+    items: () => AsyncIterable<T>;
+  } {
+    const bound = this.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
+    return {
+      syncChunks: bound.isSync() ? bound._syncChunks : null,
+      items: () => bound.asyncItems(),
+    };
   }
 
   /**
@@ -1487,7 +1397,7 @@ export class Pipeline<
       const source =
         input === undefined
           ? (owner as unknown as AnyPipeline<T>)
-          : (owner.from(input as Iterable<In>) as unknown as AnyPipeline<T>);
+          : (owner.bind(input as Iterable<In>) as unknown as AnyPipeline<T>);
 
       const results: Record<string, unknown[]> = {};
       for (const key of Object.keys(branches)) {

@@ -242,16 +242,10 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
     // `[[1,1,2,2],[3,3,4,4]]` against `[[1,1],[2,2],[3,3],[4,4]]` for the same chain after
     // `.from()`.
     const viaFrom = await chunksOf(
-      new Pipeline<number>()
-        .from([1, 2, 3, 4])
-        .transform((t) => t.flatMap((x) => [x, x]))
-        .buffer(2),
+      new Pipeline<number>().transform((t) => t.flatMap((x) => [x, x])).buffer(2),
     );
     const viaCall = await chunksOf(
-      new Pipeline<number>()
-        .transform((t) => t.flatMap((x) => [x, x]))
-        .buffer(2)
-        .from([1, 2, 3, 4]),
+      new Pipeline<number>().transform((t) => t.flatMap((x) => [x, x])).buffer(2),
     );
     expect(viaCall).toEqual(viaFrom);
     expect(viaFrom).toEqual([
@@ -263,7 +257,7 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
   });
 
   it("still cuts the source when .buffer() comes before every stage", async () => {
-    const cut = await chunksOf(new Pipeline<number>().buffer(2).from([1, 2, 3, 4, 5]));
+    const cut = await chunksOf(new Pipeline<number>().buffer(2), [1, 2, 3, 4, 5]);
     expect(cut).toEqual([[1, 2], [3, 4], [5]]);
   });
 
@@ -299,7 +293,7 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
       // Before: `class Pipeline extends Function` called `super()`, which runs
       // `CreateDynamicFunction`. Measured under `node --disallow-code-generation-from-strings`:
       // `EvalError: Code generation from strings disallowed for this context` on the FIRST
-      // `new Pipeline()`. That contradicted the package's own runtime-neutrality claim, so the
+      // `new Pipeline<number>()`. That contradicted the package's own runtime-neutrality claim, so the
       // prototype is reparented onto `Function.prototype` once instead.
       //
       // The ban is a process-level flag, so this runs in a child process. It is the real assertion;

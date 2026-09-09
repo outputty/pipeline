@@ -8,15 +8,15 @@ import { ClusterPipeline } from "../../src";
 
 const primaryPid = process.pid;
 
-const [folded] = await new ClusterPipeline({ maxConcurrency: 2 })
-  .from([1, 2, 3, 4, 5])
+const [folded] = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+
   .buffer(2)
   .local((p) =>
     p.reduce(
       (acc: { sum: number; pid: number }, x: number) => ({ sum: acc.sum + x, pid: process.pid }),
       { sum: 0, pid: primaryPid },
     ),
-  )
+  )([1, 2, 3, 4, 5])
   .toArray();
 
 if (folded) {
