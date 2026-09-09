@@ -183,11 +183,7 @@ async function* mergeUnordered<U>(sources: AsyncGenerator<U[]>[]): AsyncGenerato
  * `new ConcurrentPipeline([1,2,3,4,5], { maxConcurrency: 4 }).transform((t) => t.map((x) => x *
  * 2)).toArray()` → `[2,4,6,8,10]`.
  */
-export class ConcurrentPipeline<T, M extends PipelineMode = "unset"> extends Pipeline<
-  T,
-  M,
-  "async"
-> {
+export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline<T, "async", "async"> {
   /** Chunks of the current stage kept in flight at once. */
   readonly maxConcurrency: number;
   /** Whether output order is restored to match input order once a chunk finishes. */
@@ -220,11 +216,11 @@ export class ConcurrentPipeline<T, M extends PipelineMode = "unset"> extends Pip
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
-  ): ConcurrentPipeline<U, "sync" | "async"> {
+  ): ConcurrentPipeline<U, M> {
     const Ctor = this.constructor as new (
       data: PipelineSource<U>,
       options?: ConcurrentPipelineConstructorOptions,
-    ) => ConcurrentPipeline<U, "sync" | "async">;
+    ) => ConcurrentPipeline<U, M>;
     return new Ctor([], { ...options, ...this.concurrentOptions(), chunks });
   }
 
@@ -246,19 +242,18 @@ export class ConcurrentPipeline<T, M extends PipelineMode = "unset"> extends Pip
    * class's own `stageWork()` fan-out below.
    */
   override transform<U, M2 extends "sync" | "async">(
-    this: M extends "unset" ? never : Pipeline<T, M, "async">,
-    builder: (t: Transformer<T, T, M & ("sync" | "async")>) => Transformer<T, U, M2>,
-  ): ConcurrentPipeline<U, "async"> {
+    builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
+  ): ConcurrentPipeline<U, M> {
     // The seed is typed at the CALLBACK's own declared Mode, not `"async"`: the base's signature
     // is `M & ("sync" | "async")`, and matching it exactly is what keeps this override a narrowing
     // rather than a conflict. The runtime object is the same identity transform either way.
-    const seed = new Transformer<T, T, M & ("sync" | "async")>({ transform: (chunk) => chunk });
-    return (this as ConcurrentPipeline<T, M>).apply(builder(seed));
+    const seed = new Transformer<T, T, "async">({ transform: (chunk) => chunk });
+    return this.apply(builder(seed));
   }
 
   override apply<U>(
     transformer: Transformer<T, U, "sync" | "async">,
-  ): ConcurrentPipeline<U, "async"> {
+  ): ConcurrentPipeline<U, M> {
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
     // The run handler's own chunk-drop decision (#78) - `dropOrRethrow` (`utils/helpers.ts`) is the
@@ -315,7 +310,7 @@ export class ConcurrentPipeline<T, M extends PipelineMode = "unset"> extends Pip
    * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0)
    * .local((p)=>p.reduce((a,v)=>a+v,0)).toArray()` → `[15]`.
    */
-  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U, "async"> {
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U, M> {
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
 
@@ -356,16 +351,16 @@ export class ConcurrentPipeline<T, M extends PipelineMode = "unset"> extends Pip
    *
    * `new ConcurrentPipeline({}).from([1, 2, 3])` → `ConcurrentPipeline<number, "async">`.
    */
-  override from<U>(data: PipelineSource<U>): ConcurrentPipeline<U, "async"> {
-    return this.fromSource<U>(data, "async") as unknown as ConcurrentPipeline<U, "async">;
+  override from<U>(data: PipelineSource<U>): ConcurrentPipeline<U, M> {
+    return this.fromSource<U>(data, "async") as unknown as ConcurrentPipeline<U, M>;
   }
 
   protected override sourcePolicy(): SourcePolicy {
     return "async";
   }
 
-  override local<U>(build: (p: AnyPipeline<T>) => AnyPipeline<U>): ConcurrentPipeline<U, "async"> {
-    return super.local(build) as unknown as ConcurrentPipeline<U, "async">;
+  override local<U>(build: (p: AnyPipeline<T>) => AnyPipeline<U>): ConcurrentPipeline<U, M> {
+    return super.local(build) as unknown as ConcurrentPipeline<U, M>;
   }
 
   /**
@@ -396,7 +391,7 @@ export class ConcurrentPipeline<T, M extends PipelineMode = "unset"> extends Pip
    * `stageWork(transformer, 0)([1,2], ctx)` → `transformer.transform([1,2], ctx)`'s own result.
    */
   protected stageWork<U>(
-    transformer: Transformer<T, U>,
+    transformer: Transformer<T, U, "sync" | "async">,
     _stageIndex: number,
   ): InternalTransformer<T, U> {
     // `transformer.runnable()` (#78) wires the transformer's own row handler into every dispatch
