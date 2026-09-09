@@ -32,12 +32,15 @@ export { buildChunkGenerator, normalize, isContextAware } from "./utils";
 export { Transformer } from "./transformer";
 
 // Pipeline
-export { Pipeline, type PipelineOptions, type PipelineSource } from "./pipeline";
+export { Pipeline, type PipelineOptions, type PipelineSource, type PipelinePlan } from "./pipeline";
 
 // Pipeline family (#17) — where a chain's chunks are processed
 export { ConcurrentPipeline, type ConcurrentPipelineOptions } from "./pipelines/concurrent";
 export { HttpPipeline, toNodeHandler } from "./pipelines/http";
 export { ClusterPipeline, type ClusterPipelineOptions } from "./pipelines/cluster";
+
+// Runners (#90) - WHERE a pipeline runs, separated from what it does
+export { ConcurrentRunner, type RunnablePipeline } from "./runners/concurrent";
 
 // Factory functions
 export { createTransformer } from "./factories";

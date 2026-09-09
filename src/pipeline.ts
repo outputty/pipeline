@@ -1095,13 +1095,15 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     // .toArray()` resolved to `[]`.
     this.requireSource();
     const { chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
+    // Spread rather than list the fields: a knob added to `carriedOptions()` later then reaches a
+    // reduce stage too, instead of being silently dropped by this one method (`source` and
+    // `pinnedStages` both were, until a runner tried to read them back off a folded pipeline).
     const carried = {
-      context: this._context,
+      ...this.carriedOptions(),
       chunkTransforms,
       reduceStages,
       preBufferItems: null,
       syncPreBufferItems: null,
-      runHandler: this._runHandler,
     };
 
     // `foldSyncChunkStream` folds the same reducer over the sync chunk stream, deferring only at the
