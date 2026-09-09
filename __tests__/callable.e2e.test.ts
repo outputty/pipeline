@@ -206,7 +206,7 @@ describe("the compiler refuses what the split forbids", () => {
     // `.toArray()` still EXISTS on `Pipeline` at this layer - the terminals leave it with `.from()`
     // at the enable layer, which is where Done-when 10's compile-time half lands as a `TS2339`.
     // Until then the source guard is what refuses it, so this pins the runtime behaviour.
-    await expect(withVat.toArray()).rejects.toThrow(/no source/);
+    await expect(withVat.toArray()).rejects.toThrow(/no input/);
   });
 
   it("refuses chaining back off a result (Done-when 9)", () => {

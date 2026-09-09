@@ -314,36 +314,6 @@ describe("#90 - the Mode a chain reports and the engine it runs on never disagre
   // each test AWAITED a value its own type said was a plain array, and `await` on an array is a
   // no-op. The assertions below read the runtime value directly instead.
 
-  it("Pipeline.merge of sync pipelines returns an array, not a Promise", () => {
-    const merged: number[] = Pipeline.merge([
-      new Pipeline().from([1, 2, 3]),
-      new Pipeline().from([4, 5, 6]),
-    ]).toArray();
-
-    expect(Array.isArray(merged)).toBe(true);
-    expect(merged).toEqual([1, 2, 3, 4, 5, 6]);
-
-    const empty: number[] = Pipeline.merge([]).toArray();
-    expect(Array.isArray(empty)).toBe(true);
-    expect(empty).toEqual([]);
-  });
-
-  it("Pipeline.merge of a sync and an async pipeline returns a Promise", async () => {
-    async function* asyncSource() {
-      yield 4;
-      yield 5;
-    }
-
-    const merged = Pipeline.merge([
-      new Pipeline().from([1, 2]),
-      new Pipeline().from(asyncSource()),
-    ]);
-    const out: Promise<number[]> = merged.toArray();
-
-    expect(typeof out.then).toBe("function");
-    expect(await out).toEqual([1, 2, 4, 5]);
-  });
-
   it("a knob set before .from() survives it", () => {
     // `.onError()` and `.context()` are both callable on a source-less pipeline, and `.from()` used
     // to drop everything but the context manager - so a registered run handler never fired.
@@ -620,28 +590,6 @@ describe("#90 L4 - every fluent method widens, and none of them under-reports it
     expect(await out).toEqual([1, 3]);
   });
 
-  it("instance .merge() of a sync pipeline with an async one widens instead of refusing", async () => {
-    // Measured before the fix: a compile error, and past it a runtime throw from
-    // `syncChunkStream()`. The static `Pipeline.merge()` already widened the same pair, so the two
-    // spellings of one operation gave two answers.
-    const out: Promise<number[]> = new Pipeline()
-      .from([10, 20])
-      .merge(new Pipeline().from(asyncSource()))
-      .toArray();
-
-    expect(await out).toEqual([10, 20, 1, 2, 3]);
-  });
-
-  it("instance .merge() of two sync pipelines stays sync", () => {
-    const out: number[] = new Pipeline()
-      .from([10, 20])
-      .merge(new Pipeline().from([30]))
-      .toArray();
-
-    expect(Array.isArray(out)).toBe(true);
-    expect(out).toEqual([10, 20, 30]);
-  });
-
   it("a sync link after an async one inside one .transform() stays async", async () => {
     const out: Promise<number[]> = new Pipeline()
       .from([1, 2, 3])
@@ -766,7 +714,7 @@ describe("#90 L4 - review findings, each reproduced before it was fixed", () => 
   });
 
   it("a widening call keeps the subclass it was made on", () => {
-    // `.onError(async …)`, `.tap(async …)` and the widening `.merge()` each returned a bare
+    // `.onError(async …)` and `.tap(async …)` each returned a bare
     // `Pipeline<T, "async", P>`, so `.fetch` and every other subclass member vanished from the type
     // on a chain that compiled on `main`. Measured: `error TS2339: Property 'fetch' does not exist
     // on type 'Pipeline<number, "async", "async">'`. A receiver already async gains nothing from
@@ -802,7 +750,7 @@ describe("#90 L4 - review findings, each reproduced before it was fixed", () => 
     // `"unset"` pipeline's `.toArray()` is typed `Promise<T[]>`, so the failure arrives as a
     // rejection rather than a synchronous throw.
     await expect(new Pipeline().toArray()).rejects.toThrow(
-      "no source: call .from(data) before composing",
+      "no input: call the pipeline with the items to process",
     );
   });
 
