@@ -7,6 +7,17 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-09 A typecheck-only spike was narrated in the scratch file as an executed run
+
+Planning #90, `tmp/level3b-seam-spike.ts` was passed through `tsc --strict` alone, then the scratch
+file recorded it as having "run correctly" and showing `[6, 8, 10]` as its output - a predicted
+value written as an observed one. Caught by `advisor`, not self-caught: no `node`/`tsx` invocation
+of that file exists anywhere in this session's tool history. Fixed by striking the claim and
+re-running the actual sync engine for real (`tmp/sync-engine-bench.mjs`), producing the genuine
+numbers that replaced it. `~/.claude/rules/code.md`'s existing "run it before relying on it" line
+gains a sub-bullet: a claim that code "ran" or "produced" an output needs a real execution, never a
+type-check alone.
+
 ## 2026-09-09 Verified README/examples.md fences by hand, then Prettier's format gate rewrote them
 
 Building #84 (README/examples.md docs pass), 8 new runnable Pattern fences plus the Merging example
