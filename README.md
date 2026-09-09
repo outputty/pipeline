@@ -26,25 +26,32 @@ console.log(data); // [6, 8, 10]
 ## Core Concepts
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  PIPELINE ARCHITECTURE                                                  │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐          │
-│  │   Pipeline   │──────│  Transformer │──────│  the class   │          │
-│  │              │      │              │      │  you build   │          │
-│  │ Data source  │      │ Chain of     │      │ Where chunks │          │
-│  │ + context    │      │ operations   │      │ are executed │          │
-│  └──────────────┘      └──────────────┘      └──────────────┘          │
-│                                                                         │
-│  Data Flow:                                                             │
-│  input[] ──▶ chunk[] ──▶ transform ──▶ chunk[] ──▶ output[]            │
-│                              │                                          │
-│                        (map, filter,                                    │
-│                         reduce, etc.)                                   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│  PIPELINE ARCHITECTURE                                                    │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐             │
+│  │   Pipeline   │      │ Transformer  │      │   Reducer    │             │
+│  │              │      │              │      │              │             │
+│  │ Data source  │      │ map / filter │      │ Folds chunks │             │
+│  │  + context   │      │flatMap / tap │      │  into state  │             │
+│  └──────────────┘      └──────────────┘      └──────────────┘             │
+│                                                                           │
+│  Data flow (one chunk at a time):                                         │
+│  input[] ──▶ chunk[] ──▶ map/filter/flatMap ──▶ chunk[] ──▶ output[]      │
+│                                        │                                  │
+│                                        └──▶ .reduce() ──▶ folded[]        │
+│                                             (optional, across every chunk)│
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
+
+`Pipeline` wraps a source and decides where its chunks run - the class you construct, not a config
+knob (see [Where the work runs](#where-the-work-runs)). `Transformer` is the chain itself:
+per-chunk operations, chunk-agnostic. `Reducer` is the one exception - it folds STATE across every
+chunk instead of transforming one, which is why it gets its own box; see
+[How a Transformer runs a chunk](#how-a-transformer-runs-a-chunk) for the mechanism and
+[Reducing](#reducing) for the API.
 
 ### Pipeline
 
@@ -216,8 +223,14 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 ### ConcurrentPipeline
 
 Extends `Pipeline`. Runs several chunks of a stage at once, in this process - see
-[Where the work runs](#where-the-work-runs) for items in flight. Every `Pipeline` method above
-applies unchanged; `ConcurrentPipeline` adds no new ones, only its own constructor knobs.
+[Where the work runs](#where-the-work-runs) for a real construction example and items in flight.
+Every `Pipeline` method above applies unchanged; `ConcurrentPipeline` adds no new ones, only its
+own constructor knobs.
+
+Internally, `.apply()` never calls `Transformer.process()` here the way `Pipeline` does - it fans
+`this._chunks` (the pipeline's own already-cut chunk stream) out through up to `maxConcurrency`
+concurrent calls of the SAME stage. `ordered: true` keeps them in a sliding window so a slower
+chunk is never overtaken by a faster one; `false` yields whichever chunk finishes first.
 
 <!-- illustrative -->
 
@@ -231,12 +244,38 @@ new ConcurrentPipeline<T>(data: PipelineSource<T>, options?: ConcurrentPipelineO
 ### HttpPipeline
 
 Extends `ConcurrentPipeline`. Dispatches each chunk of a stage over HTTP to another instance
-running the same code, instead of running it here.
+running the same code, instead of running it here. A stage is its POSITION in the chain, never a
+function - the client POSTs `{ chunk, context }` to `/stage/<n>`, and the receiving instance's own
+`_chunkTransforms[n]` (populated by running the exact same `.transform()` calls) is what actually
+runs it. Both instances must run the same build.
 
-<!-- illustrative -->
+Spinning one up is a plain Node script - `node:http`, `toNodeHandler`, `.listen(0)`, call itself,
+close the server:
+
+<!-- compiles -->
 
 ```typescript
-new HttpPipeline<T>(data: PipelineSource<T>, options: { url: string } & ConcurrentPipelineOptions)
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { HttpPipeline, toNodeHandler } from "@outputty/pipeline";
+
+// The "another instance" side: an empty-source pipeline holding the SAME chain, so its
+// .fetch can serve it.
+const worker = new HttpPipeline<number>([], { url: "" }).transform((t) =>
+  t.map((x: number) => x * 2),
+);
+
+const server = createServer(toNodeHandler(worker.fetch));
+await new Promise<void>((resolve) => server.listen(0, resolve));
+const { port } = server.address() as AddressInfo;
+
+const data = await new HttpPipeline([1, 2, 3, 4, 5], { url: `http://localhost:${port}` })
+  .transform((t) => t.map((x: number) => x * 2))
+  .toArray();
+
+console.log(JSON.stringify(data)); // [2,4,6,8,10]
+
+await new Promise<void>((resolve) => server.close(() => resolve()));
 ```
 
 - **`options.url`** - required. Where another `HttpPipeline`/`ClusterPipeline` instance's `.fetch`
@@ -253,24 +292,31 @@ Extends `HttpPipeline`. Dispatches each chunk of a stage to another process on t
 Needs no server, port, url or fork in caller code - it brings its own workers up on the first
 dispatch and every later `ClusterPipeline` in the process reuses them.
 
-<!-- illustrative -->
+Internally it reuses `HttpPipeline`'s own dispatch: on the first real dispatch it forks `workers`
+processes via `node:cluster`, each re-running this SAME entry module (so each registers the same
+stages), routed through one shared server - `listen(0)` inside `cluster` hands every worker the
+identical port. A worker with nothing left in flight is killed after 500ms idle, which is why the
+canonical example below exits on its own with no explicit teardown:
+
+<!-- compiles -->
 
 ```typescript
-new ClusterPipeline<T>(data: PipelineSource<T>, options?: { workers?: number } & ConcurrentPipelineOptions)
+import { ClusterPipeline } from "@outputty/pipeline";
+
+const data = await new ClusterPipeline([1, 2, 3, 4, 5])
+  .transform((t) => t.map((x: number) => x * 2))
+  .toArray();
+
+// Last line only - every worker also re-executes this module, each printing its own empty result first.
+console.log(JSON.stringify(data)); // [2,4,6,8,10]
 ```
 
 - **`options.workers`** - worker processes to bring up on first drain. Default
   `os.availableParallelism()`.
 
-### createTransformer
-
-- **`createTransformer<T>()`** - builds an identity `Transformer<T, T>`. Chunk-agnostic like every
-  `Transformer`: it takes no chunk size, since the caller's own `Pipeline` decides that via
-  `.buffer(size)`.
-
 ### SimpleContextManager
 
-The one shipped `IContextManager` - an in-memory store, not process-safe. Pass your own class
+The one shipped context manager - an in-memory store, not process-safe. Pass your own class
 through `options.context`/`options.contextFactory` for anything more.
 
 <!-- illustrative -->
@@ -283,15 +329,6 @@ new SimpleContextManager(initial?: Record<string, unknown>)
 - **`.set(key, value)`** - stores a value at `key`.
 - **`.getOrDefault(key, defaultValue)`** - the value at `key`, or `defaultValue` when absent.
 - **`.toDict()`** - a shallow copy of the whole store.
-
-### IContextManager
-
-The interface a caller's own context manager implements, in place of `SimpleContextManager`.
-
-- **`.get(key)`** - read a value.
-- **`.set(key, value)`** - write a value.
-- **`.getOrDefault(key, defaultValue)`** - read with a fallback for a missing key.
-- **`.toDict()`** - snapshot every key as a plain object.
 
 ### Context-Aware Functions
 
@@ -370,10 +407,17 @@ const totals = await new Pipeline(orders)
 
 ## Chunking
 
-Rows move through a `Pipeline` in chunks, not one at a time. The boundary is the `Pipeline`'s own
-decision, not the `Transformer`'s: `.buffer(size)` sets it explicitly, defaulting to `1000` when
-never called, and every later stage sees those same chunks unchanged until another `.buffer()`
-call declares a new one.
+Rows move through a `Pipeline` in chunks (`In[]`/`Out[]`), not one at a time. A pipeline processing
+one item per call pays for a function call, a promise and often a garbage-collected object per
+row; batching rows into an array and running the WHOLE array through one call amortizes that cost
+over every item in the batch instead of paying it per row. `map`/`filter`/`flatMap` never stream
+item by item internally either - each is one recursive call over the chunk array it is handed (see
+[How a Transformer runs a chunk](#how-a-transformer-runs-a-chunk)).
+
+The boundary is the `Pipeline`'s own decision, not the `Transformer`'s: `.buffer(size)` sets it
+explicitly, defaulting to `1000` when never called, and every later stage sees those same chunks
+unchanged until another `.buffer()` call declares a new one. Two `.buffer()` calls back to back,
+with nothing between them, collapse to the LAST one - only it is ever actually applied:
 
 <!-- compiles -->
 
@@ -381,12 +425,77 @@ call declares a new one.
 import { Pipeline } from "@outputty/pipeline";
 
 const data = await new Pipeline([1, 2, 3, 4, 5])
-  .buffer(2)
+  .buffer(2) // never applied - superseded before any stage reads it
+  .buffer(1) // this is the boundary every later stage actually sees
   .transform((t) => t.map((x: number) => x * 2))
   .toArray();
 
 console.log(data); // [2, 4, 6, 8, 10]
 ```
+
+## How a Transformer runs a chunk
+
+`.map(f).filter(g)` builds ONE composed function, not two calls chained at runtime: each operator
+wraps the chain built so far, so calling the last one built recurses down to the first, then runs
+every operator's own work as that recursion unwinds - one call per LINK per chunk, not one call per
+item per link. Real, instrumented run over `[1, 2, 3, 4, 5]`:
+
+<!-- compiles -->
+
+```typescript
+import { Transformer } from "@outputty/pipeline";
+
+const t = new Transformer<number, number>()
+  .map((x: number) => {
+    console.log(`map(${x})`);
+    return x * 2;
+  })
+  .filter((x: number) => {
+    console.log(`filter(${x})`);
+    return x > 4;
+  });
+
+async function* chunks() {
+  yield [1, 2, 3, 4, 5];
+}
+
+for await (const chunk of t.process(chunks())) {
+  console.log("result:", chunk);
+}
+```
+
+```text
+map(1)
+map(2)
+map(3)
+map(4)
+map(5)
+filter(2)
+filter(4)
+filter(6)
+filter(8)
+filter(10)
+result: [ 6, 8, 10 ]
+```
+
+Every item finishes `map` before `filter` sees any of them - the whole chunk crosses from one link
+to the next as a single array, never one row rejoining a shared queue between operators.
+
+```
+t.process(chunks())
+	for [1,2,3,4,5] (one chunk)
+		filter's composed function(chunk)        the LAST .filter()/.map() call built
+			await map's composed function(chunk)     recurses into what it was built on
+				await identity(chunk)                the chain's own starting point
+			chunk.map(x => x*2), settled together    map's own work - runs on the unwind
+		chunk.filter(x => x>4)                       filter's own work - runs after map's finishes
+	yield [6, 8, 10]
+```
+
+`Pipeline.reduce()`/`Transformer.reduce()` are the one exception this chunk-in-chunk-out shape
+does not cover: a reducer keeps STATE across chunks instead of producing one output chunk per
+input chunk, which is why it needed its own box in [Core Concepts](#core-concepts) - see
+[Reducing](#reducing).
 
 ## Reducing
 
@@ -576,14 +685,15 @@ console.log(data); // [ 200, 300, 400, 500, 1500, 2500 ]
 
 ## Patterns
 
-Two patterns, each pinned first in [`.claude/examples.md`](.claude/examples.md) and run unchanged
-on every `Pipeline` class - only the class you construct, and for `HttpPipeline` the worker it
-dispatches to, ever differ.
+The chain itself is class-agnostic - a pattern written once runs unchanged on `Pipeline`,
+`ConcurrentPipeline`, `HttpPipeline` or `ClusterPipeline`, so it is shown once here, on plain
+`Pipeline`. Both are pinned first in [`.claude/examples.md`](.claude/examples.md) (Case 11, Case
+12), each with all four classes run and verified for real, for the one time the class actually
+matters: proving the pattern survives the trip over HTTP and a real forked worker unchanged.
 
 ### Repairing bad rows without losing the batch
 
-`Transformer.onError(fn)` drops or replaces a row that throws; the rows that parsed keep going,
-wherever the chain runs.
+`Transformer.onError(fn)` drops or replaces a row that throws; the rows that parsed keep going.
 
 <!-- compiles -->
 
@@ -603,81 +713,9 @@ const data = await new Pipeline(["a", "1", "b", "3", "5"])
 console.log(JSON.stringify(data)); // [1,3,5]
 ```
 
-<!-- compiles -->
-
-```typescript
-import { ConcurrentPipeline, DROP } from "@outputty/pipeline";
-
-const parseStrict = (s: string): number => {
-  const n = parseInt(s);
-  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-  return n;
-};
-
-const data = await new ConcurrentPipeline(["a", "1", "b", "3", "5"], { maxConcurrency: 2 })
-  .transform((t) => t.onError(() => DROP).map(parseStrict))
-  .toArray();
-
-console.log(JSON.stringify(data)); // [1,3,5]
-```
-
-<!-- compiles -->
-
-```typescript
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
-import { HttpPipeline, toNodeHandler, DROP } from "@outputty/pipeline";
-
-const parseStrict = (s: string): number => {
-  const n = parseInt(s);
-  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-  return n;
-};
-
-// The "another instance" side: an empty-source pipeline holding the SAME chain, so its
-// .fetch can serve it.
-const worker = new HttpPipeline<string>([], { url: "" }).transform((t) =>
-  t.onError(() => DROP).map(parseStrict),
-);
-
-const server = createServer(toNodeHandler(worker.fetch));
-await new Promise<void>((resolve) => server.listen(0, resolve));
-const { port } = server.address() as AddressInfo;
-
-const data = await new HttpPipeline(["a", "1", "b", "3", "5"], {
-  url: `http://localhost:${port}`,
-})
-  .transform((t) => t.onError(() => DROP).map(parseStrict))
-  .toArray();
-
-console.log(JSON.stringify(data)); // [1,3,5]
-
-await new Promise<void>((resolve) => server.close(() => resolve()));
-```
-
-<!-- compiles -->
-
-```typescript
-import { ClusterPipeline, DROP } from "@outputty/pipeline";
-
-const parseStrict = (s: string): number => {
-  const n = parseInt(s);
-  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-  return n;
-};
-
-const data = await new ClusterPipeline(["a", "1", "b", "3", "5"])
-  .transform((t) => t.onError(() => DROP).map(parseStrict))
-  .toArray();
-
-// Last line only - every worker also re-executes this module, each printing its own empty result first.
-console.log(JSON.stringify(data)); // [1,3,5]
-```
-
 ### Bounded-concurrency fan-out over a real per-item task
 
-The same async task, run with a bounded number of chunks in flight instead of one at a time - the
-task never changes, only the class does.
+The same async task, run with a bounded number of chunks in flight instead of one at a time.
 
 <!-- compiles -->
 
@@ -691,71 +729,6 @@ async function fetchScore(id: number): Promise<number> {
 
 const data = await new Pipeline([1, 2, 3, 4, 5]).transform((t) => t.map(fetchScore)).toArray();
 
-console.log(JSON.stringify(data)); // [10,20,30,40,50]
-```
-
-<!-- compiles -->
-
-```typescript
-import { ConcurrentPipeline } from "@outputty/pipeline";
-
-async function fetchScore(id: number): Promise<number> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  return id * 10;
-}
-
-const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
-  .transform((t) => t.map(fetchScore))
-  .toArray();
-
-console.log(JSON.stringify(data)); // [10,20,30,40,50]
-```
-
-<!-- compiles -->
-
-```typescript
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
-import { HttpPipeline, toNodeHandler } from "@outputty/pipeline";
-
-async function fetchScore(id: number): Promise<number> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  return id * 10;
-}
-
-const worker = new HttpPipeline<number>([], { url: "" }).transform((t) => t.map(fetchScore));
-
-const server = createServer(toNodeHandler(worker.fetch));
-await new Promise<void>((resolve) => server.listen(0, resolve));
-const { port } = server.address() as AddressInfo;
-
-const data = await new HttpPipeline([1, 2, 3, 4, 5], {
-  url: `http://localhost:${port}`,
-  maxConcurrency: 2,
-})
-  .transform((t) => t.map(fetchScore))
-  .toArray();
-
-console.log(JSON.stringify(data)); // [10,20,30,40,50]
-
-await new Promise<void>((resolve) => server.close(() => resolve()));
-```
-
-<!-- compiles -->
-
-```typescript
-import { ClusterPipeline } from "@outputty/pipeline";
-
-async function fetchScore(id: number): Promise<number> {
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  return id * 10;
-}
-
-const data = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
-  .transform((t) => t.map(fetchScore))
-  .toArray();
-
-// Last line only - every worker also re-executes this module, each printing its own empty result first.
 console.log(JSON.stringify(data)); // [10,20,30,40,50]
 ```
 
