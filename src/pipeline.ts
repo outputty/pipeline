@@ -203,6 +203,47 @@ export interface PipelineOptions {
    * direct external use.
    */
   chunkSize?: number;
+  /**
+   * Internal: the source `.from()` named, kept so a RUNNER can re-drive this pipeline's stages over
+   * it with its own dispatch. `preBufferItems`/`syncPreBufferItems` cannot serve that purpose - a
+   * real stage nulls both, since nothing is left to recut except that stage's own output. Not
+   * intended for direct external use.
+   */
+  source?: unknown;
+  /**
+   * Internal: the stage indices a `.local(build)` region owns. A runner runs these in the
+   * orchestrating process whatever else it dispatches, which is `.local()`'s whole meaning (#61).
+   * Not intended for direct external use.
+   */
+  pinnedStages?: ReadonlySet<number>;
+}
+
+/**
+ * What a `Pipeline` is, read by a runner that will execute it somewhere else (#90): the source it
+ * was given, the stages it accumulated in order, and which of those stages a `.local(build)` region
+ * pinned to the orchestrating process. A stage's identity is its INDEX, unchanged from #17 - a
+ * runner sends a chunk and an index across a boundary, never a function.
+ *
+ * `new Pipeline().from([1,2,3]).transform((t) => t.map((x) => x * 2)).plan()` → one stage, no
+ * pinned indices, `source` `[1,2,3]`.
+ */
+export interface PipelinePlan<T> {
+  /** The source `.from()` named, or `null` on a pipeline that has none yet. */
+  source: PipelineSource<T> | null;
+  /** Every stage, in order. The index is the address. */
+  stages: readonly ChunkTransform[];
+  /** Reduce stages, keyed by their index in the same space `stages` uses. */
+  reduceStages: ReadonlyMap<number, ReduceStage>;
+  /** Indices no runner may dispatch. */
+  pinned: ReadonlySet<number>;
+  /** The shared context manager, carried so a runner hands the same instance to every stage. */
+  context: IContextManager;
+  /** The run handler `.onError()` registered, if any. */
+  runHandler?: PipelineErrorHandler;
+  /** The chunk boundary in force. */
+  chunkSize: number;
+  /** Whether the chain runs synchronously, as its own type already says. */
+  mode: PipelineMode;
 }
 
 /** A registered reduce stage's own definition - `pushReduceStage()` (below) is the one place that
@@ -318,6 +359,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
   protected _syncPreBufferItems: Iterable<T> | null;
   /** The chunk boundary `.buffer(size)` last declared - see `PipelineOptions.chunkSize`. */
   protected _chunkSize: number;
+  /** The source `.from()` named - see `PipelineOptions.source`. */
+  protected _source: PipelineSource<T> | null;
+  /** Stage indices a `.local(build)` region owns - see `PipelineOptions.pinnedStages`. */
+  protected _pinnedStages: ReadonlySet<number>;
 
   /**
    * Create a new Pipeline from a data source.
@@ -340,6 +385,32 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     this._preBufferItems = (options?.preBufferItems ?? null) as AsyncIterable<T> | null;
     this._syncPreBufferItems = (options?.syncPreBufferItems ?? null) as Iterable<T> | null;
     this._chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
+    this._source = (options?.source ?? null) as PipelineSource<T> | null;
+    this._pinnedStages = options?.pinnedStages ?? new Set<number>();
+  }
+
+  /**
+   * What this pipeline IS, for a runner that will execute it elsewhere (#90) - the source, the
+   * stages in order, and which of them a `.local(build)` region pinned here. Reading a pipeline
+   * rather than being one is what lets `ConcurrentRunner`/`HttpRunner`/`ClusterRunner` exist beside
+   * the chain instead of inside it.
+   *
+   * Internal to the package in intent, public in reach: a runner is not a `Pipeline` subclass, so
+   * it cannot read the protected fields this gathers.
+   *
+   * `new Pipeline().from([1,2,3]).transform((t) => t.map((x) => x * 2)).plan().stages.length` → `1`.
+   */
+  plan(): PipelinePlan<T> {
+    return {
+      source: this._source,
+      stages: this._chunkTransforms,
+      reduceStages: this._reduceStages,
+      pinned: this._pinnedStages,
+      context: this._context,
+      runHandler: this._runHandler,
+      chunkSize: this._chunkSize,
+      mode: this._mode,
+    };
   }
 
   /**
@@ -392,6 +463,9 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
         // handler silently never fire.
         ...this.carriedOptions(),
         mode,
+        // The source is kept whole (#90), unlike the pre-buffer views a stage nulls: a runner
+        // re-drives this pipeline's stages over it with its own dispatch.
+        source: data,
         syncChunks: buildSyncChunkGenerator<U>(this._chunkSize)(items),
         syncPreBufferItems: items,
         preBufferItems: null,
@@ -402,6 +476,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     return this.createPipeline<U>(buildChunkGenerator<U>(this._chunkSize)(items), {
       ...this.carriedOptions(),
       mode,
+      source: data,
       preBufferItems: items,
       syncChunks: null,
       syncPreBufferItems: null,
@@ -459,6 +534,8 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
       preBufferItems: this._preBufferItems,
       syncPreBufferItems: this._syncPreBufferItems,
       chunkSize: this._chunkSize,
+      source: this._source,
+      pinnedStages: this._pinnedStages,
       runHandler: this._runHandler,
       mode: this._mode,
       syncChunks: this._syncChunks,
@@ -967,12 +1044,14 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
       if (items !== null) {
         return this.createPipeline<T>(EMPTY_CHUNKS as AsyncIterable<T[]>, {
           ...this.carriedOptions(),
+          chunkSize: size,
           syncChunks: buildSyncChunkGenerator<T>(size)(items),
           syncPreBufferItems: items,
         }) as this;
       }
       return this.createPipeline<T>(EMPTY_CHUNKS as AsyncIterable<T[]>, {
         ...this.carriedOptions(),
+        chunkSize: size,
         syncChunks: recutSyncChunks(this._syncChunks, size),
         syncPreBufferItems: null,
       }) as this;
@@ -981,6 +1060,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     const items = this._preBufferItems ?? flattenChunks(this._chunks);
     return this.createPipeline<T>(buildChunkGenerator<T>(size)(items), {
       ...this.carriedOptions(),
+      chunkSize: size,
       preBufferItems: items,
     }) as this;
   }
@@ -1078,7 +1158,15 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
       mode: this._mode,
       syncChunks: this._syncChunks,
     });
+    const before = this._chunkTransforms.length;
     const built = build(region as unknown as Pipeline<T, M, "shape">);
+
+    // Every stage the region added is PINNED (#90): a runner runs it in the orchestrating process
+    // whatever else it dispatches, which is exactly what `.local(build)` has always meant. Recorded
+    // as indices because a stage's identity is its index (#17), so the marker survives the wire.
+    const pinned = new Set(this._pinnedStages);
+    for (let index = before; index < built._chunkTransforms.length; index++) pinned.add(index);
+
     return this.createPipeline<U>(built._chunks, {
       context: built._context,
       chunkTransforms: built._chunkTransforms,
@@ -1088,6 +1176,8 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
       runHandler: built._runHandler,
       mode: built._mode,
       syncChunks: built._syncChunks,
+      source: this._source,
+      pinnedStages: pinned,
     }) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P>;
   }
 

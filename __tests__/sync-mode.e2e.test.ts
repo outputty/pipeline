@@ -861,3 +861,84 @@ describe("#90 L4 - review findings, each reproduced before it was fixed", () => 
     expect(out).toEqual([6, 14, 10]);
   });
 });
+
+describe("#90 L5 - a pipeline can be read as a plan, for a runner to execute elsewhere", () => {
+  it("reports its source, its stages in order, and no pinned indices", () => {
+    const plan = new Pipeline()
+      .from([1, 2, 3])
+      .transform((t) => t.map((x: number) => x * 2))
+      .transform((t) => t.map((x: number) => x + 1))
+      .plan();
+
+    expect(plan.source).toEqual([1, 2, 3]);
+    expect(plan.stages).toHaveLength(2);
+    expect([...plan.pinned]).toEqual([]);
+    expect(plan.mode).toBe("sync");
+  });
+
+  it("keeps the source after a stage has consumed the pre-buffer views", () => {
+    // `.apply()` nulls `preBufferItems`/`syncPreBufferItems`, so neither can serve as the source a
+    // runner re-drives the chain over. `_source` is kept whole for exactly that reason.
+    const plan = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .transform((t) => t.map((x: number) => x * 2))
+      .buffer(2)
+      .transform((t) => t.map((x: number) => x + 1))
+      .plan();
+
+    expect(plan.source).toEqual([1, 2, 3, 4, 5]);
+    expect(plan.chunkSize).toBe(2);
+  });
+
+  it("marks a .local() region's stages as pinned, by index", () => {
+    const plan = new Pipeline()
+      .from([1, 2, 3])
+      .transform((t) => t.map((x: number) => x * 2))
+      .local((p) => p.transform((t) => t.map((x: number) => x + 1)))
+      .transform((t) => t.map((x: number) => x * 10))
+      .plan();
+
+    expect(plan.stages).toHaveLength(3);
+    expect([...plan.pinned]).toEqual([1]);
+  });
+
+  it("two builds of the same chain agree on the plan, so an index is a stable address", () => {
+    // What makes a stage index usable across a process boundary (#17): the same chain, built twice,
+    // must produce the same stage count and the same pinned set.
+    const build = () =>
+      new Pipeline()
+        .from([1, 2, 3])
+        .transform((t) => t.map((x: number) => x * 2))
+        .local((p) => p.transform((t) => t.map((x: number) => x + 1)))
+        .plan();
+
+    const a = build();
+    const b = build();
+
+    expect(a.stages.length).toBe(b.stages.length);
+    expect([...a.pinned]).toEqual([...b.pinned]);
+  });
+
+  it("carries the context manager and the run handler a runner must reuse", () => {
+    const context = new SimpleContextManager();
+    const handler = (): void => {};
+
+    const plan = new Pipeline({ context })
+      .from([1, 2, 3])
+      .onError(handler)
+      .transform((t) => t.map((x: number) => x * 2))
+      .plan();
+
+    expect(plan.context).toBe(context);
+    expect(plan.runHandler).toBe(handler);
+  });
+
+  it("reports an async chain's Mode, which is what forces a runner to be asynchronous", () => {
+    async function* source(): AsyncGenerator<number> {
+      yield 1;
+    }
+
+    expect(new Pipeline().from(source()).plan().mode).toBe("async");
+    expect(new Pipeline().from([1, 2, 3]).plan().mode).toBe("sync");
+  });
+});
