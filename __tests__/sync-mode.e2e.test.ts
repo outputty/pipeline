@@ -438,3 +438,137 @@ describe("#90 - the Mode a chain reports and the engine it runs on never disagre
     expect(await t.runnable()([0], new SimpleContextManager())).toEqual([5]);
   });
 });
+
+describe("#90 L4 - a fold keeps the chain's Mode instead of always widening it", () => {
+  it("a plain reducer over a sync source returns an array with no await", () => {
+    const totals: number[] = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(totals).toEqual([15]);
+    expect(Array.isArray(totals)).toBe(true);
+  });
+
+  it("that fold creates no Promise at all", () => {
+    expect(
+      countPromises(() =>
+        new Pipeline()
+          .from([1, 2, 3, 4, 5])
+          .reduce((acc: number, x: number) => acc + x, 0)
+          .toArray(),
+      ),
+    ).toBe(0);
+  });
+
+  it("a fold survives more chunks than one, in order", () => {
+    const totals: number[] = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .buffer(2)
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(totals).toEqual([15]);
+  });
+
+  it("emit() mid-fold gives the sync path the same answer as the async one", async () => {
+    const batch = (
+      acc: number,
+      x: number,
+      _ctx: unknown,
+      emit: (value: number) => void,
+    ): number => {
+      const next = acc + x;
+      if (next >= 6) {
+        emit(next);
+        return 0;
+      }
+      return next;
+    };
+
+    async function* asyncSource(): AsyncGenerator<number> {
+      for (const x of [1, 2, 3, 4, 5, 6]) yield x;
+    }
+
+    const sync: number[] = new Pipeline().from([1, 2, 3, 4, 5, 6]).reduce(batch, 0).toArray();
+    const async: number[] = await new Pipeline().from(asyncSource()).reduce(batch, 0).toArray();
+
+    expect(sync).toEqual([6, 9, 6]);
+    expect(sync).toEqual(async);
+  });
+
+  it("a stage after the fold stays synchronous too", () => {
+    const scaled: number[] = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .transform((t) => t.map((n: number) => n * 10))
+      .toArray();
+
+    expect(scaled).toEqual([150]);
+  });
+
+  it("an async reducer widens the whole chain", async () => {
+    const totals: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .reduce(async (acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(await totals).toEqual([15]);
+  });
+
+  it("a fold on an async source stays async", async () => {
+    async function* source(): AsyncGenerator<number> {
+      yield 1;
+      yield 2;
+      yield 3;
+    }
+
+    const totals: Promise<number[]> = new Pipeline()
+      .from(source())
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(await totals).toEqual([6]);
+  });
+
+  it("a synchronous fold does not overflow the stack on a long source", () => {
+    const items = Array.from({ length: 20000 }, (_, index) => index);
+
+    const totals: number[] = new Pipeline()
+      .from(items)
+      .buffer(100)
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(totals).toEqual([199990000]);
+  });
+
+  it("ConcurrentPipeline's own reduce still dispatches and stays async", async () => {
+    const totals: number[] = await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
+      .from([1, 2, 3, 4, 5])
+      .buffer(5)
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(totals).toEqual([15]);
+  });
+
+  it("an async branch transformer compiles again", async () => {
+    // Regression: `Transformer`'s Mode parameter defaults to `"sync"`, so the pre-#90 spelling
+    // `Transformer<T, U>` in `.branch()`'s own signature narrowed it to sync-only transformers,
+    // rejecting an async one that compiled on `main`.
+    const data = await new Pipeline().from([1, 2, 3, 4, 5]).branch({
+      doubled: {
+        predicate: (x: number) => x % 2 === 0,
+        transformer: new Transformer<number, number>().map(async (x: number) => x * 2),
+      },
+      plain: {
+        predicate: (x: number) => x % 2 !== 0,
+        transformer: new Transformer<number, number>(),
+      },
+    });
+
+    expect(data.doubled).toEqual([4, 8]);
+    expect(data.plain).toEqual([1, 3, 5]);
+  });
+});

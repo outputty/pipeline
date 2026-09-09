@@ -44,6 +44,17 @@ export type AssignMode<P extends SourcePolicy, S extends "sync" | "async"> = P e
   : S;
 
 /**
+ * The Mode a stage produces from the chain's own Mode `M` and the stage's own Mode `S` (#90): a
+ * stage runs synchronously only when the chain reaching it already does, since one asynchronous
+ * half defers everything after it. `AssignMode` then applies the class's own policy on top.
+ *
+ * `JoinMode<"sync", "sync">` → `"sync"`. `JoinMode<"async", "sync">` → `"async"`.
+ */
+export type JoinMode<M extends PipelineMode, S extends "sync" | "async"> = M extends "sync"
+  ? S
+  : "async";
+
+/**
  * A pipeline callback: maps `item` to `T` (or `Promise<T>`), with an optional shared `ctx`.
  *
  * ONE signature, not a union of `(item)` / `(item, ctx)` arms — TypeScript will not contextually
