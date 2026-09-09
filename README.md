@@ -10,18 +10,28 @@ pnpm add @outputty/pipeline
 
 ## Quick Start
 
+A pipeline declares the type it accepts, holds no data, and IS the function you call.
+
 <!-- compiles -->
 
 ```typescript
 import { Pipeline } from "@outputty/pipeline";
 
-// Basic transformation
-const data = await new Pipeline([1, 2, 3, 4, 5])
-  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
-  .toArray();
+// Compose once, with no data.
+const doubled = new Pipeline<number>().transform((t) => t.map((x) => x * 2).filter((x) => x > 4));
 
-console.log(data); // [6, 8, 10]
+// Call it with any input. Every callback is synchronous, so no `await` and no `Promise`.
+console.log(doubled([1, 2, 3, 4, 5]).toArray()); // [6, 8, 10]
+console.log(doubled([10, 20]).toArray()); // [20, 40]
+
+// One async callback, or an async input, widens the whole chain.
+const slow = new Pipeline<number>().transform((t) => t.map(async (x) => x * 2));
+console.log(await slow([1, 2, 3]).toArray()); // [2, 4, 6]
 ```
+
+Calling a pipeline returns a `PipelineResult`. That is where the terminal ops live -
+`toArray()`, `first(n)`, `consume()`, `forEach(fn)`, `chunks()`, and both iteration protocols - so
+a chain cannot be drained without an input, and a result cannot be extended.
 
 ## Core Concepts
 
@@ -168,11 +178,6 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 
 #### Static Methods
 
-- **`Pipeline.merge(pipelines, options?)`** - concatenate several pipelines' data and contexts into
-  a fresh, plain `Pipeline`. See [Merging](#merging).
-
-#### Instance Methods
-
 - **`.context(obj)`** - merge values into the pipeline's OWN context manager, mutating it in place;
   a manager that rejects an unknown key propagates that error instead of being bypassed.
 - **`.apply(transformer)`** - apply a pre-built transformer.
@@ -188,8 +193,6 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.consume()`** - process all items without collecting.
 - **`.forEach(fn)`** - execute side-effect for each item.
 - **`.branch(definitions)`** - split into multiple branches.
-- **`.merge(...others)`** - concatenate other pipelines' items and contexts onto THIS one, keeping
-  THIS pipeline's own class, knobs and stage numbering. See [Merging](#merging).
 - **`.onError(fn)`** - the run handler. `fn` receives the error and the context; returning drops
   the failing chunk and the run continues, throwing stops the run. Position-dependent: only a
   stage applied AFTER this call is covered. See [Error Handling](#error-handling).
@@ -628,58 +631,6 @@ const data = await new Pipeline([1, 2, 3, 4, 5]).branch({
 
 console.log(data.evens); // [2, 4]
 console.log(data.odds); // [1, 3, 5]
-```
-
-## Merging
-
-Several sources concatenate back into one - the other direction from branching, and there are two
-ways to do it, pinned in [`.claude/examples.md`](.claude/examples.md) Case 5 and Case 8.
-
-`Pipeline.merge(pipelines, options?)` concatenates every source pipeline's data and context into a
-FRESH, plain `Pipeline`, for a caller who holds no pipeline of its own to continue. `pipelines` is
-an array; `options.context`, when given, is the SAME instance returned as the merged pipeline's
-`.contextManager`, later pipelines still winning on a shared key. With no `options`, a fresh
-manager is built the same way.
-
-<!-- compiles -->
-
-```typescript
-import { Pipeline } from "@outputty/pipeline";
-
-const pipeline1 = new Pipeline([1, 2, 3]);
-const pipeline2 = new Pipeline([4, 5, 6]);
-
-const merged = Pipeline.merge([pipeline1, pipeline2]);
-const data = await merged.toArray();
-
-console.log(data); // [ 1, 2, 3, 4, 5, 6 ]
-```
-
-`pipeline.merge(...others)` continues a pipeline you already hold instead: it keeps THIS
-pipeline's own class, knobs and stage numbering, so a stage applied after the merge runs at this
-pipeline's own next index rather than restarting at 0. Reach for this over the static form
-whenever work after the merge must stay concurrent, remote or clustered - the static form always
-returns a plain `Pipeline`, so a merged `HttpPipeline` gaining one more stage would otherwise
-collide with its own first stage on `/stage/0`.
-
-<!-- illustrative -->
-
-```typescript
-import { HttpPipeline, ConcurrentPipeline } from "@outputty/pipeline";
-
-const remote = new HttpPipeline([1, 2, 3, 4], { url: process.env.WORKER_URL! })
-  .buffer(1)
-  .transform((t) => t.map((x: number) => x + 1)); // stage 0, dispatched over HTTP
-
-const local = new ConcurrentPipeline([10, 20])
-  .buffer(1)
-  .transform((t) => t.map((x: number) => x + 5)); // its own in-process fan-out, never the wire
-
-const merged = remote.merge(local).transform((t) => t.map((x: number) => x * 100)); // stage 1 - THIS pipeline's own next index
-
-const data = await merged.toArray();
-
-console.log(data); // [ 200, 300, 400, 500, 1500, 2500 ]
 ```
 
 ## Patterns

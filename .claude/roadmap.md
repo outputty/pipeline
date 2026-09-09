@@ -49,6 +49,18 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **A pipeline holds its input type, not its data** (#90, `feat!`) - a chain is composed once,
+  without data, and RUN by calling it: `new Pipeline<Order>().transform(f)(orders).toArray()`.
+  Calling one returns a `PipelineResult`, which is where `toArray`/`first`/`consume`/`forEach`,
+  both iteration protocols and `chunks()` live - so a chain cannot be drained without an input, and
+  a result cannot be extended. A chain whose every callback is synchronous returns a plain array
+  with no `Promise` created anywhere, measured at zero with `node:async_hooks`; one async callback,
+  or an async input, widens the whole chain. `ConcurrentPipeline`, `HttpPipeline` and
+  `ClusterPipeline` take `(pipeline, options)` and wrap a chain built elsewhere, which is what lets
+  the HTTP worker and the HTTP trigger share one definition with no placeholder source.
+  `.branch()` returns a runner built once and called with any data, and a routing-only branch needs
+  no `Transformer` (#87, folded in). BREAKING: `.from()`, both `merge` forms, and every terminal op
+  leave `Pipeline`; the two-argument constructor is gone. PRs #92, #93, #95, #97, #102, #103, #104.
 - **Error handling moves onto the function that failed** (#78, `feat!`) - `Transformer.onError(fn)`
   is now the ROW handler: returning a value replaces the row, the exported `DROP` sentinel removes
   it, throwing escalates. It reaches every element-wise call - `.map()`, `.filter()`, `.flatMap()`,
@@ -202,6 +214,27 @@ The two older candidates, still not filed:
 
 ## Killed
 
+- **A `Runner` class that takes a built pipeline** (#90, PR #99, closed) - `ConcurrentRunner`,
+  `HttpRunner` and `ClusterRunner`, each running a pipeline through `run(pipeline)`. It forced
+  `new HttpRunner({ url }, pipeline).run(pipeline)` for the one class that must mount a server
+  before anything runs, because `.fetch` has to be ready at construction. The wrapping classes keep
+  their `Pipeline` names, take `(pipeline, options)` and are callable instead - the same separation,
+  with the pipeline named once.
+- **A `Chain` type between the builder and the pipeline** (#90, never built) - a separate function
+  type holding a stage list. The builder already carries its own; removing it and re-running the
+  cluster spike gave identical output.
+- **Detecting whether an input can be re-drained** (#90, never built) - so a spent source could
+  raise instead of reading empty. The `src[Symbol.iterator]() === src` test agrees with reality on
+  arrays, `Set`s, strings, custom iterables, generators and `Map.values()`, then reports a
+  `ReadableStream` as replayable when a second drain yields `[]` - and merely running the test locks
+  the stream, so the FIRST drain throws `Invalid state: ReadableStream is locked`. No detection is
+  attempted: every terminal re-drains, and a spent source reads empty.
+- **`class Pipeline extends Function`** (#90, never shipped) - one line for `instanceof Function`,
+  `.bind` and `.call`, and a spike confirmed it survives three levels of inheritance. Killed by
+  `super()`, which runs `CreateDynamicFunction`: `EvalError: Code generation from strings disallowed
+  for this context` on the first `new Pipeline()` under `node
+  --disallow-code-generation-from-strings`, and the same on a CSP page or a Cloudflare Worker.
+  `Pipeline.prototype` is reparented onto `Function.prototype` once instead.
 - **A conformance suite every `Pipeline` and Context class runs** (#37, closed COMPLETED, never
   built) - one set of behaviour cases, defined once in `__tests__/conformance/cases.ts`, run by thin
   wrapper files, one per class; no such file exists in the repo. Planning found four separate
