@@ -41,6 +41,7 @@ export { ClusterPipeline, type ClusterPipelineOptions } from "./pipelines/cluste
 
 // Runners (#90) - WHERE a pipeline runs, separated from what it does
 export { ConcurrentRunner, type RunnablePipeline } from "./runners/concurrent";
+export { HttpRunner, ClusterRunner, type DispatchRunnerOptions } from "./runners/http";
 
 // Factory functions
 export { createTransformer } from "./factories";

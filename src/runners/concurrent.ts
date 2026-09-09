@@ -19,6 +19,24 @@ import type { IContextManager, InternalTransformer, SourcePolicy } from "@src/ty
 export type RunnablePipeline<T> = Pipeline<T, "sync" | "async", SourcePolicy>;
 
 /**
+ * Reads a pipeline's plan and refuses one with no source (#90) - the guard every runner shares,
+ * written once rather than four times.
+ *
+ * `RunnablePipeline<T>` already excludes an `"unset"` pipeline at COMPILE time, so this only fires
+ * for a caller who cast past that. It is still a throw rather than a silent empty result, matching
+ * `requireSource()`'s own contract on the stage path.
+ */
+export function planOf<T>(
+  pipeline: RunnablePipeline<T>,
+): PipelinePlan<T> & { source: NonNullable<PipelinePlan<T>["source"]> } {
+  const plan = pipeline.plan();
+  if (plan.source === null) {
+    throw new Error("no source: call .from(data) before handing a pipeline to a runner");
+  }
+  return plan as PipelinePlan<T> & { source: NonNullable<PipelinePlan<T>["source"]> };
+}
+
+/**
  * Re-drives one plan onto `target`, stage by stage, in index order (#90) - the one place a plan
  * becomes execution, shared by every runner rather than copied per class.
  *
@@ -91,10 +109,7 @@ export class ConcurrentRunner {
    *   identically here.
    */
   async run<T>(pipeline: RunnablePipeline<T>): Promise<T[]> {
-    const plan = pipeline.plan();
-    if (plan.source === null) {
-      throw new Error("no source: call .from(data) before handing a pipeline to a runner");
-    }
+    const plan = planOf(pipeline);
 
     const target = new ConcurrentPipeline<T>({
       maxConcurrency: this.maxConcurrency,

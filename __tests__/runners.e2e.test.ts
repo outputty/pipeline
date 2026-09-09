@@ -9,8 +9,11 @@
 import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
+import { HttpPipeline } from "@src/pipelines/http";
 import { ConcurrentRunner } from "@src/runners/concurrent";
+import { HttpRunner } from "@src/runners/http";
 import { SimpleContextManager } from "@src/context/simple";
+import { HTTP_TIMEOUT, withServer } from "./helpers/fixtures";
 
 describe("#90 L5 - ConcurrentRunner runs a pipeline it is handed", () => {
   it("returns what a plain drain returns, for a chain with no concurrency to exploit", async () => {
@@ -134,5 +137,76 @@ describe("#90 L5 - ConcurrentRunner runs a pipeline it is handed", () => {
 
     expect(await runner.run(pipeline)).toEqual([2, 4, 6]);
     expect(await runner.run(pipeline)).toEqual([2, 4, 6]);
+  });
+});
+
+describe("#90 L5 - HttpRunner serves and dispatches over a real server", () => {
+  it(
+    "returns what HttpPipeline returns for the same chain",
+    async () => {
+      // The serving side holds the SAME stages over an empty source, exactly as the class-based
+      // harness in pipelines.e2e.test.ts does. Under the layering that is the runner's own bound
+      // pipeline, which is why `.fetch` is ready before anything runs.
+      const serving = new HttpRunner(
+        { url: "" },
+        new Pipeline()
+          .from<number>([])
+          .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4)),
+      );
+
+      await withServer(serving.fetch, async (url) => {
+        const pipeline = new Pipeline()
+          .from([1, 2, 3, 4, 5])
+          .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4));
+
+        const viaRunner = await new HttpRunner({ url }, pipeline).run(pipeline);
+        const viaClass = await new HttpPipeline<number>({ url })
+          .from([1, 2, 3, 4, 5])
+          .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+          .toArray();
+
+        expect(viaRunner).toEqual([6, 8, 10]);
+        expect(viaRunner).toEqual(viaClass);
+      });
+    },
+    HTTP_TIMEOUT,
+  );
+
+  it(
+    "makes zero requests for a .local() region, the same as the class does",
+    async () => {
+      let requests = 0;
+      const serving = new HttpRunner(
+        { url: "" },
+        new Pipeline().from<number>([]).transform((t) => t.map((x: number) => x * 2)),
+      );
+      const counting = async (request: Request): Promise<Response> => {
+        requests++;
+        return serving.fetch(request);
+      };
+
+      await withServer(counting, async (url) => {
+        const pipeline = new Pipeline()
+          .from([1, 2, 3])
+          .transform((t) => t.map((x: number) => x * 2))
+          .local((p) => p.transform((t) => t.filter((x: number) => x > 2)));
+
+        const out = await new HttpRunner({ url }, pipeline).run(pipeline);
+
+        expect(out).toEqual([4, 6]);
+        expect(requests).toBe(1); // only the unpinned stage crossed the wire
+      });
+    },
+    HTTP_TIMEOUT,
+  );
+
+  it("exposes .fetch before anything has run", () => {
+    const runner = new HttpRunner(
+      { url: "http://127.0.0.1:1" },
+      new Pipeline().from<number>([]).transform((t) => t.map((x: number) => x * 2)),
+    );
+
+    expect(typeof runner.fetch).toBe("function");
+    expect(runner.url).toBe("http://127.0.0.1:1");
   });
 });
