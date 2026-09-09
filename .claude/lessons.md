@@ -630,3 +630,29 @@ down to one package - splitting a coupling that was co-location-only, before the
 it had settled, would have meant redoing the split's own boilerplate (package.json, CI, `.claude/`
 docs) a second time. See `outputty/laygo`'s own `.claude/lessons.md` (2026-09-04) for the pnpm
 workspace-boundary-marker mistake made during the flatten half of that same ticket.
+
+## 2026-09-09 A batch find-and-replace reported success and changed nothing
+
+`sd 'this: M extends "unset" \? never : Pipeline<T, "async", "async">,\n' '' src/pipelines/http.ts
+src/pipelines/cluster.ts` exited 0 and edited neither file - the pattern did not match across the
+newline the way the call assumed. Both dead `this` guards stayed, `pnpm check` stayed green because
+no test chained two type-changing `.transform()` calls on those classes, and the deletion was
+reported as done in a build message. Only `/code-review` found them, one layer later, by which point
+they had also started breaking a second type-changing `.transform()` with `TS2684`. Produced
+`~/.claude/rules/code.md`'s "grep for the old pattern after a batch find-and-replace, before
+trusting it ran" (2026-09-09).
+
+## 2026-09-09 A bulk mechanical migration is a pipeline, not an edit
+
+Deleting `.from()` meant moving about 170 call sites across 18 test files. Six automated passes were
+written, and each found a real defect in the one before it: comments and string literals edited,
+variable tracking leaking across `it()` blocks, the input inserted after the variable rather than
+before the terminal, a depth-blind backward scan stopping inside `new Pipeline({ context })`,
+`.branch()` treated as a terminal when it returns a runner, and `Array.from` matched as a pipeline's
+own `.from` - that last turned `const items = Array.from({ length: 30 }, ...)` into `const items =
+Array` in four files. The scope leak is the one that mattered: it compiled cleanly wherever two
+tests happened to name their source the same, so `tsc` could not have caught it. What made the sixth
+pass affordable was `tmp/run-migration.sh` - reset to a fixed base commit, then every pass in order -
+so a fix cost one command rather than a redo of the four passes before it. Produced
+`~/.claude/rules/code.md`'s "drive a bulk mechanical migration from a fixed base through one
+re-runnable script" (2026-09-09).
