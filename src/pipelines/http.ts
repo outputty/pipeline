@@ -14,9 +14,12 @@
 
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
-import type { Pipeline, PipelineOptions, PipelineSource, ReduceStage } from "@src/pipeline";
+import type { Pipeline, PipelineOptions, PipelineSource, ReduceStage, AnyPipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import type { IContextManager, InternalTransformer, ReduceFunction } from "@src/types";
+import type { IContextManager, InternalTransformer, ReduceFunction,
+  PipelineMode,
+  SourcePolicy,
+} from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
 import { ndjsonFrame, readNdjsonLines } from "@src/utils/ndjson";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -159,11 +162,11 @@ async function flushTrailing(
  * `new HttpPipeline([1,2,3,4,5], { url }).transform((t) => t.map((x) => x * 2)).toArray()` →
  * `[2,4,6,8,10]`, across two real instances.
  */
-export class HttpPipeline<T> extends ConcurrentPipeline<T> {
+export class HttpPipeline<T, M extends PipelineMode = "unset"> extends ConcurrentPipeline<T, M> {
   protected _url: string;
 
-  constructor(source: PipelineSource<T>, options: HttpPipelineConstructorOptions) {
-    super(source, options);
+  constructor(options: HttpPipelineConstructorOptions) {
+    super(options);
     this._url = options.url;
   }
 
@@ -182,12 +185,15 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
    * un-narrowed inherited return type) has no `.fetch`. The cast is honest because
    * `createPipeline()` (above) already makes the RUNTIME value an `HttpPipeline`.
    */
-  override transform<U>(builder: (t: Transformer<T, T>) => Transformer<T, U>): HttpPipeline<U> {
-    return super.transform(builder) as HttpPipeline<U>;
+  override transform<U, M2 extends "sync" | "async">(
+    this: M extends "unset" ? never : Pipeline<T, M, "async">,
+    builder: (t: Transformer<T, T, M & ("sync" | "async")>) => Transformer<T, U, M2>,
+  ): HttpPipeline<U, "async"> {
+    return super.transform(builder) as unknown as HttpPipeline<U, "async">;
   }
 
-  override apply<U>(transformer: Transformer<T, U>): HttpPipeline<U> {
-    return super.apply(transformer) as HttpPipeline<U>;
+  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): HttpPipeline<U, "async"> {
+    return super.apply(transformer) as unknown as HttpPipeline<U, "async">;
   }
 
   /**
@@ -195,8 +201,8 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
    * `.transform()`/`.apply()` above. `ConcurrentPipeline.reduce()`'s own logic runs unchanged via
    * `super`.
    */
-  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): HttpPipeline<U> {
-    return super.reduce(fn, initial) as HttpPipeline<U>;
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): HttpPipeline<U, "async"> {
+    return super.reduce(fn, initial) as unknown as HttpPipeline<U, "async">;
   }
 
   /**
@@ -206,8 +212,25 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
    * result back through THIS class's own `createPipeline()`, which is what keeps `url` alive for
    * whatever comes after the region.
    */
-  override local<U>(build: (p: Pipeline<T>) => Pipeline<U>): HttpPipeline<U> {
-    return super.local(build) as HttpPipeline<U>;
+  /**
+   * Forced `"async"` whatever the source's shape (#90) - HttpPipeline exists for I/O-bound work and
+   * has no synchronous case, so an array source runs on the async engine here exactly as an
+   * `AsyncIterable` one does. `sourcePolicy()` below is the runtime half; the `"async"` third type
+   * argument on the `extends` clause above is the compile-time half, and is what makes this
+   * override a genuine narrowing of the base's own two arms rather than a conflict with them.
+   *
+   * `new HttpPipeline({}).from([1, 2, 3])` → `HttpPipeline<number, "async">`.
+   */
+  override from<U>(data: PipelineSource<U>): HttpPipeline<U, "async"> {
+    return this.fromSource<U>(data, "async") as unknown as HttpPipeline<U, "async">;
+  }
+
+  protected override sourcePolicy(): SourcePolicy {
+    return "async";
+  }
+
+  override local<U>(build: (p: AnyPipeline<T>) => AnyPipeline<U>): HttpPipeline<U, "async"> {
+    return super.local(build) as unknown as HttpPipeline<U, "async">;
   }
 
   /**
@@ -217,11 +240,11 @@ export class HttpPipeline<T> extends ConcurrentPipeline<T> {
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
-  ): HttpPipeline<U> {
+  ): HttpPipeline<U, "sync" | "async"> {
     const Ctor = this.constructor as new (
       data: PipelineSource<U>,
       options: HttpPipelineConstructorOptions,
-    ) => HttpPipeline<U>;
+    ) => HttpPipeline<U, "sync" | "async">;
     return new Ctor([], { ...options, ...this.concurrentOptions(), url: this._url, chunks });
   }
 
