@@ -164,7 +164,11 @@ async function flushTrailing(
  * `new HttpPipeline([1,2,3,4,5], { url }).transform((t) => t.map((x) => x * 2)).toArray()` →
  * `[2,4,6,8,10]`, across two real instances.
  */
-export class HttpPipeline<T, M extends "async" = "async"> extends ConcurrentPipeline<T> {
+export class HttpPipeline<T, M extends "async" = "async", In = T> extends ConcurrentPipeline<
+  T,
+  "async",
+  In
+> {
   protected _url: string;
 
   constructor(options: HttpPipelineConstructorOptions) {
@@ -194,12 +198,12 @@ export class HttpPipeline<T, M extends "async" = "async"> extends ConcurrentPipe
     // make impossible.
     this: M extends "unset" ? never : Pipeline<T, "async", "async">,
     builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
-  ): HttpPipeline<U, M> {
-    return super.transform(builder) as unknown as HttpPipeline<U, M>;
+  ): HttpPipeline<U, M, In> {
+    return super.transform(builder) as unknown as HttpPipeline<U, M, In>;
   }
 
-  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): HttpPipeline<U, M> {
-    return super.apply(transformer) as unknown as HttpPipeline<U, M>;
+  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): HttpPipeline<U, M, In> {
+    return super.apply(transformer) as unknown as HttpPipeline<U, M, In>;
   }
 
   /**
@@ -207,8 +211,8 @@ export class HttpPipeline<T, M extends "async" = "async"> extends ConcurrentPipe
    * `.transform()`/`.apply()` above. `ConcurrentPipeline.reduce()`'s own logic runs unchanged via
    * `super`.
    */
-  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): HttpPipeline<U, M> {
-    return super.reduce(fn, initial) as unknown as HttpPipeline<U, M>;
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): HttpPipeline<U, M, In> {
+    return super.reduce(fn, initial) as unknown as HttpPipeline<U, M, In>;
   }
 
   /**
@@ -228,6 +232,8 @@ export class HttpPipeline<T, M extends "async" = "async"> extends ConcurrentPipe
    * `new HttpPipeline({}).from([1, 2, 3])` → `HttpPipeline<number, "async">`.
    */
   override from<U>(data: PipelineSource<U>): HttpPipeline<U, M> {
+    // `In` becomes `U` here - see `ConcurrentPipeline.from()`: binding an input spends whatever the
+    // chain accepted before.
     return this.fromSource<U>(data, "async") as unknown as HttpPipeline<U, M>;
   }
 
@@ -236,9 +242,9 @@ export class HttpPipeline<T, M extends "async" = "async"> extends ConcurrentPipe
   }
 
   override local<U, M2 extends "sync" | "async">(
-    build: (p: Pipeline<T, "async", "shape">) => Pipeline<U, M2, "shape">,
-  ): HttpPipeline<U, M> {
-    return super.local(build) as unknown as HttpPipeline<U, M>;
+    build: (p: Pipeline<T, "async", "shape", any>) => Pipeline<U, M2, "shape", any>,
+  ): HttpPipeline<U, M, In> {
+    return super.local(build) as unknown as HttpPipeline<U, M, In>;
   }
 
   /**
@@ -248,10 +254,10 @@ export class HttpPipeline<T, M extends "async" = "async"> extends ConcurrentPipe
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
-  ): HttpPipeline<U, M> {
+  ): HttpPipeline<U, M, In> {
     const Ctor = this.constructor as new (
       options: HttpPipelineConstructorOptions,
-    ) => HttpPipeline<U, M>;
+    ) => HttpPipeline<U, M, In>;
     return new Ctor({ ...options, ...this.concurrentOptions(), url: this._url, chunks });
   }
 

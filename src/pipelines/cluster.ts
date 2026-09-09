@@ -149,7 +149,11 @@ async function* emptyAsyncIterable(): AsyncGenerator<never> {}
  * `new ClusterPipeline([1,2,3,4,5]).transform((t) => t.map((x) => x * 2)).toArray()` →
  * `[2,4,6,8,10]`, served by real worker processes.
  */
-export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipeline<T> {
+export class ClusterPipeline<T, M extends "async" = "async", In = T> extends HttpPipeline<
+  T,
+  "async",
+  In
+> {
   /** Worker processes to bring up on first drain. Default `os.availableParallelism()`. */
   readonly workers: number;
   /** This pipeline's stable position among every `ClusterPipeline` constructed in this process -
@@ -186,10 +190,10 @@ export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipelin
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
-  ): ClusterPipeline<U, M> {
+  ): ClusterPipeline<U, M, In> {
     const Ctor = this.constructor as new (
       options?: ClusterPipelineConstructorOptions & { url: string },
-    ) => ClusterPipeline<U, M>;
+    ) => ClusterPipeline<U, M, In>;
     const merged = {
       ...options,
       ...this.concurrentOptions(),
@@ -208,18 +212,18 @@ export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipelin
     // make impossible.
     this: M extends "unset" ? never : Pipeline<T, "async", "async">,
     builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
-  ): ClusterPipeline<U, M> {
-    return super.transform(builder) as unknown as ClusterPipeline<U, M>;
+  ): ClusterPipeline<U, M, In> {
+    return super.transform(builder) as unknown as ClusterPipeline<U, M, In>;
   }
 
-  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ClusterPipeline<U, M> {
-    return super.apply(transformer) as unknown as ClusterPipeline<U, M>;
+  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ClusterPipeline<U, M, In> {
+    return super.apply(transformer) as unknown as ClusterPipeline<U, M, In>;
   }
 
   /** Re-declared ONLY to narrow the static return type back to `ClusterPipeline<U>` - same reason
    * as `.transform()`/`.apply()` above. `HttpPipeline.reduce()`'s own logic runs unchanged. */
-  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ClusterPipeline<U, M> {
-    return super.reduce(fn, initial) as unknown as ClusterPipeline<U, M>;
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ClusterPipeline<U, M, In> {
+    return super.reduce(fn, initial) as unknown as ClusterPipeline<U, M, In>;
   }
 
   /**
@@ -237,6 +241,7 @@ export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipelin
    * `new ClusterPipeline().from([1, 2, 3])` → `ClusterPipeline<number, "async">`.
    */
   override from<U>(data: PipelineSource<U>): ClusterPipeline<U, M> {
+    // `In` becomes `U` here - see `ConcurrentPipeline.from()`.
     return this.fromSource<U>(data, "async") as unknown as ClusterPipeline<U, M>;
   }
 
@@ -245,9 +250,9 @@ export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipelin
   }
 
   override local<U, M2 extends "sync" | "async">(
-    build: (p: Pipeline<T, "async", "shape">) => Pipeline<U, M2, "shape">,
-  ): ClusterPipeline<U, M> {
-    return super.local(build) as unknown as ClusterPipeline<U, M>;
+    build: (p: Pipeline<T, "async", "shape", any>) => Pipeline<U, M2, "shape", any>,
+  ): ClusterPipeline<U, M, In> {
+    return super.local(build) as unknown as ClusterPipeline<U, M, In>;
   }
 
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain

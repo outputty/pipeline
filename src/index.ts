@@ -34,6 +34,9 @@ export { Transformer } from "./transformer";
 // Pipeline
 export { Pipeline, type PipelineOptions, type PipelineSource } from "./pipeline";
 
+// What calling a Pipeline produces (#90) — the terminal ops live here, not on the chain
+export { PipelineResult } from "./result";
+
 // Pipeline family (#17) — where a chain's chunks are processed
 export { ConcurrentPipeline, type ConcurrentPipelineOptions } from "./pipelines/concurrent";
 export { HttpPipeline, toNodeHandler } from "./pipelines/http";

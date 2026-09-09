@@ -231,23 +231,15 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     expect(created).toBe(0);
   });
 
-  it("Done-when 4: .transform() before .from() is a compile error", () => {
-    // Type-only: never executed. `tsc --noEmit` is the real assertion, matching the convention in
-    // `__tests__/pipelines.e2e.test.ts`.
-    //
-    // THIS CASE FLIPS BY ADDING A DIRECTIVE, not by removing one, and nothing in the gate forces
-    // that move on its own. At L3 the constructor becomes valid, so the directive below goes
-    // `TS2578` and must be deleted; the `.transform()` line then errors, and the case is live only
-    // once a directive sits THERE reading the "unset" Mode refusal's own diagnostic. L3 confirms
-    // that diagnostic is `TS2684` specifically (the conditional `this` parameter), not a `TS2345`
-    // argument mismatch, by deleting the new directive once and reading what tsc prints.
-    function typeOnlyCheck() {
-      const builder = new Pipeline<number>();
-      // @ts-expect-error - TS2684: the "unset" Mode refuses `.transform()`'s receiver until
-      // `.from()` has named a source (#90, Done-when 4)
-      builder.transform((t) => t.map((x) => x));
-    }
-    expect(typeof typeOnlyCheck).toBe("function");
+  it("composes .transform() before any input, and replays it on the input given", () => {
+    // Replaces the deleted Done-when 4, which asserted the opposite: `.transform()` before
+    // `.from()` used to be `TS2684`, refused by a conditional `this` reading the `"unset"` Mode.
+    // The callable shape makes composing ahead of the data the ORDINARY case, so that guard is
+    // gone. What still refuses is DRAINING with no input, now a type error rather than a runtime
+    // one - `__tests__/callable.e2e.test.ts` carries it as Done-when 10.
+    const composed = new Pipeline<number>().transform((t) => t.map((x) => x * 2));
+    expect(composed([1, 2, 3]).toArray()).toEqual([2, 4, 6]);
+    expect(composed([10]).toArray()).toEqual([20]);
   });
 
   it("Done-when 7: the two-arg constructor still compiles - L3 is what removes it", () => {
@@ -789,12 +781,17 @@ describe("#90 L4 - review findings, each reproduced before it was fixed", () => 
     expect(typeof withTap.fetch).toBe("function");
   });
 
-  it("a reduce stage refuses a source-less pipeline", () => {
-    // `.reduce()` sets the Mode explicitly, so the drain's own guard saw `"async"` rather than
-    // `"unset"`: measured before the fix, `new Pipeline().reduce(f, 0).toArray()` resolved to `[]`.
-    expect(() => new Pipeline<number>().reduce((acc: number, x: number) => acc + x, 0)).toThrow(
-      "no source: call .from(data) before composing",
-    );
+  it("a reduce stage defers on the base and refuses on a dispatching class", () => {
+    // The base's own guard is replaced by deferral (#90): a source-less `.reduce()` records the
+    // fold and replays it on the input the pipeline is called with, the same as `.transform()`.
+    // What the guard originally caught still holds - `new Pipeline().reduce(f, 0)` never resolves
+    // to `[]` - because DRAINING with no input is what still refuses.
+    const summed = new Pipeline<number>().reduce((acc: number, x: number) => acc + x, 0);
+    expect(summed([1, 2, 3, 4, 5]).toArray()).toEqual([15]);
+    expect(summed([10, 20]).toArray()).toEqual([30]);
+
+    // A dispatching class does not defer yet: it still needs `.from()` until the wrapper layer
+    // gives it a `(pipeline, options)` constructor of its own.
     expect(() =>
       new ConcurrentPipeline<number>().reduce((acc: number, x: number) => acc + x, 0),
     ).toThrow("no source: call .from(data) before composing");

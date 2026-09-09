@@ -24,7 +24,13 @@ import {
 
 /** The "another instance" side of an `HttpPipeline` chain: an empty-source pipeline whose only
  * job is to hold the SAME stage definitions `builder` describes, so its `.fetch` can serve them. */
-function makeWorker<U>(builder: (t: HttpPipeline<number>) => HttpPipeline<U>): HttpPipeline<U> {
+// The third argument is `In`, the type a pipeline is CALLED with (#90). It is `any` here because a
+// worker's own chain carries the input type of whatever seeded it (`number`), while `U` tracks the
+// stage OUTPUT - the two diverge the moment a stage changes the item type, which every caller here
+// does.
+function makeWorker<U>(
+  builder: (t: HttpPipeline<number>) => HttpPipeline<U, "async", any>,
+): HttpPipeline<U, "async", any> {
   return builder(new HttpPipeline({ url: "" }).from<number>([]));
 }
 
