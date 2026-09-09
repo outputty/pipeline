@@ -267,6 +267,49 @@ once where `.buffer(1)` pays it per item. The gap closes when the callback domin
 over a 2 ms-per-item workload, N=160, ran 23 ms each. Prefer the widest chunk that fits the
 in-flight budget.
 
+## The chain and the run - `Pipeline` and `PipelineResult` (#90)
+
+A `Pipeline` declares the type it ACCEPTS, holds no data, and IS the function you call. Calling one
+returns a `PipelineResult`, which is where every drain lives. The split is what makes draining
+without an input a compile error rather than a call resolving to `[]`, and what lets one chain serve
+any number of inputs.
+
+```text
+new Pipeline<In>(options?)      the chain. Stages are RECORDED, not run.
+  .transform / .apply           each records its own call in _pendingStages
+  .buffer / .reduce / .local    same - which is what keeps each one's POSITION
+  .branch(defs)                 -> BranchRunner, the definitions bound once
+  (input)                       -> PipelineResult
+                                     .toArray / .first / .consume / .forEach
+                                     [Symbol.iterator] (sync results only)
+                                     [Symbol.asyncIterator] (items) / .chunks()
+```
+
+Three mechanics make it work.
+
+An instance is callable because the constructor RETURNS a function and reparents it onto
+`new.target.prototype` - which restores the methods, `instanceof`, and the `this.constructor` that
+`createPipeline()`'s copy-on-write depends on. `Pipeline.prototype` is itself reparented onto
+`Function.prototype` once, below the class, so every instance is a real function. Never `class
+Pipeline extends Function`: its `super()` runs `CreateDynamicFunction`, which throws `EvalError:
+Code generation from strings disallowed for this context` wherever code generation is banned - a CSP
+page, a Cloudflare Worker, `node --disallow-code-generation-from-strings`.
+
+A stage composed before an input is recorded as its own CALL, not its result, and replayed against
+the bound pipeline when one arrives. Recording the call is what keeps a deferred chain and a bound
+one on identical code, and what preserves a stage's position - recording only a `.buffer()`'s SIZE
+instead applied it to the source cut, so a `.buffer()` written after a stage took effect before it.
+
+`Pipeline.drainable(input)` is the ONE seam between the two classes: it binds, then returns the sync
+chunk stream where there is one, the item stream, and the chunk stream. Each terminal calls it
+exactly once and threads what it got into its own async arm; calling it again there ran a user's
+`.local(build)` callback twice per call.
+
+Two knobs that look alike are deliberately apart. `PipelineMode` (`"unset" | "sync" | "async"`) is a
+TYPE fact about what a chain produces; `_bound` is the RUNTIME fact of whether an input is attached.
+`"unset"` answered both until a callable chain - `"unset"` for its whole life, bound only for the
+duration of one call - made that impossible.
+
 ## Benchmarks - pending #11
 
 `benchmarks/` is a separate project, outside the pnpm workspace, that installs its comparators once

@@ -254,21 +254,23 @@ stage runs. Everything else here is the base program with `.buffer(2)` and a fan
 <!-- compiles -->
 
 ```ts
-import { ConcurrentPipeline } from "@outputty/pipeline";
+import { ConcurrentPipeline, SimpleContextManager } from "@outputty/pipeline";
 
-const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const shared = new SimpleContextManager();
+const pipeline = new ConcurrentPipeline<number>({ maxConcurrency: 2, context: shared })
   .buffer(2)
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
   .tap((x: number, ctx) => {
     ctx.set("seen", (ctx.getOrDefault("seen", 0) as number) + 1);
   });
 
-const data = await pipeline.toArray();
-const context = pipeline.contextManager.toDict();
+const data = await pipeline([1, 2, 3, 4, 5]).toArray();
+const context = shared.toDict();
+console.log(JSON.stringify({ data, context }));
 ```
 
 ```json
-[6, 8, 10]
+{ "data": [6, 8, 10], "context": { "seen": 3 } }
 ```
 
 ```json
