@@ -42,6 +42,7 @@ import {
   buildSyncChunkGenerator,
   flattenChunks,
   drainSync,
+  drainSyncSettled,
   recutSyncChunks,
 } from "./utils/chunk";
 import { chain, isThenable, dropOrRethrow } from "./utils/helpers";
@@ -367,18 +368,24 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     if (mode === "sync") {
       const items = data as Iterable<U>;
       return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
-        context: this._context,
+        // Every knob set BEFORE `.from()` carries through it - `.onError()` and `.context()` are
+        // both callable on a source-less pipeline, and dropping them here made a registered run
+        // handler silently never fire.
+        ...this.carriedOptions(),
         mode,
         syncChunks: buildSyncChunkGenerator<U>(DEFAULT_CHUNK_SIZE)(items),
         syncPreBufferItems: items,
+        preBufferItems: null,
       });
     }
 
     const items = toAsyncIterable(data);
     return this.createPipeline<U>(buildChunkGenerator<U>(DEFAULT_CHUNK_SIZE)(items), {
-      context: this._context,
+      ...this.carriedOptions(),
       mode,
       preBufferItems: items,
+      syncChunks: null,
+      syncPreBufferItems: null,
     });
   }
 
@@ -448,6 +455,27 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
         for (const chunk of syncChunks) yield await chunk;
       },
     };
+  }
+
+  /**
+   * Refuses a stage on a pipeline that has no source yet (#90) - called by every `apply()`,
+   * including `ConcurrentPipeline`'s own, which has its own body rather than delegating here.
+   *
+   * The base's `.transform()` refuses an `"unset"` receiver at COMPILE time, but a dispatching class
+   * cannot: its Mode is fixed at `"async"` (that is what makes its narrowing overrides compile), so
+   * it has no `"unset"` state for a conditional `this` to test. Without this check a chain built
+   * with no source compiles on those three AND silently resolves to `[]`.
+   */
+  protected requireSource(): void {
+    if (this._mode === "unset") {
+      throw new Error("no source: call .from(data) before composing a stage");
+    }
+  }
+
+  /** Whether this pipeline runs on the synchronous engine (#90) - what a merge asks each input
+   * before deciding which engine the merged pipeline itself runs on. */
+  protected isSync(): boolean {
+    return this._mode === "sync" && this._syncChunks !== null;
   }
 
   /** This pipeline's chunks as a SYNC stream, for a sync merge. A pipeline that is not `"sync"`
@@ -564,8 +592,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     // caller passing either got a fresh SimpleContextManager instead, breaking the same-instance
     // contract every other path here keeps).
     if (pipelines.length === 0) {
+      // `ModeOf<never>` resolves `"sync"`, so an empty merge is a sync empty pipeline - not an
+      // `"unset"` one whose `.toArray()` would return a `Promise` against a `T[]` annotation.
       return new Pipeline<U, MergedMode<Ps>>({
         context: options?.context ?? options?.contextFactory?.(),
+        mode: "sync",
+        syncChunks: [],
       });
     }
 
@@ -580,8 +612,27 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
 
     // Concatenates each source pipeline's OWN chunk stream in sequence - no new chunking decision
     // at merge time (#39): a pipeline cut at 2 and one cut at 4 both keep their own boundary.
+    // The runtime engine has to match the Mode the return type promises (#90). Typing the result
+    // `"sync"` while leaving `_mode` at its `"unset"` default made `.toArray()` hand back a
+    // `Promise` where the caller's own annotation said `number[]` - the exact divergence this
+    // ticket removes, reintroduced at the one seam that builds a stranger rather than copying self.
+    if (pipelines.every((pipeline) => pipeline.isSync())) {
+      const streams = pipelines.map(
+        (pipeline) => pipeline.syncChunkStream() as MaybeAsyncChunks<U>,
+      );
+      function* concatSync(): Generator<U[] | Promise<U[]>> {
+        for (const stream of streams) yield* stream;
+      }
+      return new Pipeline<U, MergedMode<Ps>>({
+        context: mergedContext,
+        mode: "sync",
+        syncChunks: concatSync(),
+      });
+    }
+
     return new Pipeline<U, MergedMode<Ps>>({
       context: mergedContext,
+      mode: "async",
       chunks: concatChunks(
         pipelines.map((pipeline) => pipeline.chunkStream() as AsyncIterable<U[]>),
       ),
@@ -728,33 +779,16 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     return this.createPipeline<T>(
       concatChunks([this.chunkStream(), ...others.map((other) => other.chunkStream())]),
       {
-        context: this._context,
-        chunkTransforms: this._chunkTransforms,
-        reduceStages: this._reduceStages,
+        ...this.carriedOptions(),
+        // Several chunk streams are concatenated now, so there is no single raw item view left for
+        // a later `.buffer()` to recut from, and the merged stream is async whatever the inputs
+        // were - the signature already refuses merging async INTO sync.
         preBufferItems: null,
-        runHandler: this._runHandler,
+        syncPreBufferItems: null,
+        mode: "async",
+        syncChunks: null,
       },
     ) as this;
-  }
-
-  /**
-   * Convert sync iterable to async iterable.
-   */
-  private toAsyncIterable<U>(data: AsyncIterable<U> | Iterable<U>): AsyncIterable<U> {
-    // Check for async iterator
-    if (Symbol.asyncIterator in Object(data)) {
-      return data as AsyncIterable<U>;
-    }
-
-    // Convert sync iterable to async
-    const syncIterable = data as Iterable<U>;
-    return {
-      [Symbol.asyncIterator]: async function* () {
-        for (const item of syncIterable) {
-          yield item;
-        }
-      },
-    };
   }
 
   /**
@@ -782,6 +816,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
   apply<U, M2 extends "sync" | "async">(
     transformer: Transformer<T, U, M2>,
   ): Pipeline<U, AssignMode<P, M2>, P> {
+    this.requireSource();
     const runnable = transformer.runnable();
     const carried = {
       ...this.carriedOptions(),
@@ -992,9 +1027,13 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * `new Pipeline([1, 2, 3]).tap((x) => seen.push(x)).transform((t) => t.map((x) => x *
    * 2)).toArray()` → `[2, 4, 6]`, with `seen` `[1, 2, 3]`.
    */
-  tap(fn: PipelineFunction<T, unknown>): this;
-  tap(transformer: Transformer<T, unknown>): this;
-  tap(arg: PipelineFunction<T, unknown> | Transformer<T, unknown>): this {
+  tap(fn: (item: T, ctx: IContextManager) => Promise<unknown>): Pipeline<T, "async", P>;
+  tap(fn: (item: T, ctx: IContextManager) => unknown): this;
+  tap(transformer: Transformer<T, unknown, "async">): Pipeline<T, "async", P>;
+  tap(transformer: Transformer<T, unknown, "sync">): this;
+  tap(
+    arg: PipelineFunction<T, unknown> | Transformer<T, unknown, "sync" | "async">,
+  ): this | Pipeline<T, "async", P> {
     // Both arms below call the exact same runtime expression, `t.tap(arg)` - this is NOT dead code:
     // `Transformer.tap` is itself overloaded, and a union-typed `arg` matches neither overload on
     // its own, so the instanceof check exists purely to narrow `arg`'s STATIC type per arm before
@@ -1009,9 +1048,17 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     // narrowing is sound - `M` here is never `"unset"`.
     return this.local((p) => {
       const sourced = p as Pipeline<T, "sync" | "async", "shape"> as Pipeline<T, "sync", "shape">;
+      // Both arms call the identical runtime expression; the narrowing exists purely to pick one
+      // of `Transformer.tap`'s own overloads, which a union-typed `arg` matches neither of. The
+      // Mode cast on the transformer arm is safe for the same reason: `tap` runs its argument for
+      // side effects and returns the chunk unchanged, so the argument's own Mode never reaches the
+      // value this region produces - only the CALLER's `tap` overload records it, above.
+      const tapped = arg as Transformer<T, unknown, "sync">;
       return (arg instanceof Transformer
-        ? sourced.transform((t) => t.tap(arg))
-        : sourced.transform((t) => t.tap(arg))) as unknown as Pipeline<T, "sync", "shape">;
+        ? sourced.transform((t) => t.tap(tapped))
+        : sourced.transform((t) =>
+            t.tap(arg as PipelineFunction<T, unknown>),
+          )) as unknown as Pipeline<T, "sync", "shape">;
     }) as this;
   }
 
@@ -1139,14 +1186,16 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    *     function(item)
    * ```
    */
+  forEach(fn: (item: T) => Promise<void>): Promise<void>;
   forEach(fn: (item: T) => void): M extends "sync" ? void : Promise<void>;
-  forEach(fn: (item: T) => void | Promise<void>): Promise<void>;
   forEach(fn: (item: T) => void | Promise<void>): void | Promise<void> {
-    if (this._mode === "sync" && this._syncChunks !== null) {
-      // `fn`'s own return is NOT settled per item here: `drainSync` is a synchronous walk, and a
-      // callback that returns a `Promise` on a `"sync"` chain has already picked the async overload
-      // above, which routes to `forEachAsync` instead.
-      return drainSync(this._syncChunks, (item) => void fn(item));
+    if (this.isSync() && this._syncChunks !== null) {
+      // Each callback's own return is settled before the next item, so a `forEach` that turns out
+      // to be async still runs strictly in order and still reports its own failures. The overload
+      // above is why the ASYNC arm is declared first: TypeScript's void-return rule makes an
+      // `async` callback assignable to `(item: T) => void`, so a `void`-returning arm listed first
+      // would swallow it, type the call `void`, and leave every callback fired and dropped.
+      return drainSyncSettled(this._syncChunks, fn);
     }
     return this.forEachAsync(fn);
   }

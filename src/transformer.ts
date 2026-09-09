@@ -622,10 +622,20 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    * @returns New transformer with loop operation applied
    */
   loop(
-    loopTransformer: Transformer<Out, Out, M>,
+    loopTransformer: Transformer<Out, Out, "async">,
     condition: (chunk: Out[], ctx: IContextManager) => boolean,
     maxIterations?: number,
-  ): Transformer<In, Out, M> {
+  ): Transformer<In, Out, "async">;
+  loop(
+    loopTransformer: Transformer<Out, Out, "sync">,
+    condition: (chunk: Out[], ctx: IContextManager) => boolean,
+    maxIterations?: number,
+  ): Transformer<In, Out, M>;
+  loop(
+    loopTransformer: Transformer<Out, Out, "sync" | "async">,
+    condition: (chunk: Out[], ctx: IContextManager) => boolean,
+    maxIterations?: number,
+  ): Transformer<In, Out, "sync" | "async"> {
     const loopedTransform = loopTransformer.transform;
     const conditionIsContextAware = condition.length >= 2;
 

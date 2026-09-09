@@ -316,3 +316,125 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     expect(out).toEqual([1, 2, 3]);
   });
 });
+
+describe("#90 - the Mode a chain reports and the engine it runs on never disagree", () => {
+  // Every case here was found by review, and every one passed the whole suite before being fixed:
+  // each test AWAITED a value its own type said was a plain array, and `await` on an array is a
+  // no-op. The assertions below read the runtime value directly instead.
+
+  it("Pipeline.merge of sync pipelines returns an array, not a Promise", () => {
+    const merged: number[] = Pipeline.merge([
+      new Pipeline().from([1, 2, 3]),
+      new Pipeline().from([4, 5, 6]),
+    ]).toArray();
+
+    expect(Array.isArray(merged)).toBe(true);
+    expect(merged).toEqual([1, 2, 3, 4, 5, 6]);
+
+    const empty: number[] = Pipeline.merge([]).toArray();
+    expect(Array.isArray(empty)).toBe(true);
+    expect(empty).toEqual([]);
+  });
+
+  it("Pipeline.merge of a sync and an async pipeline returns a Promise", async () => {
+    async function* asyncSource() {
+      yield 4;
+      yield 5;
+    }
+
+    const merged = Pipeline.merge([
+      new Pipeline().from([1, 2]),
+      new Pipeline().from(asyncSource()),
+    ]);
+    const out: Promise<number[]> = merged.toArray();
+
+    expect(typeof out.then).toBe("function");
+    expect(await out).toEqual([1, 2, 4, 5]);
+  });
+
+  it("a knob set before .from() survives it", () => {
+    // `.onError()` and `.context()` are both callable on a source-less pipeline, and `.from()` used
+    // to drop everything but the context manager - so a registered run handler never fired.
+    const seen: string[] = [];
+    const out = new Pipeline()
+      .onError((e) => void seen.push(e.message))
+      .from([1, 2, 3])
+      .buffer(1)
+      .transform((t) =>
+        t.map((x: number) => {
+          if (x === 2) throw new Error("boom");
+          return x;
+        }),
+      )
+      .toArray();
+
+    expect(out).toEqual([1, 3]);
+    expect(seen).toEqual(["boom"]);
+  });
+
+  it("forEach settles an async callback and reports its Mode", async () => {
+    // TypeScript's void-return rule makes an `async` callback assignable to `(item) => void`, so a
+    // `void`-returning overload listed first swallowed it: the call typed `void`, the callbacks
+    // were fired and dropped, and a rejecting one had no handler at all.
+    const seen: number[] = [];
+    const settled = new Pipeline().from([1, 2, 3]).forEach(async (x: number) => {
+      await Promise.resolve();
+      seen.push(x);
+    });
+
+    expect(typeof settled.then).toBe("function");
+    await settled;
+    expect(seen).toEqual([1, 2, 3]);
+
+    const syncSeen: number[] = [];
+    const immediate: void = new Pipeline().from([1, 2, 3]).forEach((x) => void syncSeen.push(x));
+    expect(immediate).toBeUndefined();
+    expect(syncSeen).toEqual([1, 2, 3]);
+  });
+
+  it("Pipeline.tap with an async callback widens the chain", async () => {
+    const seen: number[] = [];
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .tap(async (x: number) => {
+        await Promise.resolve();
+        seen.push(x);
+      })
+      .toArray();
+
+    expect(typeof out.then).toBe("function");
+    expect(await out).toEqual([1, 2, 3]);
+    expect(seen).toEqual([1, 2, 3]);
+  });
+
+  it("a dispatching class refuses .transform() before .from() at runtime", () => {
+    // The base's `"unset"` guard lives on `transform`'s `this`, and a dispatching class has no
+    // `"unset"` state to test - its own Mode is fixed at `"async"`, which is what makes its
+    // narrowing overrides compile at all. `.apply()`'s runtime check is what covers those three:
+    // without it a source-less chain compiled AND silently resolved to `[]`.
+    const message = "no source: call .from(data) before composing a stage";
+
+    expect(() => new ConcurrentPipeline<number>().transform((t) => t.map((x) => x * 2))).toThrow(
+      message,
+    );
+    expect(() =>
+      new HttpPipeline<number>({ url: "http://127.0.0.1:1" }).transform((t) => t.map((x) => x * 2)),
+    ).toThrow(message);
+    expect(() => new ClusterPipeline<number>().transform((t) => t.map((x) => x * 2))).toThrow(
+      message,
+    );
+  });
+
+  it("Transformer.loop takes a synchronous body inside an async chain", async () => {
+    // `.loop()` pinned its body's Mode to the receiver's, so an ordinary sync loop body inside a
+    // chain that had gone async became a compile error on code that worked before this ticket.
+    const t = new Transformer<number, number>({ transform: (chunk) => chunk })
+      .map(async (x) => x)
+      .loop(
+        new Transformer<number, number>({ transform: (chunk) => chunk }).map((x) => x + 1),
+        (chunk) => chunk[0] < 5,
+      );
+
+    expect(await t.runnable()([0], new SimpleContextManager())).toEqual([5]);
+  });
+});

@@ -247,16 +247,24 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
    * class's own `stageWork()` fan-out below.
    */
   override transform<U, M2 extends "sync" | "async">(
+    // The same `"unset"` refusal the base carries (#90). Without it here, an override re-declares
+    // `transform` WITHOUT the guard and a source-less dispatching chain compiles, then resolves to
+    // `[]` at runtime - a chain composed with no engine decided, which is what the guard exists to
+    // make impossible.
+    this: M extends "unset" ? never : Pipeline<T, "async", "async">,
     builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
   ): ConcurrentPipeline<U, M> {
-    // The seed is typed at the CALLBACK's own declared Mode, not `"async"`: the base's signature
-    // is `M & ("sync" | "async")`, and matching it exactly is what keeps this override a narrowing
-    // rather than a conflict. The runtime object is the same identity transform either way.
+    // A dispatching class is `"async"` whatever its callbacks return, so the seed is typed there
+    // rather than at the caller's own Mode. The `this` parameter above narrowed the receiver to the
+    // base type, so the cast restores this class for `.apply()`'s own narrowed return.
     const seed = new Transformer<T, T, "async">({ transform: (chunk) => chunk });
-    return this.apply(builder(seed));
+    return (this as unknown as ConcurrentPipeline<T, M>).apply(builder(seed));
   }
 
   override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ConcurrentPipeline<U, M> {
+    // This body does not delegate to the base's `apply()`, so it needs the base's own source guard
+    // (#90) - a dispatching class has no `"unset"` Mode for a conditional `this` to refuse.
+    this.requireSource();
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
     // The run handler's own chunk-drop decision (#78) - `dropOrRethrow` (`utils/helpers.ts`) is the
@@ -279,6 +287,10 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
     const newChunks = fanOut(this._chunks, work, this._context, this.maxConcurrency);
 
     return this.createPipeline<U>(newChunks, {
+      // Spread first (#90): a dispatched stage that rebuilt its options field by field silently
+      // dropped `mode`, so the pipeline reverted to `"unset"` after its first `.transform()` and
+      // `.local()`'s own region then refused to compose a stage at all.
+      ...this.carriedOptions(),
       context: this._context,
       chunkTransforms: [
         ...this._chunkTransforms,
@@ -331,6 +343,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
     const newChunks = mergeUnordered(partitions);
 
     return this.createPipeline<U>(newChunks, {
+      ...this.carriedOptions(),
       context: this._context,
       chunkTransforms,
       reduceStages,
