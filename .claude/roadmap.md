@@ -9,16 +9,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **A conformance suite every `Pipeline` and Context class runs** (#37) - one set of behaviour
-  cases, defined once in `__tests__/conformance/cases.ts`, run by thin wrapper files, one per class.
-  `product.md` promises the chain "is identical in all four" and only the base class was ever tested
-  against it. Now, because planning found four separate reasons a case could not run everywhere, and
-  each turned out to be a defect rather than a boundary - three of them since fixed by #39
-  (chunking), #40 (error handlers) and #41 (`merge` keeping its class). Its own `.reduce()` case
-  needs its `ConcurrentPipeline` branch rewritten now (#62): a bare `.reduce()` prints `[15]` on
-  `Pipeline` but N values summing to 15 on `ConcurrentPipeline` (partition count is a ceiling,
-  timing-dependent) - the conformance case either sums the array or adds
-  `.local((p) => p.reduce(mergeFn, initial))` to compare one value.
 - **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
   `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
   change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results
@@ -202,6 +192,16 @@ The two older candidates, still not filed:
   `In`/`Out` with no `transform`. PRs #7, #8, #10, #12.
 
 ## Killed
+
+- **A conformance suite every `Pipeline` and Context class runs** (#37, closed COMPLETED, never
+  built) - one set of behaviour cases, defined once in `__tests__/conformance/cases.ts`, run by thin
+  wrapper files, one per class; no such file exists in the repo. Planning found four separate
+  reasons a case could not run everywhere, and each turned out to be a defect rather than a
+  boundary rather than something a conformance suite itself needed to encode: `#39` (chunking),
+  `#40` (error handlers), `#41` (`merge` keeping its class) and `#62` (`ConcurrentPipeline.reduce()`
+  partitioning) fixed the defects directly, closing the gap the suite would have only proven. Its
+  own Done-when 1 also named `EventEmitterPipeline` as a fifth wrapper class, which #72 later killed
+  outright - stale before the suite could ever be built as originally scoped.
 
 - **A `.catch()`-shaped per-row region** (#78, spiked) - a region combinator whose sub-chain runs row
   by row, the per-row sibling of `.catch()`. Killed by measurement: per-row execution changes what a
