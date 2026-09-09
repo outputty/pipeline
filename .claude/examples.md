@@ -1,14 +1,17 @@
 <!-- examples.md - canonical worked examples, one per concept. No executable docs harness exists yet
-     (roadmap.md's first Building candidate) - every fence here is marked `<!-- illustrative -->` and
-     hand-verified against the real `__tests__/*.e2e.test.ts` suite, not machine-checked on each edit.
-     Reused verbatim; pin a new example here first. -->
+     (roadmap.md's first Building candidate) - a fence marked `<!-- illustrative -->` names something
+     undefined and is hand-verified against the real `__tests__/*.e2e.test.ts` suite; a fence marked
+     `<!-- compiles -->` is a real, self-contained program, pasted into a throwaway `tmp/` script and
+     run for real on each edit that touches it. Reused verbatim; pin a new example here first. -->
 
 # @outputty/pipeline - Examples
 
 The canonical worked examples, one per concept. Each is real code a reader can paste, followed by its
-real output. Once the executable docs harness (`roadmap.md`) exists, every fence here gets a `<!--
-compiles -->`/`<!-- run -->` marker and a machine check; until then, verify by hand against the e2e
-suite before editing an output block.
+real output. A `<!-- compiles -->` fence is a real, self-contained program, hand-run in a throwaway
+`tmp/` script on every edit that touches it; a `<!-- illustrative -->` fence names something the
+reader supplies (a database pool, a url with no server behind it) and is verified by hand against
+the real `__tests__/*.e2e.test.ts` suite instead. Once the executable docs harness (`roadmap.md`)
+exists, every fence gets a machine check instead of a hand-run one.
 
 ## The base pipeline
 
@@ -351,4 +354,192 @@ const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 }
 
 ```json
 [15]
+```
+
+## Case 11 - repairing bad rows without losing the batch
+
+`Transformer.onError(fn)` drops or replaces a row that throws; the rows that parsed keep going.
+The same chain, run unchanged on all four `Pipeline` classes - only the class you construct, and
+for `HttpPipeline` the worker it dispatches to, ever differ. `README.md`'s own Patterns section
+reuses this chain, adapted to each class the same way.
+
+<!-- compiles -->
+
+```ts
+import { Pipeline, DROP } from "@outputty/pipeline";
+
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
+
+const data = await new Pipeline(["a", "1", "b", "3", "5"])
+  .transform((t) => t.onError(() => DROP).map(parseStrict))
+  .toArray();
+
+console.log(JSON.stringify(data)); // [1,3,5]
+```
+
+<!-- compiles -->
+
+```ts
+import { ConcurrentPipeline, DROP } from "@outputty/pipeline";
+
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
+
+const data = await new ConcurrentPipeline(["a", "1", "b", "3", "5"], { maxConcurrency: 2 })
+  .transform((t) => t.onError(() => DROP).map(parseStrict))
+  .toArray();
+
+console.log(JSON.stringify(data)); // [1,3,5]
+```
+
+<!-- compiles -->
+
+```ts
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { HttpPipeline, toNodeHandler, DROP } from "@outputty/pipeline";
+
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
+
+// The "another instance" side: an empty-source pipeline holding the SAME chain, so its
+// .fetch can serve it.
+const worker = new HttpPipeline<string>([], { url: "" }).transform((t) =>
+  t.onError(() => DROP).map(parseStrict),
+);
+
+const server = createServer(toNodeHandler(worker.fetch));
+await new Promise<void>((resolve) => server.listen(0, resolve));
+const { port } = server.address() as AddressInfo;
+
+const data = await new HttpPipeline(["a", "1", "b", "3", "5"], {
+  url: `http://localhost:${port}`,
+})
+  .transform((t) => t.onError(() => DROP).map(parseStrict))
+  .toArray();
+
+console.log(JSON.stringify(data)); // [1,3,5]
+
+await new Promise<void>((resolve) => server.close(() => resolve()));
+```
+
+<!-- compiles -->
+
+```ts
+import { ClusterPipeline, DROP } from "@outputty/pipeline";
+
+const parseStrict = (s: string): number => {
+  const n = parseInt(s);
+  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
+  return n;
+};
+
+const data = await new ClusterPipeline(["a", "1", "b", "3", "5"])
+  .transform((t) => t.onError(() => DROP).map(parseStrict))
+  .toArray();
+
+// Last line only - every worker also re-executes this module, each printing its own empty result first.
+console.log(JSON.stringify(data)); // [1,3,5]
+```
+
+## Case 12 - same chain, more in flight
+
+An I/O-bound per-item task wastes its wait run one at a time; `ConcurrentPipeline` runs several
+waits at once instead, with no change to the chain - only the class, and `.buffer(1)` so each item
+is its own chunk, change. `.buffer(1)` matters on BOTH sides here: at the default buffer of 1000,
+five items are one chunk and `.map()`'s own `Promise.all` already runs them together, so a plain
+`Pipeline` would look just as "concurrent" as `ConcurrentPipeline` and the comparison would prove
+nothing. Neither this nor Case 11 uses `.reduce()`: `ConcurrentPipeline.reduce()` partitions into
+`maxConcurrency` independent accumulators by design (#62), so a "same output on every class" case
+built on it would contradict itself.
+
+<!-- compiles -->
+
+```ts
+import { Pipeline, ConcurrentPipeline } from "@outputty/pipeline";
+
+async function fetchScore(id: number): Promise<number> {
+  await new Promise((resolve) => setTimeout(resolve, 5)); // stands in for a real network wait
+  return id * 10;
+}
+
+// Pipeline: one item's wait finishes before the next one starts.
+const sequential = await new Pipeline([1, 2, 3, 4, 5])
+  .buffer(1)
+  .transform((t) => t.map(fetchScore))
+  .toArray();
+
+// ConcurrentPipeline: up to 4 items waiting at once - the SAME chain, unchanged.
+const concurrent = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 4 })
+  .buffer(1)
+  .transform((t) => t.map(fetchScore))
+  .toArray();
+
+console.log(JSON.stringify({ sequential, concurrent })); // identical - only the wait overlaps
+```
+
+```json
+{ "sequential": [10, 20, 30, 40, 50], "concurrent": [10, 20, 30, 40, 50] }
+```
+
+The same chain dispatched over HTTP and to real worker processes, proving the pattern travels:
+
+<!-- compiles -->
+
+```ts
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { HttpPipeline, toNodeHandler } from "@outputty/pipeline";
+
+async function fetchScore(id: number): Promise<number> {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  return id * 10;
+}
+
+const worker = new HttpPipeline<number>([], { url: "" }).transform((t) => t.map(fetchScore));
+
+const server = createServer(toNodeHandler(worker.fetch));
+await new Promise<void>((resolve) => server.listen(0, resolve));
+const { port } = server.address() as AddressInfo;
+
+const data = await new HttpPipeline([1, 2, 3, 4, 5], {
+  url: `http://localhost:${port}`,
+  maxConcurrency: 4,
+})
+  .buffer(1)
+  .transform((t) => t.map(fetchScore))
+  .toArray();
+
+console.log(JSON.stringify(data)); // [10,20,30,40,50]
+
+await new Promise<void>((resolve) => server.close(() => resolve()));
+```
+
+<!-- compiles -->
+
+```ts
+import { ClusterPipeline } from "@outputty/pipeline";
+
+async function fetchScore(id: number): Promise<number> {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  return id * 10;
+}
+
+const data = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 4 })
+  .buffer(1)
+  .transform((t) => t.map(fetchScore))
+  .toArray();
+
+// Last line only - every worker also re-executes this module, each printing its own empty result first.
+console.log(JSON.stringify(data)); // [10,20,30,40,50]
 ```
