@@ -566,7 +566,9 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    * @param fn - Function that receives this transformer and returns a new one
    * @returns Result of applying the function to this transformer
    */
-  apply<U, M2 extends "sync" | "async">(fn: (t: this) => Transformer<In, U, M2>): Transformer<In, U, M2> {
+  apply<U, M2 extends "sync" | "async">(
+    fn: (t: this) => Transformer<In, U, M2>,
+  ): Transformer<In, U, M2> {
     return fn(this);
   }
 

@@ -19,10 +19,12 @@ import { availableParallelism } from "node:os";
 import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
-import type { Pipeline, PipelineOptions, PipelineSource, AnyPipeline } from "@src/pipeline";
+import type { Pipeline, PipelineOptions, PipelineSource } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import type { IContextManager, InternalTransformer, ReduceFunction,
-  PipelineMode,
+import type {
+  IContextManager,
+  InternalTransformer,
+  ReduceFunction,
   SourcePolicy,
 } from "@src/types";
 
@@ -185,10 +187,7 @@ export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipelin
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
   ): ClusterPipeline<U, M> {
-    const Ctor = this.constructor as new (
-      data: PipelineSource<U>,
-      options?: ClusterPipelineConstructorOptions & { url: string },
-    ) => ClusterPipeline<U, M>;
+    const Ctor = this.constructor as new (options?: ClusterPipelineConstructorOptions & { url: string }) => ClusterPipeline<U, M>;
     const merged = {
       ...options,
       ...this.concurrentOptions(),
@@ -197,7 +196,7 @@ export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipelin
       url: this._url,
       chunks,
     };
-    return new Ctor([], merged);
+    return new Ctor(merged);
   }
 
   override transform<U, M2 extends "sync" | "async">(
@@ -228,7 +227,7 @@ export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipelin
    * argument on the `extends` clause above is the compile-time half, and is what makes this
    * override a genuine narrowing of the base's own two arms rather than a conflict with them.
    *
-   * `new ClusterPipeline({}).from([1, 2, 3])` → `ClusterPipeline<number, "async">`.
+   * `new ClusterPipeline().from([1, 2, 3])` → `ClusterPipeline<number, "async">`.
    */
   override from<U>(data: PipelineSource<U>): ClusterPipeline<U, M> {
     return this.fromSource<U>(data, "async") as unknown as ClusterPipeline<U, M>;
@@ -238,7 +237,9 @@ export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipelin
     return "async";
   }
 
-  override local<U>(build: (p: AnyPipeline<T>) => AnyPipeline<U>): ClusterPipeline<U, M> {
+  override local<U, M2 extends "sync" | "async">(
+    build: (p: Pipeline<T, "async", "shape">) => Pipeline<U, M2, "shape">,
+  ): ClusterPipeline<U, M> {
     return super.local(build) as unknown as ClusterPipeline<U, M>;
   }
 

@@ -200,10 +200,8 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
   });
 
   it.fails("Done-when 1: a fully sync chain returns number[] with no await", () => {
-    // @ts-expect-error - L1: the no-source constructor does not exist yet (#90)
-    const builder = new Pipeline<number>({});
+    const builder = new Pipeline<number>();
     const out: number[] = builder
-      // @ts-expect-error - L1: .from() does not exist yet (#90)
       .from([1, 2, 3, 4, 5])
       .transform((t: Transformer<number, number>) =>
         t.map((x: number) => x * 2).filter((x: number) => x > 4),
@@ -214,10 +212,8 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
   });
 
   it.fails("Done-when 2: one async callback widens the chain to Promise<number[]>", async () => {
-    // @ts-expect-error - L1: the no-source constructor does not exist yet (#90)
-    const builder = new Pipeline<number>({});
+    const builder = new Pipeline<number>();
     const out: Promise<number[]> = builder
-      // @ts-expect-error - L1: .from() does not exist yet (#90)
       .from([1, 2, 3, 4, 5])
       .transform((t: Transformer<number, number>) =>
         t.map(async (x: number) => x * 2).filter((x: number) => x > 4),
@@ -228,11 +224,9 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
   });
 
   it.fails("Done-when 3: zero promises are created between .from() and .toArray()", () => {
-    // @ts-expect-error - L1: the no-source constructor does not exist yet (#90)
-    const builder = new Pipeline<number>({});
+    const builder = new Pipeline<number>();
     const created = countPromises(() =>
       builder
-        // @ts-expect-error - L1: .from() does not exist yet (#90)
         .from([1, 2, 3, 4, 5])
         .transform((t: Transformer<number, number>) =>
           t.map((x: number) => x * 2).filter((x: number) => x > 4),
@@ -254,8 +248,9 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     // that diagnostic is `TS2684` specifically (the conditional `this` parameter), not a `TS2345`
     // argument mismatch, by deleting the new directive once and reading what tsc prints.
     function typeOnlyCheck() {
-      // @ts-expect-error - L1: the no-source constructor does not exist yet (#90)
-      const builder = new Pipeline<number>({});
+      const builder = new Pipeline<number>();
+      // @ts-expect-error - TS2684: the "unset" Mode refuses `.transform()`'s receiver until
+      // `.from()` has named a source (#90, Done-when 4)
       builder.transform((t) => t.map((x) => x));
     }
     expect(typeof typeOnlyCheck).toBe("function");
@@ -270,7 +265,7 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     // goes above it, and this test becomes the assertion that the removal really landed - alongside
     // the sweep of every other call site across `src/`, `__tests__/`, `README.md` and `.claude/*.md`
     // that the same layer carries.
-    const legacy = new Pipeline<number>([1, 2, 3], {});
+    const legacy = new Pipeline().from<number>([1, 2, 3]);
     expect(legacy).toBeInstanceOf(Pipeline);
   });
 
@@ -285,10 +280,8 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
       // static type at an `any` boundary, never wrong data, and never a `Promise` left unawaited
       // in the output. `code.md` rules out a guard against a misuse the caller could mean, which
       // is what the ticket's own per-chunk throw would have been.
-      // @ts-expect-error - L1: the no-source constructor does not exist yet (#90)
-      const builder = new Pipeline<number>({});
+      const builder = new Pipeline<number>();
       const out: Promise<number[]> = builder
-        // @ts-expect-error - L1: .from() does not exist yet (#90)
         .from([1, 2, 3])
         .transform((t: Transformer<number, number>) => t.map((x: number) => Promise.resolve(x * 2)))
         .toArray();
@@ -306,12 +299,9 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
       // `toArray()` then returns a plain array, `await` on one is a no-op, and both the
       // `instanceof` and the `toEqual` still pass. The three `: Promise<number[]>` annotations
       // below are the assertion; each fails to compile if its class's Mode came out "sync".
-      // @ts-expect-error - L1: the no-source constructor does not exist yet (#90)
-      const concurrent = new ConcurrentPipeline<number>({}).from([1, 2, 3]);
-      // @ts-expect-error - L1: the no-source constructor does not exist yet (#90)
+      const concurrent = new ConcurrentPipeline<number>().from([1, 2, 3]);
       const http = new HttpPipeline<number>({ url: "http://127.0.0.1:1" }).from([1, 2, 3]);
-      // @ts-expect-error - L1: the no-source constructor does not exist yet (#90)
-      const cluster = new ClusterPipeline<number>({}).from([1, 2, 3]);
+      const cluster = new ClusterPipeline<number>().from([1, 2, 3]);
 
       const concurrentOut: Promise<number[]> = concurrent.toArray();
       const httpOut: Promise<number[]> = http.toArray();
@@ -327,14 +317,12 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
   );
 
   it.fails("Done-when 8: .buffer()/.onError()/.local() all preserve the sync Mode", () => {
-    // @ts-expect-error - L1: the no-source constructor does not exist yet (#90)
-    const builder = new Pipeline<number>({});
+    const builder = new Pipeline<number>();
     const out: number[] = builder
-      // @ts-expect-error - L1: .from() does not exist yet (#90)
       .from([1, 2, 3])
       .buffer(2)
       .onError(() => {})
-      .local((p: Pipeline<number>) => p)
+      .local((p) => p)
       .toArray();
 
     expect(out).toEqual([1, 2, 3]);

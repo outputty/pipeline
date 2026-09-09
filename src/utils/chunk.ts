@@ -197,7 +197,9 @@ export function drainSync<T>(
 
       const chunk = step.value;
       if (isThenable(chunk)) {
-        return Promise.resolve(chunk).then((settled) => (pushAll(settled, onItem) ? undefined : resume()));
+        return Promise.resolve(chunk).then((settled) =>
+          pushAll(settled, onItem) ? undefined : resume(),
+        );
       }
       if (pushAll(chunk, onItem)) return;
     }

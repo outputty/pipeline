@@ -17,11 +17,13 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * now (#39), not the `Transformer`'s own. */
 async function run<I, O>(
   input: I[],
-  transformer: Transformer<I, O>,
+  transformer: Transformer<I, O, "sync" | "async">,
   bufferSize?: number,
 ): Promise<O[]> {
   const pipeline =
-    bufferSize !== undefined ? new Pipeline(input).buffer(bufferSize) : new Pipeline(input);
+    bufferSize !== undefined
+      ? new Pipeline().from(input).buffer(bufferSize)
+      : new Pipeline().from(input);
   return pipeline.apply(transformer).toArray();
 }
 

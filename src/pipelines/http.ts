@@ -14,10 +14,12 @@
 
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
-import type { Pipeline, PipelineOptions, PipelineSource, ReduceStage, AnyPipeline } from "@src/pipeline";
+import type { Pipeline, PipelineOptions, PipelineSource, ReduceStage } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import type { IContextManager, InternalTransformer, ReduceFunction,
-  PipelineMode,
+import type {
+  IContextManager,
+  InternalTransformer,
+  ReduceFunction,
   SourcePolicy,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
@@ -228,7 +230,9 @@ export class HttpPipeline<T, M extends "async" = "async"> extends ConcurrentPipe
     return "async";
   }
 
-  override local<U>(build: (p: AnyPipeline<T>) => AnyPipeline<U>): HttpPipeline<U, M> {
+  override local<U, M2 extends "sync" | "async">(
+    build: (p: Pipeline<T, "async", "shape">) => Pipeline<U, M2, "shape">,
+  ): HttpPipeline<U, M> {
     return super.local(build) as unknown as HttpPipeline<U, M>;
   }
 
@@ -241,10 +245,9 @@ export class HttpPipeline<T, M extends "async" = "async"> extends ConcurrentPipe
     options: PipelineOptions,
   ): HttpPipeline<U, M> {
     const Ctor = this.constructor as new (
-      data: PipelineSource<U>,
       options: HttpPipelineConstructorOptions,
     ) => HttpPipeline<U, M>;
-    return new Ctor([], { ...options, ...this.concurrentOptions(), url: this._url, chunks });
+    return new Ctor({ ...options, ...this.concurrentOptions(), url: this._url, chunks });
   }
 
   /**
