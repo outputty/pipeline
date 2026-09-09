@@ -197,9 +197,12 @@ The two older candidates, still not filed:
   built) - one set of behaviour cases, defined once in `__tests__/conformance/cases.ts`, run by thin
   wrapper files, one per class; no such file exists in the repo. Planning found four separate
   reasons a case could not run everywhere, and each turned out to be a defect rather than a
-  boundary rather than something a conformance suite itself needed to encode: `#39` (chunking),
-  `#40` (error handlers), `#41` (`merge` keeping its class) and `#62` (`ConcurrentPipeline.reduce()`
-  partitioning) fixed the defects directly, closing the gap the suite would have only proven. Its
+  boundary the suite needed to encode: `.withHooks()` drops silently on a dispatched stage - `#30`,
+  the `EventEmitterPipeline` entry below, closed unbuilt; the capability itself shipped later as
+  `.tap()` (#72) - a custom chunker is refused there (#39), an error handler is refused there and
+  never sees the failing chunk (#40), and `merge` demotes to a plain `Pipeline` (#41). `#39`/`#40`/
+  `#41` fixed their defects directly; `#37` itself was never built to prove the rest, closing the
+  gap the suite would have only proven. Its
   own Done-when 1 also named `EventEmitterPipeline` as a fifth wrapper class, which #72 later killed
   outright - stale before the suite could ever be built as originally scoped.
 

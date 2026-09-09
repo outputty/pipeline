@@ -103,7 +103,9 @@ import { ConcurrentPipeline } from "@outputty/pipeline";
 // Up to 10 chunks in flight at once, in this process - Pipeline (one at a time) is the default
 const data = await new ConcurrentPipeline(["a", "b", "c"], { maxConcurrency: 10 })
   .transform((t) => t.map((s: string) => s.toUpperCase()))
-  .toArray(); // ["A", "B", "C"]
+  .toArray();
+
+console.log(JSON.stringify(data)); // ["A","B","C"]
 ```
 
 `HttpPipeline` dispatches each chunk to another instance over HTTP; `ClusterPipeline` dispatches to
@@ -113,9 +115,9 @@ and [ClusterPipeline](#clusterpipeline) in the API Reference for their construct
 The chunk is the unit of concurrency, so a `ConcurrentPipeline`'s parallelism is its buffer size
 times `maxConcurrency` - items in flight - never `maxConcurrency` alone. A chain left at the
 default buffer of 1000 with `maxConcurrency: 3` holds 3000 callbacks in flight, not 3. Call
-`.buffer(size)` to lower the ceiling, and prefer the widest chunk that fits it: two chains holding
-the same 16 in flight over 50000 items ran 27 ms and 63 ms, because a narrow chunk pays the
-per-chunk cost more often.
+`.buffer(size)` to lower the ceiling, and prefer the widest chunk that fits it: measured in
+[`.claude/architecture.md`](.claude/architecture.md), two chains holding the same 16 in flight over
+50000 items ran 27 ms and 63 ms, because a narrow chunk pays the per-chunk cost more often.
 
 | `.buffer(size)` | `maxConcurrency` | items in flight |
 | --------------- | ---------------- | --------------- |
@@ -668,7 +670,7 @@ const data = await new ClusterPipeline(["a", "1", "b", "3", "5"])
   .transform((t) => t.onError(() => DROP).map(parseStrict))
   .toArray();
 
-// Last line only - a worker also re-executes this module and prints its own empty result first.
+// Last line only - every worker also re-executes this module, each printing its own empty result first.
 console.log(JSON.stringify(data)); // [1,3,5]
 ```
 
@@ -753,7 +755,7 @@ const data = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
   .transform((t) => t.map(fetchScore))
   .toArray();
 
-// Last line only - a worker also re-executes this module and prints its own empty result first.
+// Last line only - every worker also re-executes this module, each printing its own empty result first.
 console.log(JSON.stringify(data)); // [10,20,30,40,50]
 ```
 

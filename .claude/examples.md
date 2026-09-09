@@ -448,7 +448,7 @@ const data = await new ClusterPipeline(["a", "1", "b", "3", "5"])
   .transform((t) => t.onError(() => DROP).map(parseStrict))
   .toArray();
 
-// Last line only - a worker also re-executes this module and prints its own empty result first.
+// Last line only - every worker also re-executes this module, each printing its own empty result first.
 console.log(JSON.stringify(data)); // [1,3,5]
 ```
 
@@ -537,6 +537,6 @@ const data = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
   .transform((t) => t.map(fetchScore))
   .toArray();
 
-// Last line only - a worker also re-executes this module and prints its own empty result first.
+// Last line only - every worker also re-executes this module, each printing its own empty result first.
 console.log(JSON.stringify(data)); // [10,20,30,40,50]
 ```
