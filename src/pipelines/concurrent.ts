@@ -11,11 +11,13 @@
  * actually happens (`HttpPipeline`, #17 L4, overrides it to POST).
  */
 
-import type { IContextManager, InternalTransformer, ReduceFunction,
-  PipelineMode,
+import type {
+  IContextManager,
+  InternalTransformer,
+  ReduceFunction,
   SourcePolicy,
 } from "@src/types";
-import { Pipeline, type PipelineOptions, type PipelineSource, type AnyPipeline } from "@src/pipeline";
+import { Pipeline, type PipelineOptions, type PipelineSource } from "@src/pipeline";
 import type { ChunkTransform } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
@@ -183,7 +185,11 @@ async function* mergeUnordered<U>(sources: AsyncGenerator<U[]>[]): AsyncGenerato
  * `new ConcurrentPipeline([1,2,3,4,5], { maxConcurrency: 4 }).transform((t) => t.map((x) => x *
  * 2)).toArray()` → `[2,4,6,8,10]`.
  */
-export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline<T, "async", "async"> {
+export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline<
+  T,
+  "async",
+  "async"
+> {
   /** Chunks of the current stage kept in flight at once. */
   readonly maxConcurrency: number;
   /** Whether output order is restored to match input order once a chunk finishes. */
@@ -217,11 +223,8 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
   ): ConcurrentPipeline<U, M> {
-    const Ctor = this.constructor as new (
-      data: PipelineSource<U>,
-      options?: ConcurrentPipelineConstructorOptions,
-    ) => ConcurrentPipeline<U, M>;
-    return new Ctor([], { ...options, ...this.concurrentOptions(), chunks });
+    const Ctor = this.constructor as new (options?: ConcurrentPipelineConstructorOptions) => ConcurrentPipeline<U, M>;
+    return new Ctor({ ...options, ...this.concurrentOptions(), chunks });
   }
 
   /** This level's OWN knobs, for a subclass's `createPipeline()` override to spread alongside its
@@ -251,9 +254,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
     return this.apply(builder(seed));
   }
 
-  override apply<U>(
-    transformer: Transformer<T, U, "sync" | "async">,
-  ): ConcurrentPipeline<U, M> {
+  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ConcurrentPipeline<U, M> {
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
     // The run handler's own chunk-drop decision (#78) - `dropOrRethrow` (`utils/helpers.ts`) is the
@@ -349,7 +350,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
    * argument on the `extends` clause above is the compile-time half, and is what makes this
    * override a genuine narrowing of the base's own two arms rather than a conflict with them.
    *
-   * `new ConcurrentPipeline({}).from([1, 2, 3])` → `ConcurrentPipeline<number, "async">`.
+   * `new ConcurrentPipeline().from([1, 2, 3])` → `ConcurrentPipeline<number, "async">`.
    */
   override from<U>(data: PipelineSource<U>): ConcurrentPipeline<U, M> {
     return this.fromSource<U>(data, "async") as unknown as ConcurrentPipeline<U, M>;
@@ -359,7 +360,9 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
     return "async";
   }
 
-  override local<U>(build: (p: AnyPipeline<T>) => AnyPipeline<U>): ConcurrentPipeline<U, M> {
+  override local<U, M2 extends "sync" | "async">(
+    build: (p: Pipeline<T, "async", "shape">) => Pipeline<U, M2, "shape">,
+  ): ConcurrentPipeline<U, M> {
     return super.local(build) as unknown as ConcurrentPipeline<U, M>;
   }
 

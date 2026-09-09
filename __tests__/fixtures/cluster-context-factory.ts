@@ -46,7 +46,7 @@ const workers = 3;
 // to every worker at all.
 const items = Array.from({ length: 30 }, (_, i) => i);
 
-const pipeline = new ClusterPipeline(items, {
+const pipeline = new ClusterPipeline({
   workers,
   maxConcurrency: workers,
   context: orchestratorInstance,
@@ -54,7 +54,7 @@ const pipeline = new ClusterPipeline(items, {
     factoryCalls++;
     return new PoolContext();
   },
-});
+}).from(items);
 
 const out = await pipeline
   .context({ multiplier: 10 })

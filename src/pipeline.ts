@@ -41,7 +41,6 @@ import {
   buildChunkGenerator,
   buildSyncChunkGenerator,
   flattenChunks,
-  flattenSyncChunks,
   drainSync,
   recutSyncChunks,
 } from "./utils/chunk";
@@ -92,7 +91,17 @@ export type ChunkTransform = (
  * `P extends Pipeline<infer U> ? U : never` and applying that to `Ps[number]` at the call site
  * keeps `P` naked, so it distributes across a union of differently-typed `Pipeline`s correctly.
  */
-type ElementOf<P> = P extends Pipeline<infer U> ? U : never;
+type ElementOf<Q> = Q extends Pipeline<infer U, infer _M, infer _P> ? U : never;
+
+/** A `Pipeline`'s own Mode, extracted the same way `ElementOf` extracts its item type (#90) - kept
+ * as its own alias so the conditional distributes over a UNION of differently-moded pipelines, the
+ * `.claude/rules/typescript.md` rule a naked type parameter needs. */
+type ModeOf<Q> = Q extends Pipeline<infer _U, infer M2, infer _P> ? M2 : never;
+
+/** The Mode a merge produces: `"sync"` only when EVERY input is sync, `"async"` the moment one is
+ * not (#90) - a merged stream is only consumable synchronously if all of its sources are. */
+type MergedMode<Ps extends readonly Pipeline<any, "sync" | "async", SourcePolicy>[]> =
+  ModeOf<Ps[number]> extends "sync" ? "sync" : "async";
 
 /**
  * What a `Pipeline<T>` may be built from - a stream/collection of items. Terminal ops
@@ -274,11 +283,7 @@ async function* concatChunks<U>(streams: AsyncIterable<U[]>[]): AsyncGenerator<U
  * `[2, 4, 6]`. A terminal op's return carries no context snapshot (#744) - read `.contextManager`
  * for that.
  */
-export class Pipeline<
-  T,
-  M extends PipelineMode = "unset",
-  P extends SourcePolicy = "shape",
-> {
+export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolicy = "shape"> {
   // Protected (#17), not private: a dispatching subclass's own overridden `createPipeline()`
   // (below) reads these to carry them into the next instance the same way this base
   // implementation does - `private` would put them out of reach from `src/pipelines/`.
@@ -337,8 +342,8 @@ export class Pipeline<
    * during planning. An ordinary method can, which is the whole reason this exists.
    *
    * @example
-   * `new Pipeline({}).from([1, 2, 3]).toArray()` → `[1, 2, 3]`, typed `number[]`, no `await`.
-   * `new Pipeline({}).from(asyncSource).toArray()` → typed `Promise<number[]>`.
+   * `new Pipeline().from([1, 2, 3]).toArray()` → `[1, 2, 3]`, typed `number[]`, no `await`.
+   * `new Pipeline().from(asyncSource).toArray()` → typed `Promise<number[]>`.
    */
   from<U>(data: AsyncIterable<U>): Pipeline<U, "async", P>;
   from<U>(data: Iterable<U>): Pipeline<U, AssignMode<P, "sync">, P>;
@@ -433,6 +438,30 @@ export class Pipeline<
     };
   }
 
+  /** This pipeline's CHUNKS as an async stream, whichever engine it runs on (#90) - what a merge
+   * reads, since a `"sync"` pipeline leaves `_chunks` empty and carries `_syncChunks` instead. */
+  protected chunkStream(): AsyncIterable<T[]> {
+    if (this._mode !== "sync" || this._syncChunks === null) return this._chunks;
+    const syncChunks = this._syncChunks;
+    return {
+      [Symbol.asyncIterator]: async function* () {
+        for (const chunk of syncChunks) yield await chunk;
+      },
+    };
+  }
+
+  /** This pipeline's chunks as a SYNC stream, for a sync merge. A pipeline that is not `"sync"`
+   * has none, so this raises rather than inventing one - the `.merge()` signature already makes
+   * that combination a compile error, and a runtime that disagreed with it would be worse. */
+  protected syncChunkStream(): MaybeAsyncChunks<T> {
+    if (this._mode !== "sync" || this._syncChunks === null) {
+      throw new Error(
+        "cannot merge an async pipeline into a sync one - call .from() on an async source, or merge the other way round",
+      );
+    }
+    return this._syncChunks;
+  }
+
   /** This pipeline's items, as one stream, whichever engine it runs on (#90) - the seam the async
    * terminal ops and `[Symbol.asyncIterator]` read, so neither has to branch on `_mode` itself. */
   protected asyncItems(): AsyncIterable<T> {
@@ -470,7 +499,7 @@ export class Pipeline<
    * ```
    */
   async *[Symbol.asyncIterator](): AsyncGenerator<T[]> {
-    yield* this._chunks;
+    yield* this.chunkStream();
   }
 
   // ===== Static Factory Methods =====
@@ -524,10 +553,10 @@ export class Pipeline<
    * `Pipeline.merge([p1, p2], { context: mine })` then `.contextManager === mine` → `true` (#31,
    * Done-when 3) - verified live via `__tests__/fixtures/context-managers.ts`'s own `LoggingContext`.
    */
-  static merge<Ps extends readonly Pipeline<any>[]>(
+  static merge<Ps extends readonly Pipeline<any, "sync" | "async", SourcePolicy>[]>(
     pipelines: Ps,
     options?: PipelineOptions,
-  ): Pipeline<ElementOf<Ps[number]>> {
+  ): Pipeline<ElementOf<Ps[number]>, MergedMode<Ps>> {
     type U = ElementOf<Ps[number]>;
 
     // `options?.context`/`contextFactory` both honored on the zero-pipeline path too (review: the
@@ -535,7 +564,9 @@ export class Pipeline<
     // caller passing either got a fresh SimpleContextManager instead, breaking the same-instance
     // contract every other path here keeps).
     if (pipelines.length === 0) {
-      return new Pipeline<U>({ context: options?.context ?? options?.contextFactory?.() });
+      return new Pipeline<U, MergedMode<Ps>>({
+        context: options?.context ?? options?.contextFactory?.(),
+      });
     }
 
     // Merge contexts from all pipelines into the caller's own manager when given (#31) - never a
@@ -549,9 +580,11 @@ export class Pipeline<
 
     // Concatenates each source pipeline's OWN chunk stream in sequence - no new chunking decision
     // at merge time (#39): a pipeline cut at 2 and one cut at 4 both keep their own boundary.
-    return new Pipeline<U>({
+    return new Pipeline<U, MergedMode<Ps>>({
       context: mergedContext,
-      chunks: concatChunks(pipelines.map((pipeline) => pipeline._chunks as AsyncIterable<U[]>)),
+      chunks: concatChunks(
+        pipelines.map((pipeline) => pipeline.chunkStream() as AsyncIterable<U[]>),
+      ),
     });
   }
 
@@ -605,13 +638,7 @@ export class Pipeline<
     for (const [key, value] of Object.entries(ctx)) {
       this._context.set(key, value);
     }
-    return this.createPipeline<T>(this._chunks, {
-      context: this._context,
-      chunkTransforms: this._chunkTransforms,
-      reduceStages: this._reduceStages,
-      preBufferItems: this._preBufferItems,
-      runHandler: this._runHandler,
-    }) as this;
+    return this.createPipeline<T>(this._chunks, this.carriedOptions()) as this;
   }
 
   /**
@@ -633,10 +660,7 @@ export class Pipeline<
    */
   onError(handler: PipelineErrorHandler): this {
     return this.createPipeline<T>(this._chunks, {
-      context: this._context,
-      chunkTransforms: this._chunkTransforms,
-      reduceStages: this._reduceStages,
-      preBufferItems: this._preBufferItems,
+      ...this.carriedOptions(),
       runHandler: handler,
     }) as this;
   }
@@ -677,14 +701,32 @@ export class Pipeline<
    * t.map((x) => x * 100))` (stage 1, continuing THIS pipeline's own index, never restarting at
    * 0) → `.toArray()` → `[200,300,400,500,1500,2500]`.
    */
-  merge(...others: Pipeline<T>[]): this {
+  merge(
+    ...others: Pipeline<T, M extends "async" ? "sync" | "async" : "sync", SourcePolicy>[]
+  ): this {
     mergeContextsInto(
       this._context,
       others.map((other) => other._context),
     );
 
+    // Every pipeline is read through `chunkStream()`, never `_chunks` directly: a `"sync"` one
+    // carries its chunks in `_syncChunks` and leaves `_chunks` empty, so reading the field would
+    // silently merge nothing (#90).
+    if (this._mode === "sync" && this._syncChunks !== null) {
+      const streams = [this._syncChunks, ...others.map((other) => other.syncChunkStream())];
+      function* concatSync(): Generator<T[] | Promise<T[]>> {
+        for (const stream of streams) yield* stream;
+      }
+      return this.createPipeline<T>(EMPTY_CHUNKS as AsyncIterable<T[]>, {
+        ...this.carriedOptions(),
+        syncChunks: concatSync(),
+        preBufferItems: null,
+        syncPreBufferItems: null,
+      }) as this;
+    }
+
     return this.createPipeline<T>(
-      concatChunks([this._chunks, ...others.map((other) => other._chunks)]),
+      concatChunks([this.chunkStream(), ...others.map((other) => other.chunkStream())]),
       {
         context: this._context,
         chunkTransforms: this._chunkTransforms,
@@ -737,7 +779,9 @@ export class Pipeline<
    * `pipeline.apply(new Transformer<T, T>().map((x) => x * 2))` on a pipeline of `[1, 2, 3]` →
    * `.toArray()` resolves `[2, 4, 6]`.
    */
-  apply<U>(transformer: Transformer<T, U, "sync" | "async">): AnyPipeline<U> {
+  apply<U, M2 extends "sync" | "async">(
+    transformer: Transformer<T, U, M2>,
+  ): Pipeline<U, AssignMode<P, M2>, P> {
     const runnable = transformer.runnable();
     const carried = {
       ...this.carriedOptions(),
@@ -758,20 +802,22 @@ export class Pipeline<
       function* stageChunks(): Generator<U[] | Promise<U[]>> {
         for (const chunk of source) {
           yield chain(chunk, (settled) => runStageChunk(runnable, settled, ctx, runHandler)) as
-            | U[]
-            | Promise<U[]>;
+            U[] | Promise<U[]>;
         }
       }
       return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
         ...carried,
         syncChunks: stageChunks(),
-      });
+      }) as Pipeline<U, AssignMode<P, M2>, P>;
     }
 
     return this.createPipeline<U>(
       transformer.process(this._chunks, this._context, this._runHandler),
-      { ...carried, syncChunks: null },
-    );
+      {
+        ...carried,
+        syncChunks: null,
+      },
+    ) as Pipeline<U, AssignMode<P, M2>, P>;
   }
 
   /**
@@ -786,9 +832,7 @@ export class Pipeline<
    */
   transform<U, M2 extends "sync" | "async">(
     this: M extends "unset" ? never : Pipeline<T, M, P>,
-    t: (
-      transformer: Transformer<T, T, M & ("sync" | "async")>,
-    ) => Transformer<T, U, M2>,
+    t: (transformer: Transformer<T, T, M & ("sync" | "async")>) => Transformer<T, U, M2>,
   ): Pipeline<U, AssignMode<P, M2>, P> {
     const transformer = t(
       new Transformer<T, T, M & ("sync" | "async")>({ transform: (chunk) => chunk }),
@@ -861,16 +905,25 @@ export class Pipeline<
    * `new Pipeline([1,2,3,4,5]).reduce((acc, x) => acc + x, 0).transform((t) => t.map((n) => n *
    * 10)).toArray()` → `[150]`.
    */
-  reduce<U>(fn: ReduceFunction<U, T>, initial: U): AnyPipeline<U> {
+  reduce<U>(fn: ReduceFunction<U, T>, initial: U): Pipeline<U, "async", P> {
     const { chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
-    const newChunks = foldChunkStream(fn, initial, this._chunks, this._context);
+    const newChunks = foldChunkStream(fn, initial, this.chunkStream(), this._context);
     return this.createPipeline<U>(newChunks, {
       context: this._context,
       chunkTransforms,
       reduceStages,
       preBufferItems: null,
+      syncPreBufferItems: null,
       runHandler: this._runHandler,
-    });
+      // Always `"async"`, whatever the chain's Mode was (#90): this folds `foldChunkStream`, an
+      // async generator over an `AsyncIterable`, so it cannot run synchronously whatever the
+      // reducer does. Saying so in the return type is what keeps the Mode honest - a `"sync"`
+      // return here would promise an array and hand back a `Promise`. `Transformer.reduce()` is
+      // the per-chunk fold that DOES stay synchronous; use it inside `.transform()` when the whole
+      // chain must stay sync.
+      mode: "async",
+      syncChunks: null,
+    }) as Pipeline<U, "async", P>;
   }
 
   /**
@@ -895,23 +948,31 @@ export class Pipeline<
    * 0)).toArray()` → `[30]` - the map and the fold both run in-process, in one region, instead of
    * dispatching two separate stages.
    */
-  local<U>(build: (p: AnyPipeline<T>) => AnyPipeline<U>): AnyPipeline<U> {
+  local<U, M2 extends "sync" | "async">(
+    build: (p: Pipeline<T, M, "shape">) => Pipeline<U, M2, "shape">,
+  ): Pipeline<U, AssignMode<P, M2>, P> {
     const region = new Pipeline<T, "sync" | "async", SourcePolicy>({
       context: this._context,
       chunkTransforms: this._chunkTransforms,
       reduceStages: this._reduceStages,
       chunks: this._chunks,
       preBufferItems: this._preBufferItems,
+      syncPreBufferItems: this._syncPreBufferItems,
       runHandler: this._runHandler,
+      mode: this._mode,
+      syncChunks: this._syncChunks,
     });
-    const built = build(region);
+    const built = build(region as unknown as Pipeline<T, M, "shape">);
     return this.createPipeline<U>(built._chunks, {
       context: built._context,
       chunkTransforms: built._chunkTransforms,
       reduceStages: built._reduceStages,
       preBufferItems: built._preBufferItems,
+      syncPreBufferItems: built._syncPreBufferItems,
       runHandler: built._runHandler,
-    });
+      mode: built._mode,
+      syncChunks: built._syncChunks,
+    }) as Pipeline<U, AssignMode<P, M2>, P>;
   }
 
   /**
@@ -948,11 +1009,9 @@ export class Pipeline<
     // narrowing is sound - `M` here is never `"unset"`.
     return this.local((p) => {
       const sourced = p as Pipeline<T, "sync" | "async", "shape"> as Pipeline<T, "sync", "shape">;
-      return (
-        arg instanceof Transformer
-          ? sourced.transform((t) => t.tap(arg))
-          : sourced.transform((t) => t.tap(arg))
-      ) as unknown as AnyPipeline<T>;
+      return (arg instanceof Transformer
+        ? sourced.transform((t) => t.tap(arg))
+        : sourced.transform((t) => t.tap(arg))) as unknown as Pipeline<T, "sync", "shape">;
     }) as this;
   }
 
@@ -1136,7 +1195,7 @@ export class Pipeline<
       results[key] = [];
     }
 
-    for await (const item of flattenChunks(this._chunks)) {
+    for await (const item of this.asyncItems()) {
       await this.routeItemToBranches(item, branches, results, firstMatch);
     }
 

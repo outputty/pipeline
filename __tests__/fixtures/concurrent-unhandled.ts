@@ -34,7 +34,7 @@ function expectChunkFailure(error: unknown): void {
 }
 
 async function runConcurrentPipeline(ordered: boolean): Promise<string[]> {
-  const cp = new ConcurrentPipeline<number>([1, 2, 3, 4, 5], { maxConcurrency: 4, ordered });
+  const cp = new ConcurrentPipeline({ maxConcurrency: 4, ordered }).from<number>([1, 2, 3, 4, 5]);
   try {
     await cp.transform((t) => t.map(failFrom2)).toArray();
   } catch (error) {

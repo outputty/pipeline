@@ -14,7 +14,7 @@ export const DEFAULT_CHUNK_SIZE = 1000;
  * `Promise` (#90). `"unset"` is a `Pipeline` built but not yet given a source: `.transform()` refuses
  * it, so a chain cannot be composed before `.from()` decides which engine it runs on.
  *
- * `new Pipeline({})` is `"unset"`; `.from([1, 2, 3])` makes it `"sync"`; `.from(asyncSource)`, or a
+ * `new Pipeline()` is `"unset"`; `.from([1, 2, 3])` makes it `"sync"`; `.from(asyncSource)`, or a
  * single `Promise`-returning callback anywhere in the chain, makes it `"async"`.
  */
 export type PipelineMode = "unset" | "sync" | "async";

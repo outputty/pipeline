@@ -15,7 +15,8 @@ describe("Pipeline.prototype.merge (#41)", () => {
     async () => {
       // The ticket's own planning spike (#41's `## Interface`): remote's stage 0 is `x + 1`,
       // the merged stage is `x * 100`. The worker mirrors the orchestrator's own two stages.
-      const worker = new HttpPipeline<number>([], { url: "" })
+      const worker = new HttpPipeline({ url: "" })
+        .from<number>([])
         .transform((t) => t.map((x: number) => x + 1))
         .transform((t) => t.map((x: number) => x * 100));
 
@@ -28,13 +29,15 @@ describe("Pipeline.prototype.merge (#41)", () => {
 
       await withServer(countingHandler, async (url) => {
         // Stage 0, dispatched over HTTP before the merge - 4 items, one chunk each.
-        const remote = new HttpPipeline<number>([1, 2, 3, 4], { url })
+        const remote = new HttpPipeline({ url })
+          .from<number>([1, 2, 3, 4])
           .buffer(1)
           .transform((t) => t.map((x: number) => x + 1));
 
         // A ConcurrentPipeline's OWN items, produced through its OWN in-process fan-out - never
         // touching the wire (Done-when 4: "each contributed items its own class produced").
-        const local = new ConcurrentPipeline<number>([10, 20])
+        const local = new ConcurrentPipeline()
+          .from<number>([10, 20])
           .buffer(1)
           .transform((t) => t.map((x: number) => x + 5));
 
@@ -54,11 +57,13 @@ describe("Pipeline.prototype.merge (#41)", () => {
   );
 
   it("the merged pipeline keeps its class, knobs and buffered chunk cut (Done-when 2)", async () => {
-    const base = new ConcurrentPipeline<number>([1, 2], {
+    const base = new ConcurrentPipeline({
       maxConcurrency: 8,
       ordered: false,
-    }).buffer(1);
-    const other = new Pipeline<number>([3, 4]);
+    })
+      .from<number>([1, 2])
+      .buffer(1);
+    const other = new Pipeline().from<number>([3, 4]);
 
     const merged = base.merge(other);
 
@@ -76,8 +81,8 @@ describe("Pipeline.prototype.merge (#41)", () => {
   });
 
   it("contexts merge, later winning on a shared key - the static's own semantics (Done-when 3)", async () => {
-    const p1 = new Pipeline([1]).context({ k1: "a", shared: "A" });
-    const p2 = new Pipeline([2]).context({ k2: "b", shared: "B" });
+    const p1 = new Pipeline().from([1]).context({ k1: "a", shared: "A" });
+    const p2 = new Pipeline().from([2]).context({ k2: "b", shared: "B" });
 
     const merged = p1.merge(p2);
 
@@ -86,8 +91,8 @@ describe("Pipeline.prototype.merge (#41)", () => {
 
   it("mutates THIS pipeline's own manager in place, same instance forward (.context()'s own contract)", async () => {
     const mine = new LoggingContext();
-    const p1 = new Pipeline([1], { context: mine }).context({ shared: "first" });
-    const p2 = new Pipeline([2]).context({ shared: "second" });
+    const p1 = new Pipeline({ context: mine }).from([1]).context({ shared: "first" });
+    const p2 = new Pipeline().from([2]).context({ shared: "second" });
 
     const merged = p1.merge(p2);
 
@@ -96,7 +101,7 @@ describe("Pipeline.prototype.merge (#41)", () => {
   });
 
   it("merge() with no arguments returns an equivalent pipeline of the same class (Done-when 5)", async () => {
-    const p = new ConcurrentPipeline<number>([1, 2, 3], { maxConcurrency: 2 });
+    const p = new ConcurrentPipeline({ maxConcurrency: 2 }).from<number>([1, 2, 3]);
 
     const merged = p.merge();
 
@@ -105,9 +110,9 @@ describe("Pipeline.prototype.merge (#41)", () => {
   });
 
   it("merging an empty pipeline changes nothing (Done-when 5)", async () => {
-    const p = new Pipeline<number>([1, 2, 3]);
+    const p = new Pipeline().from<number>([1, 2, 3]);
 
-    const merged = p.merge(new Pipeline<number>([]));
+    const merged = p.merge(new Pipeline().from<number>([]));
 
     expect(await merged.toArray()).toEqual([1, 2, 3]);
   });

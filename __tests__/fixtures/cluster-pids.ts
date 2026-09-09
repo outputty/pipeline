@@ -9,7 +9,8 @@ import { ClusterPipeline } from "../../src";
 const workers = 3;
 const items = Array.from({ length: 30 }, (_, i) => i);
 
-const pids = await new ClusterPipeline(items, { workers, maxConcurrency: workers })
+const pids = await new ClusterPipeline({ workers, maxConcurrency: workers })
+  .from(items)
   .buffer(1)
   .transform((t) => t.map((_x: number) => process.pid))
   .toArray();

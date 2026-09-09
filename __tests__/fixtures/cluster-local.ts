@@ -8,7 +8,8 @@ import { ClusterPipeline } from "../../src";
 
 const primaryPid = process.pid;
 
-const [folded] = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const [folded] = await new ClusterPipeline({ maxConcurrency: 2 })
+  .from([1, 2, 3, 4, 5])
   .buffer(2)
   .local((p) =>
     p.reduce(

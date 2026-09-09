@@ -8,7 +8,7 @@ describe("Pipeline", () => {
   describe("constructor", () => {
     it("creates pipeline from sync iterable", async () => {
       const data = [1, 2, 3];
-      const pipeline = new Pipeline(data);
+      const pipeline = new Pipeline().from(data);
       const results = await pipeline.toArray();
 
       expect(results).toEqual([1, 2, 3]);
@@ -21,7 +21,7 @@ describe("Pipeline", () => {
         yield 3;
       }
 
-      const pipeline = new Pipeline(asyncData());
+      const pipeline = new Pipeline().from(asyncData());
       const results = await pipeline.toArray();
 
       expect(results).toEqual([1, 2, 3]);
@@ -29,7 +29,7 @@ describe("Pipeline", () => {
 
     it("accepts custom context", async () => {
       const context = new SimpleContextManager({ key: "value" });
-      const pipeline = new Pipeline([1, 2, 3], { context });
+      const pipeline = new Pipeline({ context }).from([1, 2, 3]);
       await pipeline.toArray();
       const ctx = pipeline.contextManager.toDict();
 
@@ -39,7 +39,7 @@ describe("Pipeline", () => {
 
   describe("context", () => {
     it("sets context values via fluent API", async () => {
-      const pipeline = new Pipeline([1, 2, 3]).context({ multiplier: 3 });
+      const pipeline = new Pipeline().from([1, 2, 3]).context({ multiplier: 3 });
       await pipeline.toArray();
       const ctx = pipeline.contextManager.toDict();
 
@@ -47,7 +47,8 @@ describe("Pipeline", () => {
     });
 
     it("returns pipeline for chaining", async () => {
-      const pipeline = new Pipeline([1, 2, 3])
+      const pipeline = new Pipeline()
+        .from([1, 2, 3])
         .context({ key1: "value1" })
         .context({ key2: "value2" });
 
@@ -58,7 +59,8 @@ describe("Pipeline", () => {
     });
 
     it("can be used with transformers", async () => {
-      const results = await new Pipeline([1, 2, 3])
+      const results = await new Pipeline()
+        .from([1, 2, 3])
         .context({ multiplier: 10 })
         .transform((t) =>
           t.map((x, ctx) => {
@@ -72,14 +74,14 @@ describe("Pipeline", () => {
     });
 
     it("allows access via contextManager getter", () => {
-      const pipeline = new Pipeline([1, 2, 3]).context({ key: "value" });
+      const pipeline = new Pipeline().from([1, 2, 3]).context({ key: "value" });
 
       expect(pipeline.contextManager.get("key")).toBe("value");
     });
 
     it("survives .context() as the SAME instance and receives its writes (#31, Done-when 1)", async () => {
       const mine = new LoggingContext();
-      const afterContext = new Pipeline([1, 2], { context: mine }).context({ multiplier: 10 });
+      const afterContext = new Pipeline({ context: mine }).from([1, 2]).context({ multiplier: 10 });
 
       expect(afterContext.contextManager).toBe(mine);
 
@@ -94,7 +96,7 @@ describe("Pipeline", () => {
     it("propagates a manager's own rejection instead of bypassing it (#31, Done-when 2)", () => {
       const sealed = new SealedContext({ known: 1 });
 
-      expect(() => new Pipeline([1], { context: sealed }).context({ unknown: 2 })).toThrow(
+      expect(() => new Pipeline({ context: sealed }).from([1]).context({ unknown: 2 })).toThrow(
         "SealedContext: unknown key 'unknown'",
       );
     });
@@ -102,7 +104,7 @@ describe("Pipeline", () => {
 
   describe("apply", () => {
     it("applies transformer to data", async () => {
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
       const transformer = new Transformer<number, number>().map((x: number) => x * 2);
 
       const results = await pipeline.apply(transformer).toArray();
@@ -111,7 +113,7 @@ describe("Pipeline", () => {
     });
 
     it("chains multiple transformers", async () => {
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
       const double = new Transformer<number, number>().map((x: number) => x * 2);
       const addOne = new Transformer<number, number>().map((x: number) => x + 1);
 
@@ -123,7 +125,7 @@ describe("Pipeline", () => {
 
   describe("transform", () => {
     it("applies transformer builder function", async () => {
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
 
       const results = await pipeline
         .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 2))
@@ -133,7 +135,7 @@ describe("Pipeline", () => {
     });
 
     it("chains with other operations", async () => {
-      const pipeline = new Pipeline(["hello", "world"]);
+      const pipeline = new Pipeline().from(["hello", "world"]);
 
       const results = await pipeline
         .transform((t) => t.map((s: string) => s.toUpperCase()))
@@ -146,14 +148,14 @@ describe("Pipeline", () => {
 
   describe("buffer", () => {
     it("cuts the chunk boundary while maintaining item order", async () => {
-      const pipeline = new Pipeline([1, 2, 3, 4, 5]);
+      const pipeline = new Pipeline().from([1, 2, 3, 4, 5]);
       const results = await pipeline.buffer(2).toArray();
 
       expect(results).toEqual([1, 2, 3, 4, 5]);
     });
 
     it("works with empty input", async () => {
-      const pipeline = new Pipeline<number>([]);
+      const pipeline = new Pipeline().from<number>([]);
       const results = await pipeline.buffer(2).toArray();
 
       expect(results).toEqual([]);
@@ -162,14 +164,14 @@ describe("Pipeline", () => {
 
   describe("toArray", () => {
     it("collects all items to array", async () => {
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
       const results = await pipeline.toArray();
 
       expect(results).toEqual([1, 2, 3]);
     });
 
     it("returns empty array for empty input", async () => {
-      const pipeline = new Pipeline<number>([]);
+      const pipeline = new Pipeline().from<number>([]);
       const results = await pipeline.toArray();
 
       expect(results).toEqual([]);
@@ -177,7 +179,7 @@ describe("Pipeline", () => {
 
     it("does not carry a context snapshot; .contextManager still resolves it afterward", async () => {
       const context = new SimpleContextManager({ key: "value" });
-      const pipeline = new Pipeline([1], { context });
+      const pipeline = new Pipeline({ context }).from([1]);
       await pipeline.toArray();
       const ctx = pipeline.contextManager.toDict();
 
@@ -187,35 +189,35 @@ describe("Pipeline", () => {
 
   describe("first", () => {
     it("returns first N elements", async () => {
-      const pipeline = new Pipeline([1, 2, 3, 4, 5]);
+      const pipeline = new Pipeline().from([1, 2, 3, 4, 5]);
       const results = await pipeline.first(3);
 
       expect(results).toEqual([1, 2, 3]);
     });
 
     it("returns single element by default", async () => {
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
       const results = await pipeline.first();
 
       expect(results).toEqual([1]);
     });
 
     it("returns all elements if N > length", async () => {
-      const pipeline = new Pipeline([1, 2]);
+      const pipeline = new Pipeline().from([1, 2]);
       const results = await pipeline.first(5);
 
       expect(results).toEqual([1, 2]);
     });
 
     it("throws if N < 1", async () => {
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
 
       await expect(pipeline.first(0)).rejects.toThrow(new Error("n must be at least 1"));
     });
 
     it("does not carry a context snapshot; .contextManager still resolves it afterward", async () => {
       const context = new SimpleContextManager({ key: "value" });
-      const pipeline = new Pipeline([1, 2, 3], { context });
+      const pipeline = new Pipeline({ context }).from([1, 2, 3]);
       await pipeline.first(2);
       const ctx = pipeline.contextManager.toDict();
 
@@ -233,7 +235,7 @@ describe("Pipeline", () => {
         }
       }
 
-      const pipeline = new Pipeline(data());
+      const pipeline = new Pipeline().from(data());
       await pipeline.consume();
 
       expect(processed).toBe(5);
@@ -241,7 +243,7 @@ describe("Pipeline", () => {
 
     it("resolves undefined; .contextManager still resolves the context afterward", async () => {
       const context = new SimpleContextManager({ key: "value" });
-      const pipeline = new Pipeline([1, 2, 3], { context });
+      const pipeline = new Pipeline({ context }).from([1, 2, 3]);
       const result = await pipeline.consume();
       const ctx = pipeline.contextManager.toDict();
 
@@ -253,7 +255,7 @@ describe("Pipeline", () => {
   describe("forEach", () => {
     it("applies function to each item", async () => {
       const items: number[] = [];
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
 
       await pipeline.forEach((item) => {
         items.push(item * 2);
@@ -264,7 +266,7 @@ describe("Pipeline", () => {
 
     it("supports async functions", async () => {
       const items: number[] = [];
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
 
       await pipeline.forEach(async (item) => {
         await Promise.resolve();
@@ -276,7 +278,7 @@ describe("Pipeline", () => {
 
     it("resolves undefined; .contextManager still resolves the context afterward", async () => {
       const context = new SimpleContextManager({ key: "value" });
-      const pipeline = new Pipeline([1, 2, 3], { context });
+      const pipeline = new Pipeline({ context }).from([1, 2, 3]);
       const result = await pipeline.forEach(() => {});
       const ctx = pipeline.contextManager.toDict();
 
@@ -287,7 +289,7 @@ describe("Pipeline", () => {
 
   describe("branch", () => {
     it("routes items to different branches", async () => {
-      const pipeline = new Pipeline([1, 2, 3, 4, 5]);
+      const pipeline = new Pipeline().from([1, 2, 3, 4, 5]);
 
       const results = await pipeline.branch({
         even: {
@@ -305,7 +307,7 @@ describe("Pipeline", () => {
     });
 
     it("uses first matching branch only", async () => {
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
 
       const results = await pipeline.branch({
         positive: {
@@ -324,7 +326,7 @@ describe("Pipeline", () => {
     });
 
     it("handles empty input", async () => {
-      const pipeline = new Pipeline<number>([]);
+      const pipeline = new Pipeline().from<number>([]);
 
       const results = await pipeline.branch({
         even: {
@@ -337,7 +339,7 @@ describe("Pipeline", () => {
     });
 
     it("handles no matching branches", async () => {
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
 
       const results = await pipeline.branch({
         negative: {
@@ -350,7 +352,7 @@ describe("Pipeline", () => {
     });
 
     it("supports async predicates", async () => {
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
 
       const results = await pipeline.branch({
         async: {
@@ -364,7 +366,7 @@ describe("Pipeline", () => {
 
     it("does not carry a context snapshot; .contextManager still resolves it afterward", async () => {
       const context = new SimpleContextManager({ key: "value" });
-      const pipeline = new Pipeline([1, 2], { context });
+      const pipeline = new Pipeline({ context }).from([1, 2]);
 
       await pipeline.branch({
         all: {
@@ -378,7 +380,7 @@ describe("Pipeline", () => {
     });
 
     it("supports broadcast mode (firstMatch: false)", async () => {
-      const pipeline = new Pipeline([1, 2, 3, 4, 5]);
+      const pipeline = new Pipeline().from([1, 2, 3, 4, 5]);
 
       const results = await pipeline.branch(
         {
@@ -405,7 +407,7 @@ describe("Pipeline", () => {
     });
 
     it("router mode (firstMatch: true) routes to first match only", async () => {
-      const pipeline = new Pipeline([1, 2, 3, 4, 5]);
+      const pipeline = new Pipeline().from([1, 2, 3, 4, 5]);
 
       const results = await pipeline.branch(
         {
@@ -434,7 +436,8 @@ describe("Pipeline", () => {
 
   describe("integration", () => {
     it("complex pipeline with multiple operations", async () => {
-      const results = await new Pipeline([1, 2, 3, 4, 5])
+      const results = await new Pipeline()
+        .from([1, 2, 3, 4, 5])
         .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
         .toArray();
 
@@ -445,7 +448,7 @@ describe("Pipeline", () => {
       const double = new Transformer<number, number>().map((x: number) => x * 2);
       const toString = new Transformer<number, number>().map((x: number) => `value: ${x}`);
 
-      const results = await new Pipeline([1, 2, 3]).apply(double).apply(toString).toArray();
+      const results = await new Pipeline().from([1, 2, 3]).apply(double).apply(toString).toArray();
 
       expect(results).toEqual(["value: 2", "value: 4", "value: 6"]);
     });
@@ -460,7 +463,8 @@ describe("Pipeline", () => {
 
     it("Done-when 7: a chunk that can't be repaired is dropped, the run continues", async () => {
       const logged: string[] = [];
-      const out = await new Pipeline(["1", "x", "3", "4"])
+      const out = await new Pipeline()
+        .from(["1", "x", "3", "4"])
         .buffer(1)
         .onError((e) => logged.push(e.message))
         .transform((t) => t.map(parseStrict))
@@ -472,7 +476,8 @@ describe("Pipeline", () => {
 
     it("Done-when 8: a handler that rethrows stops the run, rejecting with what it threw", async () => {
       await expect(
-        new Pipeline(["1", "x", "3", "4"])
+        new Pipeline()
+          .from(["1", "x", "3", "4"])
           .buffer(1)
           .onError((e) => {
             throw e;
@@ -485,7 +490,8 @@ describe("Pipeline", () => {
     it("Done-when 10: a rethrowing ROW handler escalates to the RUN handler, which drops the chunk", async () => {
       // Same chain as Done-when 7, but the row handler is what rethrows this time - it never
       // recovers "x" itself, so the failure still reaches Pipeline.onError() as a chunk failure.
-      const out = await new Pipeline(["1", "x", "3", "4"])
+      const out = await new Pipeline()
+        .from(["1", "x", "3", "4"])
         .buffer(1)
         .onError(() => {
           /* swallow: drop the chunk, keep going */
@@ -507,7 +513,8 @@ describe("Pipeline", () => {
       // an ALREADY-DISPATCHED stage - too late for THIS run to see it, so the chunk failure still
       // propagates uncaught. Contrast with Done-when 7, where .onError() precedes .transform().
       await expect(
-        new Pipeline(["1", "x", "3", "4"])
+        new Pipeline()
+          .from(["1", "x", "3", "4"])
           .buffer(1)
           .transform((t) => t.map(parseStrict))
           .onError(() => {
@@ -528,7 +535,8 @@ describe("Pipeline", () => {
       const seen: Error[] = [];
 
       await expect(
-        new Pipeline(failingSource())
+        new Pipeline()
+          .from(failingSource())
           .onError((e) => seen.push(e))
           .transform((t) => t.map((x: number) => x))
           .toArray(),
