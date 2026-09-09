@@ -55,13 +55,15 @@ export type AssignMode<P extends SourcePolicy, S extends PipelineMode> = P exten
  * `JoinMode<"sync", "sync">` → `"sync"`. `JoinMode<"async", "sync">` → `"async"`.
  * `JoinMode<"unset", "sync">` → `"unset"`. `JoinMode<"unset", "async">` → `"async"`.
  */
-export type JoinMode<M extends PipelineMode, S extends "sync" | "async"> = M extends "sync"
-  ? S
-  : M extends "unset"
-    ? S extends "async"
-      ? "async"
-      : "unset"
-    : "async";
+export type JoinMode<M extends PipelineMode, S extends PipelineMode> = S extends "async"
+  ? "async"
+  : M extends "sync"
+    ? S extends "unset"
+      ? "unset"
+      : S
+    : M extends "unset"
+      ? "unset"
+      : "async";
 
 /**
  * The Mode the seed `Transformer` inside `.transform()` starts at, for a chain whose own Mode is
@@ -252,9 +254,12 @@ export interface BranchDefinition<T, _U, TTransformer = unknown> {
   predicate: (item: T) => boolean | Promise<boolean>;
 
   /**
-   * Transformer to apply to items that match the predicate.
+   * Transformer to apply to items that match the predicate. Optional (#87, folded into #90): a
+   * routing-only branch - a predicate and nothing else - used to force the caller to hand-build
+   * `new Transformer<T, T>()` per branch purely to satisfy this field. Omitted, matching items pass
+   * through unchanged, which makes `U` the item type `T`.
    */
-  transformer: TTransformer;
+  transformer?: TTransformer;
 }
 
 /**

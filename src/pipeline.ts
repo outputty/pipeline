@@ -139,6 +139,24 @@ export type AnyPipeline<U> = Pipeline<U, PipelineMode, SourcePolicy, any>;
  */
 export type PendingStage = (pipeline: AnyPipeline<any>) => AnyPipeline<any>;
 
+/**
+ * What `.branch()` returns (#90): the branch definitions bound once, callable with any input.
+ *
+ * `.branch()` is a terminal - it drains, routes each item into named buckets and hands back a plain
+ * object, and nothing chains after it. Returning a runner rather than the buckets themselves is
+ * what keeps the definitions written once: `split(a)` and `split(b)` reuse them, where a terminal
+ * that drained immediately made the caller re-pass every predicate and transformer per input.
+ *
+ * The no-argument form is for a pipeline that already named a source through `.from()`.
+ *
+ * `split(orders)` → `{ big: ["BIG:2", "BIG:4"], eu: ["EU:1", "EU:3"], rest: [] }`.
+ */
+export interface BranchRunner<In, U> {
+  (input: AsyncIterable<In>): Promise<Record<string, U[]>>;
+  (input: Iterable<In>): Promise<Record<string, U[]>>;
+  (): Promise<Record<string, U[]>>;
+}
+
 /** Construction-time knobs for a `Pipeline` — every field optional. */
 export interface PipelineOptions {
   /**
@@ -379,6 +397,12 @@ export class Pipeline<
   /** Whether `_context` was invented here rather than named by the caller - see
    * `PipelineOptions.contextIsDefault`. */
   protected _contextIsDefault!: boolean;
+  /** `registries()`'s memo - built on first serve, never carried through copy-on-write, since the
+   * next instance's own stage list is different. */
+  protected _registries?: {
+    chunkTransforms: ChunkTransform[];
+    reduceStages: Map<number, ReduceStage>;
+  };
 
   /**
    * Create a new Pipeline from a data source.
@@ -637,6 +661,86 @@ export class Pipeline<
    * arrives, which is every pipeline built the callable way (#90). */
   protected isDeferred(): boolean {
     return this._mode === "unset";
+  }
+
+  /**
+   * This pipeline's stage registries - the two maps a SERVING side reads to answer `/stage/<n>` and
+   * `/reduce/<n>` (#90).
+   *
+   * A deferred pipeline has recorded its stages but not run them, so both registries are empty
+   * until something binds an input. A worker never binds one: it holds the chain to serve it, and
+   * has no data by definition. So the stages are replayed here against an empty source, once and
+   * memoised - which is exactly what the caller's own `.from([])` placeholder used to do, moved
+   * inside where it belongs. The empty source produces no chunks, so nothing runs; only the
+   * registries are the point.
+   *
+   * @example
+   * A worker holding one `.transform()` serves stage index `0` after this, where before it reported
+   * `unknown stage 0; this deployment serves 0..-1`.
+   */
+  protected registries(): {
+    chunkTransforms: ChunkTransform[];
+    reduceStages: Map<number, ReduceStage>;
+  } {
+    if (!this.isDeferred()) {
+      return { chunkTransforms: this._chunkTransforms, reduceStages: this._reduceStages };
+    }
+    this._registries ??= (() => {
+      const materialised = this.from([] as T[]) as unknown as AnyPipeline<T>;
+      return {
+        chunkTransforms: materialised._chunkTransforms,
+        reduceStages: materialised._reduceStages,
+      };
+    })();
+    return this._registries;
+  }
+
+  /**
+   * The options that reproduce `pipeline`'s chain on ANOTHER class (#90) - what a wrapping class's
+   * `(pipeline, options)` constructor spreads to adopt a chain built elsewhere.
+   *
+   * Only a source-less pipeline can be adopted: its stages are still recorded calls, so replaying
+   * them against the adopting class makes each one run THAT class's way. A pipeline already bound
+   * through `.from()` has materialised its stages into a chunk stream that belongs to the class
+   * that built it, and there is nothing left to replay - so this refuses rather than adopting half
+   * a chain.
+   *
+   * @example
+   * `new HttpPipeline(scored, { url })` runs `scored`'s stages over HTTP, where `scored([1,2,3])`
+   * runs the identical stages in this process.
+   */
+  static adopt(pipeline: AnyPipeline<any>): PipelineOptions {
+    if (pipeline._mode !== "unset") {
+      throw new Error(
+        "cannot wrap a pipeline that already named a source with .from() - build the chain without .from() and wrap that",
+      );
+    }
+    return {
+      context: pipeline._context,
+      contextIsDefault: pipeline._contextIsDefault,
+      chunkTransforms: [...pipeline._chunkTransforms],
+      reduceStages: new Map(pipeline._reduceStages),
+      runHandler: pipeline._runHandler,
+      chunkSize: pipeline._chunkSize,
+      pendingStages: [...pipeline._pendingStages],
+    };
+  }
+
+  /**
+   * Resolves a wrapping class's two constructor forms into the one `PipelineOptions` its `super()`
+   * call takes (#90): `(pipeline, options)` adopts a chain built elsewhere, `(options)` builds an
+   * empty one. Written once here so `ConcurrentPipeline`, `HttpPipeline` and `ClusterPipeline`
+   * cannot drift on which of the two they accept, or on how a wrapped chain is carried in.
+   *
+   * @example
+   * `Pipeline.wrapping(scored, { url })` → `scored`'s stages plus `{ url }`, ready for `super()`.
+   */
+  protected static wrapping<O extends PipelineOptions>(
+    first: AnyPipeline<any> | O | undefined,
+    second: O | undefined,
+  ): O {
+    if (first instanceof Pipeline) return { ...Pipeline.adopt(first), ...second } as O;
+    return (first ?? second ?? {}) as O;
   }
 
   /** This pipeline's CHUNKS as an async stream, whichever engine it runs on (#90) - what a merge
@@ -1276,7 +1380,7 @@ export class Pipeline<
    * 0)).toArray()` → `[30]` - the map and the fold both run in-process, in one region, instead of
    * dispatching two separate stages.
    */
-  local<U, M2 extends "sync" | "async">(
+  local<U, M2 extends PipelineMode>(
     build: (p: Pipeline<T, M, "shape", any>) => Pipeline<U, M2, "shape", any>,
   ): Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P, In> {
     // A region defers whole (#90) - see `apply()`. Deferring the `.local()` CALL rather than its
@@ -1544,26 +1648,37 @@ export class Pipeline<
    * @param options - Optional settings: firstMatch (default true)
    * @returns Results by branch name. Read context via `.contextManager` afterward if needed (#744).
    */
-  async branch<U>(
+  branch<U = T>(
     // Either Mode (#90). `Transformer`'s Mode parameter DEFAULTS to `"sync"`, so the pre-#90
     // spelling `Transformer<T, U>` would have silently narrowed this to sync-only transformers and
     // rejected `new Transformer<T, U>().map(async (x) => …)`, which compiled before. `.branch()`
     // awaits every branch's own result regardless, so accepting both is the behaviour it always had.
     branches: Record<string, BranchDefinition<T, U, Transformer<T, U, "sync" | "async">>>,
     options?: BranchOptions,
-  ): Promise<Record<string, U[]>> {
+  ): BranchRunner<In, U> {
     const firstMatch = options?.firstMatch !== false; // Default to true (router mode)
+    const owner = this;
 
-    const results: Record<string, U[]> = {};
-    for (const key of Object.keys(branches)) {
-      results[key] = [];
-    }
+    const run = async (input?: PipelineSource<In>): Promise<Record<string, U[]>> => {
+      // Bound here, once per call: a source-less pipeline gets the input the runner was called
+      // with, and one that already named a source drains itself, which is what keeps every
+      // pre-existing `await p.from(data).branch({…})` call site working unchanged.
+      const source =
+        owner.isDeferred() && input !== undefined
+          ? (owner.from(input as Iterable<In>) as unknown as AnyPipeline<T>)
+          : (owner as unknown as AnyPipeline<T>);
 
-    for await (const item of this.asyncItems()) {
-      await this.routeItemToBranches(item, branches, results, firstMatch);
-    }
+      const results: Record<string, U[]> = {};
+      for (const key of Object.keys(branches)) {
+        results[key] = [];
+      }
+      for await (const item of source.asyncItems()) {
+        await owner.routeItemToBranches(item as T, branches, results, firstMatch);
+      }
+      return results;
+    };
 
-    return results;
+    return run as BranchRunner<In, U>;
   }
 
   /**
@@ -1609,10 +1724,18 @@ export class Pipeline<
    */
   private async pushBranchOutput<U>(
     item: T,
-    transformer: Transformer<T, U, "sync" | "async">,
+    transformer: Transformer<T, U, "sync" | "async"> | undefined,
     results: Record<string, U[]>,
     key: string,
   ): Promise<void> {
+    // A routing-only branch names no transformer (#87, folded into #90), so the item passes
+    // through as it is. Before, the caller had to hand-build `new Transformer<T, T>()` per branch
+    // purely to fill the field - the friction `.transform()` never had, since it takes a BUILDER.
+    if (transformer === undefined) {
+      results[key].push(item as unknown as U);
+      return;
+    }
+
     async function* oneItem() {
       yield item;
     }

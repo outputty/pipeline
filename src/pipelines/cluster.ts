@@ -19,13 +19,15 @@ import { availableParallelism } from "node:os";
 import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
-import type { Pipeline, PipelineOptions, PipelineSource } from "@src/pipeline";
+import { Pipeline } from "@src/pipeline";
+import type { PipelineOptions, PipelineSource, AnyPipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
   IContextManager,
   InternalTransformer,
   ReduceFunction,
   SourcePolicy,
+  PipelineMode,
 } from "@src/types";
 
 /** Construction-time knobs for `ClusterPipeline`. */
@@ -161,7 +163,16 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
    * the SAME logical pipeline keeps the SAME route on both the primary and every worker. */
   readonly pipelineIndex: number;
 
-  constructor(options?: ClusterPipelineConstructorOptions) {
+  /** Wraps a chain built elsewhere, dispatching its stages to forked worker processes (#90). The
+   * worker's own copy needs no placeholder source: a wrapped chain has none by construction, which
+   * is what `emptyAsyncIterable()` below was standing in for. */
+  constructor(pipeline: AnyPipeline<T>, options?: ClusterPipelineOptions);
+  constructor(options?: ClusterPipelineConstructorOptions);
+  constructor(
+    first?: AnyPipeline<T> | ClusterPipelineConstructorOptions,
+    second?: ClusterPipelineOptions,
+  ) {
+    const options = Pipeline.wrapping<ClusterPipelineConstructorOptions>(first, second);
     // The real url is only known once bootstrapCluster() (below) picks a port; "" is inert until
     // the first actual dispatch sets it, inside stageWork()'s own returned closure.
     super({ ...options, url: "" });
@@ -246,7 +257,7 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
     return "async";
   }
 
-  override local<U, M2 extends "sync" | "async">(
+  override local<U, M2 extends PipelineMode>(
     build: (p: Pipeline<T, "async", "shape", any>) => Pipeline<U, M2, "shape", any>,
   ): ClusterPipeline<U, M, In> {
     return super.local(build) as unknown as ClusterPipeline<U, M, In>;

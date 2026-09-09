@@ -16,8 +16,14 @@ import type {
   InternalTransformer,
   ReduceFunction,
   SourcePolicy,
+  PipelineMode,
 } from "@src/types";
-import { Pipeline, type PipelineOptions, type PipelineSource } from "@src/pipeline";
+import {
+  Pipeline,
+  type PipelineOptions,
+  type PipelineSource,
+  type AnyPipeline,
+} from "@src/pipeline";
 import type { ChunkTransform } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
@@ -199,7 +205,16 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
   /** Whether output order is restored to match input order once a chunk finishes. */
   readonly ordered: boolean;
 
-  constructor(options?: ConcurrentPipelineConstructorOptions) {
+  /** Wraps a chain built elsewhere, running its stages concurrently (#90) - the chain says WHAT to
+   * do, this class says WHERE. Only a source-less pipeline can be wrapped, since its stages are
+   * still recorded calls to replay; one already bound through `.from()` is refused. */
+  constructor(pipeline: AnyPipeline<T>, options?: ConcurrentPipelineOptions);
+  constructor(options?: ConcurrentPipelineConstructorOptions);
+  constructor(
+    first?: AnyPipeline<T> | ConcurrentPipelineConstructorOptions,
+    second?: ConcurrentPipelineOptions,
+  ) {
+    const options = Pipeline.wrapping<ConcurrentPipelineConstructorOptions>(first, second);
     super(options);
     this.maxConcurrency = options?.maxConcurrency ?? 4;
     // Validated eagerly, at construction - the deleted concurrent() strategy did the same (review
@@ -270,9 +285,16 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
   override apply<U>(
     transformer: Transformer<T, U, "sync" | "async">,
   ): ConcurrentPipeline<U, M, In> {
-    // This body does not delegate to the base's `apply()`, so it needs the base's own source guard
-    // (#90) - a dispatching class has no `"unset"` Mode for a conditional `this` to refuse.
-    this.requireSource();
+    // This body does not delegate to the base's `apply()`, so it repeats the base's own deferral
+    // (#90): with no input yet, the call is recorded and replayed later - against THIS class, so
+    // the replayed stage still dispatches. Without it a dispatching pipeline inherited the call
+    // signature and typed fine, then threw `no source: call .from(data) before composing a stage`
+    // the moment a stage was composed.
+    if (this.isDeferred()) {
+      return this.defer<U>((p) =>
+        p.apply(transformer as Transformer<unknown, U, "sync" | "async">),
+      ) as ConcurrentPipeline<U, M, In>;
+    }
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
     // The run handler's own chunk-drop decision (#78) - `dropOrRethrow` (`utils/helpers.ts`) is the
@@ -334,9 +356,16 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
    * .local((p)=>p.reduce((a,v)=>a+v,0)).toArray()` → `[15]`.
    */
   override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U, M, In> {
-    // A dispatching class has no `"unset"` Mode for a compile-time guard to test, so the refusal is
-    // this call - the same reason `apply()` above makes it (#90).
-    this.requireSource();
+    // Defers with no input yet, the same as `apply()` above (#90). Replaying it through this same
+    // method is what keeps the partitioning (#62) identical either way.
+    if (this.isDeferred()) {
+      return this.defer<U>((p) =>
+        p.reduce(
+          fn as (acc: U, item: unknown, ctx: IContextManager, emit: (v: U) => void) => U,
+          initial,
+        ),
+      ) as ConcurrentPipeline<U, M, In>;
+    }
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
 
@@ -388,7 +417,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
     return "async";
   }
 
-  override local<U, M2 extends "sync" | "async">(
+  override local<U, M2 extends PipelineMode>(
     build: (p: Pipeline<T, "async", "shape", any>) => Pipeline<U, M2, "shape", any>,
   ): ConcurrentPipeline<U, M, In> {
     return super.local(build) as unknown as ConcurrentPipeline<U, M, In>;

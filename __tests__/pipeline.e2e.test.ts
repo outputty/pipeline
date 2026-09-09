@@ -302,7 +302,7 @@ describe("Pipeline", () => {
           predicate: (x: number) => x % 2 !== 0,
           transformer: new Transformer<number, number>().map((x: number) => x * 100),
         },
-      });
+      })();
 
       expect(results.even).toEqual([20, 40]);
       expect(results.odd).toEqual([100, 300, 500]);
@@ -320,7 +320,7 @@ describe("Pipeline", () => {
           predicate: () => true,
           transformer: new Transformer<number, number>().map(() => "all"),
         },
-      });
+      })();
 
       // All items match 'positive' first
       expect(results.positive).toEqual(["positive", "positive", "positive"]);
@@ -335,7 +335,7 @@ describe("Pipeline", () => {
           predicate: (x) => x % 2 === 0,
           transformer: new Transformer<number, number>(),
         },
-      });
+      })();
 
       expect(results.even).toEqual([]);
     });
@@ -348,7 +348,7 @@ describe("Pipeline", () => {
           predicate: (x) => x < 0,
           transformer: new Transformer<number, number>(),
         },
-      });
+      })();
 
       expect(results.negative).toEqual([]);
     });
@@ -361,7 +361,7 @@ describe("Pipeline", () => {
           predicate: async (x) => x > 1,
           transformer: new Transformer<number, number>().map((x: number) => x * 2),
         },
-      });
+      })();
 
       expect(results.async).toEqual([4, 6]);
     });
@@ -375,7 +375,7 @@ describe("Pipeline", () => {
           predicate: () => true,
           transformer: new Transformer<number, number>(),
         },
-      });
+      })();
       const ctx = pipeline.contextManager.toDict();
 
       expect(ctx).toEqual({ key: "value" });
@@ -396,7 +396,7 @@ describe("Pipeline", () => {
           },
         },
         { firstMatch: false }, // Broadcast mode
-      );
+      )();
 
       // In broadcast mode, items go to ALL matching branches
       // 1: matches smallerThan4 only -> 100
@@ -423,7 +423,7 @@ describe("Pipeline", () => {
           },
         },
         { firstMatch: true }, // Router mode (default)
-      );
+      )();
 
       // In router mode, items go to FIRST matching branch only
       // 1: matches smallerThan4 first? No, even is first but doesn't match -> smallerThan4 -> 100
