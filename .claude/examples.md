@@ -543,3 +543,40 @@ const data = await new ClusterPipeline([1, 2, 3, 4, 5], { maxConcurrency: 4 })
 // Last line only - every worker also re-executes this module, each printing its own empty result first.
 console.log(JSON.stringify(data)); // [10,20,30,40,50]
 ```
+
+## Case 13 - a synchronous chain, widening once async is introduced
+
+`.from(source)` decides whether the chain runs synchronously from the source's own shape - a plain
+array stays synchronous through every stage, and `.toArray()` returns `number[]` directly, no
+`await`. `.transform()` cannot be called before `.from()` at all - a compile error, since there is
+no source yet to decide sync or async against.
+
+<!-- illustrative, pending #90 -->
+
+```ts
+import { Pipeline } from "@outputty/pipeline";
+
+const data = new Pipeline()
+  .from([1, 2, 3, 4, 5])
+  .transform((t) => t.map((x) => x * 2).filter((x) => x > 4))
+  .toArray(); // number[] - no await
+```
+
+```json
+[6, 8, 10]
+```
+
+The same chain widens to asynchronous the moment any stage's own function returns a `Promise`:
+
+<!-- illustrative, pending #90 -->
+
+```ts
+const widened = await new Pipeline()
+  .from([1, 2, 3, 4, 5])
+  .transform((t) => t.map(async (x) => x * 2).filter((x) => x > 4))
+  .toArray(); // Promise<number[]>
+```
+
+```json
+[6, 8, 10]
+```

@@ -140,13 +140,23 @@ none of it survived the hand-trim (#745).
 ## Language
 
 - **Pipeline** - the high-level API composing a data source with a `Transformer` chain: `new
-  Pipeline(source, options?)`, `.context()`, `.apply()`/`.transform()`, `.tap()` (#72), the terminal ops
+  Pipeline(options?)` (#90, BREAKING - `options` only, no `data`), `.from(source)` to attach the
+  data, `.context()`, `.apply()`/`.transform()`, `.tap()` (#72), the terminal ops
   (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`), the static
   `Pipeline.merge(pipelines, options?)` concatenating several pipelines' sources and contexts into a
   FRESH plain `Pipeline` - `pipelines` is an array, not a rest param (#31, BREAKING), and
   `options.context` carries a caller's own manager through the merge as the SAME instance - and the
   instance `.merge(...others)` (#41), concatenating other pipelines onto ONE already held, keeping
   its own class, knobs and stage numbering instead of building a stranger.
+- **`PipelineMode`** (#90) - `"unset" | "sync" | "async"`, a phantom type parameter on `Pipeline`/
+  `Transformer` deciding whether a chain runs synchronously. `new Pipeline(options?)` alone is
+  `"unset"` - no chain method is callable on it, a compile error, since there is no source to decide
+  sync or async against. `.from(source)` resolves it: a plain `Iterable` source starts `"sync"`, an
+  `AsyncIterable` source starts `"async"`. A `"sync"` chain widens to `"async"` the first time any
+  stage's own function returns a `Promise`, or `.merge()` combines in an already-`"async"`
+  pipeline - never the other direction. `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` are
+  always `"async"`, since each dispatches a chunk across a real boundary regardless of the caller's
+  own callbacks.
 - **Transformer** - the chainable chunk-transformation builder: `new Transformer<In, Out>(options?)`,
   `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.onError()`. Chunk-agnostic (#39) - it never decides how its own input was cut, only
   processes whatever chunk it is handed. `.process(chunks, context?)` runs it directly over an
