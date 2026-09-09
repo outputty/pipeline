@@ -35,7 +35,7 @@ direction (#743, #745).
 src/
   types.ts              PipelineFunction, IContextManager, InternalTransformer, every options
                           interface, plus DROP/RowErrorHandler/PipelineErrorHandler/RunScope (#78)
-  pipeline.ts            Pipeline: source + context + terminal ops + Pipeline.merge +
+  pipeline.ts            Pipeline: the chain, context, stages and Pipeline.drainable +
                           createPipeline() + onError() (#78)
   transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError()
                           (the row handler, #78) and runnable() (the seam that carries it in)
@@ -226,7 +226,7 @@ bare `Pipeline`'s own `.transform()`/`.reduce()` never fan out or POST.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
 createPipeline()` calling `this.constructor` rather than a hard-coded `new Pipeline<U>`, so a
-subclass survives a `.transform()`/`.context()`/`.buffer()`/`.merge()` chain; each level overrides
+subclass survives a `.transform()`/`.context()`/`.buffer()` chain; each level overrides
 `createPipeline()` again to carry its OWN extra knobs forward (`ConcurrentPipeline`'s own
 `concurrentOptions()` helper is the one place `maxConcurrency`/`ordered` are listed - `chunkSize`
 dropped out of it (#39), since `.buffer()` is `Pipeline`'s own knob now, not
@@ -235,14 +235,6 @@ stage's identity is its INDEX in `_chunkTransforms` - the table `apply()` alread
 dispatching class sends a chunk plus an index, never a function. Every instance runs the same code,
 so index N means the same transform on both sides; a mixed-version fleet breaks that assumption
 silently, which is why atomic deploys are a documented requirement rather than a check.
-
-`pipeline.merge(...others)` (#41) is the instance-method sibling of the static `Pipeline.merge()`,
-and goes through the SAME `createPipeline()` seam - the reason it never restarts `_chunkTransforms`
-at 0 the way the static's own hard-coded `new Pipeline(...)` does. The static builds a fresh, class-
-less pipeline because it has no instance of its own to continue; the instance method has one, so it
-carries THIS pipeline's own class, knobs and stage table forward instead of starting over. Both
-share one context-merge loop and one chunk-concatenation generator (`mergeContextsInto()`/
-`concatChunks()`, `src/pipeline.ts`) rather than two independent copies of the same logic.
 
 `ConcurrentPipeline.apply()` does NOT call `transformer.process()` for a non-local stage - that
 bypass IS the mechanism, since `process()` runs a chain sequentially, one chunk at a time. It fans
@@ -301,7 +293,7 @@ resolves immediately with an EMPTY result - the worker exists only to hold the t
 
 - TypeScript removed `baseUrl` at 7.0; a tsconfig that sets it fails with `TS5102`.
 - A conditional type distributes only over a naked type parameter. `Ps[number] extends Pipeline<infer
-  U> ? U : never` is an indexed access, so it compiles and evaluates to `never`; `Pipeline.merge`
+  U> ? U : never` is an indexed access, so it compiles and evaluates to `never`; the deleted merge
   extracts it as `ElementOf<P>` to make it distribute (#5).
 - `Pipeline<T>` is invariant, because `apply<U>(transformer: Transformer<T, U>)` puts `T` in a
   parameter position. Only `Pipeline<any>` works as a constraint over pipelines of mixed item types.
