@@ -506,13 +506,31 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       // before the `fetch()` call below is awaited (`.claude/rules/code.md`: a streaming/duplex
       // probe's input starts before the call that consumes it), so the connection is genuinely
       // duplex rather than the request finishing before the response starts.
+      // One frame per `pull`, NEVER the whole upstream in `start` (#113). `start` ran its own
+      // `for await` to completion and enqueued every frame without consulting `desiredSize`, so
+      // nothing throttled it - and `ConcurrentPipeline.reduce()` calls this closure
+      // `maxConcurrency` times over ONE `share()`d iterator, so N partitions each raced to pull the
+      // entire source into N in-memory queues before the server had folded anything. That also
+      // destroyed the free-slot dealing `share()` exists to provide: a slow partition stops pulling
+      // less than a fast one once neither is throttled. `pull` is called only as the stream drains,
+      // so the shared iterator now advances at the rate the socket accepts.
+      const upstream = chunks[Symbol.asyncIterator]();
       const requestBody = new ReadableStream<Uint8Array>({
-        async start(controller) {
+        start(controller) {
           controller.enqueue(ndjsonFrame({ context: ctx.toDict() }));
-          for await (const chunk of chunks) {
-            controller.enqueue(ndjsonFrame({ chunk }));
+        },
+        async pull(controller) {
+          const next = await upstream.next();
+          if (next.done === true) {
+            controller.close();
+            return;
           }
-          controller.close();
+          controller.enqueue(ndjsonFrame({ chunk: next.value }));
+        },
+        async cancel() {
+          // The consumer stopped reading - a failed request, an aborted response - so this
+          // partition's view of the shared iterator is released rather than left open.
+          await upstream.return?.();
         },
       });
 
@@ -600,9 +618,21 @@ async function writeStreamedBody(res: ServerResponse, bodyStream: Readable): Pro
     if (!ok && !res.destroyed) {
       // Races 'close' alongside 'drain' - a client that disconnects while backed up never fires
       // 'drain' on a destroyed socket, which would otherwise hang this wait forever.
+      //
+      // BOTH listeners come off when either fires (#113). `once` removes only the one that fired,
+      // so the loser stayed attached to a response that outlives this wait: a reduce stage emitting
+      // faster than a slow client drains backs up repeatedly on ONE response, and after eleven such
+      // waits Node printed `MaxListenersExceededWarning: 11 close listeners added to
+      // [ServerResponse]` - each retained closure holding its own `resolve` alive for the life of
+      // the connection.
       await new Promise<void>((resolve) => {
-        res.once("drain", resolve);
-        res.once("close", resolve);
+        const settle = (): void => {
+          res.removeListener("drain", settle);
+          res.removeListener("close", settle);
+          resolve();
+        };
+        res.once("drain", settle);
+        res.once("close", settle);
       });
     }
   }

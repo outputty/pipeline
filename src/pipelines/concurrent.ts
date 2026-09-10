@@ -136,17 +136,67 @@ async function* fanOutUnordered<T, U>(
     inFlight.set(id, tagged);
   }
 
-  for (let i = 0; i < maxConcurrency && !exhausted; i++) {
-    await pullNext();
-  }
+  // The source is closed however this generator ends - exhausted, thrown, or stopped early by a
+  // consumer's `break`/`.first(n)` (#113). `fanOutOrdered` gets this from its own `for await`,
+  // which calls `.return()` on exit; a MANUAL iterator has to do it, and without this the same
+  // chain leaked its source under `ordered: false` and released it under `ordered: true` - one
+  // boolean apart, two resource outcomes, invisible until the process runs out of handles.
+  try {
+    for (let i = 0; i < maxConcurrency && !exhausted; i++) {
+      await pullNext();
+    }
 
-  while (inFlight.size > 0) {
-    const { id, result } = await Promise.race(inFlight.values());
-    inFlight.delete(id);
-    yield result;
-    await pullNext();
+    while (inFlight.size > 0) {
+      const { id, result } = await Promise.race(inFlight.values());
+      inFlight.delete(id);
+      yield result;
+      await pullNext();
+    }
+  } finally {
+    if (!exhausted) await iterator.return?.();
   }
 }
+
+/**
+ * One partition's own accumulator seed, copied from the caller's `initial` (#113).
+ *
+ * `Pipeline.reduce(fn, initial)` takes a VALUE, and a partitioned reduce needs one accumulator per
+ * partition - so handing the same object to all of them made them one accumulator wearing N names.
+ * A primitive copies by assignment; anything else is `structuredClone`d.
+ *
+ * A seed `structuredClone` cannot copy - a function, a class instance, anything holding one - RAISES
+ * here rather than silently reverting to the shared object that produced the defect. The caller's
+ * own fix is `.local((p) => p.reduce(fn, initial))`, which runs one unpartitioned fold in this
+ * process, so the seed is never copied at all.
+ *
+ * `seedFor(0)` → `0`. `seedFor([])` → a fresh `[]` each call.
+ */
+function seedFor<U>(initial: U): U {
+  if (initial === null || typeof initial !== "object") return initial;
+
+  let copy: U;
+  try {
+    copy = structuredClone(initial);
+  } catch (error) {
+    throw new Error(`${SEED_REFUSAL}: ${(error as Error).message}`);
+  }
+
+  // A CLASS INSTANCE does not throw - `structuredClone` copies its own properties and silently
+  // drops the prototype, so the partition folds into a stripped object and fails later with
+  // something like `acc.add is not a function`, pointing at the caller's own reducer rather than at
+  // the copy. Comparing prototypes catches exactly that: `Map`, `Set`, `Date` and a plain object
+  // or array all keep theirs, and anything carrying behaviour does not.
+  if (Object.getPrototypeOf(copy) !== Object.getPrototypeOf(initial)) {
+    throw new Error(`${SEED_REFUSAL}: a class instance loses its prototype when copied`);
+  }
+  return copy;
+}
+
+/** `seedFor`'s refusal, one string so its two throw sites cannot drift on the advice they give. */
+const SEED_REFUSAL =
+  "a partitioned reduce needs one accumulator per partition, and this seed cannot be copied. " +
+  "Pass a seed structuredClone can copy, or wrap the fold in " +
+  ".local((p) => p.reduce(fn, initial)) to run it unpartitioned in this process";
 
 /**
  * Merges N partitions' own reduceWork generators (`ConcurrentPipeline.reduce()`, #62) into one, in
@@ -420,7 +470,12 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     initial: U,
     _stageIndex: number,
   ): (chunks: AsyncIterable<T[]>, ctx: IContextManager) => AsyncGenerator<U[]> {
-    return (chunks, ctx) => foldChunkStream(fn, initial, chunks, ctx);
+    // A SEED PER PARTITION, not the caller's one value handed to all of them (#113). This closure
+    // is called `maxConcurrency` times, so a mutable `initial` was one accumulator shared by every
+    // partition: measured, `.buffer(1).reduce((acc, x) => (acc.push(x), acc), [])` over `[1,2,3,4]`
+    // at `maxConcurrency: 2` returned `[[1,2,3,4],[1,2,3,4]]` - the SAME array twice, where two
+    // partitions owe `[[1,3],[2,4]]` - and a downstream merge then double-counted every item.
+    return (chunks, ctx) => foldChunkStream(fn, seedFor(initial), chunks, ctx);
   }
 
   /**

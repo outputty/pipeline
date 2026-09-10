@@ -613,6 +613,20 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
   );
 
   it(
+    "gives two sibling chains off one base their own worker registry slots (#113)",
+    async () => {
+      // `createPipeline()` forwarded `pipelineIndex` and every constructor claimed that key, so
+      // both siblings registered at the base's index and the second overwrote the first - on the
+      // primary and on every worker re-running the entry module. Calling the FIRST then got the
+      // second's stages back, with no error. Measured before the fix: `{"doubled":[100,200]}`.
+      const fixture = await runFixture("__tests__/fixtures/cluster-sibling-chains.ts");
+      expectFixtureOk(fixture);
+      expect(lastJsonLine(fixture)).toEqual({ doubled: [2, 4], hundredfold: [100, 200] });
+    },
+    FIXTURE_TIMEOUT,
+  );
+
+  it(
     "branches on a ClusterPipeline without an arm clobbering its own parent",
     async () => {
       // An arm's pipeline carried the parent's `pipelineIndex`, and every ClusterPipeline

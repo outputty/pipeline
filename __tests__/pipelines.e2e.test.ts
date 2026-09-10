@@ -664,3 +664,73 @@ describe("#31 contextFactory is invoked once per process, not per request (Done-
     FIXTURE_TIMEOUT,
   );
 });
+
+describe("#113 - a partitioned reduce owns its accumulator, and every fan-out closes its source", () => {
+  it("gives each partition its own seed rather than the caller's one object", async () => {
+    // `reduceWork` captured the single `initial` and handed it to all `maxConcurrency` partitions,
+    // so they were one accumulator wearing N names. Measured before the fix:
+    // `[[1,2,3,4],[1,2,3,4]]`, with `out[0] === out[1]` - the SAME array, returned twice - and a
+    // downstream merge then double-counted every item.
+    const out = await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
+      .buffer(1)
+      .reduce(
+        (acc: number[], x: number) => (acc.push(x), acc),
+        [],
+      )([1, 2, 3, 4])
+      .toArray();
+
+    expect(out).toEqual([
+      [1, 3],
+      [2, 4],
+    ]);
+    expect(out[0]).not.toBe(out[1]);
+  });
+
+  it("refuses a seed it cannot copy, rather than silently sharing or stripping one", () => {
+    // Fail loud, and at the SEED rather than three stack frames later: `structuredClone` does not
+    // throw on a class instance, it drops the prototype - so the partition folded into a stripped
+    // object and failed with `acc.add is not a function`, pointing at the caller's own reducer.
+    class Holder {
+      total = 0;
+      add(x: number): void {
+        this.total += x;
+      }
+    }
+    const shared = new Holder();
+    // Thrown, not rejected: the seed is copied while the partitions are built, before any promise
+    // exists to carry a rejection.
+    expect(() =>
+      new ConcurrentPipeline<number>({ maxConcurrency: 2 })
+        .buffer(1)
+        .reduce(
+          (acc: Holder, x: number) => (acc.add(x), acc),
+          shared,
+        )([1, 2, 3, 4])
+        .toArray(),
+    ).toThrow("this seed cannot be copied");
+  });
+
+  it("closes the source on an early exit under ordered: false, as ordered: true already does", async () => {
+    const closed: string[] = [];
+    const source = (label: string) =>
+      (async function* () {
+        try {
+          for (let i = 0; i < 100; i++) yield i;
+        } finally {
+          closed.push(label);
+        }
+      })();
+
+    const chain = (ordered: boolean) =>
+      new ConcurrentPipeline<number>({ maxConcurrency: 2, ordered })
+        .buffer(1)
+        .transform((t) => t.map((x: number) => x * 2));
+
+    expect(await chain(true)(source("ordered")).first(1)).toEqual([0]);
+    expect(await chain(false)(source("unordered")).first(1)).toEqual([0]);
+
+    // A macrotask, so a generator closed by `.return()` has run its `finally`.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(closed.sort()).toEqual(["ordered", "unordered"]);
+  });
+});

@@ -74,13 +74,18 @@ export class SimpleContextManager implements IContextManager {
   /**
    * Get a value by key with a default fallback.
    *
+   * Tests key PRESENCE, not `value !== undefined` (#113): a deliberately stored `undefined` is a
+   * real value here, the same distinction `DROP` exists for on the row-handler side, where
+   * `types.ts` records that "`undefined` stays an ordinary value a handler may legitimately
+   * return". Comparing the value instead made `.set("k", undefined)` read back as the default while
+   * `.get("k")` returned `undefined` - two accessors disagreeing about whether the key exists.
+   *
    * @param key - The key to look up
-   * @param defaultValue - Value to return if key is not present
-   * @returns The value if present, otherwise the default
+   * @param defaultValue - Value to return if the key is absent
+   * @returns The stored value if the key is present, otherwise the default
    */
   getOrDefault<T>(key: string, defaultValue: T): T {
-    const value = this.data[key];
-    return value !== undefined ? (value as T) : defaultValue;
+    return Object.hasOwn(this.data, key) ? (this.data[key] as T) : defaultValue;
   }
 
   /**

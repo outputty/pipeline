@@ -92,10 +92,11 @@ function scheduleIdleCheck(): void {
  * own probe), so the first one to report it IS the shared port. Memoized: every `ClusterPipeline`
  * in this process shares the same in-flight or already-resolved bootstrap (Done-when 4). */
 function bootstrapCluster(workerCount: number): Promise<BootstrapResult> {
-  bootstrapPromise ??= new Promise((resolve) => {
+  bootstrapPromise ??= new Promise((resolve, reject) => {
     const count = workerCount > 0 ? workerCount : availableParallelism();
     let sharedPort: number | undefined;
     let readyCount = 0;
+    let settled = false;
     for (let i = 0; i < count; i++) {
       const worker = cluster.fork();
       worker.on("message", (message: unknown) => {
@@ -103,8 +104,23 @@ function bootstrapCluster(workerCount: number): Promise<BootstrapResult> {
         if (type !== "outputty-pipeline-ready" || typeof port !== "number") return;
         sharedPort ??= port;
         readyCount++;
-        if (readyCount === count) resolve({ port: sharedPort! });
+        if (readyCount === count && !settled) {
+          settled = true;
+          resolve({ port: sharedPort! });
+        }
       });
+      // A worker that dies before reporting its port must REJECT (#113). With a resolve-only
+      // promise, `readyCount` simply stalled below `count` and the bootstrap stayed pending
+      // forever: a bad import in the entry module, a port-permission failure or an OOM kill left
+      // every later `stageWork`/`reduceWork` awaiting a promise that never settles, so the terminal
+      // op neither returned nor threw. A silent hang is the one outcome with no diagnosis in it.
+      const fail = (detail: string): void => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`a ClusterPipeline worker failed before reporting its port: ${detail}`));
+      };
+      worker.on("error", (error: Error) => fail(error.message));
+      worker.on("exit", (code, signal) => fail(`exited with code ${code}, signal ${signal}`));
     }
   });
   return bootstrapPromise;
@@ -170,12 +186,30 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
     // the first actual dispatch sets it, inside stageWork()'s own returned closure.
     super({ ...options, url: "" });
     this.workers = options?.workers ?? availableParallelism();
-    this.pipelineIndex = options?.pipelineIndex ?? nextPipelineIndex++;
-    // Only a chain's OWN pipeline claims a registry slot. A `.branch()` arm carries a route trail
-    // and is reached THROUGH its parent's route, so registering it would overwrite the parent at
-    // the same `pipelineIndex` - measured, the primary's `/pipeline/0/transform/0` was then served
-    // by the arm's stage table, and the run returned `REST:undefined` rather than failing.
-    if (this._routeTrail === "") {
+
+    // A COMPOSED, trail-less instance is its own logical pipeline and claims its own slot;
+    // everything else carries the slot it was built from (#113). Three cases, and the middle one
+    // is the defect this replaces:
+    //
+    // - `new ClusterPipeline(...)` and every `.transform()`/`.context()` off one - composed,
+    //   unbound, no trail. Each claims a FRESH index. Before this they all inherited the base's,
+    //   so two sibling chains off one base both registered at it and the second overwrote the
+    //   first: measured, `base.transform(x*2)` and `base.transform(x*100)` were all
+    //   `pipelineIndex 0`, and calling the first returned `[100,200]` for `[1,2]` - the second
+    //   chain's stages, no error.
+    // - A BOUND instance - `registries()`'s own `bind([])` replay, or a real call's `bind(input)`.
+    //   It must NOT claim, and not only to avoid a spare slot: the serving side replays LAZILY, on
+    //   first request, so a claim there would advance this process's counter at a moment the
+    //   orchestrator never reaches. Both sides agree on an index only while every claim happens
+    //   during composition, which the entry module runs identically in both.
+    // - A `.branch()` arm, which carries a route trail and is reached THROUGH its parent's route.
+    //   Registering it overwrote the parent at the shared index, and the run returned
+    //   `REST:undefined` rather than failing.
+    const claimsOwnSlot = options?.bound !== true && (options?.routeTrail ?? "") === "";
+    this.pipelineIndex = claimsOwnSlot
+      ? nextPipelineIndex++
+      : (options?.pipelineIndex ?? nextPipelineIndex++);
+    if (claimsOwnSlot) {
       registry.set(this.pipelineIndex, this as ClusterPipeline<unknown>);
     }
 
