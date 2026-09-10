@@ -29,6 +29,8 @@ client of its own beyond what dispatching a stage requires. A `Pipeline` accepts
 structurally (`outputty/laygo`'s `Source` accepts any `AsyncIterable`), with no import edge in either
 direction (#743, #745).
 
+The `node:cluster`/`node:http` boundary above is oxlint-enforced - pending #117.
+
 ## Module layout
 
 ```text
