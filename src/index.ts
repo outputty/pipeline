@@ -46,6 +46,7 @@ export {
   EventEmitterPipeline,
   type EventEmitterPipelineOptions,
   type PipelineEmitter,
+  type WorkEvent,
 } from "./pipelines/eventemitter";
 
 // Factory functions

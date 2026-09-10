@@ -83,7 +83,14 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const options = Pipeline.wrapping<EventEmitterPipelineConstructorOptions>(first, second);
     super(options);
     this.emitter = options?.emitter ?? new EventEmitter();
-    assertPipelineEmitter(this.emitter);
+    // `registeredStages` is only ever set by `createPipeline()` (below), never by a caller - its
+    // presence is what tells apart a DERIVED instance (already validated once, at the ORIGINAL
+    // caller-facing construction this chain started from) from that original construction itself,
+    // so a long chain re-validates the identical, unchanged `emitter` object exactly once rather
+    // than once per `.transform()`/`.buffer()`/`.context()` call.
+    if (!options?.registeredStages) {
+      assertPipelineEmitter(this.emitter);
+    }
     this._registeredStages = options?.registeredStages ?? new Set();
   }
 
@@ -297,7 +304,7 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
 /** The shape a registered Worker receives - a plain event object, never the raw
  * `InternalTransformer` signature, so a Worker is a function of ONE argument regardless of what the
  * composed transform's own arity looks like. */
-interface WorkEvent<In, Out> {
+export interface WorkEvent<In, Out> {
   chunk: In[];
   ctx: IContextManager;
   respond: (value: Out[]) => void;
@@ -318,18 +325,33 @@ async function* withEndSignal<V>(source: AsyncIterable<V>, onEnd: () => void): A
 }
 
 /**
- * Emits a lifecycle event, and if a caller's own listener on it throws, surfaces that as its own
- * separate uncaught exception on the next microtask rather than letting it escape the `.then()`
- * callback `respond()`/`doReject()` run inside (`stageWork()`, above) - that path has no downstream
- * `.catch()`, so an unguarded throw there becomes a silent `unhandledRejection` instead of a loud
- * failure naming the listener that caused it.
+ * Emits a lifecycle event to every listener registered on it, synchronous or async - a throw from
+ * ANY of them, before or after their own `await`, surfaces as its own separate uncaught exception on
+ * a later microtask instead of escaping the `.then()` callback `respond()`/`doReject()` run inside
+ * (`stageWork()`, above), which has no downstream `.catch()` of its own, or blocking a sibling
+ * listener registered on the same event from running at all.
  */
 function emitSafely(emitter: PipelineEmitter, event: string, payload?: unknown): void {
-  try {
-    emitter.emit(event, payload);
-  } catch (error) {
-    queueMicrotask(() => {
-      throw error;
-    });
+  // Iterates `emitter.listeners()` directly, one call per listener - the same reason `stageWork()`'s
+  // own dispatch loop never calls `emitter.emit()`: Node's EventEmitter does not catch a listener's
+  // own throw, so a single throwing listener stops `.emit()`'s internal loop before it reaches any
+  // listener registered after it. One `try` per listener means a throw on ANY of them surfaces as
+  // its own separate uncaught exception without silencing its siblings (code-review xhigh, F5).
+  for (const fn of emitter.listeners(event)) {
+    try {
+      // Wrapped in `Promise.resolve(...).catch(...)` too - an ASYNC listener that throws AFTER its
+      // own `await` throws on a later microtask, past this function's own synchronous `try`, and
+      // would otherwise leak as a real `unhandledRejection` instead of surfacing here (code-review
+      // xhigh, F4).
+      Promise.resolve((fn as (payload?: unknown) => unknown)(payload)).catch((error: unknown) => {
+        queueMicrotask(() => {
+          throw error;
+        });
+      });
+    } catch (error) {
+      queueMicrotask(() => {
+        throw error;
+      });
+    }
   }
 }
