@@ -133,7 +133,8 @@ The two older candidates, still not filed:
   (`errorResponse`/`unknownBranchRoute`/`buildReduceRequestBody`/`parseReduceFrames`/
   `nodeRequestToFetchRequest`). `utils/chunk.ts` (503 lines) splits into `cut.ts`/`drain.ts`/
   `recut.ts` along its own real seams, re-exported from `chunk.ts` so no existing import changes;
-  `normalize` drops out of the public barrel, internal to `cut.ts` only (BREAKING, no deprecation
+  `normalize` drops out of `utils/index.ts`/`src/index.ts`'s own PUBLIC barrels; `chunk.ts`'s
+  internal re-export of it is untouched (BREAKING on the public surface only, no deprecation
   period - never a documented capability). `branch.ts`/`result.ts` adopt `Drainable<T>`, collapsing
   3 independent re-spellings of the same 4-field drain view; `PipelineResult`'s three different
   sync/async terminal-dispatch styles share one `dispatchSync()`; `BranchBuilder` gains

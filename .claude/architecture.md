@@ -79,9 +79,12 @@ src/
                              (a dead re-export) is deleted (#133)
   utils/
     chunk.ts                a thin re-export barrel over cut.ts/drain.ts/recut.ts, so an existing
-                             `from "@src/utils/chunk"` import keeps resolving (#133); normalize is
-                             NOT re-exported here any more - internal to cut.ts only, dropped from
-                             the public barrel (BREAKING)
+                             `from "@src/utils/chunk"` import keeps resolving (#133), normalize
+                             included - this internal path is unchanged. What dropped is the
+                             PACKAGE's own public surface: `utils/index.ts` and `src/index.ts`
+                             never re-export normalize any more (BREAKING) - the one caller left
+                             (`__tests__/normalize-and-chunks.e2e.test.ts`) reaches it through this
+                             internal `@src/utils/chunk` path, same as before
     cut.ts                  buildChunkGenerator/buildSyncChunkGenerator (cut) / flattenChunks
                              (undo) / normalize / share / collectItems / collectAsyncItems;
                              assertPositiveChunkSize() is the one `chunkSize < 1` guard 3 sites
