@@ -39,7 +39,7 @@ export type SourcePolicy = "shape" | "async";
  *
  * `Assign<"shape", "sync">` → `"sync"`. `Assign<"async", "sync">` → `"async"`.
  */
-export type AssignMode<P extends SourcePolicy, S extends "sync" | "async"> = P extends "async"
+export type AssignMode<P extends SourcePolicy, S extends PipelineMode> = P extends "async"
   ? "async"
   : S;
 
@@ -48,11 +48,34 @@ export type AssignMode<P extends SourcePolicy, S extends "sync" | "async"> = P e
  * stage runs synchronously only when the chain reaching it already does, since one asynchronous
  * half defers everything after it. `AssignMode` then applies the class's own policy on top.
  *
+ * `"unset"` is the source-less chain, which the callable shape makes the ordinary case: a chain is
+ * composed before its input exists, so a sync stage leaves the decision open for the input to make,
+ * while ONE async stage decides it whatever the input turns out to be.
+ *
  * `JoinMode<"sync", "sync">` → `"sync"`. `JoinMode<"async", "sync">` → `"async"`.
+ * `JoinMode<"unset", "sync">` → `"unset"`. `JoinMode<"unset", "async">` → `"async"`.
  */
 export type JoinMode<M extends PipelineMode, S extends "sync" | "async"> = M extends "sync"
   ? S
-  : "async";
+  : M extends "unset"
+    ? S extends "async"
+      ? "async"
+      : "unset"
+    : "async";
+
+/**
+ * The Mode the seed `Transformer` inside `.transform()` starts at, for a chain whose own Mode is
+ * `M` (#90). A source-less chain is provisionally synchronous: nothing about it is async yet, and
+ * either an async callback or an async input decides otherwise later.
+ *
+ * Written as a conditional rather than the intersection `M & ("sync" | "async")` that preceded it.
+ * That intersection is `never` for `"unset"`, which made the seed's Mode `never`, the callback's
+ * own `M2` infer as `never`, and every source-less `.transform()` return `Pipeline<U, never, …>` -
+ * a chain that then typed every terminal `never` and accepted nothing.
+ *
+ * `SeedMode<"unset">` → `"sync"`. `SeedMode<"sync">` → `"sync"`. `SeedMode<"async">` → `"async"`.
+ */
+export type SeedMode<M extends PipelineMode> = M extends "async" ? "async" : "sync";
 
 /**
  * A pipeline callback: maps `item` to `T` (or `Promise<T>`), with an optional shared `ctx`.

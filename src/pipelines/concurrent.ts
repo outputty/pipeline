@@ -185,10 +185,14 @@ async function* mergeUnordered<U>(sources: AsyncGenerator<U[]>[]): AsyncGenerato
  * `new ConcurrentPipeline([1,2,3,4,5], { maxConcurrency: 4 }).transform((t) => t.map((x) => x *
  * 2)).toArray()` → `[2,4,6,8,10]`.
  */
-export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline<
+// `In` (#90) is the type this pipeline is CALLED with, fixed when the chain is declared and carried
+// unchanged through every stage - unlike `T`, which becomes each stage's own output. It defaults to
+// `T` so an existing two-argument spelling keeps meaning what it did.
+export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends Pipeline<
   T,
   "async",
-  "async"
+  "async",
+  In
 > {
   /** Chunks of the current stage kept in flight at once. */
   readonly maxConcurrency: number;
@@ -222,10 +226,10 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
-  ): ConcurrentPipeline<U, M> {
+  ): ConcurrentPipeline<U, M, In> {
     const Ctor = this.constructor as new (
       options?: ConcurrentPipelineConstructorOptions,
-    ) => ConcurrentPipeline<U, M>;
+    ) => ConcurrentPipeline<U, M, In>;
     return new Ctor({ ...options, ...this.concurrentOptions(), chunks });
   }
 
@@ -251,17 +255,21 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
     // `transform` WITHOUT the guard and a source-less dispatching chain compiles, then resolves to
     // `[]` at runtime - a chain composed with no engine decided, which is what the guard exists to
     // make impossible.
-    this: M extends "unset" ? never : Pipeline<T, "async", "async">,
     builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
-  ): ConcurrentPipeline<U, M> {
+  ): ConcurrentPipeline<U, M, In> {
     // A dispatching class is `"async"` whatever its callbacks return, so the seed is typed there
-    // rather than at the caller's own Mode. The `this` parameter above narrowed the receiver to the
-    // base type, so the cast restores this class for `.apply()`'s own narrowed return.
+    // rather than at the caller's own Mode.
+    //
+    // The conditional `this` this override used to carry is gone with the base's own (#90): its
+    // guard read `M extends "unset"`, and this class fixes `M` at `"async"`, so it never once
+    // refused anything. Composing before an input is the ordinary case now regardless.
     const seed = new Transformer<T, T, "async">({ transform: (chunk) => chunk });
-    return (this as unknown as ConcurrentPipeline<T, M>).apply(builder(seed));
+    return this.apply(builder(seed));
   }
 
-  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ConcurrentPipeline<U, M> {
+  override apply<U>(
+    transformer: Transformer<T, U, "sync" | "async">,
+  ): ConcurrentPipeline<U, M, In> {
     // This body does not delegate to the base's `apply()`, so it needs the base's own source guard
     // (#90) - a dispatching class has no `"unset"` Mode for a conditional `this` to refuse.
     this.requireSource();
@@ -325,7 +333,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
    * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0)
    * .local((p)=>p.reduce((a,v)=>a+v,0)).toArray()` → `[15]`.
    */
-  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U, M> {
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U, M, In> {
     // A dispatching class has no `"unset"` Mode for a compile-time guard to test, so the refusal is
     // this call - the same reason `apply()` above makes it (#90).
     this.requireSource();
@@ -371,6 +379,8 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
    * `new ConcurrentPipeline().from([1, 2, 3])` → `ConcurrentPipeline<number, "async">`.
    */
   override from<U>(data: PipelineSource<U>): ConcurrentPipeline<U, M> {
+    // `In` becomes `U` here, not the receiver's own: `.from()` BINDS an input, so whatever the
+    // chain accepted before is spent. Every other override carries `In` through unchanged.
     return this.fromSource<U>(data, "async") as unknown as ConcurrentPipeline<U, M>;
   }
 
@@ -379,9 +389,9 @@ export class ConcurrentPipeline<T, M extends "async" = "async"> extends Pipeline
   }
 
   override local<U, M2 extends "sync" | "async">(
-    build: (p: Pipeline<T, "async", "shape">) => Pipeline<U, M2, "shape">,
-  ): ConcurrentPipeline<U, M> {
-    return super.local(build) as unknown as ConcurrentPipeline<U, M>;
+    build: (p: Pipeline<T, "async", "shape", any>) => Pipeline<U, M2, "shape", any>,
+  ): ConcurrentPipeline<U, M, In> {
+    return super.local(build) as unknown as ConcurrentPipeline<U, M, In>;
   }
 
   /**

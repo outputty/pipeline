@@ -28,12 +28,15 @@ export interface FixtureResult {
 /** Spawns a fixture script under `tsx` (needed for `src`'s extensionless imports and the `@src/*`
  * alias - Node's own ESM resolver has neither) and collects its stdout/stderr/exit code. Every
  * assertion a fixture's OWN Done-when cases need reads one shared run - never re-spawn the same
- * script per assertion. */
-export function runFixture(relativePath: string): Promise<FixtureResult> {
+ * script per assertion.
+ *
+ * `nodeFlags` go ahead of `--import tsx`, for a fixture whose whole point is a process-level flag -
+ * `no-codegen.ts` runs under `--disallow-code-generation-from-strings` (#90). */
+export function runFixture(relativePath: string, nodeFlags: string[] = []): Promise<FixtureResult> {
   return new Promise((resolve) => {
     execFile(
       process.execPath,
-      ["--import", "tsx", relativePath],
+      [...nodeFlags, "--import", "tsx", relativePath],
       { timeout: FIXTURE_TIMEOUT },
       (err, stdout, stderr) => {
         const errno = err as
