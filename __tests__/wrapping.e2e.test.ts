@@ -676,6 +676,12 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
     );
     expect(() => withVat.branch((b) => b.when("a/b", () => true))).toThrow(/not usable in a route/);
     expect(() => withVat.branch((b) => b.when("big-orders_2.v~1", () => true))).not.toThrow();
+
+    // Review finding: `.` and `..` pass the character class and are RELATIVE path segments.
+    // `new URL()` rewrites `/branch/0/./transform/0` to `/branch/0/transform/0`, which misses
+    // `.fetch()`'s trail regex and serves the PARENT chain's stage 0 - wrong data, no error.
+    expect(() => withVat.branch((b) => b.when(".", () => true))).toThrow(/not usable in a route/);
+    expect(() => withVat.branch((b) => b.when("..", () => true))).toThrow(/not usable in a route/);
   });
 
   it("gives the catch-all every item under broadcast, not only the unclaimed ones", () => {

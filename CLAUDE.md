@@ -265,12 +265,13 @@ none of it survived the hand-trim (#745).
   parameter - one signature, not a union of arities, so an un-annotated callback still infers its item
   type (`types.ts`'s own docstring on `PipelineFunction` records why the union form was rejected).
   `.context()` mutates a caller's OWN manager in place and carries the SAME instance forward, never
-  a copy (#31) - a rejected write propagates instead of being bypassed. The static
-  `Pipeline.merge(pipelines, options?)` merges every source pipeline's context into the manager
-  `options.context` names, or into a fresh `SimpleContextManager` when it names none; the instance
-  `.merge(...others)` (#41) merges every `other`'s context into THIS pipeline's own manager instead -
-  the TWO places values flow backward across pipelines, which is why both take (or already hold) the
-  manager explicitly rather than only ever receiving one at construction.
+  a copy (#31) - a rejected write propagates instead of being bypassed. `.context()` is the ONE
+  place values flow into a chain's manager now: both `merge` forms are deleted (#90), so a manager
+  reaches a pipeline through `options.context`, `options.contextFactory` or `.context()` and never
+  backward from a stranger pipeline. ⚠ A CALL seeds a fresh manager from the chain's own values
+  (`contextForRun()`), so a run's `ctx.set()` reaches the caller only through a manager the caller
+  supplied: measured, `new Pipeline<number>().tap(write)([1,2,3])` leaves `.contextManager` at `{}`,
+  where the same chain built with `{ context: shared }` leaves `shared` at `{"seen":3}`.
 - **`context` / `contextFactory`** - the two ways a caller supplies a manager (`PipelineOptions`).
   `context` is an instance for THIS process, kept by every operation, writes included; `.context()`
   merges into it rather than replacing it. `contextFactory` is how to BUILD one, for a process that
@@ -282,18 +283,40 @@ none of it survived the hand-trim (#745).
   construction code. Context is forward-looking - the wire carries `{ chunk, context }` out and
   `{ chunk }` back, so a worker's `ctx.set()` reaches other processes only through the caller's own
   manager class and its store.
-- **Branch** - `Pipeline.branch(definitions, options?)` routing items to one or more named
-  sub-pipelines by predicate. It returns a `BranchRunner`, not the results (#90, BREAKING): the
-  definitions are written ONCE and the runner is called with any input, so `await p.branch({…})`
-  becomes `await p.branch({…})(items)` - awaiting the runner alone yields the function.
-  `BranchDefinition<T, U>` pairs a `predicate` with an OPTIONAL `transformer` (#87, folded into
-  #90): a routing-only branch names none and its items pass through unchanged, where before every
-  branch had to hand-build `new Transformer<T, T>()` purely to fill the field. Each branch's result
-  type comes from its OWN transformer (`BranchResults`), never one type shared across the map - one
-  shared `U` typed a routing-only branch as another branch's output and filled it with the wrong
-  values, no cast anywhere. `BranchOptions.firstMatch` (default `true`) sends an item to only the
-  first matching branch, `false` broadcasts it to every matching branch; declaration order is
-  routing order. A branch transformer reads the RUN's context, not the chain's.
+- **Branch** - `Pipeline.branch(build)` routing items into named ARMS by predicate, configured by a
+  fluent builder. A STAGE, not a terminal (#90, BREAKING): it returns a runner, the arms are written
+  ONCE, and calling the runner produces one record keyed by arm name - `await p.branch({…})` becomes
+  `await p.branch((b) => …)(items)`, since awaiting the runner alone yields the function. Each arm
+  receives an optional PIPELINE of the parent's own class, `(q) => q.transform(…)`, which is what
+  decides where its work runs: an arm dispatches wherever the chain's stages do, and `.local()`
+  inside an arm pins it. The `Transformer` this replaces had no class and therefore no WHERE, so
+  every arm ran in the orchestrating process however the chain was built. `.when(name, predicate,
+  build?)` routes and `.otherwise(name, build?)` is the catch-all, ALWAYS routed last whatever order
+  it was written in - a catch-all written first used to swallow every arm below it. `.broadcast()`
+  replaces `{ firstMatch: false }`; router mode is the default, so most callers write neither. ⚠
+  Under broadcast the catch-all takes EVERY item, not only the unclaimed ones, because broadcast
+  means every matching arm and its predicate accepts all of them. An arm naming no pipeline routes
+  only and its items pass through unchanged (#87, folded in), and each key's type comes from its OWN
+  arm - one shared type made a routing-only arm carry another arm's output type with no cast
+  anywhere. MATCHING runs where the caller is, never dispatched: a predicate decides WHICH arm an
+  item enters, so sending it out would cost every item two trips and would stop a predicate reading
+  local state. The JOIN runs there too, since arms can be remote and it is the only process that
+  sees all of them. The record is arrays, never results the caller drains at will - two consumers
+  over one shared source can only buffer without bound, deadlock, or starve. Mode joins across every
+  arm: all synchronous creates ZERO promises, one asynchronous arm widens the WHOLE record to a
+  single `Promise` while its synchronous siblings are never wrapped. ⚠ `.branch()` drains the parent
+  chain in full before any arm runs, so an arm reads the chain's FINAL context, not its own item's
+  chunk.
+- **Route** - how a dispatched stage is addressed on the wire, reading as the chain was BUILT rather
+  than as a flat counter (#90, BREAKING): `/transform/<n>` for a stage, `/reduce/<n>` for a fold, and
+  `/branch/<i>/<name>/transform/<n>` for an arm's own - the branch positional so two `.branch()`
+  calls may each declare an arm called `rest`, the arm by name. `ClusterPipeline` prefixes each with
+  `/pipeline/<i>/`. `routePath(verb, index)` is the one seam that builds one and `.fetch()` the one
+  that resolves it. A `.local()` region KEEPS its id, so wrapping a stage in one leaves every later
+  route unchanged - skipping it would renumber both sides silently, and a rolling deploy could serve
+  the wrong transform under a number that exists in both versions. An arm name must survive a URL
+  path, so `BranchBuilder` refuses one that would not: `.when("big orders", …)` dispatched
+  `/branch/0/big%20orders/…` and 404'd.
 - **Observation point / `.tap()`** - the ONE surface that watches data without changing it, at two
   levels with one meaning. `Transformer.tap(fn | transformer)` (`src/transformer.ts`) is a `pipe()`
   link: `fn` gets each item plus context via `Promise.all(chunk.map(...))`, the `transformer` form

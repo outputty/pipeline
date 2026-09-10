@@ -14,7 +14,10 @@ paths: ["**/*.ts", "**/*.tsx"]
   own arguments - the outer call's return-type annotation does not propagate it back in. Annotate the
   literal at its own construction site (`new Pipeline<"a" | "b">([...])`) when a literal union must
   survive. (2026-09-04)
-- Call `.buffer(1)` on BOTH sides before using an in-flight counter to tell a `Pipeline` from a
-  `ConcurrentPipeline`. (2026-09-06)
-  - At `DEFAULT_CHUNK_SIZE` a small source is one chunk and `.map()` runs its items together, so a
-    plain `Pipeline` also reads 4 in flight and the counter proves nothing.
+- Call `.buffer(1)` before the stage under test in any probe that reads a CHUNK-granular observable -
+  concurrency, ordering, a per-chunk context write, a per-chunk error. (2026-09-06, generalised
+  2026-09-10)
+  - At `DEFAULT_CHUNK_SIZE` a small source is ONE chunk, so nothing the mechanism does within a
+    chunk is visible and the probe passes for the wrong reason: a plain `Pipeline` also reads 4 in
+    flight, and a four-item branch also comes back in order. The same four items behind
+    `.buffer(1)` returned `["item-2","item-3","item-4","item-1"]`.

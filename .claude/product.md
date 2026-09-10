@@ -202,17 +202,25 @@ already holds the manager explicitly.
 A single source splits into several named sub-chains by predicate, and several sources concatenate back
 into one - the two directions of composing whole pipelines rather than chaining one.
 
-> **Branch** - `Pipeline.branch(definitions)`: each `BranchDefinition` pairs a `predicate` with a
-> `Transformer`; `BranchOptions.firstMatch` (default `true`) sends an item to the first matching branch
-> only, `false` broadcasts it to every match.
+> **Branch** - `Pipeline.branch(build)`: a builder pairs each `predicate` with an optional PIPELINE
+> of the parent's own class, so an arm's stages run where the chain's do and `.local()` inside pins
+> one. A STAGE, not a terminal - it returns a runner, and calling that produces one record keyed by
+> arm name. `.when(name, predicate, build?)` routes, `.otherwise(name, build?)` is the catch-all and
+> is always routed last, and `.broadcast()` sends an item to every matching arm rather than only the
+> first. Matching runs where the caller is, so a predicate may read local state; the join does too,
+> since arms can be remote.
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline<number>()([1, 2, 3, 4, 5]).branch({
-  evens: { predicate: (x: number) => x % 2 === 0, transformer: createTransformer<number>() },
-  odds: { predicate: (x: number) => x % 2 !== 0, transformer: createTransformer<number>() },
-});
+const split = new Pipeline<number>().branch((b) =>
+  b.when("evens", (x) => x % 2 === 0).otherwise("odds"),
+);
+
+const data = split([1, 2, 3, 4, 5]);
+
+console.log(data.evens); // [2, 4]
+console.log(data.odds); // [1, 3, 5]
 ```
 
 ```json

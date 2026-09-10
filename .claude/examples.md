@@ -136,19 +136,27 @@ app.mount("/pipeline", pipeline.fetch);
 
 One source, several named sub-chains, routed by predicate.
 
-<!-- illustrative -->
+<!-- compiles -->
 
 ```ts
-import { Pipeline, createTransformer } from "@outputty/pipeline";
-
-const data = await new Pipeline<number>()([1, 2, 3, 4, 5]).branch({
-  evens: { predicate: (x: number) => x % 2 === 0, transformer: createTransformer<number>() },
-  odds: { predicate: (x: number) => x % 2 !== 0, transformer: createTransformer<number>() },
-});
+// The arms are written ONCE, and `.branch()` is a stage - so the runner it returns takes any input.
+console.log(
+  JSON.stringify(
+    new Pipeline<number>().branch((b) =>
+      b
+        .when(
+          "evens",
+          (x) => x % 2 === 0,
+          (q) => q.transform((t) => t.map((x) => x * 10)),
+        )
+        .otherwise("odds"),
+    )([1, 2, 3, 4, 5]),
+  ),
+);
 ```
 
 ```json
-{ "evens": [2, 4], "odds": [1, 3, 5] }
+{ "evens": [20, 40], "odds": [1, 3, 5] }
 ```
 
 ## Case 5 - per-row error recovery, and the run-level decision

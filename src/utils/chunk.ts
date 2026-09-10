@@ -303,8 +303,29 @@ export function* recutSyncChunks<T>(
     throw new Error("chunkSize must be at least 1");
   }
 
-  let carry: T[] = [];
   const iterator = chunks[Symbol.iterator]();
+
+  try {
+    yield* recutFrom(iterator, size);
+  } finally {
+    // A consumer that stops early - `PipelineResult.first(n)` - closes THIS generator, and a MANUAL
+    // iterator learns nothing from a `for…of` that never ran, so its source's own `finally` never
+    // runs. Measured before this: a 100-item generator behind `.buffer(10).transform(f).buffer(2)`,
+    // drained with `.first(1)`, left the source open where the identical chain over an
+    // `AsyncIterable` closed it - two engines disagreeing on user code that differed only in its
+    // source, which is exactly what #90 exists to remove. Closing an already-exhausted iterator is
+    // a no-op, so this needs no "did it finish?" flag.
+    iterator.return?.();
+  }
+}
+
+/** `recutSyncChunks`'s cutting loop, its own function so the close above costs no nesting - this
+ * repo caps blocks at `max-depth: 2`. */
+function* recutFrom<T>(
+  iterator: Iterator<T[] | Promise<T[]>>,
+  size: number,
+): Generator<T[] | Promise<T[]>> {
+  let carry: T[] = [];
 
   for (;;) {
     const step = iterator.next();

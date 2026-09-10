@@ -58,9 +58,14 @@ The two older candidates, still not filed:
   or an async input, widens the whole chain. `ConcurrentPipeline`, `HttpPipeline` and
   `ClusterPipeline` take `(pipeline, options)` and wrap a chain built elsewhere, which is what lets
   the HTTP worker and the HTTP trigger share one definition with no placeholder source.
-  `.branch()` returns a runner built once and called with any data, and a routing-only branch needs
-  no `Transformer` (#87, folded in). BREAKING: `.from()`, both `merge` forms, and every terminal op
-  leave `Pipeline`; the two-argument constructor is gone. PRs #92, #93, #95, #97, #102, #103, #104.
+  `.branch()` is a STAGE configured by a fluent builder - `b.when(name, predicate, build?)` and
+  `b.otherwise(name, build?)` - whose arms are pipelines of the parent's own class, so an arm
+  dispatches wherever the parent does and `.local()` inside it pins the arm in the orchestrating
+  process. It returns a runner built once and called with any data, matching and joining always on
+  the orchestrator, and a routing-only arm needs no `Transformer` (#87, folded in). A route reads as
+  the chain was built: `/transform/<n>`, `/reduce/<n>`, `/branch/<i>/<name>/transform/<n>`.
+  BREAKING: `.from()`, both `merge` forms, and every terminal op leave `Pipeline`; the two-argument
+  constructor is gone. PRs #92, #93, #95, #97, #102, #103, #104, #105, #106, #107, #108.
 - **Error handling moves onto the function that failed** (#78, `feat!`) - `Transformer.onError(fn)`
   is now the ROW handler: returning a value replaces the row, the exported `DROP` sentinel removes
   it, throwing escalates. It reaches every element-wise call - `.map()`, `.filter()`, `.flatMap()`,
