@@ -3,7 +3,8 @@
  * `countPromises` (3 byte-identical copies before this: `sync-mode`/`wrapping`/`callable`),
  * `chunksOf` (`callable.e2e.test.ts`'s own definition, used wherever a case wants the whole chunk
  * stream rather than items), `parseStrict` (3 byte-identical copies: `pipeline`/`transforms`/
- * `pipelines`).
+ * `pipelines`), `closingSource`/`closingAsyncSource` (5 near-duplicate inline generators across
+ * `buffer`/`pipelines`/`callable`, each proving an early exit ran a source's own `finally`).
  */
 
 import { createHook } from "node:async_hooks";
@@ -47,4 +48,34 @@ export function parseStrict(s: string): number {
   const n = parseInt(s);
   if (isNaN(n)) throw new Error(`Invalid: ${s}`);
   return n;
+}
+
+/** A sync generator over `0..count-1` that flips `state.closed` when its own `finally` runs -
+ * proves an early exit (`.first(n)`, a `break`, a rejected chunk) closed the REAL source, not
+ * just stopped reading it.
+ *
+ * `const state = { closed: false }; pipeline(closingSource(state, 3)).first(1)` → `[0]`,
+ * `state.closed` → `true`. */
+export function closingSource(state: { closed: boolean }, count = 100): Generator<number> {
+  return (function* () {
+    try {
+      for (let i = 0; i < count; i++) yield i;
+    } finally {
+      state.closed = true;
+    }
+  })();
+}
+
+/** The async twin of `closingSource` - same contract, over `for await`'s own `.return()` path. */
+export function closingAsyncSource(
+  state: { closed: boolean },
+  count = 100,
+): AsyncGenerator<number> {
+  return (async function* () {
+    try {
+      for (let i = 0; i < count; i++) yield i;
+    } finally {
+      state.closed = true;
+    }
+  })();
 }

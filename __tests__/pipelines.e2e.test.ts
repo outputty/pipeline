@@ -21,7 +21,7 @@ import {
   expectFixtureOk,
   runFixtureJson,
 } from "./helpers/fixtures";
-import { parseStrict } from "./helpers/sequences";
+import { parseStrict, closingAsyncSource } from "./helpers/sequences";
 
 /** The "another instance" side of an `HttpPipeline` chain: an empty-source pipeline whose only
  * job is to hold the SAME stage definitions `builder` describes, so its `.fetch` can serve them. */
@@ -700,26 +700,20 @@ describe("#113 - a partitioned reduce owns its accumulator, and every fan-out cl
   });
 
   it("closes the source on an early exit under ordered: false, as ordered: true already does", async () => {
-    const closed: string[] = [];
-    const source = (label: string) =>
-      (async function* () {
-        try {
-          for (let i = 0; i < 100; i++) yield i;
-        } finally {
-          closed.push(label);
-        }
-      })();
+    const orderedState = { closed: false };
+    const unorderedState = { closed: false };
 
     const chain = (ordered: boolean) =>
       new ConcurrentPipeline<number>({ maxConcurrency: 2, ordered })
         .buffer(1)
         .transform((t) => t.map((x: number) => x * 2));
 
-    expect(await chain(true)(source("ordered")).first(1)).toEqual([0]);
-    expect(await chain(false)(source("unordered")).first(1)).toEqual([0]);
+    expect(await chain(true)(closingAsyncSource(orderedState)).first(1)).toEqual([0]);
+    expect(await chain(false)(closingAsyncSource(unorderedState)).first(1)).toEqual([0]);
 
     // A macrotask, so a generator closed by `.return()` has run its `finally`.
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(closed.sort()).toEqual(["ordered", "unordered"]);
+    expect(orderedState.closed).toBe(true);
+    expect(unorderedState.closed).toBe(true);
   });
 });
