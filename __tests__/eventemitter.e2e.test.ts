@@ -11,8 +11,8 @@
  * Done-when 12 (`pnpm check` passes, no file outside the ticket's own Where) is a repo-wide gate,
  * not a per-case assertion - checked once at the end of the build, not here.
  *
- * Every case #124 has not yet built is `it.fails` - the same convention `pipelines.e2e.test.ts`
- * (#17) established. As L2 lands, every case flips from `it.fails` to `it`.
+ * Every case ran as `it.fails` against L1's stub, then flipped live once L2's real dispatch landed
+ * (`pipelines.e2e.test.ts`'s own convention, #17) - every case below is live.
  */
 import { describe, it, expect } from "vitest";
 import { EventEmitterPipeline } from "../src";
@@ -30,32 +30,29 @@ interface WorkerEvent {
 }
 
 describe("#124 the Interface program (Done-when 1)", () => {
-  it.fails(
-    "prints [2,4,6,8,10,12] with dispatched/done per chunk, then stage 0 ended, then run ended",
-    async () => {
-      const pipeline = new EventEmitterPipeline<number>({ maxConcurrency: 2 })
-        .buffer(1)
-        .transform((t) => t.map((x: number) => x * 2));
+  it("prints [2,4,6,8,10,12] with dispatched/done per chunk, then stage 0 ended, then run ended", async () => {
+    const pipeline = new EventEmitterPipeline<number>({ maxConcurrency: 2 })
+      .buffer(1)
+      .transform((t) => t.map((x: number) => x * 2));
 
-      const labels: string[] = [];
-      pipeline.emitter.on("stage:0:dispatched", () => labels.push("dispatched"));
-      pipeline.emitter.on("stage:0:done", () => labels.push("done"));
-      pipeline.emitter.on("stage:0:end", () => labels.push("stage 0 ended"));
-      pipeline.emitter.on("pipeline:end", () => labels.push("run ended"));
+    const labels: string[] = [];
+    pipeline.emitter.on("stage:0:dispatched", () => labels.push("dispatched"));
+    pipeline.emitter.on("stage:0:done", () => labels.push("done"));
+    pipeline.emitter.on("stage:0:end", () => labels.push("stage 0 ended"));
+    pipeline.emitter.on("pipeline:end", () => labels.push("run ended"));
 
-      const out = await pipeline([1, 2, 3, 4, 5, 6]).toArray();
+    const out = await pipeline([1, 2, 3, 4, 5, 6]).toArray();
 
-      expect(out).toEqual([2, 4, 6, 8, 10, 12]);
-      expect(labels.filter((l) => l === "dispatched")).toHaveLength(6);
-      expect(labels.filter((l) => l === "done")).toHaveLength(6);
-      expect(labels.at(-2)).toBe("stage 0 ended");
-      expect(labels.at(-1)).toBe("run ended");
-    },
-  );
+    expect(out).toEqual([2, 4, 6, 8, 10, 12]);
+    expect(labels.filter((l) => l === "dispatched")).toHaveLength(6);
+    expect(labels.filter((l) => l === "done")).toHaveLength(6);
+    expect(labels.at(-2)).toBe("stage 0 ended");
+    expect(labels.at(-1)).toBe("run ended");
+  });
 });
 
 describe("#124 the composed function alone is a complete Worker (Done-when 2)", () => {
-  it.fails("runs with zero external .on() calls", async () => {
+  it("runs with zero external .on() calls", async () => {
     const out = await new EventEmitterPipeline<number>()
       .buffer(1)
       .transform((t) => t.map((x: number) => x * 2))([1, 2, 3])
@@ -65,7 +62,7 @@ describe("#124 the composed function alone is a complete Worker (Done-when 2)", 
 });
 
 describe("#124 the composed function registers once per stage index, never once per run (Done-when 3, 7)", () => {
-  it.fails("emitter.listenerCount('stage:0') is unchanged across two separate calls", async () => {
+  it("emitter.listenerCount('stage:0') is unchanged across two separate calls", async () => {
     const pipeline = new EventEmitterPipeline<number>()
       .buffer(1)
       .transform((t) => t.map((x: number) => x * 2));
@@ -79,67 +76,58 @@ describe("#124 the composed function registers once per stage index, never once 
     expect(pipeline.emitter.listenerCount("stage:0")).toBe(1);
   });
 
-  it.fails(
-    "a stage with no worker registered rejects immediately, naming the stage index",
-    async () => {
-      const pipeline = new EventEmitterPipeline<number>()
-        .buffer(1)
-        .transform((t) => t.map((x: number) => x * 2));
+  it("a stage with no worker registered rejects immediately, naming the stage index", async () => {
+    const pipeline = new EventEmitterPipeline<number>()
+      .buffer(1)
+      .transform((t) => t.map((x: number) => x * 2));
 
-      await pipeline([1]).toArray();
-      const [registered] = pipeline.emitter.listeners("stage:0");
-      pipeline.emitter.off("stage:0", registered as (...args: unknown[]) => void);
-      expect(pipeline.emitter.listenerCount("stage:0")).toBe(0);
+    await pipeline([1]).toArray();
+    const [registered] = pipeline.emitter.listeners("stage:0");
+    pipeline.emitter.off("stage:0", registered as (...args: unknown[]) => void);
+    expect(pipeline.emitter.listenerCount("stage:0")).toBe(0);
 
-      // The dedup Set still thinks stage 0 is registered (Done-when 3's own mechanism), so the
-      // composed function is NOT re-added here - the stage genuinely has no worker left.
-      await expect(pipeline([2]).toArray()).rejects.toThrow(/stage 0/);
-    },
-  );
+    // The dedup Set still thinks stage 0 is registered (Done-when 3's own mechanism), so the
+    // composed function is NOT re-added here - the stage genuinely has no worker left.
+    await expect(pipeline([2]).toArray()).rejects.toThrow(/stage 0/);
+  });
 });
 
 describe("#124 an external Worker races the composed function (Done-when 4)", () => {
-  it.fails(
-    "a Worker rejecting at 5ms beats one resolving at 30ms, even though the resolving one registered first",
-    async () => {
-      const pipeline = new EventEmitterPipeline<number>().buffer(1).transform((t) =>
-        t.map(async (x: number) => {
-          await delay(30);
-          return x * 2;
-        }),
-      );
+  it("a Worker rejecting at 5ms beats one resolving at 30ms, even though the resolving one registered first", async () => {
+    const pipeline = new EventEmitterPipeline<number>().buffer(1).transform((t) =>
+      t.map(async (x: number) => {
+        await delay(30);
+        return x * 2;
+      }),
+    );
 
-      pipeline.emitter.on("stage:0", async ({ chunk, reject }: WorkerEvent) => {
-        await delay(5);
-        reject(new Error(`external-worker-rejected-${chunk.join(",")}`));
-      });
+    pipeline.emitter.on("stage:0", async ({ chunk, reject }: WorkerEvent) => {
+      await delay(5);
+      reject(new Error(`external-worker-rejected-${chunk.join(",")}`));
+    });
 
-      await expect(pipeline([1]).toArray()).rejects.toThrow("external-worker-rejected-1");
-    },
-  );
+    await expect(pipeline([1]).toArray()).rejects.toThrow("external-worker-rejected-1");
+  });
 });
 
 describe("#124 Pipeline.onError() reaches a rejecting Worker for free (Done-when 5)", () => {
-  it.fails(
-    "drops the chunk that fails and the run continues, with no explicit call in the new code",
-    async () => {
-      const out = await new EventEmitterPipeline<number>()
-        .buffer(1)
-        .onError(() => undefined)
-        .transform((t) =>
-          t.map((x: number) => {
-            if (x === 3) throw new Error("boom on 3");
-            return x * 2;
-          }),
-        )([1, 2, 3, 4])
-        .toArray();
-      expect(out).toEqual([2, 4, 8]);
-    },
-  );
+  it("drops the chunk that fails and the run continues, with no explicit call in the new code", async () => {
+    const out = await new EventEmitterPipeline<number>()
+      .buffer(1)
+      .onError(() => undefined)
+      .transform((t) =>
+        t.map((x: number) => {
+          if (x === 3) throw new Error("boom on 3");
+          return x * 2;
+        }),
+      )([1, 2, 3, 4])
+      .toArray();
+    expect(out).toEqual([2, 4, 8]);
+  });
 });
 
 describe("#124 an async Worker that throws after its own await never hangs or leaks (Done-when 6)", () => {
-  it.fails(
+  it(
     "rejects the chunk exactly as an explicit reject() would, and leaves no unhandled rejection",
     async () => {
       const fixture = await runFixture("__tests__/fixtures/eventemitter-async-throw.ts");
@@ -156,7 +144,7 @@ describe("#124 an async Worker that throws after its own await never hangs or le
 });
 
 describe("#124 maxConcurrency/ordered behave exactly as ConcurrentPipeline's own (Done-when 8)", () => {
-  it.fails("ordered: true - chunk 0 made 12x slower still comes out first", async () => {
+  it("ordered: true - chunk 0 made 12x slower still comes out first", async () => {
     const out = await new EventEmitterPipeline<number>({ maxConcurrency: 4, ordered: true })
       .buffer(1)
       .transform((t) =>
@@ -169,7 +157,7 @@ describe("#124 maxConcurrency/ordered behave exactly as ConcurrentPipeline's own
     expect(out).toEqual([1, 2, 3, 4]);
   });
 
-  it.fails("ordered: false - dispatches before the whole source has been pulled", async () => {
+  it("ordered: false - dispatches before the whole source has been pulled", async () => {
     const pulled: number[] = [];
     async function* source() {
       for (const x of [1, 2, 3, 4, 5, 6]) {
@@ -190,7 +178,7 @@ describe("#124 maxConcurrency/ordered behave exactly as ConcurrentPipeline's own
 });
 
 describe("#124 lifecycle events fire on channels separate from the worker channel (Done-when 9)", () => {
-  it.fails("an observer on stage:0:done alone is never handed a chunk to process", async () => {
+  it("an observer on stage:0:done alone is never handed a chunk to process", async () => {
     const received: unknown[] = [];
     const pipeline = new EventEmitterPipeline<number>()
       .buffer(1)
@@ -209,7 +197,7 @@ describe("#124 lifecycle events fire on channels separate from the worker channe
 });
 
 describe("#124 stage:<n>:end and pipeline:end fire once per run (Done-when 10)", () => {
-  it.fails(".first() then .toArray() on the same result fires pipeline:end twice", async () => {
+  it(".first() then .toArray() on the same result fires pipeline:end twice", async () => {
     let stageEnds = 0;
     let pipelineEnds = 0;
     const pipeline = new EventEmitterPipeline<number>()
@@ -230,7 +218,7 @@ describe("#124 stage:<n>:end and pipeline:end fire once per run (Done-when 10)",
 });
 
 describe("#124 .local() dispatches nothing, and the stage after it resumes at the correct index (Done-when 11)", () => {
-  it.fails("stage 1 (the local region) never touches the emitter; stage 2 does", async () => {
+  it("stage 1 (the local region) never touches the emitter; stage 2 does", async () => {
     const pipeline = new EventEmitterPipeline<number>()
       .transform((t) => t.map((x: number) => x * 2))
       .local((p) => p.transform((t) => t.filter((x: number) => x > 2)))

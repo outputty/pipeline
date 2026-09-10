@@ -9,16 +9,7 @@
  * handler and would report a leak as a test-runner error, not a value this script can observe.
  */
 import { ConcurrentPipeline } from "../../src";
-
-const unhandled: string[] = [];
-process.on("unhandledRejection", (reason) => {
-  unhandled.push(String((reason as Error)?.message ?? reason));
-});
-
-async function settle(): Promise<void> {
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 20));
-}
+import { drainUnhandledRejections } from "./unhandled-rejection";
 
 function failFrom2(x: number): number {
   if (x >= 2) throw new Error(`chunk-${x}-failed`);
@@ -42,10 +33,7 @@ async function runConcurrentPipeline(ordered: boolean): Promise<string[]> {
   } catch (error) {
     expectChunkFailure(error);
   }
-  await settle();
-  const seen = [...unhandled];
-  unhandled.length = 0;
-  return seen;
+  return drainUnhandledRejections();
 }
 
 async function main(): Promise<void> {
