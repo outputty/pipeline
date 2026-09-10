@@ -12,7 +12,7 @@ import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
 import { PipelineResult } from "@src/result";
 import { SimpleContextManager } from "@src/context/simple";
-import { runFixture, expectFixtureOk, lastJsonLine, FIXTURE_TIMEOUT } from "./helpers/fixtures";
+import { runFixtureJson, FIXTURE_TIMEOUT } from "./helpers/fixtures";
 import { chunksOf, countPromises } from "./helpers/sequences";
 import { type Order, ordersA, ordersB, withVat } from "./helpers/domain";
 
@@ -231,11 +231,10 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
       //
       // The ban is a process-level flag, so this runs in a child process. It is the real assertion;
       // the in-process checks below only say what the reparenting buys.
-      const fixture = await runFixture("__tests__/fixtures/no-codegen.ts", [
+      const result = await runFixtureJson("__tests__/fixtures/no-codegen.ts", [
         "--disallow-code-generation-from-strings",
       ]);
-      expectFixtureOk(fixture);
-      expect(lastJsonLine(fixture)).toEqual({
+      expect(result).toEqual({
         values: [2, 4, 6],
         isFunction: true,
         hasCall: true,

@@ -80,3 +80,20 @@ export function lastJsonLine<T>(fixture: FixtureResult): T {
   const lines = fixture.stdout.trim().split("\n");
   return JSON.parse(lines.at(-1) ?? "") as T;
 }
+
+/** Runs a fixture, asserts it exited cleanly, and parses its real result - the
+ * `runFixture` → `expectFixtureOk` → `lastJsonLine` triplet nearly every fixture-backed case
+ * repeated (#133: was spelled inline 11+ times). A case that also needs the raw `FixtureResult`
+ * (its `stderr`, say) still calls the three separately; this is for the ordinary case that only
+ * wants the parsed JSON.
+ *
+ * `await runFixtureJson<{ distinctPids: number }>("__tests__/fixtures/cluster-pids.ts")` →
+ * `{ distinctPids: 3 }`, having already asserted the fixture exited 0. */
+export async function runFixtureJson<T>(
+  relativePath: string,
+  nodeFlags: string[] = [],
+): Promise<T> {
+  const fixture = await runFixture(relativePath, nodeFlags);
+  expectFixtureOk(fixture);
+  return lastJsonLine<T>(fixture);
+}

@@ -12,14 +12,7 @@ import { describe, it, expect } from "vitest";
 
 import { Pipeline } from "@src/pipeline";
 import { HttpPipeline } from "@src/pipelines/http";
-import {
-  withServer,
-  HTTP_TIMEOUT,
-  FIXTURE_TIMEOUT,
-  runFixture,
-  expectFixtureOk,
-  lastJsonLine,
-} from "./helpers/fixtures";
+import { withServer, HTTP_TIMEOUT, FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
 import { countPromises } from "./helpers/sequences";
 import { type Order, ordersA, ordersB, orders, withVat } from "./helpers/domain";
 
@@ -388,9 +381,8 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
       // both siblings registered at the base's index and the second overwrote the first - on the
       // primary and on every worker re-running the entry module. Calling the FIRST then got the
       // second's stages back, with no error. Measured before the fix: `{"doubled":[100,200]}`.
-      const fixture = await runFixture("__tests__/fixtures/cluster-sibling-chains.ts");
-      expectFixtureOk(fixture);
-      expect(lastJsonLine(fixture)).toEqual({ doubled: [2, 4], hundredfold: [100, 200] });
+      const result = await runFixtureJson("__tests__/fixtures/cluster-sibling-chains.ts");
+      expect(result).toEqual({ doubled: [2, 4], hundredfold: [100, 200] });
     },
     FIXTURE_TIMEOUT,
   );
@@ -403,9 +395,8 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
       // `registry.get(0)` with a stage-less arm clone at module load, and the primary's
       // `/pipeline/0/transform/0` was then served the arm's stage table. Measured before the fix:
       // `{"rest":["REST:undefined","REST:undefined"]}`.
-      const fixture = await runFixture("__tests__/fixtures/cluster-branch.ts");
-      expectFixtureOk(fixture);
-      expect(lastJsonLine(fixture)).toEqual({ big: ["BIG:2", "BIG:3"], rest: ["REST:1"] });
+      const result = await runFixtureJson("__tests__/fixtures/cluster-branch.ts");
+      expect(result).toEqual({ big: ["BIG:2", "BIG:3"], rest: ["REST:1"] });
     },
     FIXTURE_TIMEOUT,
   );

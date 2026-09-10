@@ -14,14 +14,7 @@
 import { describe, test, expect } from "vitest";
 import type { IContextManager } from "../src";
 import { Pipeline, ConcurrentPipeline, HttpPipeline } from "../src";
-import {
-  FIXTURE_TIMEOUT,
-  HTTP_TIMEOUT,
-  runFixture,
-  withServer,
-  expectFixtureOk,
-  lastJsonLine,
-} from "./helpers/fixtures";
+import { FIXTURE_TIMEOUT, HTTP_TIMEOUT, withServer, runFixtureJson } from "./helpers/fixtures";
 // The SAME parser the client (HttpPipeline.reduceWork) and server (.fetch's /reduce/<n> handling)
 // use - review found this test hand-rolling its own copy, missing the shared one's trailing-buffer
 // flush (a final unterminated frame silently dropped), so a wire-format bug there would be
@@ -241,9 +234,9 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
   test(
     "ClusterPipeline, dispatched to a real worker process",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-reduce.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{ sum: number; dispatchedToWorker: boolean }>(fixture);
+      const result = await runFixtureJson<{ sum: number; dispatchedToWorker: boolean }>(
+        "__tests__/fixtures/cluster-reduce.ts",
+      );
       expect(result.sum * 10).toBe(150);
       expect(result.dispatchedToWorker).toBe(true);
     },
@@ -428,14 +421,12 @@ describe("#62 the same chains behave identically over HttpPipeline and ClusterPi
   test(
     "ClusterPipeline - sum and count both flow through as N values; .local() still merges to one",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-partitioned-reduce.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{
+      const result = await runFixtureJson<{
         sumTotal: number;
         countTotal: number;
         merged: number[];
         countMerged: number[];
-      }>(fixture);
+      }>("__tests__/fixtures/cluster-partitioned-reduce.ts");
       expect(result.sumTotal).toBe(15);
       expect(result.countTotal).toBe(5);
       expect(result.merged).toEqual([15]);

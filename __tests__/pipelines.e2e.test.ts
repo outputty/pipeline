@@ -19,7 +19,7 @@ import {
   runFixture,
   withServer,
   expectFixtureOk,
-  lastJsonLine,
+  runFixtureJson,
 } from "./helpers/fixtures";
 import { parseStrict } from "./helpers/sequences";
 
@@ -56,9 +56,9 @@ describe("#17 ClusterPipeline dispatches to real worker processes (Done-when 2)"
   it(
     "distinct process.pid values serve stage 0, count matches workers",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-pids.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{ distinctPids: number; workers: number }>(fixture);
+      const result = await runFixtureJson<{ distinctPids: number; workers: number }>(
+        "__tests__/fixtures/cluster-pids.ts",
+      );
       expect(result.distinctPids).toBe(result.workers);
     },
     FIXTURE_TIMEOUT,
@@ -69,9 +69,9 @@ describe("#17 three ClusterPipelines share one port and worker set (Done-when 4)
   it(
     "every pipeline's url is identical",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-shared-port.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{ ports: string[]; results: number[][] }>(fixture);
+      const result = await runFixtureJson<{ ports: string[]; results: number[][] }>(
+        "__tests__/fixtures/cluster-shared-port.ts",
+      );
       expect(new Set(result.ports).size).toBe(1);
       expect(result.results).toEqual([[1], [2], [3]]);
     },
@@ -140,9 +140,9 @@ describe("#61 .local(build) prints the ticket's own canonical program on every c
   it(
     "the same chain over a real ClusterPipeline prints [15], folded in the primary process",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-local.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{ sum: number; stayedInPrimary: boolean }>(fixture);
+      const result = await runFixtureJson<{ sum: number; stayedInPrimary: boolean }>(
+        "__tests__/fixtures/cluster-local.ts",
+      );
       expect(result.sum).toBe(15);
       expect(result.stayedInPrimary).toBe(true);
     },
@@ -364,12 +364,9 @@ describe("#17 a chunk failure never leaks an unhandled rejection (Done-when 8)",
   it(
     "ConcurrentPipeline leaves UNHANDLED [] at both ordered: true and ordered: false",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/concurrent-unhandled.ts");
-      expectFixtureOk(fixture);
-      const result = JSON.parse(fixture.stdout.trim()) as {
-        ordered: string[];
-        unordered: string[];
-      };
+      const result = await runFixtureJson<{ ordered: string[]; unordered: string[] }>(
+        "__tests__/fixtures/concurrent-unhandled.ts",
+      );
       expect(result.ordered).toEqual([]);
       expect(result.unordered).toEqual([]);
     },
@@ -550,9 +547,9 @@ describe("#17 .context() propagates through the wire (Done-when 14)", () => {
   it(
     "prints [10,20,30,40,50] through ClusterPipeline, still a ClusterPipeline after .context()",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-context.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{ out: number[]; ctorNameAfterContext: string }>(fixture);
+      const result = await runFixtureJson<{ out: number[]; ctorNameAfterContext: string }>(
+        "__tests__/fixtures/cluster-context.ts",
+      );
       expect(result.out).toEqual([10, 20, 30, 40, 50]);
       expect(result.ctorNameAfterContext).toBe("ClusterPipeline");
     },
@@ -615,16 +612,14 @@ describe("#31 a ClusterPipeline worker builds the caller's own class via context
   it(
     "each worker builds its own PoolContext once, and forward context still crosses the wire",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-context-factory.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{
+      const result = await runFixtureJson<{
         orchestratorCtxClass: string;
         ctxBuiltInOrchestrator: boolean;
         workerCtxClasses: string[];
         distinctWorkerCtxPids: number;
         ctxBuiltInSamePidAsServer: boolean;
         multiplierCrossedWire: number[];
-      }>(fixture);
+      }>("__tests__/fixtures/cluster-context-factory.ts");
       // The orchestrator was given an already-built instance (`context`), so `contextFactory`
       // never ran there - only every OTHER process (each worker) needed to build its own.
       expect(result.orchestratorCtxClass).toBe("PoolContext");
@@ -642,14 +637,12 @@ describe("#31 contextFactory is invoked once per process, not per request (Done-
   it(
     "primary builds once for its own _context; each worker builds once and reuses it to serve",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-context-factory-invocations.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{
+      const result = await runFixtureJson<{
         primaryBuilt: number;
         chunks: number;
         maxBuiltPerWorkerPid: number[];
         workerPids: number;
-      }>(fixture);
+      }>("__tests__/fixtures/cluster-context-factory-invocations.ts");
       expect(result).toEqual({
         primaryBuilt: 1,
         chunks: 20,
