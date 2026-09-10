@@ -53,6 +53,20 @@ interface StageResponseBody<U> {
   chunk: U[];
 }
 
+/** The one JSON error-body shape every failure response in this file uses (#133: was spelled
+ * `Response.json({ error: … }, { status: … })` inline 6x across `.fetch()`/`serveReduceRequest()`). */
+function errorResponse(status: number, message: string): Response {
+  return Response.json({ error: message }, { status });
+}
+
+/** The 404 both `.fetch()`'s own `stage` verb and `serveReduceRequest()` answer with when
+ * `resolveRegistries(trail)` finds no arm this deployment holds (#133: identical
+ * `Response.json({ error: \`unknown branch route ${trail}\` }, { status: 404 })` spelled at both
+ * call sites, differing only in the pathname/trail variable name). */
+function unknownBranchRoute(trail: string | null): Response {
+  return errorResponse(404, `unknown branch route ${trail}`);
+}
+
 /**
  * Parses and validates a stage POST body - malformed JSON, a missing `chunk` array, or a missing
  * `context` object all fail here rather than reaching the worker's own context manager/the stage's
@@ -307,7 +321,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     // paid that replay for a `maxIndex` it then ignored, and a replay that threw turned a 404 into
     // a rejected `fetch` promise instead of an error response.
     if (route === null) {
-      return Response.json({ error: `unknown stage ${pathname}` }, { status: 404 });
+      return errorResponse(404, `unknown stage ${pathname}`);
     }
     const requested = route.index;
 
@@ -317,20 +331,20 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     // one stage.
     const resolved = this.resolveRegistries(route.trail);
     if (resolved === null) {
-      return Response.json({ error: `unknown branch route ${pathname}` }, { status: 404 });
+      return unknownBranchRoute(pathname);
     }
     const { chunkTransforms } = resolved;
     const maxIndex = chunkTransforms.length - 1;
     if (requested > maxIndex) {
-      return Response.json(
-        { error: `unknown stage ${requested}; this deployment serves 0..${maxIndex}` },
-        { status: 404 },
+      return errorResponse(
+        404,
+        `unknown stage ${requested}; this deployment serves 0..${maxIndex}`,
       );
     }
 
     const body = await parseStageRequest(request);
     if (!body.ok) {
-      return Response.json({ error: body.error }, { status: 400 });
+      return errorResponse(400, body.error);
     }
 
     try {
@@ -348,7 +362,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       return Response.json({ chunk: result } satisfies StageResponseBody<unknown>);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return Response.json({ error: message }, { status: 500 });
+      return errorResponse(500, message);
     }
   };
 
@@ -371,22 +385,19 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     // silently serves the parent's own fold when it does.
     const resolved = this.resolveRegistries(trail);
     if (resolved === null) {
-      return Response.json({ error: `unknown branch route ${trail}` }, { status: 404 });
+      return unknownBranchRoute(trail);
     }
     const { reduceStages } = resolved;
     const stage = reduceStages.get(index);
     if (!stage) {
       const known = [...reduceStages.keys()].join(",") || "none";
-      return Response.json(
-        { error: `unknown reduce stage ${index}; this deployment serves ${known}` },
-        { status: 404 },
-      );
+      return errorResponse(404, `unknown reduce stage ${index}; this deployment serves ${known}`);
     }
     // A registered stage with no body is a DIFFERENT problem than an unknown one (review: the OLD
     // message said "unknown reduce stage N" even when N was real) - reported as its own 400, the
     // same shape /transform/<n>'s own parseStageRequest() uses for a missing body.
     if (!request.body) {
-      return Response.json({ error: "request body is missing" }, { status: 400 });
+      return errorResponse(400, "request body is missing");
     }
 
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -478,37 +489,10 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       const url = self._url;
       const path = self.routePath("reduce", stageIndex);
 
-      // Feeds the request body as chunks arrive, one NDJSON frame per upstream chunk - started
-      // before the `fetch()` call below is awaited (`.claude/rules/code.md`: a streaming/duplex
-      // probe's input starts before the call that consumes it), so the connection is genuinely
-      // duplex rather than the request finishing before the response starts.
-      // One frame per `pull`, NEVER the whole upstream in `start` (#113). `start` ran its own
-      // `for await` to completion and enqueued every frame without consulting `desiredSize`, so
-      // nothing throttled it - and `ConcurrentPipeline.reduce()` calls this closure
-      // `maxConcurrency` times over ONE `share()`d iterator, so N partitions each raced to pull the
-      // entire source into N in-memory queues before the server had folded anything. That also
-      // destroyed the free-slot dealing `share()` exists to provide: a slow partition stops pulling
-      // less than a fast one once neither is throttled. `pull` is called only as the stream drains,
-      // so the shared iterator now advances at the rate the socket accepts.
-      const upstream = chunks[Symbol.asyncIterator]();
-      const requestBody = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(ndjsonFrame({ context: ctx.toDict() }));
-        },
-        async pull(controller) {
-          const next = await upstream.next();
-          if (next.done === true) {
-            controller.close();
-            return;
-          }
-          controller.enqueue(ndjsonFrame({ chunk: next.value }));
-        },
-        async cancel() {
-          // The consumer stopped reading - a failed request, an aborted response - so this
-          // partition's view of the shared iterator is released rather than left open.
-          await upstream.return?.();
-        },
-      });
+      // Built (not yet consumed) before the `fetch()` call below is awaited (`.claude/rules/code.md`:
+      // a streaming/duplex probe's input starts before the call that consumes it), so the connection
+      // is genuinely duplex rather than the request finishing before the response starts.
+      const requestBody = buildReduceRequestBody(chunks, ctx);
 
       const response = await fetch(`${url}${path}`, {
         method: "POST",
@@ -524,16 +508,66 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
         throw new Error(`reduce stage ${stageIndex} at ${url} failed: ${detail}`);
       }
 
-      for await (const line of readNdjsonLines(response.body)) {
-        const frame = JSON.parse(line) as { emit?: U[]; error?: string };
-        if (frame.error !== undefined) {
-          throw new Error(`reduce stage ${stageIndex} at ${url} failed: ${frame.error}`);
-        }
-        if (frame.emit !== undefined && frame.emit.length > 0) {
-          yield frame.emit;
-        }
-      }
+      yield* parseReduceFrames<U>(response.body, stageIndex, url);
     };
+  }
+}
+
+/** The reduce wire's own OUTGOING half: one `{"context":…}` frame, then one `{"chunk":…}` NDJSON
+ * frame per upstream chunk (#133: split out of `reduceWork()`'s own `dispatchReduce` generator, kept
+ * as ONE function since `start`/`pull`/`cancel` all close over the SAME `upstream` iterator).
+ *
+ * `pull`-driven, never draining the whole stream in `start` (#113): `start` ran its own `for await`
+ * to completion and enqueued every frame without consulting `desiredSize`, so nothing throttled it -
+ * and `ConcurrentPipeline.reduce()` calls the caller's own closure `maxConcurrency` times over ONE
+ * `share()`d iterator, so N partitions each raced to pull the entire source into N in-memory queues
+ * before the server had folded anything. That also destroyed the free-slot dealing `share()` exists
+ * to provide: a slow partition stops pulling less than a fast one once neither is throttled. `pull`
+ * is called only as the stream drains, so the shared iterator now advances at the rate the socket
+ * accepts.
+ */
+function buildReduceRequestBody<T>(
+  chunks: AsyncIterable<T[]>,
+  ctx: IContextManager,
+): ReadableStream<Uint8Array> {
+  const upstream = chunks[Symbol.asyncIterator]();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(ndjsonFrame({ context: ctx.toDict() }));
+    },
+    async pull(controller) {
+      const next = await upstream.next();
+      if (next.done === true) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(ndjsonFrame({ chunk: next.value }));
+    },
+    async cancel() {
+      // The consumer stopped reading - a failed request, an aborted response - so this partition's
+      // view of the shared iterator is released rather than left open.
+      await upstream.return?.();
+    },
+  });
+}
+
+/** The reduce wire's own INCOMING half: `{"emit":…}` frames as a remote fold produces them,
+ * `{"error":…}` on a mid-stream failure - arriving AFTER the response's own 200, so values already
+ * emitted have already entered downstream stages (#133: split out of `reduceWork()`'s own
+ * `dispatchReduce` generator). */
+async function* parseReduceFrames<U>(
+  body: ReadableStream<Uint8Array>,
+  stageIndex: number,
+  url: string,
+): AsyncGenerator<U[]> {
+  for await (const line of readNdjsonLines(body)) {
+    const frame = JSON.parse(line) as { emit?: U[]; error?: string };
+    if (frame.error !== undefined) {
+      throw new Error(`reduce stage ${stageIndex} at ${url} failed: ${frame.error}`);
+    }
+    if (frame.emit !== undefined && frame.emit.length > 0) {
+      yield frame.emit;
+    }
   }
 }
 
@@ -615,36 +649,39 @@ async function writeStreamedBody(res: ServerResponse, bodyStream: Readable): Pro
   res.end();
 }
 
-async function handleOverBridge(
-  req: IncomingMessage,
-  res: ServerResponse,
-  handler: (request: Request) => Promise<Response>,
-): Promise<void> {
+/** Converts a Node `IncomingMessage` into a real `Request` (#133: split out of `handleOverBridge`'s
+ * own body, which mixed this conversion with writing the RESPONSE back).
+ *
+ * Streams the request body in as it arrives (#45) - `handler` (a reduce stage's `.fetch()`, for
+ * one) can start folding an early chunk before a later one has even been sent. GET/HEAD forbid a
+ * body entirely (the Fetch spec throws on the `Request` constructor otherwise) - gating on method,
+ * not on whether anything was ever read, is what streaming needs: buffering used to decide this
+ * from the collected length, which streaming has no equivalent of upfront.
+ */
+function nodeRequestToFetchRequest(req: IncomingMessage): Request {
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;
     for (const v of Array.isArray(value) ? value : [value]) headers.append(key, v);
   }
 
-  // GET/HEAD forbid a body entirely (the Fetch spec throws on the Request constructor otherwise) -
-  // gating on method, not on whether anything was ever read, is what streaming needs: buffering
-  // used to decide this from the collected length, which streaming has no equivalent of upfront.
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
-  const request = new Request(
-    new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`),
-    {
-      method: req.method,
-      headers,
-      // Streams the request body in as it arrives (#45) - `handler` (a reduce stage's `.fetch()`,
-      // for one) can start folding an early chunk before a later one has even been sent.
-      body: hasBody ? (Readable.toWeb(req) as ReadableStream<Uint8Array>) : undefined,
-      // Required by Node's undici Request whenever a body is passed - harmless when body is
-      // undefined, so set unconditionally rather than branching on it.
-      duplex: "half",
-    },
-  );
+  return new Request(new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`), {
+    method: req.method,
+    headers,
+    body: hasBody ? (Readable.toWeb(req) as ReadableStream<Uint8Array>) : undefined,
+    // Required by Node's undici Request whenever a body is passed - harmless when body is
+    // undefined, so set unconditionally rather than branching on it.
+    duplex: "half",
+  });
+}
 
-  const response = await handler(request);
+async function handleOverBridge(
+  req: IncomingMessage,
+  res: ServerResponse,
+  handler: (request: Request) => Promise<Response>,
+): Promise<void> {
+  const response = await handler(nodeRequestToFetchRequest(req));
   res.statusCode = response.status;
   response.headers.forEach((value, key) => res.setHeader(key, value));
 
