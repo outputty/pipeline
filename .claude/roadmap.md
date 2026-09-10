@@ -33,6 +33,16 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   committed as JSON; the second table controls measured ITEMS IN FLIGHT rather than any declared
   concurrency option, because no two libraries name that knob the same way. Layout and rationale in
   `.claude/architecture.md`'s Benchmarks section.
+- **Every exported symbol's TSDoc follows one convention, gated by `typedoc`** (#118) - `src/`'s
+  docstrings mix what a symbol does with ticket numbers, benchmarks and mechanism narration that
+  duplicates `.claude/architecture.md`, and some describe machinery #90 already deleted
+  (`Pipeline.buffer()` still narrated `_preBufferItems`, gone since #90's own rewrite). Several
+  current exports carry no docstring at all (`Pipeline`'s own call signature, `BranchOwner.drainable`),
+  and nothing checks a `@param` name or a missing description - #90 alone renamed or deleted dozens
+  of signatures in one stack with no tool catching drift. Now, because #90 and #113 landing the same
+  day this was planned is exactly the kind of large, fast-moving change this gap lets through
+  silently; `typedoc --validation.notDocumented` is proven this session to catch it for real
+  (`Pipeline.local has an @param with name "wrongName", which was not used`).
 
 ### Later - not yet filed
 
