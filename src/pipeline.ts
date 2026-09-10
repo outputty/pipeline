@@ -32,6 +32,7 @@ import type {
   PipelineMode,
   SourcePolicy,
   AssignMode,
+  JoinMode,
 } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
 import { SimpleContextManager } from "./context/simple";
@@ -46,7 +47,7 @@ import {
   recutSyncChunks,
 } from "./utils/chunk";
 import { chain, isThenable, dropOrRethrow } from "./utils/helpers";
-import { foldChunkStream } from "./utils/reduce";
+import { foldChunkStream, foldSyncChunkStream } from "./utils/reduce";
 
 /** The chunk stream a `Pipeline` that has no source yet carries - `.from()` is what replaces it.
  * Shared rather than rebuilt per instance: it is empty and stateless. */
@@ -195,6 +196,13 @@ export interface PipelineOptions {
    * `.buffer()` recuts from on a `"sync"` chain. Not intended for direct external use.
    */
   syncPreBufferItems?: Iterable<unknown> | null;
+  /**
+   * Internal: the chunk boundary `.buffer(size)` last declared, carried so a `.buffer()` called
+   * BEFORE `.from()` still decides the source's own cut (#90). `.from()` read `DEFAULT_CHUNK_SIZE`
+   * unconditionally before this existed, so that call was silently discarded. Not intended for
+   * direct external use.
+   */
+  chunkSize?: number;
 }
 
 /** A registered reduce stage's own definition - `pushReduceStage()` (below) is the one place that
@@ -308,6 +316,8 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
   protected _syncChunks: MaybeAsyncChunks<T> | null;
   /** `_preBufferItems`' sync counterpart - see `PipelineOptions.syncPreBufferItems`. */
   protected _syncPreBufferItems: Iterable<T> | null;
+  /** The chunk boundary `.buffer(size)` last declared - see `PipelineOptions.chunkSize`. */
+  protected _chunkSize: number;
 
   /**
    * Create a new Pipeline from a data source.
@@ -329,6 +339,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     this._chunks = (options?.chunks ?? EMPTY_CHUNKS) as AsyncIterable<T[]>;
     this._preBufferItems = (options?.preBufferItems ?? null) as AsyncIterable<T> | null;
     this._syncPreBufferItems = (options?.syncPreBufferItems ?? null) as Iterable<T> | null;
+    this._chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
   }
 
   /**
@@ -347,7 +358,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * `new Pipeline().from(asyncSource).toArray()` → typed `Promise<number[]>`.
    */
   from<U>(data: AsyncIterable<U>): Pipeline<U, "async", P>;
-  from<U>(data: Iterable<U>): Pipeline<U, AssignMode<P, "sync">, P>;
+  // A receiver already widened to `"async"` stays async whatever the source's own shape (#90):
+  // `.onError()` and `.context()` are both callable BEFORE `.from()`, so an async run handler
+  // registered there had its widening discarded here - the chain typed `number[]` while
+  // `dropOrRethrow` deferred on that handler the moment a chunk failed. `"unset"` is the ordinary
+  // case and still takes the source's own shape, which is what keeps `.from([1,2,3])` synchronous.
+  from<U>(data: Iterable<U>): Pipeline<U, M extends "async" ? "async" : AssignMode<P, "sync">, P>;
   from<U>(data: PipelineSource<U>): Pipeline<U, "sync" | "async", P> {
     return this.fromSource<U>(data, this.sourcePolicy()) as Pipeline<U, "sync" | "async", P>;
   }
@@ -363,7 +379,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    */
   protected fromSource<U>(data: PipelineSource<U>, policy: SourcePolicy): AnyPipeline<U> {
     const isAsyncSource = Symbol.asyncIterator in Object(data);
-    const mode: "sync" | "async" = isAsyncSource || policy === "async" ? "async" : "sync";
+    // `this._mode` is read too, so a receiver already widened before `.from()` stays widened - see
+    // `from`'s own Iterable overload for the case that made this necessary.
+    const mode: "sync" | "async" =
+      isAsyncSource || policy === "async" || this._mode === "async" ? "async" : "sync";
 
     if (mode === "sync") {
       const items = data as Iterable<U>;
@@ -373,14 +392,14 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
         // handler silently never fire.
         ...this.carriedOptions(),
         mode,
-        syncChunks: buildSyncChunkGenerator<U>(DEFAULT_CHUNK_SIZE)(items),
+        syncChunks: buildSyncChunkGenerator<U>(this._chunkSize)(items),
         syncPreBufferItems: items,
         preBufferItems: null,
       });
     }
 
     const items = toAsyncIterable(data);
-    return this.createPipeline<U>(buildChunkGenerator<U>(DEFAULT_CHUNK_SIZE)(items), {
+    return this.createPipeline<U>(buildChunkGenerator<U>(this._chunkSize)(items), {
       ...this.carriedOptions(),
       mode,
       preBufferItems: items,
@@ -439,6 +458,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
       reduceStages: this._reduceStages,
       preBufferItems: this._preBufferItems,
       syncPreBufferItems: this._syncPreBufferItems,
+      chunkSize: this._chunkSize,
       runHandler: this._runHandler,
       mode: this._mode,
       syncChunks: this._syncChunks,
@@ -493,6 +513,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
   /** This pipeline's items, as one stream, whichever engine it runs on (#90) - the seam the async
    * terminal ops and `[Symbol.asyncIterator]` read, so neither has to branch on `_mode` itself. */
   protected asyncItems(): AsyncIterable<T> {
+    // A drain refuses a source-less pipeline for the same reason a stage does (#90): without this,
+    // `new Pipeline().toArray()` resolved to `[]`, a plausible-looking answer for a caller who
+    // simply forgot `.from()`, where composing any stage on the same pipeline throws.
+    this.requireSource();
     if (this._mode !== "sync" || this._syncChunks === null) {
       return flattenChunks(this._chunks);
     }
@@ -709,7 +733,17 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * .transform((t) => t.map(parseStrict)).toArray()` → `[1, 3, 4]` - the chunk holding `"x"` is
    * dropped, every other chunk survives.
    */
-  onError(handler: PipelineErrorHandler): this {
+  onError(
+    handler: (error: Error, ctx: IContextManager) => Promise<void>,
+  ): M extends "async" ? this : Pipeline<T, "async", P>;
+  onError(handler: (error: Error, ctx: IContextManager) => void): this;
+  onError(handler: PipelineErrorHandler): this | Pipeline<T, "async", P> {
+    // An ASYNC handler widens the chain (#90), the same rule `.tap()` follows. `PipelineErrorHandler`
+    // declares a bare `void` return, which accepts an `async` function silently, so without the
+    // overload above the chain kept its `"sync"` type while `dropOrRethrow` deferred on the handler's
+    // own promise - a chain typed `number[]` handed back a pending `Promise` the moment an error
+    // actually fired. A handler that never fires makes the widening pessimistic, never wrong: an
+    // `await` on the array it still returns is a no-op.
     return this.createPipeline<T>(this._chunks, {
       ...this.carriedOptions(),
       runHandler: handler,
@@ -754,7 +788,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    */
   merge(
     ...others: Pipeline<T, M extends "async" ? "sync" | "async" : "sync", SourcePolicy>[]
-  ): this {
+  ): this;
+  merge(
+    ...others: Pipeline<T, "sync" | "async", SourcePolicy>[]
+  ): M extends "async" ? this : Pipeline<T, "async", P>;
+  merge(...others: Pipeline<T, "sync" | "async", SourcePolicy>[]): this | Pipeline<T, "async", P> {
     mergeContextsInto(
       this._context,
       others.map((other) => other._context),
@@ -763,7 +801,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
     // Every pipeline is read through `chunkStream()`, never `_chunks` directly: a `"sync"` one
     // carries its chunks in `_syncChunks` and leaves `_chunks` empty, so reading the field would
     // silently merge nothing (#90).
-    if (this._mode === "sync" && this._syncChunks !== null) {
+    //
+    // ONE async pipeline anywhere in `others` sends the whole merge down the async arm (#90), which
+    // is what makes merging widen rather than refuse - the same rule every other stage follows, and
+    // the reason the second overload above exists. `chunkStream()` converts a sync pipeline's own
+    // chunks on the way in, so that arm already handles the mixed case unchanged.
+    if (this._mode === "sync" && this._syncChunks !== null && others.every((o) => o.isSync())) {
       const streams = [this._syncChunks, ...others.map((other) => other.syncChunkStream())];
       function* concatSync(): Generator<T[] | Promise<T[]>> {
         for (const stream of streams) yield* stream;
@@ -815,7 +858,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    */
   apply<U, M2 extends "sync" | "async">(
     transformer: Transformer<T, U, M2>,
-  ): Pipeline<U, AssignMode<P, M2>, P> {
+  ): Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P> {
     this.requireSource();
     const runnable = transformer.runnable();
     const carried = {
@@ -843,7 +886,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
       return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
         ...carried,
         syncChunks: stageChunks(),
-      }) as Pipeline<U, AssignMode<P, M2>, P>;
+      }) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P>;
     }
 
     return this.createPipeline<U>(
@@ -852,7 +895,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
         ...carried,
         syncChunks: null,
       },
-    ) as Pipeline<U, AssignMode<P, M2>, P>;
+    ) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P>;
   }
 
   /**
@@ -868,11 +911,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
   transform<U, M2 extends "sync" | "async">(
     this: M extends "unset" ? never : Pipeline<T, M, P>,
     t: (transformer: Transformer<T, T, M & ("sync" | "async")>) => Transformer<T, U, M2>,
-  ): Pipeline<U, AssignMode<P, M2>, P> {
+  ): Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P> {
     const transformer = t(
       new Transformer<T, T, M & ("sync" | "async")>({ transform: (chunk) => chunk }),
     );
-    return this.apply(transformer) as unknown as Pipeline<U, AssignMode<P, M2>, P>;
+    return this.apply(transformer) as unknown as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P>;
   }
 
   /**
@@ -902,6 +945,18 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * intermediate 2- or 3-cut.
    */
   buffer(size: number): this {
+    // Before `.from()` there is no stream to cut, so the size is only RECORDED (#90) - `fromSource`
+    // reads it in place of `DEFAULT_CHUNK_SIZE` when the source finally arrives. Without this arm
+    // the call built an empty generator that `.from()` then overwrote, so `new
+    // Pipeline().buffer(2).from([1,2,3,4,5])` yielded one chunk of five and the declared boundary
+    // of 2 never applied, with no error.
+    if (this._mode === "unset") {
+      return this.createPipeline<T>(this._chunks, {
+        ...this.carriedOptions(),
+        chunkSize: size,
+      }) as this;
+    }
+
     // The `"sync"` arm recuts with the sync chunker (#90) - going through the async one here would
     // make `.buffer()` alone widen a chain whose every callback is synchronous, which is exactly
     // the Mode/runtime divergence this ticket exists to remove.
@@ -937,28 +992,54 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * overrides this to dispatch it instead - `.local(build)` (#61) is what keeps a reduce stage
    * in-process on a dispatching class now.
    *
-   * `new Pipeline([1,2,3,4,5]).reduce((acc, x) => acc + x, 0).transform((t) => t.map((n) => n *
-   * 10)).toArray()` → `[150]`.
+   * A fold is order-dependent but not inherently asynchronous (#90): over a `"sync"` chain a plain
+   * reducer folds with no `Promise` created, so the stage keeps the chain's own Mode. A
+   * `Promise`-returning reducer takes the first overload and widens the whole chain, the same rule
+   * `.transform()` follows.
+   *
+   * `new Pipeline().from([1,2,3,4,5]).reduce((acc, x) => acc + x, 0).transform((t) => t.map((n) => n *
+   * 10)).toArray()` → `[1500]`, a `number[]` with no `await`.
    */
-  reduce<U>(fn: ReduceFunction<U, T>, initial: U): Pipeline<U, "async", P> {
+  reduce<U>(
+    fn: (acc: U, item: T, ctx: IContextManager, emit: (value: U) => void) => Promise<U>,
+    initial: U,
+  ): Pipeline<U, "async", P>;
+  reduce<U>(
+    fn: (acc: U, item: T, ctx: IContextManager, emit: (value: U) => void) => U,
+    initial: U,
+  ): Pipeline<U, AssignMode<P, JoinMode<M, "sync">>, P>;
+  reduce<U>(fn: ReduceFunction<U, T>, initial: U): AnyPipeline<U> {
+    // A reduce stage is a stage, so it refuses a source-less pipeline like `apply()` does. Without
+    // this the drain's own guard never fires either: this method sets the Mode explicitly, so
+    // `asyncItems()` sees `"async"` rather than `"unset"` and `new Pipeline().reduce(f, 0)
+    // .toArray()` resolved to `[]`.
+    this.requireSource();
     const { chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
-    const newChunks = foldChunkStream(fn, initial, this.chunkStream(), this._context);
-    return this.createPipeline<U>(newChunks, {
+    const carried = {
       context: this._context,
       chunkTransforms,
       reduceStages,
       preBufferItems: null,
       syncPreBufferItems: null,
       runHandler: this._runHandler,
-      // Always `"async"`, whatever the chain's Mode was (#90): this folds `foldChunkStream`, an
-      // async generator over an `AsyncIterable`, so it cannot run synchronously whatever the
-      // reducer does. Saying so in the return type is what keeps the Mode honest - a `"sync"`
-      // return here would promise an array and hand back a `Promise`. `Transformer.reduce()` is
-      // the per-chunk fold that DOES stay synchronous; use it inside `.transform()` when the whole
-      // chain must stay sync.
+    };
+
+    // `foldSyncChunkStream` folds the same reducer over the sync chunk stream, deferring only at the
+    // first thenable a chunk or the reducer itself produces. `foldChunkStream` is that fold over an
+    // `AsyncIterable`, which is the only reason the second arm is always `"async"`.
+    if (this.isSync()) {
+      return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
+        ...carried,
+        mode: this.sourcePolicy() === "async" ? "async" : "sync",
+        syncChunks: foldSyncChunkStream(fn, initial, this.syncChunkStream(), this._context),
+      }) as AnyPipeline<U>;
+    }
+
+    return this.createPipeline<U>(foldChunkStream(fn, initial, this.chunkStream(), this._context), {
+      ...carried,
       mode: "async",
       syncChunks: null,
-    }) as Pipeline<U, "async", P>;
+    }) as AnyPipeline<U>;
   }
 
   /**
@@ -985,7 +1066,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    */
   local<U, M2 extends "sync" | "async">(
     build: (p: Pipeline<T, M, "shape">) => Pipeline<U, M2, "shape">,
-  ): Pipeline<U, AssignMode<P, M2>, P> {
+  ): Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P> {
     const region = new Pipeline<T, "sync" | "async", SourcePolicy>({
       context: this._context,
       chunkTransforms: this._chunkTransforms,
@@ -1007,7 +1088,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
       runHandler: built._runHandler,
       mode: built._mode,
       syncChunks: built._syncChunks,
-    }) as Pipeline<U, AssignMode<P, M2>, P>;
+    }) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P>;
   }
 
   /**
@@ -1027,9 +1108,13 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * `new Pipeline([1, 2, 3]).tap((x) => seen.push(x)).transform((t) => t.map((x) => x *
    * 2)).toArray()` → `[2, 4, 6]`, with `seen` `[1, 2, 3]`.
    */
-  tap(fn: (item: T, ctx: IContextManager) => Promise<unknown>): Pipeline<T, "async", P>;
+  tap(
+    fn: (item: T, ctx: IContextManager) => Promise<unknown>,
+  ): M extends "async" ? this : Pipeline<T, "async", P>;
   tap(fn: (item: T, ctx: IContextManager) => unknown): this;
-  tap(transformer: Transformer<T, unknown, "async">): Pipeline<T, "async", P>;
+  tap(
+    transformer: Transformer<T, unknown, "async">,
+  ): M extends "async" ? this : Pipeline<T, "async", P>;
   tap(transformer: Transformer<T, unknown, "sync">): this;
   tap(
     arg: PipelineFunction<T, unknown> | Transformer<T, unknown, "sync" | "async">,
@@ -1234,7 +1319,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    * @returns Results by branch name. Read context via `.contextManager` afterward if needed (#744).
    */
   async branch<U>(
-    branches: Record<string, BranchDefinition<T, U, Transformer<T, U>>>,
+    // Either Mode (#90). `Transformer`'s Mode parameter DEFAULTS to `"sync"`, so the pre-#90
+    // spelling `Transformer<T, U>` would have silently narrowed this to sync-only transformers and
+    // rejected `new Transformer<T, U>().map(async (x) => …)`, which compiled before. `.branch()`
+    // awaits every branch's own result regardless, so accepting both is the behaviour it always had.
+    branches: Record<string, BranchDefinition<T, U, Transformer<T, U, "sync" | "async">>>,
     options?: BranchOptions,
   ): Promise<Record<string, U[]>> {
     const firstMatch = options?.firstMatch !== false; // Default to true (router mode)
@@ -1264,7 +1353,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    */
   private async routeItemToBranches<U>(
     item: T,
-    branches: Record<string, BranchDefinition<T, U, Transformer<T, U>>>,
+    branches: Record<string, BranchDefinition<T, U, Transformer<T, U, "sync" | "async">>>,
     results: Record<string, U[]>,
     firstMatch: boolean,
   ): Promise<void> {
@@ -1294,7 +1383,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", P extends SourcePolic
    */
   private async pushBranchOutput<U>(
     item: T,
-    transformer: Transformer<T, U>,
+    transformer: Transformer<T, U, "sync" | "async">,
     results: Record<string, U[]>,
     key: string,
   ): Promise<void> {

@@ -8,6 +8,7 @@
 
 import type { IContextManager, ReduceFunction, RowErrorHandler } from "@src/types";
 import { DROP } from "@src/types";
+import type { MaybeAsyncChunks } from "@src/utils/chunk";
 import { chain, isThenable } from "@src/utils/helpers";
 
 /**
@@ -168,9 +169,53 @@ export async function* foldChunkStream<U, T>(
     const out = await foldChunk(reducer, chunk, ctx);
     if (out.length > 0) yield out;
   }
-  // `foldChunkStream` itself stays an async generator: its input is an `AsyncIterable`, so it can
-  // never run synchronously whatever the reducer does. `Pipeline.reduce()`'s own sync counterpart
-  // is L3's, over the sync chunk stream.
+  // `foldChunkStream` stays an async generator because its INPUT is an `AsyncIterable`, not because
+  // a fold must defer: `foldSyncChunkStream` (below) folds the same reducer over a sync chunk stream
+  // and is what `Pipeline.reduce()` picks on a `"sync"` chain.
+  const trailing = reducer.final();
+  if (trailing.length > 0) yield trailing;
+}
+
+/**
+ * `foldChunkStream`'s synchronous counterpart (#90): folds a `MaybeAsyncChunks` stream into
+ * emitted-value chunks, ONE accumulator for the whole stream, staying synchronous until the first
+ * pending chunk. `Pipeline.reduce()` picks this over `foldChunkStream` when its chain is `"sync"`.
+ *
+ * A fold is ORDER-DEPENDENT across chunks as well as within one, so chunk `n + 1` cannot fold until
+ * `n` has settled: `tail` carries whatever the last chunk is still waiting on, and the first
+ * thenable therefore defers every chunk after it too. That deferral runs on `.then`, so a long
+ * stream never grows the stack.
+ *
+ * `foldSyncChunkStream((acc, x) => acc + x, 0, [[1, 2], [3]], ctx)` → yields `[6]` once, no
+ * `Promise` created.
+ */
+export function* foldSyncChunkStream<U, T>(
+  fn: ReduceFunction<U, T>,
+  initial: U,
+  chunks: MaybeAsyncChunks<T>,
+  ctx: IContextManager,
+): MaybeAsyncChunks<U> {
+  const reducer = new Reducer<U, T>(fn, initial);
+  let tail: Promise<U[]> | null = null;
+
+  for (const chunk of chunks) {
+    const fold = (): U[] | Promise<U[]> => chain(chunk, (items) => foldChunk(reducer, items, ctx));
+    const out: U[] | Promise<U[]> = tail === null ? fold() : tail.then(fold);
+
+    if (isThenable(out)) {
+      tail = out as Promise<U[]>;
+      yield out as Promise<U[]>;
+      continue;
+    }
+    if ((out as U[]).length > 0) yield out as U[];
+  }
+
+  // The trailing accumulator owes the same ordering: once anything deferred, it is only known after
+  // the last chunk settles.
+  if (tail !== null) {
+    yield tail.then(() => reducer.final());
+    return;
+  }
   const trailing = reducer.final();
   if (trailing.length > 0) yield trailing;
 }

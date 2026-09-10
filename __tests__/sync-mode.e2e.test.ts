@@ -438,3 +438,426 @@ describe("#90 - the Mode a chain reports and the engine it runs on never disagre
     expect(await t.runnable()([0], new SimpleContextManager())).toEqual([5]);
   });
 });
+
+describe("#90 L4 - a fold keeps the chain's Mode instead of always widening it", () => {
+  it("a plain reducer over a sync source returns an array with no await", () => {
+    const totals: number[] = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(totals).toEqual([15]);
+    expect(Array.isArray(totals)).toBe(true);
+  });
+
+  it("that fold creates no Promise at all", () => {
+    expect(
+      countPromises(() =>
+        new Pipeline()
+          .from([1, 2, 3, 4, 5])
+          .reduce((acc: number, x: number) => acc + x, 0)
+          .toArray(),
+      ),
+    ).toBe(0);
+  });
+
+  it("a fold survives more chunks than one, in order", () => {
+    const totals: number[] = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .buffer(2)
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(totals).toEqual([15]);
+  });
+
+  it("emit() mid-fold gives the sync path the same answer as the async one", async () => {
+    const batch = (
+      acc: number,
+      x: number,
+      _ctx: unknown,
+      emit: (value: number) => void,
+    ): number => {
+      const next = acc + x;
+      if (next >= 6) {
+        emit(next);
+        return 0;
+      }
+      return next;
+    };
+
+    async function* asyncSource(): AsyncGenerator<number> {
+      for (const x of [1, 2, 3, 4, 5, 6]) yield x;
+    }
+
+    const sync: number[] = new Pipeline().from([1, 2, 3, 4, 5, 6]).reduce(batch, 0).toArray();
+    const async: number[] = await new Pipeline().from(asyncSource()).reduce(batch, 0).toArray();
+
+    expect(sync).toEqual([6, 9, 6]);
+    expect(sync).toEqual(async);
+  });
+
+  it("a stage after the fold stays synchronous too", () => {
+    const scaled: number[] = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .transform((t) => t.map((n: number) => n * 10))
+      .toArray();
+
+    expect(scaled).toEqual([150]);
+  });
+
+  it("an async reducer widens the whole chain", async () => {
+    const totals: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .reduce(async (acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(await totals).toEqual([15]);
+  });
+
+  it("a fold on an async source stays async", async () => {
+    async function* source(): AsyncGenerator<number> {
+      yield 1;
+      yield 2;
+      yield 3;
+    }
+
+    const totals: Promise<number[]> = new Pipeline()
+      .from(source())
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(await totals).toEqual([6]);
+  });
+
+  it("a synchronous fold does not overflow the stack on a long source", () => {
+    const items = Array.from({ length: 20000 }, (_, index) => index);
+
+    const totals: number[] = new Pipeline()
+      .from(items)
+      .buffer(100)
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(totals).toEqual([199990000]);
+  });
+
+  it("ConcurrentPipeline's own reduce still dispatches and stays async", async () => {
+    const totals: number[] = await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
+      .from([1, 2, 3, 4, 5])
+      .buffer(5)
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(totals).toEqual([15]);
+  });
+
+  it("an async branch transformer compiles again", async () => {
+    // Regression: `Transformer`'s Mode parameter defaults to `"sync"`, so the pre-#90 spelling
+    // `Transformer<T, U>` in `.branch()`'s own signature narrowed it to sync-only transformers,
+    // rejecting an async one that compiled on `main`.
+    const data = await new Pipeline().from([1, 2, 3, 4, 5]).branch({
+      doubled: {
+        predicate: (x: number) => x % 2 === 0,
+        transformer: new Transformer<number, number>().map(async (x: number) => x * 2),
+      },
+      plain: {
+        predicate: (x: number) => x % 2 !== 0,
+        transformer: new Transformer<number, number>(),
+      },
+    });
+
+    expect(data.doubled).toEqual([4, 8]);
+    expect(data.plain).toEqual([1, 3, 5]);
+  });
+});
+
+describe("#90 L4 - every fluent method widens, and none of them under-reports its Mode", () => {
+  async function* asyncSource(): AsyncGenerator<number> {
+    yield 1;
+    yield 2;
+    yield 3;
+  }
+
+  it(".apply() with a sync transformer on an async chain stays async", async () => {
+    // Measured before the fix: this typed `number[]` and returned `Promise { <pending> }`.
+    // `.apply()`'s return read only the TRANSFORMER's Mode and ignored the chain's own.
+    const out: Promise<number[]> = new Pipeline()
+      .from(asyncSource())
+      .apply(new Transformer<number, number>().map((x: number) => x * 2))
+      .toArray();
+
+    expect(await out).toEqual([2, 4, 6]);
+  });
+
+  it(".local() with a sync region inside an async chain stays async", async () => {
+    const out: Promise<number[]> = new Pipeline()
+      .from(asyncSource())
+      .local((p) => p.transform((t) => t.map((x: number) => x * 2)))
+      .toArray();
+
+    expect(await out).toEqual([2, 4, 6]);
+  });
+
+  it(".local() with an async region inside a sync chain widens", async () => {
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .local((p) => p.transform((t) => t.map(async (x: number) => x * 2)))
+      .toArray();
+
+    expect(await out).toEqual([2, 4, 6]);
+  });
+
+  it(".onError() with an async handler widens", async () => {
+    // Measured before the fix: `PipelineErrorHandler` declares a bare `void` return, which accepts
+    // an `async` function silently, so the chain stayed typed `number[]` while `dropOrRethrow`
+    // deferred - a real `Promise { <pending> }` the moment an error fired.
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .onError(async () => {
+        await Promise.resolve();
+      })
+      .buffer(1)
+      .transform((t) =>
+        t.map((x: number) => {
+          if (x === 2) throw new Error("boom");
+          return x;
+        }),
+      )
+      .toArray();
+
+    expect(await out).toEqual([1, 3]);
+  });
+
+  it("instance .merge() of a sync pipeline with an async one widens instead of refusing", async () => {
+    // Measured before the fix: a compile error, and past it a runtime throw from
+    // `syncChunkStream()`. The static `Pipeline.merge()` already widened the same pair, so the two
+    // spellings of one operation gave two answers.
+    const out: Promise<number[]> = new Pipeline()
+      .from([10, 20])
+      .merge(new Pipeline().from(asyncSource()))
+      .toArray();
+
+    expect(await out).toEqual([10, 20, 1, 2, 3]);
+  });
+
+  it("instance .merge() of two sync pipelines stays sync", () => {
+    const out: number[] = new Pipeline()
+      .from([10, 20])
+      .merge(new Pipeline().from([30]))
+      .toArray();
+
+    expect(Array.isArray(out)).toBe(true);
+    expect(out).toEqual([10, 20, 30]);
+  });
+
+  it("a sync link after an async one inside one .transform() stays async", async () => {
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .transform((t) => t.map(async (x: number) => x * 2).filter((x: number) => x > 2))
+      .toArray();
+
+    expect(await out).toEqual([4, 6]);
+  });
+
+  it("a stage after one that widened stays async", async () => {
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .transform((t) => t.map(async (x: number) => x * 2))
+      .buffer(2)
+      .transform((t) => t.map((x: number) => x + 1))
+      .reduce((acc: number, x: number) => acc + x, 0)
+      .toArray();
+
+    expect(await out).toEqual([15]);
+  });
+
+  it(".tap() with an async transformer widens", async () => {
+    const seen: number[] = [];
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .tap(
+        new Transformer<number, number>().map(async (x: number) => {
+          seen.push(x);
+          return x;
+        }),
+      )
+      .toArray();
+
+    expect(await out).toEqual([1, 2, 3]);
+    expect(seen).toEqual([1, 2, 3]);
+  });
+
+  it(".first() and .consume() follow the same Mode as .toArray()", async () => {
+    const head: number[] = new Pipeline().from([1, 2, 3]).first(2);
+    expect(head).toEqual([1, 2]);
+
+    const drained: void = new Pipeline().from([1, 2, 3]).consume();
+    expect(drained).toBeUndefined();
+
+    const widened: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3])
+      .transform((t) => t.map(async (x: number) => x))
+      .first(2);
+    expect(await widened).toEqual([1, 2]);
+  });
+});
+
+describe("#90 L4 - review findings, each reproduced before it was fixed", () => {
+  it("a synchronous forEach drains a long stream without growing the stack", () => {
+    // `drainSyncSettled`'s `resume` and `runChunk` tail-called each other, so its `for(;;)` never
+    // iterated and every chunk cost a frame pair. Measured on that shape: this threw `RangeError:
+    // Maximum call stack size exceeded` after 3579 items, where `toArray()` over the identical
+    // stream - which drains through `drainSync`'s real loop - returned all 200 000.
+    function* gen(n: number): Generator<number> {
+      for (let index = 0; index < n; index++) yield index;
+    }
+
+    let count = 0;
+    new Pipeline()
+      .from(gen(200000))
+      .buffer(1)
+      .forEach(() => {
+        count++;
+      });
+
+    expect(count).toBe(200000);
+    expect(new Pipeline().from(gen(200000)).buffer(1).toArray()).toHaveLength(200000);
+  });
+
+  it("an async run handler registered BEFORE .from() still widens the chain", async () => {
+    // `fromSource` set the Mode purely from the source's shape, discarding a widening `.onError()`
+    // had already recorded. Measured before the fix: this typed `number[]` and handed back a
+    // pending `Promise` the moment a chunk failed.
+    const out: Promise<number[]> = new Pipeline()
+      .onError(async () => {
+        await Promise.resolve();
+      })
+      .from([1, 2, 3])
+      .buffer(1)
+      .transform((t) =>
+        t.map((x: number) => {
+          if (x === 2) throw new Error("boom");
+          return x;
+        }),
+      )
+      .toArray();
+
+    expect(await out).toEqual([1, 3]);
+  });
+
+  it("a sync run handler registered before .from() keeps the chain sync", () => {
+    const out: number[] = new Pipeline()
+      .onError(() => {})
+      .from([1, 2, 3])
+      .buffer(1)
+      .transform((t) =>
+        t.map((x: number) => {
+          if (x === 2) throw new Error("boom");
+          return x;
+        }),
+      )
+      .toArray();
+
+    expect(out).toEqual([1, 3]);
+  });
+
+  it(".buffer() called before .from() decides the source's own cut", () => {
+    // Measured before the fix: `[15]`. `.buffer()` built a generator over an empty stream that
+    // `.from()` then overwrote with `DEFAULT_CHUNK_SIZE`, so the declared boundary never applied.
+    const out: number[] = new Pipeline()
+      .buffer(2)
+      .from([1, 2, 3, 4, 5])
+      .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+      .toArray();
+
+    expect(out).toEqual([3, 7, 5]);
+  });
+
+  it("a widening call keeps the subclass it was made on", () => {
+    // `.onError(async …)`, `.tap(async …)` and the widening `.merge()` each returned a bare
+    // `Pipeline<T, "async", P>`, so `.fetch` and every other subclass member vanished from the type
+    // on a chain that compiled on `main`. Measured: `error TS2339: Property 'fetch' does not exist
+    // on type 'Pipeline<number, "async", "async">'`. A receiver already async gains nothing from
+    // widening, so it keeps its own class.
+    const url = "http://localhost:1";
+    const withHandler = new HttpPipeline<number>({ url }).from([1, 2, 3]).onError(async () => {});
+    const withTap = new HttpPipeline<number>({ url }).from([1, 2, 3]).tap(async () => {});
+
+    expect(typeof withHandler.fetch).toBe("function");
+    expect(typeof withTap.fetch).toBe("function");
+  });
+
+  it("a reduce stage refuses a source-less pipeline", () => {
+    // `.reduce()` sets the Mode explicitly, so the drain's own guard saw `"async"` rather than
+    // `"unset"`: measured before the fix, `new Pipeline().reduce(f, 0).toArray()` resolved to `[]`.
+    expect(() => new Pipeline<number>().reduce((acc: number, x: number) => acc + x, 0)).toThrow(
+      "no source: call .from(data) before composing",
+    );
+    expect(() =>
+      new ConcurrentPipeline<number>().reduce((acc: number, x: number) => acc + x, 0),
+    ).toThrow("no source: call .from(data) before composing");
+  });
+
+  it("a drain with no source fails instead of resolving to an empty array", async () => {
+    // Measured before the fix: `await new Pipeline().toArray()` → `[]`, a plausible-looking answer
+    // for a caller who forgot `.from()`, where composing any stage on it already threw. An
+    // `"unset"` pipeline's `.toArray()` is typed `Promise<T[]>`, so the failure arrives as a
+    // rejection rather than a synchronous throw.
+    await expect(new Pipeline().toArray()).rejects.toThrow(
+      "no source: call .from(data) before composing",
+    );
+  });
+
+  it(".buffer() keeps cutting after an async stage, and both engines agree", async () => {
+    // Measured before the fix: the sync-sourced chain gave `[28]` - `recutSyncChunks` met a pending
+    // chunk and yielded the whole remaining stream as one array - where the identical chain over an
+    // `AsyncIterable` source gave `[3,7,11,7]`. Two engines, one piece of user code, two answers.
+    async function* asyncSeven(): AsyncGenerator<number> {
+      for (const x of [1, 2, 3, 4, 5, 6, 7]) yield x;
+    }
+
+    const fromSync: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3, 4, 5, 6, 7])
+      .transform((t) => t.map(async (x: number) => x))
+      .buffer(2)
+      .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+      .toArray();
+
+    const fromAsync: Promise<number[]> = new Pipeline()
+      .from(asyncSeven())
+      .transform((t) => t.map(async (x: number) => x))
+      .buffer(2)
+      .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+      .toArray();
+
+    expect(await fromSync).toEqual([3, 7, 11, 7]);
+    expect(await fromSync).toEqual(await fromAsync);
+  });
+
+  it("a cut that does not divide evenly keeps its trailing partial chunk", async () => {
+    const out: Promise<number[]> = new Pipeline()
+      .from([1, 2, 3, 4, 5, 6, 7])
+      .transform((t) => t.map(async (x: number) => x))
+      .buffer(3)
+      .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+      .toArray();
+
+    expect(await out).toEqual([6, 15, 7]);
+  });
+
+  it("an all-sync chain with a stage before .buffer() stays synchronous", () => {
+    // The negative control: the recut above must not widen a chain whose callbacks are all
+    // synchronous, which is the divergence this whole ticket exists to remove.
+    const out: number[] = new Pipeline()
+      .from([1, 2, 3, 4, 5])
+      .transform((t) => t.map((x: number) => x * 2))
+      .buffer(2)
+      .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+      .toArray();
+
+    expect(Array.isArray(out)).toBe(true);
+    expect(out).toEqual([6, 14, 10]);
+  });
+});
