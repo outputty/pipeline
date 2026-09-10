@@ -65,7 +65,7 @@ The two older candidates, still not filed:
   the orchestrator, and a routing-only arm needs no `Transformer` (#87, folded in). A route reads as
   the chain was built: `/transform/<n>`, `/reduce/<n>`, `/branch/<i>/<name>/transform/<n>`.
   BREAKING: `.from()`, both `merge` forms, and every terminal op leave `Pipeline`; the two-argument
-  constructor is gone. PRs #92, #93, #95, #97, #102, #103, #104, #106, #107, #105.
+  constructor is gone. PRs #92, #93, #95, #97, #102, #103, #104, #105, #106, #107, #108.
 - **Error handling moves onto the function that failed** (#78, `feat!`) - `Transformer.onError(fn)`
   is now the ROW handler: returning a value replaces the row, the exported `DROP` sentinel removes
   it, throwing escalates. It reaches every element-wise call - `.map()`, `.filter()`, `.flatMap()`,
