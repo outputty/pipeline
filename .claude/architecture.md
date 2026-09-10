@@ -394,6 +394,26 @@ merely leak an unhandled rejection (review-caught, verified live: a throwing `st
 listener produced zero unhandled rejections and no hang, surfacing instead as its own separate
 `uncaughtException` on the next microtask via `emitSafely`'s `queueMicrotask`).
 
+`emitSafely()` itself (shared by every lifecycle emit in this class) is a plain
+`try { emitter.emit(event, payload) } catch { queueMicrotask(() => { throw error }) }` - the
+simplest event-emitter shape available: one real `.emit()` call, so a caller-supplied emitter's own
+`.emit()` override and Node's own `.once()` unwrap machinery both still run exactly as documented,
+and every listener still SEES the event through the ordinary `EventEmitter` contract. ⚠ Two
+consequences of staying this simple, both deliberate, neither fixed: a listener that throws
+SYNCHRONOUSLY stops `.emit()`'s own internal loop, so a sibling listener registered AFTER it on the
+SAME lifecycle event silently never runs for that dispatch - ordinary `EventEmitter` behavior a
+caller registering two listeners on one event is expected to already know, not a guarantee this
+class makes about listener isolation. A listener that throws ASYNCHRONOUSLY, after its own `await`,
+leaks as a real `unhandledRejection` instead of surfacing through `emitSafely`'s own `queueMicrotask`
+rethrow at all - `.emit()` never awaits a listener's return value, so nothing here can attach a
+`.catch()` to it without abandoning plain `.emit()` for manual listener invocation, priced and
+rejected as not worth the cost (a custom emitter's own `.emit()` bypassed entirely, `.once()` broken
+for every event this class touches, not only the Worker channel). ⚠ A LOSING Worker's own failure on
+a multi-Worker `stage:<n>` is discarded with no trace once another Worker has already settled -
+`settle()`'s `if (settled) return` guard means no `:error` emit, no log, nothing observable anywhere
+for it. This matches "first to settle wins" for the WINNER; nothing catches a bug in a Worker that
+merely lost the race.
+
 `apply()` is overridden a second time, wrapping the stage's own output chunk stream so
 `stage:<n>:end` fires once, after every chunk that stage's fan-out produced has been yielded from
 THIS WRAPPED STREAM - the stage index it wraps under is read OFF THE RESULT
@@ -428,7 +448,11 @@ The constructor mirrors `HttpPipeline`'s own two-overload shape (`Pipeline.wrapp
 options)` wraps a chain built elsewhere, `(options)` builds standalone), and validates a
 caller-supplied `options.emitter` against `PipelineEmitter`'s five methods at construction - a
 trust-boundary value, so a missing method fails loud there rather than as a generic `TypeError`
-deep inside `stageWork()`'s dispatch closure later.
+deep inside `stageWork()`'s dispatch closure later. Validated ONCE, at the ORIGINAL caller-facing
+construction only - gated on the ABSENCE of the internal `registeredStages` option, which only
+`createPipeline()` (below) ever sets, so a long chain's own copy-on-write calls
+(`.transform()`/`.buffer()`/`.context()`) never re-validate the identical, unchanged `emitter`
+object a second time.
 
 One emitter per chain, in two DIFFERENT failure shapes depending on where the `Set` comes from -
 `#113`'s `pipelineIndex` fix for `ClusterPipeline` is the family's precedent for solving either
