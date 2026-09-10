@@ -140,9 +140,9 @@ export type PendingStage = (pipeline: AnyPipeline<any>) => AnyPipeline<any>;
  * The knobs a CALLER writes when constructing a `Pipeline` - both optional, and both about the
  * context manager, which is the only construction-time decision a caller actually makes.
  *
- * Everything else a pipeline carries is `PipelineState` below. The two were ONE exported interface
- * of seventeen fields, fifteen of which repeated "Not intended for direct external use" in their
- * own docstrings - a public surface saying fifteen times over that it was not public.
+ * Everything else a pipeline carries is `PipelineState` below. The two were ONE exported interface,
+ * and most of its fields repeated "Internal: … Not intended for direct external use" in their own
+ * docstrings - a public surface saying over and over that it was not public.
  */
 export interface PipelineOptions {
   /**

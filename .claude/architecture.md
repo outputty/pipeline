@@ -231,7 +231,7 @@ subclass survives a `.transform()`/`.context()`/`.buffer()` chain; each level ov
 dropped out of it (#39), since `.buffer()` is `Pipeline`'s own knob now, not
 `ConcurrentPipelineOptions`' - so `HttpPipeline`/`ClusterPipeline` only add their own field). What
 `createPipeline()` carries is `PipelineState`, declared apart from the exported `PipelineOptions`
-(#90): a caller writes `context`/`contextFactory`, and the fifteen internal knobs are named once in
+(#90): a caller writes `context`/`contextFactory`, and every carried knob is named once in
 `carriedOptions()` rather than field by field at each call site - which is what stops one being
 dropped, as `mode` and then `bound` each silently were. And a
 stage's identity is its INDEX in `_chunkTransforms` - the table `apply()` already maintains - so a
