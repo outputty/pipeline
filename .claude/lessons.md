@@ -20,6 +20,29 @@ and a full re-run of every prior finding followed. `~/.claude/rules/issues.md`'s
 re-fetch-before-filing rule is sharpened: the same check now runs the moment a cited ticket's
 open/closed state becomes the premise of ANY mid-session decision, not only right before filing.
 
+## 2026-09-10 A detailed opening instruction was itself a wrong paraphrase of what the user wanted
+
+Planning #124, the opening `/plan` command named a specific prior ticket to revive (#30, an
+observability class) and a specific gap to check (`.tap()` coverage). It was followed literally -
+real research, a real spike proving no gap survived - before the user broke the frame entirely:
+"I just need a new way to run the pipeline... this is literally a new pipeline, not something that
+aims to fill in a gap that existed." The whole opening premise was never the actual ask; a full
+round of verification work answered a question nobody had. `~/.claude/rules/issues.md` gains a
+line: restate an opening instruction's own detailed technical premise in one plain sentence and
+confirm it against the user's goal before spending a round of verification on it.
+
+## 2026-09-10 Each new objection about the design added a bigger mechanism instead of pulling scope back
+
+Still planning #124, a flooding objection (round-robin dispatch could overwhelm a slow worker) was
+answered by building a `share()`-based worker pool; a follow-up question (how to control it per
+stage) was answered by building `.concurrency(n)`. Both were verified working. Then: "Let's just
+make the simplest event emitter pipeline possible... not even think about concurrency at this
+stage... a distributed event emitter solution layer [later]." Every verified mechanism from both
+rounds was scrapped in one message - the plan's own Root-walk had gone down a level (more
+mechanism) each time an objection arrived, never up (less scope). `~/.claude/skills/plan/SKILL.md`'s
+Root section gains a fourth step: when a new objection reopens a level already picked, ask the
+user "add a layer, or drop the scope this is about" before building either.
+
 ## 2026-09-10 A type parameter outlived its stated reason, and its real one was one level up
 
 `SourcePolicy` was a type parameter on `Pipeline` because - its own docstring said - a subclass's
