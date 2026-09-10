@@ -12,7 +12,13 @@ import { describe, it, expect } from "vitest";
 
 import { Pipeline } from "@src/pipeline";
 import { HttpPipeline } from "@src/pipelines/http";
-import { withServer, HTTP_TIMEOUT, FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
+import {
+  withServer,
+  withTrackedServer,
+  HTTP_TIMEOUT,
+  FIXTURE_TIMEOUT,
+  runFixtureJson,
+} from "./helpers/fixtures";
 import { countPromises } from "./helpers/sequences";
 import { type Order, ordersA, ordersB, orders, withVat } from "./helpers/domain";
 
@@ -190,15 +196,8 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
     chain: Pipeline<any, any, any>,
     use: (url: string) => Promise<R>,
   ): Promise<{ value: R; paths: string[] }> {
-    const paths: string[] = [];
     const worker = new HttpPipeline(chain as never, { url: "" });
-    return withServer(
-      async (request) => {
-        paths.push(new URL(request.url).pathname);
-        return worker.fetch(request);
-      },
-      async (url) => ({ value: await use(url), paths }),
-    );
+    return withTrackedServer((request) => worker.fetch(request), use);
   }
 
   it(
@@ -218,15 +217,11 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
             .otherwise("rest"),
         );
 
-      const paths: string[] = [];
       const worker = new HttpPipeline(withVat, { url: "" });
       declare(worker);
 
-      const value = await withServer(
-        async (request) => {
-          paths.push(new URL(request.url).pathname);
-          return worker.fetch(request);
-        },
+      const { value, paths } = await withTrackedServer(
+        (request) => worker.fetch(request),
         async (url) => declare(new HttpPipeline(withVat, { url }))(orders),
       );
 

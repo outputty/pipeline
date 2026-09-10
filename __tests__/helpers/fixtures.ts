@@ -66,6 +66,25 @@ export async function withServer<T>(
   }
 }
 
+/** Wraps `handler` with `withServer`, recording every path a request asked for while `use` ran -
+ * the one seam every "which route got hit" e2e case goes through, `.branch()`'s own dispatch trail
+ * included.
+ * `withTrackedServer((req) => worker.fetch(req), (url) => new HttpPipeline(chain, {url})(input).toArray())`
+ * -> `{ value: [20, 30, 40], paths: ["/transform/0", "/transform/1"] }` */
+export async function withTrackedServer<T>(
+  handler: (request: Request) => Promise<Response>,
+  use: (url: string) => Promise<T>,
+): Promise<{ value: T; paths: string[] }> {
+  const paths: string[] = [];
+  return withServer(
+    async (request) => {
+      paths.push(new URL(request.url).pathname);
+      return handler(request);
+    },
+    async (url) => ({ value: await use(url), paths }),
+  );
+}
+
 /** Asserts a fixture exited 0 - and, when it didn't, says whether that's because
  * `FIXTURE_TIMEOUT`/`HTTP_TIMEOUT` killed it (a hang) rather than a real non-zero exit. */
 export function expectFixtureOk(result: FixtureResult): void {

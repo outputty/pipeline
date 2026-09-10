@@ -13,7 +13,7 @@ import { Pipeline } from "@src/pipeline";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
 import { ClusterPipeline } from "@src/pipelines/cluster";
-import { withServer, HTTP_TIMEOUT } from "./helpers/fixtures";
+import { withServer, withTrackedServer, HTTP_TIMEOUT } from "./helpers/fixtures";
 import { ordersA, ordersB, withVat } from "./helpers/domain";
 
 describe("a wrapping class takes (pipeline, options) and runs the chain elsewhere", () => {
@@ -117,18 +117,12 @@ describe("the wire format reads as the chain was built (#90 L10)", () => {
     chain: Pipeline<number, "unset", number>,
     input: number[],
   ): Promise<{ out: number[]; paths: string[] }> {
-    const paths: string[] = [];
     const worker = new HttpPipeline(chain, { url: "" });
-    return withServer(
-      async (request) => {
-        paths.push(new URL(request.url).pathname);
-        return worker.fetch(request);
-      },
-      async (url) => {
-        const out = await new HttpPipeline(chain, { url })(input).toArray();
-        return { out, paths };
-      },
+    const { value: out, paths } = await withTrackedServer(
+      (request) => worker.fetch(request),
+      (url) => new HttpPipeline(chain, { url })(input).toArray(),
     );
+    return { out, paths };
   }
 
   it(
