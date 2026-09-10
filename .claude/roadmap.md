@@ -18,6 +18,15 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   attaches it and infers whether the chain runs synchronously (a plain `Iterable`) or asynchronously
   (an `AsyncIterable`), widening automatically the first time an async function or async source
   appears. `.branch()` is out of scope, blocked conceptually by #87's own signature redesign.
+- **The node: import boundary as an oxlint rule** (#117) - `architecture.md`'s own stack diagram draws
+  `node:cluster`/`node:http` as scoped to `ClusterPipeline`/`HttpPipeline` only, and nothing has ever
+  checked it - the same shape `outputty/laygo` already mechanizes as six `no-restricted-imports`
+  overrides (roadmap #58/#669). `import/no-nodejs-modules`, scoped via `excludeFiles` rather than a
+  hand-rolled `node:*` glob (a real spike showed the glob misses a subpath specifier,
+  `node:fs/promises`), closes the gap with zero violations on the current tree. First candidate of a
+  wider sweep for prose that is really a lint-mechanizable structural rule; the sweep found one more
+  (`never class Pipeline extends Function`) with no oxlint mechanism to enforce it, recorded as
+  considered rather than converted.
 - **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
   `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
   change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results
