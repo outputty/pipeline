@@ -1,5 +1,5 @@
 ---
-"@outputty/pipeline": major
+"@outputty/pipeline": minor
 ---
 
 **Breaking:** a `Pipeline` holds its input TYPE, not its data. It is composed once with no data and
