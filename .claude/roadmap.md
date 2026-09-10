@@ -64,6 +64,18 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   deciding the chunk. Revives the NAME from `#30` (closed unbuilt) for an unrelated capability -
   `#30` was an observability class superseded by `.tap()` (#72); this is a dispatch mode, verified
   during planning to have no overlap with `.tap()`'s own coverage.
+- **`.queue(n)` prefetches chunks ahead of the consumer** (#123) - `.buffer()` pulls a chunk exactly
+  when the consumer asks for it, so a slow producer or a slow consumer always pays the other's
+  latency in full; `ConcurrentPipeline`'s own `fanOutUnordered` already overlaps pulling with WORK
+  via a `Promise.race` pool, but only on that class, and only as a side effect of running
+  `maxConcurrency` chunks concurrently. Now, because `share()` (checked first, per the reuse rule)
+  turned out not to serve this - it is competitive pull for many consumers with zero storage, not a
+  producer allowed to race ahead of one consumer. An array-of-promises queue, restated from the
+  user's own design and measured for real: 671ms serial vs 539ms queued over a 100ms/item source and
+  a 30ms/item stage, from overlap alone. `Promise.race` was priced and killed twice (proven to buy
+  nothing over a single async generator source, which always serializes its own internal work); a
+  `ReadableStream`/`CountQueuingStrategy` candidate was priced and killed (eager pull at
+  construction, an off-by-one capacity bound).
 
 ### Later - not yet filed
 

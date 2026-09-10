@@ -236,6 +236,21 @@ none of it survived the hand-trim (#745).
   until another `.buffer()` call declares a new one. Two `.buffer()` calls back to back, with no
   stage between them, collapse to the last - only it is ever actually applied. An
   `InternalTransformer<In, Out>` processes one chunk at a time.
+- **`.queue(capacity)`** - prefetches up to `capacity` chunks a `Pipeline` already cut, decoupling
+  WHEN a chunk is pulled from WHEN the consumer asks for it (pending #123). An array of exactly
+  `capacity` pending `upstream.next()` promises; the consumer takes the front one, and the instant it
+  does, a fresh promise is pushed onto the back - order preserved, never a race. Widens Mode to
+  `"async"` unconditionally, the same way a dispatching class's `.from()` override already does.
+  Measured: a 100ms/item source feeding a 30ms/item stage ran 671ms with no queue, 539ms queued, same
+  output - overlap, not concurrent production, since a single async generator source still serializes
+  its own internal work regardless of how many pulls are issued (no `Promise.race` anywhere - proven
+  twice to buy nothing here). Composes with `share()`-based partitioning
+  (`ConcurrentPipeline.reduce()`) only because exhaustion is tracked as its own flag, never inferred
+  from the array being momentarily empty - a version that inferred it starved one partition of an
+  entire 10-item stream under two concurrent consumers before this fix. ⚠ The initial fill is itself
+  a pull: a version that filled the array in its own constructor pulled ahead of any consumer
+  request, reproducing the `ReadableStream` candidate's own disqualifying defect - gated behind a
+  flag read inside the returned iterator's `next()` instead, never at construction.
 - **Pipeline family** - WHERE a chain's chunks run is chosen by CONSTRUCTING A CLASS, not by
   configuring a `Transformer` (#17 - replaced `ExecutionStrategy`, `.withExecutor()`, `sequential`,
   `concurrent()` and `ConcurrentStrategyOptions` entirely, deleted with `src/strategies/`).

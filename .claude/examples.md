@@ -533,6 +533,28 @@ const widened = await new Pipeline()
   .toArray(); // Promise<number[]>
 ```
 
+## Case 14 - prefetching ahead of the consumer
+
+`.queue(capacity)` prefetches chunks `.buffer()` already cut, so a slow producer's latency overlaps
+with the consumer's own processing instead of adding to it. Order is unchanged from the base
+pipeline - `.queue()` only changes WHEN a chunk is pulled, never what it contains.
+
+<!-- illustrative, pending #123 -->
+
+```ts
+import { Pipeline } from "@outputty/pipeline";
+
+const data = await new Pipeline<number>()
+  .buffer(2)
+  .queue(3)
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+  ([1, 2, 3, 4, 5]).toArray();
+```
+
+```json
+[6, 8, 10]
+```
+
 ```json
 [6, 8, 10]
 ```

@@ -104,6 +104,68 @@ reads `this._chunks` directly and cuts none of its own, so a custom `.buffer()` 
 dispatched stage exactly like a local one. Wrap the chain in one of those classes for concurrency
 instead of configuring the `Transformer`.
 
+## Prefetching - pending #123
+
+`.queue(capacity)` is `.buffer()`'s sibling, not its replacement: it operates on `this._chunks`
+directly, never `_chunkTransforms`, and never cuts a chunk itself - it prefetches up to `capacity`
+chunks that whatever chunking is already in effect (`.buffer()`'s own cut, or the `1000`-item
+default) already produced. `.buffer()` staying pull-driven is what makes it free when unused;
+`.queue()` is the opt-in cost for a caller who wants the source running ahead of the consumer.
+
+The mechanism is an array of exactly `capacity` pending `upstream.next()` promises, not a value
+buffer with a separate backpressure signal: the consumer takes the front promise in order, and the
+instant it does, a fresh `upstream.next()` is pushed onto the back. The array's length is invariant
+at `capacity` (until the source exhausts), so there is no separate "full" state to signal - only
+"temporarily empty, not yet exhausted," which a momentarily-starved caller waits out via a FIFO
+waiter list, woken one at a time as each new promise is queued.
+
+Two failure shapes were found and fixed during planning, both from treating this as a single-
+consumer mechanism when it must also serve `share()`'s concurrent pullers
+(`ConcurrentPipeline.reduce()`'s own partitioning reads a queue-backed `.buffer()` output through
+`share()` exactly like any other chunk stream):
+
+- **`Promise.race` over concurrent `upstream.next()` calls buys nothing.** Proven twice, with real
+  instrumented runs: issuing several `.next()` calls on ONE async generator without awaiting between
+  them does not start their bodies concurrently - the generator queues and resolves them strictly in
+  call order internally, so racing them returns whichever was CALLED first, not whichever's own work
+  would finish first. Measured: a source with per-item delays `[300ms, 10ms, 10ms]`, three
+  concurrent `.next()` calls issued at once - the 10ms item's own timer does not start until the
+  300ms item's body returns (`item 1 STARTS its own 10ms delay at 301 ms`), despite being called at
+  the same instant. `fanOutUnordered` (below) races real independent WORK on already-pulled chunks,
+  never repeated pulls on one shared generator - that distinction is why the same shape pays off
+  there and not here.
+- **"The array is empty" is not "the stream is exhausted."** Under two concurrent consumers at a
+  capacity smaller than consumer count, the array empties on every handoff, momentarily, as part of
+  ordinary operation. A version that read the array's length to decide `done` starved one partition
+  of an entire stream (10 items to one partition, 0 to the other, no error, no crash) the instant a
+  second consumer raced the first for capacity-1 worth of promises. Fixed: exhaustion is its own
+  flag, set only when the SOURCE itself reports done. Re-verified after the fix, capacity 1 and
+  capacity 3, two partitions, 10 items: `[0,2,4,6,8]`/`[1,3,5,7,9]` both times, zero duplicates.
+- **Filling the array is itself a pull, and must be gated the same way `pump()` is.** An array of
+  promises invariant at `capacity` is naturally simplest when the fill runs in the wrapper's own
+  constructor - but that runs the moment the wrapper is built, which is BEFORE any consumer has
+  asked for anything, reproducing the `ReadableStream` candidate's own disqualifying defect on a
+  design that otherwise looks nothing like it. Measured: constructing the queue and waiting 100ms
+  with zero reads pulled 3 items from the source at capacity 3, on a version regression-tested for
+  speed and fairness alone. Fixed by gating the fill behind a `started` flag read inside the
+  returned iterator's own `next()`, the same shape `.buffer()`'s own lazy replay already uses -
+  re-verified lazy (0 pulls at 100ms idle), with the speed win (664ms -> 538ms) and the fairness
+  split (5/5 at capacity 1 and 3) both unchanged by the fix.
+
+A `ReadableStream`+`CountQueuingStrategy` candidate was priced and killed: Node's `pull()` fires
+immediately at construction to fill `highWaterMark` rather than on first consumer pull (5 pulls
+measured at 100ms idle with zero reads), and its own capacity accounting let `capacity + 1` items
+through rather than an exact bound - both regressions against the settled requirement that nothing
+touches the source until a terminal drains, which `.queue()` must preserve like every other
+`Pipeline` mechanism.
+
+`.queue()` unconditionally widens Mode to `"async"`, the same way a dispatching class's `.from()`
+override already forces it - a queue's own next value may not be ready yet, so there is no
+conditional "stays sync" arm the way `.tap()`/`.onError()` keep one. No new `JoinMode`/`SeedMode`
+plumbing was needed: `.queue()` is not stage-shaped (it never joins with a stage's own Mode), it
+unconditionally overwrites the chain's Mode, so a flat `Pipeline<T, "async", In>` return type
+sufficed against the real generic machinery.
+
 ## Synchronous execution - pending #90
 
 Every piece above (`buildChunkGenerator`, `flattenChunks`, `Transformer.process()`/

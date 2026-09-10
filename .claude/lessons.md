@@ -7,6 +7,31 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-10 A regression check after a mechanism's shape changed skipped a previously-settled property
+
+Planning #123 (`.queue(n)`), a hand-rolled pump was rebuilt as a simpler array-of-promises design at
+the user's own request, fixed for a real starvation bug found under `share()`, then regression-tested
+for speed and fairness only - not for lazy start, settled two rounds earlier. The array's initial
+fill ran inside its own constructor, pulling from the source the instant the queue was built rather
+than on first consumer pull - the exact defect the `ReadableStream` candidate had already been
+disqualified for, reintroduced silently and shipped into the filed ticket (#123) and three committed
+doc files. Caught only by re-reading the session transcript for this retro, not during planning
+itself. Fixed live (gated the fill behind a flag read inside the iterator's own `next()`) and the
+ticket/docs corrected before this retro continued. `~/.claude/rules/code.md`'s Prove it section gains
+a new line: re-run every previously-settled observable after a mechanism's underlying shape changes,
+not only the ones the current change touches.
+
+## 2026-09-10 A candidate was declared killed from a paraphrase, not the user's own words restated as code
+
+Planning #123 (`.queue(n)`), `Promise.race` was probed and killed against a shape inferred from the
+ticket's own vague text ("something built on `Promise.race`") - repeated `.next()` calls on one
+shared async generator. The user later described a materially different mechanism (a pool of
+promises, raced, unordered delivery) and asked to see it built for real before accepting the
+conclusion; rebuilding and reproving it against their actual words reached the identical answer, at
+the cost of a full round-trip. `~/.claude/rules/code.md`'s existing "restate the user's own words as
+code before writing a spike brief" rule is sharpened: the same failure reaches a conclusion declared
+mid-conversation, not only a fork's own written brief.
+
 ## 2026-09-10 #90's own citation went stale mid-plan, and a whole question round was built on it
 
 Planning #118 (this docstring sweep), `.claude/roadmap.md`'s "Building" section and
