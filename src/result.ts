@@ -167,17 +167,13 @@ export class PipelineResult<T, M extends PipelineMode> {
    * `[...score([1, 2, 3])]` → `[2, 4, 6]`.
    */
   [Symbol.iterator](): M extends "sync" ? Iterator<T> : never {
-    const drained = this.toArray();
-    if (isThenable(drained)) {
-      // The drain has already STARTED, so abandoning its promise here leaves a rejection nobody
-      // handles - fatal under Node's default. Measured on an async chain whose map throws: the
-      // `TypeError` below printed, then `UNHANDLED REJECTION: boom` killed the process.
-      drained.catch(() => {});
+    const { syncChunks } = this.drainable();
+    if (syncChunks === null) {
       throw new TypeError(
         "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
       );
     }
-    return (drained as T[])[Symbol.iterator]() as unknown as M extends "sync" ? Iterator<T> : never;
+    return syncItems(syncChunks) as unknown as M extends "sync" ? Iterator<T> : never;
   }
 
   /**
@@ -193,5 +189,30 @@ export class PipelineResult<T, M extends PipelineMode> {
    */
   async *[Symbol.asyncIterator](): AsyncGenerator<T> {
     yield* this.drainable().items();
+  }
+}
+
+/**
+ * A `"sync"` result's items, yielded lazily (#90) - what `[Symbol.iterator]` hands back.
+ *
+ * Lazy, not `toArray()[Symbol.iterator]()`: a `for…of` with a `break` used to run the whole chain
+ * first and leave the source open, where `.first(n)` over the same chain stopped early and closed
+ * it - so one object's two iteration protocols disagreed, the async one having been lazy all along.
+ * A generator's own `return()` runs its `finally`, which closes the chunk iterator exactly as an
+ * early `.first(n)` does.
+ *
+ * A pending chunk throws rather than blocking: the type says `"sync"`, so reaching one means an
+ * `any` boundary let an async callback through, and there is nothing to hand back item by item.
+ */
+function* syncItems<T>(chunks: MaybeAsyncChunks<T>): Generator<T> {
+  for (const chunk of chunks) {
+    if (isThenable(chunk)) {
+      // Nothing else will await it, and an abandoned rejection is fatal under Node's default.
+      void Promise.resolve(chunk).catch(() => {});
+      throw new TypeError(
+        "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
+      );
+    }
+    yield* chunk;
   }
 }

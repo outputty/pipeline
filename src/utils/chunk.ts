@@ -193,7 +193,29 @@ export function drainSync<T>(
     }
   };
 
-  return resume();
+  return closingOnFailure(iterator, resume);
+}
+
+/**
+ * Runs `drain`, closing `iterator` on ANY failure - a synchronous throw or a rejection (#90).
+ *
+ * The async engine gets this for free: `runSequentially`'s `for await` calls `.return()` on its
+ * source when the loop body throws. A MANUAL iterator has to do it itself, and without this the two
+ * engines disagreed on a failed run - measured, a sync generator's own `finally` did not run where
+ * the identical chain over an async source released it. Stays synchronous when `drain` does.
+ */
+function closingOnFailure<R>(iterator: Iterator<unknown>, drain: () => R): R {
+  try {
+    const result = drain();
+    if (!isThenable(result)) return result;
+    return Promise.resolve(result).catch((error: unknown) => {
+      close(iterator);
+      throw error;
+    }) as R;
+  } catch (error) {
+    close(iterator);
+    throw error;
+  }
 }
 
 /**
@@ -250,7 +272,7 @@ export function drainSyncSettled<T>(
     }
   };
 
-  return resume();
+  return closingOnFailure(iterator, resume);
 }
 
 /** Closes a source iterator that a consumer stopped reading early, so a generator's own `finally`

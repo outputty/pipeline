@@ -229,7 +229,11 @@ subclass survives a `.transform()`/`.context()`/`.buffer()` chain; each level ov
 `createPipeline()` again to carry its OWN extra knobs forward (`ConcurrentPipeline`'s own
 `concurrentOptions()` helper is the one place `maxConcurrency`/`ordered` are listed - `chunkSize`
 dropped out of it (#39), since `.buffer()` is `Pipeline`'s own knob now, not
-`ConcurrentPipelineOptions`' - so `HttpPipeline`/`ClusterPipeline` only add their own field). And a
+`ConcurrentPipelineOptions`' - so `HttpPipeline`/`ClusterPipeline` only add their own field). What
+`createPipeline()` carries is `PipelineState`, declared apart from the exported `PipelineOptions`
+(#90): a caller writes `context`/`contextFactory`, and every carried knob is named once in
+`carriedOptions()` rather than field by field at each call site - which is what stops one being
+dropped, as `mode` and then `bound` each silently were. And a
 stage's identity is its INDEX in `_chunkTransforms` - the table `apply()` already maintains - so a
 dispatching class sends a chunk plus an index, never a function. Every instance runs the same code,
 so index N means the same transform on both sides; a mixed-version fleet breaks that assumption

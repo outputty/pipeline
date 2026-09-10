@@ -1,25 +1,14 @@
 /**
- * Pipeline class - high-level API for composing transformers with data sources.
+ * `Pipeline` - a chain over an input TYPE, holding no data (#90).
  *
- * Python equivalent:
- * ```python
- * class Pipeline[T]:
- *   def __init__(self, *data: Iterable[T], context_manager: IContextManager | None = None):
- *     if len(data) == 0:
- *       raise ValueError("At least one data source must be provided to Pipeline.")
- *     self.data_source = itertools.chain.from_iterable(data) if len(data) > 1 else data[0]
- *     self.processed_data = iter(self.data_source)
- *     self.context_manager = context_manager or SimpleContextManager()
+ * Composed once and RUN by calling it, so one definition serves every input. `.transform()`,
+ * `.apply()`, `.buffer()`, `.reduce()`, `.local()`, `.tap()`, `.context()` and `.branch()` compose;
+ * calling the result hands back a `PipelineResult` (`./result.ts`), which is where every terminal
+ * op lives. Where a stage RUNS is chosen by constructing a class - `ConcurrentPipeline`,
+ * `HttpPipeline`, `ClusterPipeline` (`./pipelines/`) - never by configuring the chain.
  *
- *   def apply(self, transformer) -> "Pipeline[U]": ...
- *   def transform(self, t) -> "Pipeline[U]": ...
- *   def buffer(self, size) -> "Pipeline[T]": ...
- *   def to_list() -> (list, context): ...
- *   def first(n) -> (list, context): ...
- *   def consume() -> context: ...
- *   def each(fn) -> context: ...
- *   def branch(branches) -> (dict, context): ...
- * ```
+ * `new Pipeline<number>().transform((t) => t.map((x) => x * 2))([1, 2, 3]).toArray()` → `[2, 4, 6]`,
+ * with no `await` and no `Promise` created.
  */
 
 import type {
@@ -120,10 +109,15 @@ export type AnyPipeline<U> = Pipeline<U, PipelineMode, any>;
  * `In` is named rather than `any` because a wrapper's constructor INFERS it: with `any` there the
  * wrapper fell back to its own `T`, which is each stage's OUTPUT type, so
  * `new ConcurrentPipeline(numberToString)` typed its input `string` and rejected the `number[]`
- * that ran fine at runtime. `"unset"` is what makes wrapping a `.from()`-bound pipeline a compile
- * error rather than only a runtime throw.
+ * that ran fine at runtime.
+ *
+ * Any Mode, deliberately. It was `"unset"`, to make wrapping a `.from()`-bound pipeline a compile
+ * error rather than a runtime throw - but `.from()` went with this ticket, and the bound left
+ * behind refused a chain holding ONE async callback: `new ConcurrentPipeline(asyncChain, {…})` was
+ * `TS2345`, on the very class that forces `"async"` and therefore exists for exactly that chain.
+ * Boundness is `adopt()`'s check, at runtime, where the runtime fact `_bound` actually lives.
  */
-export type WrappablePipeline<T, In> = Pipeline<T, "unset", In>;
+export type WrappablePipeline<T, In> = Pipeline<T, PipelineMode, In>;
 
 /**
  * One stage recorded on a source-less pipeline, replayed against the bound pipeline once an input
@@ -140,9 +134,9 @@ export type PendingStage = (pipeline: AnyPipeline<any>) => AnyPipeline<any>;
  * The knobs a CALLER writes when constructing a `Pipeline` - both optional, and both about the
  * context manager, which is the only construction-time decision a caller actually makes.
  *
- * Everything else a pipeline carries is `PipelineState` below. The two were ONE exported interface
- * of seventeen fields, fifteen of which repeated "Not intended for direct external use" in their
- * own docstrings - a public surface saying fifteen times over that it was not public.
+ * Everything else a pipeline carries is `PipelineState` below. The two were ONE exported interface,
+ * and most of its fields repeated "Internal: … Not intended for direct external use" in their own
+ * docstrings - a public surface saying over and over that it was not public.
  */
 export interface PipelineOptions {
   /**
@@ -381,10 +375,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   };
 
   /**
-   * Create a new Pipeline from a data source.
+   * Builds a chain over `T`, with no data. `T` is the type it will be CALLED with.
    *
-   * @param data - Sync or async iterable data source
-   * @param options - Optional pipeline configuration
+   * @param options - The caller's own context manager or factory (`PipelineOptions`), plus the
+   *   carried state a copy-on-write call threads through (`PipelineState`), which no caller writes.
    */
   constructor(options?: PipelineConstructorOptions) {
     // A constructor that RETURNS a function is what makes an instance callable (#90). Two halves,
@@ -612,7 +606,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       contextIsDefault: this._contextIsDefault,
       bound: this._bound,
       routeTrail: this._routeTrail,
-      branchStages: this._branchStages,
+      // A COPY, not the map itself: `.branch()` writes into `_branchStages`, and every other
+      // stage method returns a fresh instance rather than mutating one. Shared by reference, one
+      // chain's `.branch()` landed in every ancestor's and sibling's registry, and `branchIndex`
+      // (derived from `.size`) then depended on which sibling was declared first.
+      branchStages: new Map(this._branchStages),
     };
   }
 
@@ -677,7 +675,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `registriesFor("/branch/0/big")` returns the stage table of the `big` arm of the first
    * `.branch()` call, so `/branch/0/big/transform/0` serves that arm's own first stage.
    */
-  registriesFor(trail: string): {
+  protected registriesFor(trail: string): {
     chunkTransforms: ChunkTransform[];
     reduceStages: Map<number, ReduceStage>;
   } | null {
@@ -824,14 +822,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * through (a sealed manager rejecting one key among several) leaves every EARLIER key's write
    * already applied - the same partial-application a caller looping `.set()` calls by hand would
    * get, never rolled back.
-   *
-   * Python equivalent:
-   * ```python
-   * def context(self, ctx: dict[str, Any]) -> "Pipeline[T]":
-   *   for key, value in ctx.items():
-   *     self.context_manager[key] = value
-   *   return Pipeline(self.data_source, context=self.context_manager)
-   * ```
    *
    * @param ctx - Dictionary of context values to merge in
    * @returns A new instance of THIS pipeline's own class, carrying the SAME (now-mutated) context
@@ -1036,8 +1026,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       // call: `new Pipeline<number>().buffer(0)` used to return a pipeline and throw
       // `chunkSize must be at least 1` later, at the drain, in a message that never names
       // `.buffer()`. Every chain is source-less by default now, so that is the ordinary path.
-      if (size < 1) {
-        throw new Error("buffer size must be at least 1");
+      // Non-integer refused as well as `< 1`: the two cutting paths round it differently.
+      // `.buffer(2.5)` accumulated until `length >= 2.5`, so the SOURCE cut at 3, while
+      // `cutChunk`'s re-cut sliced `index + 2.5` and cut at 2 - one call, two boundaries over the
+      // same data, no error.
+      if (!Number.isInteger(size) || size < 1) {
+        throw new Error("buffer size must be a whole number of at least 1");
       }
       const cutsTheSource = this._pendingStages.length === 0;
       return this.defer<T>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {}) as this;

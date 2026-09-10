@@ -7,6 +7,20 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-10 A type parameter outlived its stated reason, and its real one was one level up
+
+`SourcePolicy` was a type parameter on `Pipeline` because - its own docstring said - a subclass's
+`.from()` override had to be a narrowing of the base's. #90 deleted `.from()`. Deleting the
+parameter then failed with nine `TS2416`s, so the docstring's reason was stale but the parameter was
+not dead: `AssignMode<P, …>` was collapsing `JoinMode<M, M2>` to the literal `"async"`, because
+`JoinMode` tested `S` first and so never reduced while `M2` was abstract. Reordering `JoinMode` to
+test `M` first - identical at every concrete instantiation - does the same collapse with no
+parameter to carry, and the deletion then reached zero errors. Two independent review agents both
+proposed a discriminating check (is a dispatching class assignable at `"shape"`?); it answered "no"
+for an unrelated reason and would have stopped the change. The deletion itself was the only honest
+test. Recorded in `.claude/rules/typescript.md`: a multi-arm conditional type is ordered so the
+parameter a caller PINS is tested first.
+
 ## 2026-09-10 Built `.branch()`'s demux against the opposite of #90's own invariant
 
 #90 exists so a synchronous chain creates zero promises, and the same ticket had already shipped

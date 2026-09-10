@@ -11,11 +11,12 @@ export const DEFAULT_CHUNK_SIZE = 1000;
 
 /**
  * Whether a chain runs synchronously, and therefore whether its terminal ops return a value or a
- * `Promise` (#90). `"unset"` is a `Pipeline` built but not yet given a source: `.transform()` refuses
- * it, so a chain cannot be composed before `.from()` decides which engine it runs on.
+ * `Promise` (#90). `"unset"` is the ORDINARY state of a composed chain: nothing about it is async
+ * yet, and either an async callback or an async input decides otherwise later. Composing ahead of
+ * the data is the normal case, so nothing refuses an `"unset"` receiver.
  *
- * `new Pipeline()` is `"unset"`; `.from([1, 2, 3])` makes it `"sync"`; `.from(asyncSource)`, or a
- * single `Promise`-returning callback anywhere in the chain, makes it `"async"`.
+ * `new Pipeline<number>()` is `"unset"`; calling it with an array keeps that, an `AsyncIterable`
+ * widens it, and a single `Promise`-returning callback anywhere in the chain makes it `"async"`.
  */
 export type PipelineMode = "unset" | "sync" | "async";
 

@@ -163,7 +163,7 @@ none of it survived the hand-trim (#745).
   generator or stream reads empty. `Pipeline.drainable(input)` is the one seam between the two
   classes, and each terminal calls it exactly once. `.chunks()` drops empty chunks, which is what
   makes the two engines agree on what a consumer sees.
-- **Mode** - whether a chain runs synchronously, carried in `Pipeline<In, M, P, T>`'s own type
+- **Mode** - whether a chain runs synchronously, carried in `Pipeline<T, M, In>`'s own type
   (#90). `PipelineMode` is `"unset" | "sync" | "async"`. `"unset"` is the ORDINARY state of a
   composed chain: nothing about it is async yet, and either an async callback or an async input
   decides otherwise later. Every terminal on a `PipelineResult` returns
@@ -174,9 +174,14 @@ none of it survived the hand-trim (#745).
   `JoinMode<M, S>` joins the chain's Mode with a stage's, `SeedMode<M>` is what the seed
   `Transformer` inside `.transform()` starts at (`"sync"` for an undecided chain - the intersection
   `M & ("sync" | "async")` that preceded it is `never` for `"unset"`, which made every source-less
-  `.transform()` return `Pipeline<U, never, …>`), and `AssignMode<P, S>` applies the class's own
-  policy on top. `SourcePolicy` (`P`) records what a class does to an input's shape - the
-  dispatching classes are `"async"` whatever their callbacks return. ⚠ Mode is a TYPE fact only:
+  `.transform()` return `Pipeline<U, never, …>`). `JoinMode` tests `M` FIRST, deliberately: a
+  dispatching class pins `M` to the literal `"async"` on its own `extends` clause, so
+  `JoinMode<"async", M2>` reduces even where `M2` is still abstract. Testing `S` first gives the
+  identical answer at every concrete instantiation and leaves the conditional deferred inside a
+  generic scope, which is what made those classes need a whole extra type parameter
+  (`SourcePolicy`/`P`, with an `AssignMode<P, S>` operator) to state what one line now states -
+  both deleted. `SourcePolicy` survives as the RUNTIME value `sourcePolicy()` returns, which
+  `fromSource()` reads to force `"async"`. ⚠ Mode is a TYPE fact only:
   whether an input is BOUND is the runtime field `_bound`, kept separate because a callable chain is
   `"unset"` for its whole life and becomes bound only for the duration of one call. Two
   consequences, both BREAKING: a failure on a sync chain THROWS out of the terminal op instead of
@@ -234,7 +239,7 @@ none of it survived the hand-trim (#745).
   a `.fetch` handler; `ClusterPipeline` adds the worker bootstrap, brought up lazily on the first
   chunk actually dispatched. Each level overrides ONE thing, and the chain is identical in all four.
 - **Stage** - One `.apply()` call, and therefore one `.transform()` call, since `transform()` is
-  `return this.apply(transformer)` (`pipeline.ts:451-454`). A stage's identity is its INDEX in
+  `return this.apply(transformer)`. A stage's identity is its INDEX in
   `_chunkTransforms`, so a dispatching class sends a chunk plus an index and never a function.
   `.transform((t) => t.map(f).filter(g))` is ONE stage; two chained `.transform()` calls are TWO, and
   on a dispatching class that is two network hops. `_chunkTransforms` is `HttpPipeline`/
@@ -272,7 +277,10 @@ none of it survived the hand-trim (#745).
   (`contextForRun()`), so a run's `ctx.set()` reaches the caller only through a manager the caller
   supplied: measured, `new Pipeline<number>().tap(write)([1,2,3])` leaves `.contextManager` at `{}`,
   where the same chain built with `{ context: shared }` leaves `shared` at `{"seen":3}`.
-- **`context` / `contextFactory`** - the two ways a caller supplies a manager (`PipelineOptions`).
+- **`context` / `contextFactory`** - the two ways a caller supplies a manager, and the WHOLE of
+  the exported `PipelineOptions`: everything else a pipeline carries between copy-on-write calls is
+  `PipelineState`, internal, with `PipelineConstructorOptions` the intersection every internal site
+  actually takes.
   `context` is an instance for THIS process, kept by every operation, writes included; `.context()`
   merges into it rather than replacing it. `contextFactory` is how to BUILD one, for a process that
   cannot receive an instance - the constructor calls it ONCE per process, only when `context` is
@@ -293,7 +301,8 @@ none of it survived the hand-trim (#745).
   every arm ran in the orchestrating process however the chain was built. `.when(name, predicate,
   build?)` routes and `.otherwise(name, build?)` is the catch-all, ALWAYS routed last whatever order
   it was written in - a catch-all written first used to swallow every arm below it. `.broadcast()`
-  replaces `{ firstMatch: false }`; router mode is the default, so most callers write neither. ⚠
+  replaces the deleted `BranchOptions.firstMatch`; router mode is the default, so most callers
+  write neither. ⚠
   Under broadcast the catch-all takes EVERY item, not only the unclaimed ones, because broadcast
   means every matching arm and its predicate accepts all of them. An arm naming no pipeline routes
   only and its items pass through unchanged (#87, folded in), and each key's type comes from its OWN

@@ -76,10 +76,13 @@ describe("#90 review - .buffer() refuses an invalid size at the call, not at the
     // input eventually reached: `new Pipeline<number>().buffer(0)` returned a pipeline, and the
     // drain then threw `chunkSize must be at least 1` - a message that never names `.buffer()`.
     // Every chain is source-less by default now, so that is the ordinary path.
-    expect(() => new Pipeline<number>().buffer(0)).toThrow("buffer size must be at least 1");
+    expect(() => new Pipeline<number>().buffer(0)).toThrow("buffer size must be");
     expect(() => new Pipeline<number>().transform((t) => t.map((x) => x)).buffer(-5)).toThrow(
-      "buffer size must be at least 1",
+      "buffer size must be",
     );
+    // A fractional size passed the `< 1` guard and made the two cutting paths disagree: the source
+    // cut at 3 (`length >= 2.5`) where the re-cut sliced at 2 (`index + 2.5`), over the same data.
+    expect(() => new Pipeline<number>().buffer(2.5)).toThrow("whole number");
     expect(() => new Pipeline<number>().buffer(1)).not.toThrow();
   });
 });
@@ -151,6 +154,59 @@ describe("#90 review - an early exit closes the source on both engines", () => {
 
     expect(await chain(source).first(1)).toEqual([0]);
     expect(state.closed).toBe(true);
+  });
+
+  it("closes the source when a FAILED run stops the drain, on both engines", async () => {
+    // The async engine gets this from `for await`, which calls `.return()` when its body throws.
+    // `drainSync`'s pending arm attached only a fulfillment handler, so a rejected chunk left the
+    // manual iterator open - measured, `source finally ran - sync input: false | async: true`,
+    // the same two-engines-disagree class the source-close case above closed for early EXIT.
+    const syncState = { closed: false };
+    const boom = new Pipeline<number>().buffer(1).transform((t) =>
+      t.map(async (x: number) => {
+        if (x === 2) throw new Error("boom");
+        return x;
+      }),
+    );
+
+    await expect(boom(counted(syncState)).toArray()).rejects.toThrow("boom");
+    expect(syncState.closed).toBe(true);
+
+    const asyncState = { closed: false };
+    const asyncSource = (async function* () {
+      try {
+        for (let i = 0; i < 100; i++) yield i;
+      } finally {
+        asyncState.closed = true;
+      }
+    })();
+    await expect(boom(asyncSource).toArray()).rejects.toThrow("boom");
+    expect(asyncState.closed).toBe(true);
+  });
+
+  it("closes the source when a for...of breaks early, without draining the whole chain", () => {
+    // `[Symbol.iterator]` was `toArray()[Symbol.iterator]()`, so a `break` ran the entire chain
+    // first and never closed the source - where `.first(n)` over the same chain stopped early and
+    // did. The sibling `[Symbol.asyncIterator]` was lazy the whole time.
+    const state = { closed: false };
+    let mapped = 0;
+    const chain = new Pipeline<number>().buffer(1).transform((t) =>
+      t.map((x: number) => {
+        mapped++;
+        return x;
+      }),
+    );
+
+    const seen: number[] = [];
+    for (const item of chain(counted(state))) {
+      seen.push(item);
+      if (seen.length === 3) break;
+    }
+
+    expect(seen).toEqual([0, 1, 2]);
+    expect(state.closed).toBe(true);
+    // The whole point: 100 items in the source, only what the loop asked for ran.
+    expect(mapped).toBeLessThan(10);
   });
 
   it("closes the source when the re-cut runs over a pending tail", async () => {
