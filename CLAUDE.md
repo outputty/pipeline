@@ -212,7 +212,15 @@ none of it survived the hand-trim (#745).
   independent accumulators now (#62): `reduceWork()` is still called ONCE, but the closure it returns
   is called `maxConcurrency` times, each its own `share()` view of the one shared chunk stream - on
   `HttpPipeline` that is `maxConcurrency` concurrent duplex
-  POSTs to the SAME `/reduce/<n>`, each with its own accumulator server-side. Each partition's own
+  POSTs to the SAME `/reduce/<n>`, each with its own accumulator server-side. ⚠ Each partition gets
+  its OWN SEED, copied from `initial` with `structuredClone` (#113): handing all of them the one
+  value the caller passed made a mutable seed one accumulator wearing N names, and
+  `.buffer(1).reduce((acc, x) => (acc.push(x), acc), [])` over `[1,2,3,4]` at `maxConcurrency: 2`
+  returned `[[1,2,3,4],[1,2,3,4]]` - the SAME array twice, where two partitions owe `[[1,3],[2,4]]`.
+  A seed that cannot be copied RAISES rather than reverting to the shared object: a class instance
+  is the case to know, since `structuredClone` does not throw on one, it drops the prototype. The
+  caller's own way out is `.local((p) => p.reduce(fn, initial))`, an unpartitioned fold in this
+  process, where nothing is copied at all. Each partition's own
   result flows downstream as an ordinary value - no forced merge, no thrown error, same as a
   non-partitioned reduce's own `emit()` output. A caller who wants ONE final value writes an
   ordinary second reduce as the next stage, `.local((p) => p.reduce(mergeFn, initial))` (#61) - the
