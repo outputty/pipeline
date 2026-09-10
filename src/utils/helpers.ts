@@ -61,3 +61,89 @@ export async function dropOrRethrow(
   if (!runHandler) throw error;
   await runHandler(error, ctx);
 }
+
+/**
+ * True when `value` is a thenable - the one place a "did this stay synchronous?" decision is made
+ * (#90). Structural, not `instanceof Promise`: a caller's own thenable, a `PromiseLike` from another
+ * realm and a native `Promise` all have to widen the chain the same way.
+ *
+ * `isThenable(1)` → `false`. `isThenable(Promise.resolve(1))` → `true`.
+ */
+export function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as PromiseLike<T>).then === "function"
+  );
+}
+
+/**
+ * Runs `next` on `value`, creating NO `Promise` when `value` is not already one (#90) - the
+ * replacement for every `await` on a composition seam, so a chain whose callbacks all return plain
+ * values runs start to finish without a microtask. When `value` IS a thenable the call defers
+ * through `.then`, which is the chain widening to async exactly where the first async link sits.
+ *
+ * `chain(2, (x) => x * 2)` → `4`, no `Promise` created. `chain(Promise.resolve(2), (x) => x * 2)` →
+ * a `Promise` of `4`.
+ */
+export function chain<A, B>(
+  value: A | Promise<A>,
+  next: (resolved: A) => B | Promise<B>,
+): B | Promise<B> {
+  // `Promise.resolve` on an already-native `Promise` returns that same instance, so the async arm
+  // allocates nothing extra; it is here to normalize a caller's own non-native thenable.
+  return isThenable(value) ? Promise.resolve(value).then(next) : next(value);
+}
+
+/**
+ * Collects per-item results into one array, staying synchronous when NO item is pending (#90) -
+ * `Promise.all`'s replacement wherever a chunk's items were mapped one at a time. `Promise.all`
+ * always allocates and always defers, even over an array of plain values, which is what made a
+ * fully-synchronous `.map()` cost a microtask per chunk before this.
+ *
+ * `settleMaybe([1, 2])` → `[1, 2]`, no `Promise` created. `settleMaybe([1, Promise.resolve(2)])` →
+ * a `Promise` of `[1, 2]`.
+ */
+export function settleMaybe<T>(values: (T | PromiseLike<T>)[]): T[] | Promise<T[]> {
+  return values.some((value) => isThenable(value)) ? Promise.all(values) : (values as T[]);
+}
+
+/**
+ * Runs `run` over every item of `chunk` and settles the results, staying synchronous when none is
+ * pending (#90) - the ONE per-item map every element-wise link goes through, rather than a bare
+ * `chunk.map(...)` at each site.
+ *
+ * The bare form is unsafe here: `run` is a caller's own callback, so it can throw SYNCHRONOUSLY for
+ * item `i` after items `0..i-1` already returned pending promises. `Array.prototype.map` abandons
+ * the array at that point, leaving those promises with no rejection handler ever attached - one of
+ * them rejecting then crashes the process under Node's default unhandled-rejection policy. Before
+ * #90 the per-item callback was `async`, so a throw became a rejection `Promise.all` always handled;
+ * it cannot be now, because that `async` wrapper is exactly what made a synchronous chain allocate.
+ * This loop attaches a throwaway `.catch` to whatever was already created, then rethrows.
+ *
+ * `mapSettle([1, 2], (x) => x * 2)` → `[2, 4]`, no `Promise` created.
+ */
+export function mapSettle<T, R>(chunk: T[], run: (item: T) => R | Promise<R>): R[] | Promise<R[]> {
+  const results: (R | Promise<R>)[] = [];
+  try {
+    for (const item of chunk) {
+      results.push(run(item));
+    }
+  } catch (error) {
+    disarm(results);
+    throw error;
+  }
+  return settleMaybe(results);
+}
+
+/**
+ * Attaches a throwaway rejection handler to every pending value in `created` (#90) - what
+ * `mapSettle` above owes the siblings of an item whose callback threw synchronously, since nothing
+ * downstream will ever await them. Its own function to keep `mapSettle`'s `catch` at this repo's
+ * `max-depth: 2`.
+ */
+function disarm<R>(created: (R | Promise<R>)[]): void {
+  for (const value of created) {
+    if (isThenable(value)) void Promise.resolve(value).catch(() => {});
+  }
+}

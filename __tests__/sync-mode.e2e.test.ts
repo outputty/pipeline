@@ -23,6 +23,9 @@ import { describe, it, expect } from "vitest";
 import { createHook } from "node:async_hooks";
 import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
+import { SimpleContextManager } from "@src/context/simple";
+import { DROP } from "@src/types";
+import { buildSyncChunkGenerator, flattenSyncChunks } from "@src/utils/chunk";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
 import { ClusterPipeline } from "@src/pipelines/cluster";
@@ -61,6 +64,139 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     expect(countPromises(() => Promise.resolve().then(() => {}))).toBeGreaterThan(0);
     expect(countPromises(() => void (async () => 1)())).toBeGreaterThan(0);
     expect(countPromises(() => [1, 2, 3].map((x) => x * 2))).toBe(0);
+  });
+
+  it("L2: a Transformer whose callbacks are all synchronous returns a plain array", () => {
+    // L2's own observable, live from the layer that builds it. Without it the layer is invisible:
+    // every pre-existing test awaits its result, and `await` on a plain array is a no-op, so the
+    // whole suite passes identically whether the links create a Promise or not.
+    const t = new Transformer<number, number>({ transform: (chunk) => chunk })
+      .map((x) => x * 2)
+      .filter((x) => x > 4);
+
+    const out = t.runnable()([1, 2, 3, 4, 5], new SimpleContextManager());
+
+    expect(Array.isArray(out)).toBe(true);
+    expect(out).toEqual([6, 8, 10]);
+    expect(countPromises(() => t.runnable()([1, 2, 3, 4, 5], new SimpleContextManager()))).toBe(0);
+  });
+
+  it("L2: one async callback makes that same Transformer return a Promise", async () => {
+    // The negative control for the test above: flip one callback and the plain-array claim must
+    // stop holding, or the assertion was never reading what it says it reads.
+    const t = new Transformer<number, number>({ transform: (chunk) => chunk })
+      .map(async (x) => x * 2)
+      .filter((x) => x > 4);
+
+    const out = t.runnable()([1, 2, 3, 4, 5], new SimpleContextManager());
+
+    expect(Array.isArray(out)).toBe(false);
+    expect(await out).toEqual([6, 8, 10]);
+  });
+
+  it("L2: .onError() and .reduce() both keep a synchronous chain synchronous", () => {
+    // The two links whose recovery and fold steps were `async` before L2 - the paths Done-when 8's
+    // `.onError(h)` and any in-chain `.reduce()` would otherwise widen on their own.
+    const recovered = new Transformer<string, string>({ transform: (chunk) => chunk })
+      .onError(() => DROP)
+      .map((s) => {
+        const n = parseInt(s, 10);
+        if (isNaN(n)) throw new Error(`bad: ${s}`);
+        return n;
+      });
+
+    const recoveredOut = recovered.runnable()(["a", "3"], new SimpleContextManager());
+    expect(Array.isArray(recoveredOut)).toBe(true);
+    expect(recoveredOut).toEqual([3]);
+
+    const folded = new Transformer<number, number>({ transform: (chunk) => chunk }).reduce(
+      (acc, x) => acc + x,
+      0,
+    );
+
+    const foldedOut = folded.runnable()([1, 2, 3], new SimpleContextManager());
+    expect(Array.isArray(foldedOut)).toBe(true);
+    expect(foldedOut).toEqual([6]);
+  });
+
+  it("L2: a large synchronous fold and a long synchronous loop do not overflow the stack", () => {
+    // Both paths replaced a real loop with per-step recursion at first. Measured on that draft: a
+    // 5000-item fold and a 4000-iteration loop each threw `RangeError: Maximum call stack size
+    // exceeded`, where the pre-#90 code handled 20 000 of each. The sizes below sit above those
+    // ceilings, so this test fails outright if the trampolines are ever undone.
+    const items = Array.from({ length: 20000 }, (_x, i) => i + 1);
+
+    const folded = new Transformer<number, number>({ transform: (chunk) => chunk }).reduce(
+      (acc, x) => acc + x,
+      0,
+    );
+    expect(folded.runnable()(items, new SimpleContextManager())).toEqual([200010000]);
+
+    const looped = new Transformer<number, number>({ transform: (chunk) => chunk }).loop(
+      new Transformer<number, number>({ transform: (chunk) => chunk }).map((x) => x + 1),
+      (chunk) => chunk[0] < 20000,
+    );
+    expect(looped.runnable()([0], new SimpleContextManager())).toEqual([20000]);
+  });
+
+  it("L2: a synchronously-throwing row handler leaves no unhandled rejection behind", async () => {
+    // A user callback can throw SYNCHRONOUSLY for one item after an earlier item in the same chunk
+    // already returned a pending promise. `Array.prototype.map` abandons the array there, and that
+    // earlier promise would never get a rejection handler - fatal under Node's default policy.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    const t = new Transformer<number, number>({ transform: (chunk) => chunk })
+      .onError(() => {
+        throw new Error("handler blew up");
+      })
+      .map((x) => {
+        if (x === 1) return Promise.reject(new Error("slow failure"));
+        if (x === 2) throw new Error("fast failure");
+        return x;
+      });
+
+    expect(() => t.runnable()([1, 2, 3], new SimpleContextManager())).toThrow("handler blew up");
+
+    // One turn of the event loop is enough for an abandoned rejection to surface.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    process.off("unhandledRejection", onUnhandled);
+
+    expect(unhandled).toEqual([]);
+  });
+
+  it("L2: a row handler that returns an array replaces the row, never spreads into it", () => {
+    // `.flatMap()`'s SUCCESS is already an array, so telling success from recovery by sniffing
+    // `Array.isArray` puts a handler's own array into the output flattened - wrong for any item
+    // type that is itself an array.
+    const t = new Transformer<number, number[]>({
+      transform: (chunk) => chunk.map((x) => [x]),
+    })
+      .onError(() => [99, 98])
+      .flatMap((pair) => {
+        if (pair[0] === 2) throw new Error("boom");
+        return [pair, pair];
+      });
+
+    expect(t.runnable()([1, 2, 3], new SimpleContextManager())).toEqual([
+      [1],
+      [1],
+      [99, 98],
+      [3],
+      [3],
+    ]);
+  });
+
+  it("L2: the sync chunk utils cut and flatten the same way their async counterparts do", () => {
+    expect([...buildSyncChunkGenerator<number>(3)([1, 2, 3, 4, 5, 6, 7])]).toEqual([
+      [1, 2, 3],
+      [4, 5, 6],
+      [7],
+    ]);
+    expect([...flattenSyncChunks([[1, 2], [3]])]).toEqual([1, 2, 3]);
+    expect(() => buildSyncChunkGenerator<number>(0)).toThrow("chunkSize must be at least 1");
+    expect(countPromises(() => [...buildSyncChunkGenerator<number>(2)([1, 2, 3])])).toBe(0);
   });
 
   it.fails("Done-when 1: a fully sync chain returns number[] with no await", () => {
