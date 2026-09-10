@@ -1,6 +1,7 @@
 /**
- * Small, repeated test-only utilities that touch neither HTTP nor subprocesses (#133) -
- * `countPromises` (3 byte-identical copies before this: `sync-mode`/`wrapping`/`callable`),
+ * Small, in-process test-only utilities with no shared theme beyond that (#133) - each was its own
+ * repeated copy before landing here, not a family: `countPromises` (4 byte-identical copies:
+ * `sync-mode`/`wrapping`/`callable`, moved here, plus `sync-mode`'s own missed one folded in later),
  * `chunksOf` (`callable.e2e.test.ts`'s own definition, used wherever a case wants the whole chunk
  * stream rather than items), `parseStrict` (3 byte-identical copies: `pipeline`/`transforms`/
  * `pipelines`), `closingSource`/`closingAsyncSource` (5 near-duplicate inline generators across

@@ -26,7 +26,14 @@ export class LoggingContext extends SimpleContextManager {
 
 /** Throws on `.set()` for a key outside its initial shape - proves a manager that REFUSES a write
  * propagates the error instead of being silently bypassed by a copy-into-`SimpleContextManager`
- * step that never calls the caller's own `.set()` at all. */
+ * step that never calls the caller's own `.set()` at all.
+ *
+ * `allowedKeys` tracks its own key set rather than testing `key in <the base's own store>`, unlike
+ * the hand-rolled version this replaces: `SimpleContextManager`'s own store field is `private`, so
+ * a subclass cannot see it at all, only call through `get`/`set`. A side effect worth naming:
+ * `allowedKeys.has(key)` checks OWN keys only, where the old `in` check also passed for anything on
+ * `Object.prototype` (`toString`, `constructor`) - strictly narrower, and strictly correct for a
+ * class whose entire point is refusing an unrecognized key. */
 export class SealedContext extends SimpleContextManager {
   private readonly allowedKeys: ReadonlySet<string>;
 

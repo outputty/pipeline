@@ -19,9 +19,10 @@ import {
   runFixture,
   withServer,
   expectFixtureOk,
+  lastJsonLine,
   runFixtureJson,
 } from "./helpers/fixtures";
-import { parseStrict, closingAsyncSource } from "./helpers/sequences";
+import { parseStrict, closingAsyncSource, chunksOf } from "./helpers/sequences";
 
 /** The "another instance" side of an `HttpPipeline` chain: an empty-source pipeline whose only
  * job is to hold the SAME stage definitions `builder` describes, so its `.fetch` can serve them. */
@@ -45,8 +46,7 @@ describe("#17 ClusterPipeline canonical program (Done-when 1, 3)", () => {
       // Done-when 1: the canonical result, the LAST line - every worker also re-executes the
       // entry module and prints ITS OWN empty placeholder first (architecture.md's own documented
       // constraint: "a violation shows as duplicated output, never an error").
-      const lines = result.stdout.trim().split("\n");
-      expect(lines.at(-1)).toBe("[6,8,10]");
+      expect(lastJsonLine<number[]>(result)).toEqual([6, 8, 10]);
     },
     FIXTURE_TIMEOUT,
   );
@@ -267,10 +267,7 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
     const p = new ConcurrentPipeline<number>()
       .transform((t) => t.map((x: number) => x * 2))
       .buffer(10);
-    const chunks: number[][] = [];
-    for await (const chunk of p([1, 2, 3, 4, 5]).chunks()) {
-      chunks.push(chunk);
-    }
+    const chunks = await chunksOf(p([1, 2, 3, 4, 5]));
     expect(chunks.flat()).toEqual([2, 4, 6, 8, 10]);
   });
 });

@@ -4,10 +4,10 @@
  *
  * Covers #90's Done-when 13, 14 and 18-24, plus the L11 review findings each case below reproduces
  * before its own fix. Moved here from `wrapping.e2e.test.ts` (#133), every `describe`/`it` and every
- * `expect` unchanged; later #133 passes then folded this file's own `servedBy`/inline path-recording
- * onto the shared `withTrackedServer`, and its `runFixture`/`expectFixtureOk` pairs onto
- * `runFixtureJson`, on top of the shared `Order`/`ordersA`/`withVat`/`countPromises` imports
- * (replacing in-file shadowed re-declarations of the identical values).
+ * `expect` unchanged; later #133 passes then folded this file's own inline path-recording onto the
+ * shared `withTrackedServer`, and its `runFixture`/`expectFixtureOk` pairs onto `runFixtureJson`, on
+ * top of the shared `Order`/`ordersA`/`withVat`/`countPromises` imports (replacing in-file shadowed
+ * re-declarations of the identical values).
  */
 
 import { describe, it, expect } from "vitest";
@@ -193,15 +193,6 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
 });
 
 describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", () => {
-  /** Every path a mounted `.fetch` was asked for while `use` ran. */
-  async function servedBy<R>(
-    chain: Pipeline<any, any, any>,
-    use: (url: string) => Promise<R>,
-  ): Promise<{ value: R; paths: string[] }> {
-    const worker = new HttpPipeline(chain as never, { url: "" });
-    return withTrackedServer((request) => worker.fetch(request), use);
-  }
-
   it(
     "dispatches an arm's own stages, where the Transformer form ran them here (Done-when 18)",
     async () => {
@@ -244,16 +235,20 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
   it(
     "runs an arm in the orchestrating process when its builder pins it (Done-when 19)",
     async () => {
-      const { value, paths } = await servedBy(withVat, async (url) => {
-        const live = new HttpPipeline(withVat, { url });
-        return live.branch((b) =>
-          b.when(
-            "eu",
-            (o) => o.region === "eu",
-            (q) => q.local((r) => r.transform((t) => t.map((o) => o.id))),
-          ),
-        )(ordersA);
-      });
+      const worker = new HttpPipeline(withVat, { url: "" });
+      const { value, paths } = await withTrackedServer(
+        (request) => worker.fetch(request),
+        async (url) => {
+          const live = new HttpPipeline(withVat, { url });
+          return live.branch((b) =>
+            b.when(
+              "eu",
+              (o) => o.region === "eu",
+              (q) => q.local((r) => r.transform((t) => t.map((o) => o.id))),
+            ),
+          )(ordersA);
+        },
+      );
 
       expect(value).toEqual({ eu: [1, 3] });
       // Only the parent's stage crossed: the arm's own transform was pinned by `.local()`.
@@ -473,8 +468,8 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
 
   it("refuses an arm name that could not survive a route", () => {
     // The name goes straight into `/branch/<i>/<name>/transform/<n>`, and `.fetch()` matches an
-    // ENCODED pathname - so `.when("big ordersA", …)` dispatched `/branch/0/big%20orders/…` and 404'd.
-    expect(() => withVat.branch((b) => b.when("big ordersA", () => true))).toThrow(
+    // ENCODED pathname - so `.when("big orders", …)` dispatched `/branch/0/big%20orders/…` and 404'd.
+    expect(() => withVat.branch((b) => b.when("big orders", () => true))).toThrow(
       /not usable in a route/,
     );
     expect(() => withVat.branch((b) => b.when("a/b", () => true))).toThrow(/not usable in a route/);

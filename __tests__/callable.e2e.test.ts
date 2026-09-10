@@ -371,14 +371,12 @@ describe("L8 review findings, each reproduced before it was fixed", () => {
       .transform((t) => t.map(async (x) => x))
       .reduce((a: number, x: number) => a + x, 0);
 
-    const viaSync: number[][] = [];
-    for await (const chunk of folded([1, 2, 3, 4, 5]).chunks()) viaSync.push(chunk);
+    const viaSync = await chunksOf(folded([1, 2, 3, 4, 5]));
 
     async function* stream(): AsyncGenerator<number> {
       for (const x of [1, 2, 3, 4, 5]) yield x;
     }
-    const viaAsync: number[][] = [];
-    for await (const chunk of folded(stream()).chunks()) viaAsync.push(chunk);
+    const viaAsync = await chunksOf(folded(stream()));
 
     expect(viaSync).toEqual(viaAsync);
     expect(viaSync).toEqual([[15]]);

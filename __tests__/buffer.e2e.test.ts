@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Transformer } from "@src/transformer";
-import { closingSource, closingAsyncSource } from "./helpers/sequences";
+import { closingSource, closingAsyncSource, chunksOf } from "./helpers/sequences";
 
 /** Records each chunk `.apply()` hands to a stage, before that stage's own transform runs -
  * a chunk-level probe, not a per-item one (`.tap(fn)` runs per item and can't see boundaries). */
@@ -90,21 +90,10 @@ describe("#90 review - .buffer() refuses an invalid size at the call, not at the
 
 describe("#39 two .buffer() calls back to back collapse to the last one (Done-when 3)", () => {
   it("matches .buffer(4) alone over [1..9]", async () => {
-    const chained: number[][] = [];
-    for await (const chunk of new Pipeline<number>()
-      .buffer(2)
-      .buffer(3)
-      .buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9])
-      .chunks()) {
-      chained.push(chunk);
-    }
-
-    const direct: number[][] = [];
-    for await (const chunk of new Pipeline<number>()
-      .buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9])
-      .chunks()) {
-      direct.push(chunk);
-    }
+    const chained = await chunksOf(
+      new Pipeline<number>().buffer(2).buffer(3).buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9]),
+    );
+    const direct = await chunksOf(new Pipeline<number>().buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9]));
 
     expect(chained).toEqual([[1, 2, 3, 4], [5, 6, 7, 8], [9]]);
     expect(direct).toEqual(chained);

@@ -22,7 +22,7 @@ import { buildSyncChunkGenerator } from "@src/utils/chunk";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
 import { ClusterPipeline } from "@src/pipelines/cluster";
-import { countPromises } from "./helpers/sequences";
+import { countPromises, parseStrict } from "./helpers/sequences";
 
 describe("#90 - a synchronous chain never creates a Promise", () => {
   it("countPromises itself counts real async work and ignores sync work", () => {
@@ -66,11 +66,7 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     // `.onError(h)` and any in-chain `.reduce()` would otherwise widen on their own.
     const recovered = new Transformer<string, string>({ transform: (chunk) => chunk })
       .onError(() => DROP)
-      .map((s) => {
-        const n = parseInt(s, 10);
-        if (isNaN(n)) throw new Error(`bad: ${s}`);
-        return n;
-      });
+      .map((s) => parseStrict(s));
 
     const recoveredOut = recovered.runnable()(["a", "3"], new SimpleContextManager());
     expect(Array.isArray(recoveredOut)).toBe(true);
