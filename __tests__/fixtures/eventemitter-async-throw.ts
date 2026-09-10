@@ -2,9 +2,9 @@
  * #124 Done-when 6 - an async Worker that throws AFTER its own `await` (never calling `reject()`
  * explicitly) must reject the chunk's dispatch the same as a synchronous throw or an explicit
  * `reject()` call: no hang, no unhandled rejection. Runs as its own process
- * (`process.on("unhandledRejection", …)`), the same reason `concurrent-unhandled.ts` (#17) does -
- * Vitest installs its own handler and would report a leak as a test-runner error, never a value
- * this script can observe.
+ * (`unhandled-rejection.ts`'s own `process.on("unhandledRejection", …)`), the same reason
+ * `concurrent-unhandled.ts` (#17) does - Vitest installs its own handler and would report a leak as
+ * a test-runner error, never a value this script can observe.
  *
  * The composed function (the chain's own `.transform()`) is deliberately SLOWER (30ms) than the
  * external Worker's throw-after-await (5ms), so the external Worker's rejection is what decides the
@@ -13,19 +13,10 @@
  * the SLOWER, losing composed-function promise never leaks as unhandled once it resolves later.
  */
 import { EventEmitterPipeline } from "../../src";
-
-const unhandled: string[] = [];
-process.on("unhandledRejection", (reason) => {
-  unhandled.push(String((reason as Error)?.message ?? reason));
-});
+import { drainUnhandledRejections, errorMessage, runFixtureMain } from "./unhandled-rejection";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function settle(): Promise<void> {
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 60));
 }
 
 async function main(): Promise<void> {
@@ -46,14 +37,11 @@ async function main(): Promise<void> {
   try {
     await pipeline([1, 2, 3]).toArray();
   } catch (error) {
-    rejection = error instanceof Error ? error.message : String(error);
+    rejection = errorMessage(error);
   }
 
-  await settle();
+  const unhandled = await drainUnhandledRejections(60);
   console.log(JSON.stringify({ rejection, unhandled }));
 }
 
-main().catch((error: unknown) => {
-  console.log(`FATAL ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
-});
+runFixtureMain(main);

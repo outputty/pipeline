@@ -1,17 +1,26 @@
 /**
- * `EventEmitterPipeline` (#124) — STUB. Real signatures. `createPipeline` (the emitter/registered-
- * stages knobs) and every pure type-narrowing override (`transform`/`apply`/`local`, each an
- * unchanged `super.X(...)` delegation, the same shape `HttpPipeline`/`ClusterPipeline` use) are real
- * from here, since none of them carries any dispatch logic of their own. Only `stageWork` (the
- * emitter-based dispatch) and `drainable` (`pipeline:end`) throw - L2 fills those two in, and
- * extends `apply`'s own delegation with the `stage:<n>:end` wrap.
+ * `EventEmitterPipeline` (#124) — a fourth `Pipeline` dispatch mode: each chunk of a stage handed to
+ * whichever Worker functions are registered on `pipeline.emitter`, a `node:events`-shaped
+ * `EventEmitter`, instead of POSTed over HTTP or sent to another process. `stageWork()` is the only
+ * dispatch override - `ConcurrentPipeline.apply()`'s own fan-out (`fanOutOrdered`/`fanOutUnordered`,
+ * `maxConcurrency`, `ordered`) is inherited UNCHANGED. `apply()` and `drainable()` are each
+ * overridden a second time, on top of that, purely to emit `stage:<n>:end`/`pipeline:end`.
+ *
+ * `new EventEmitterPipeline<number>().transform((t) => t.map((x) => x * 2))([1, 2, 3]).toArray()` →
+ * `[2, 4, 6]`, the composed function alone a complete Worker.
  */
 
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
-import type { Pipeline, PipelineConstructorOptions, PipelineSource } from "@src/pipeline";
+import { Pipeline } from "@src/pipeline";
+import type { PipelineConstructorOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import type { IContextManager, InternalTransformer, PipelineMode } from "@src/types";
+import type {
+  IContextManager,
+  InternalTransformer,
+  PipelineMode,
+  ReduceFunction,
+} from "@src/types";
 import type { MaybeAsyncChunks } from "@src/utils/chunk";
 import { EventEmitter } from "node:events";
 
@@ -30,6 +39,19 @@ export interface PipelineEmitter {
   emit(event: string, ...args: unknown[]): unknown;
 }
 
+/** `options.emitter` is a trust-boundary value - a caller's own compatible emitter, not necessarily
+ * `node:events`' own - so a missing method fails HERE, at construction, naming what is missing,
+ * rather than surfacing later as a generic `TypeError` deep inside `stageWork()`'s dispatch closure
+ * (this repo's own Fail Loud rule: "External data missing an expected field fails at the parse"). */
+function assertPipelineEmitter(candidate: PipelineEmitter): void {
+  const required = ["on", "off", "listeners", "listenerCount", "emit"] as const;
+  for (const method of required) {
+    if (typeof candidate[method] !== "function") {
+      throw new Error(`options.emitter is missing '${method}()' - it must satisfy PipelineEmitter`);
+    }
+  }
+}
+
 /** Construction-time knobs for `EventEmitterPipeline` - `ConcurrentPipelineOptions` (inherited
  * unchanged) plus the emitter a caller may already hold; omitted, a fresh `node:events`
  * `EventEmitter` is built. */
@@ -41,16 +63,6 @@ export type EventEmitterPipelineOptions = { emitter?: PipelineEmitter } & Concur
 type EventEmitterPipelineConstructorOptions = EventEmitterPipelineOptions &
   PipelineConstructorOptions & { registeredStages?: Set<string> };
 
-/**
- * Each chunk of a stage handed to whichever Worker functions are registered on `pipeline.emitter`,
- * a `node:events`-shaped `EventEmitter` (#124). The chain's own composed function auto-registers as
- * a stage's first Worker, once per stage index; any number of extra Workers may register afterward
- * from anywhere in the process, and every one of them runs on every chunk - whichever settles
- * first, `respond()` or `reject()`, decides the chunk.
- *
- * `new EventEmitterPipeline<number>().transform((t) => t.map((x) => x * 2))([1, 2, 3]).toArray()` →
- * `[2, 4, 6]` (L2), the composed function alone a complete worker.
- */
 export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   readonly emitter: PipelineEmitter;
   /** Event names already carrying the composed function's own registration - keyed by name, not by
@@ -59,9 +71,26 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * `createPipeline()` (below), never copied - the same object the ORIGINAL, unbound pipeline holds. */
   protected _registeredStages: Set<string>;
 
-  constructor(options?: EventEmitterPipelineConstructorOptions) {
+  /** Wraps a chain built elsewhere, dispatching its stages through the emitter (#90's own
+   * wrapping-constructor pattern, `HttpPipeline`/`ClusterPipeline` share it) - the WORKER and the
+   * TRIGGER can then share one definition. */
+  constructor(pipeline: WrappablePipeline<T, In>, options?: EventEmitterPipelineOptions);
+  constructor(options?: EventEmitterPipelineConstructorOptions);
+  constructor(
+    first?: WrappablePipeline<T, In> | EventEmitterPipelineConstructorOptions,
+    second?: EventEmitterPipelineOptions,
+  ) {
+    const options = Pipeline.wrapping<EventEmitterPipelineConstructorOptions>(first, second);
     super(options);
     this.emitter = options?.emitter ?? new EventEmitter();
+    // `registeredStages` is only ever set by `createPipeline()` (below), never by a caller - its
+    // presence is what tells apart a DERIVED instance (already validated once, at the ORIGINAL
+    // caller-facing construction this chain started from) from that original construction itself,
+    // so a long chain re-validates the identical, unchanged `emitter` object exactly once rather
+    // than once per `.transform()`/`.buffer()`/`.context()` call.
+    if (!options?.registeredStages) {
+      assertPipelineEmitter(this.emitter);
+    }
     this._registeredStages = options?.registeredStages ?? new Set();
   }
 
@@ -100,14 +129,27 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   }
 
   /**
-   * Re-declared ONLY to narrow the static return type - `ConcurrentPipeline.apply()`'s own fan-out
-   * runs unchanged via `super`, which in turn calls `this.stageWork()` polymorphically. L2 extends
-   * this same delegation with the `stage:<n>:end` wrap; until `stageWork()` is filled in, calling
-   * this on a BOUND pipeline throws from there, and composing ahead of an input (the ordinary case)
-   * works today, exactly as it will once L2 lands.
+   * Narrows the static return type, same as `transform()` above, AND wraps the dispatched stage's
+   * own output chunk stream so `stage:<n>:end` fires once, after every chunk that stage's fan-out
+   * produced has been yielded (Done-when 9, 10). `stageIndex` is read OFF THE RESULT
+   * (`dispatched._chunkTransforms.length - 1`, the slot `super.apply()` just appended), never
+   * re-derived by independently repeating `ConcurrentPipeline.apply()`'s own internal computation -
+   * so this stays correct even if that computation ever changes, with nothing to keep in sync by
+   * hand.
+   *
+   * A still-deferred result (no source bound yet) is returned unwrapped: `super.apply()` itself
+   * only RECORDED this call, to replay later against a bound instance - where this method runs
+   * again, and wraps for real.
    */
   override apply<U>(transformer: Transformer<T, U, "sync" | "async">): EventEmitterPipeline<U, In> {
-    return super.apply(transformer) as unknown as EventEmitterPipeline<U, In>;
+    const dispatched = super.apply(transformer) as EventEmitterPipeline<U, In>;
+    if (dispatched.isDeferred()) return dispatched;
+
+    const emitter = this.emitter;
+    const eventName = `stage:${dispatched._chunkTransforms.length - 1}`;
+    const source = dispatched._chunks;
+    dispatched._chunks = withEndSignal(source, () => emitSafely(emitter, `${eventName}:end`));
+    return dispatched;
   }
 
   /**
@@ -122,19 +164,176 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     return super.local(build) as unknown as EventEmitterPipeline<U, In>;
   }
 
-  protected override stageWork<U>(
-    _transformer: Transformer<T, U, "sync" | "async">,
-    _stageIndex: number,
-  ): InternalTransformer<T, U> {
-    throw new Error("EventEmitterPipeline.stageWork: not implemented (#124 L2)");
+  /**
+   * Re-declared ONLY to narrow the static return type, the same reason as `transform()`/`local()`
+   * above - `.reduce()` dispatch is INHERITED UNCHANGED from `ConcurrentPipeline` (#124's own Settle
+   * first: it folds in-process, with no emitter involvement, silently different from every
+   * `.transform()` stage - left that way here by decision, not an oversight).
+   */
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): EventEmitterPipeline<U, In> {
+    return super.reduce(fn, initial) as unknown as EventEmitterPipeline<U, In>;
   }
 
-  override drainable(_input: PipelineSource<In>): {
+  /**
+   * Registers the composed function as `stage:<n>`'s own first Worker, once per stage index -
+   * `_registeredStages` (a `Set`, carried BY REFERENCE through `createPipeline()`) is what makes
+   * this a once-EVER registration rather than once per bound call, since `stageWork()` itself
+   * replays on every call (Done-when 3). Dispatch reads `emitter.listeners(eventName)` itself and
+   * calls each directly INSIDE a `try`, wrapped in `Promise.resolve(...).catch(...)`, never
+   * `emitter.emit()` - `emit()` cannot catch a Worker's throw after its own `await` (Done-when 6),
+   * and the `try` is what stops a Worker's SYNCHRONOUS throw aborting the loop before every later
+   * Worker has had its turn. Every registered Worker runs on every chunk; the first to SETTLE,
+   * `respond()` or `reject()`, decides it (Done-when 4) - a native `Promise`'s own idempotence makes
+   * every later settle on the same dispatch a no-op, guarded again here (`settled`) so the LIFECYCLE
+   * events stay exactly-once too. No listener at all rejects immediately, naming the stage
+   * (Done-when 7).
+   *
+   * `stageWork(transformer, 0)` returns a function that, called with `([1,2], ctx)`, emits
+   * `stage:0:dispatched`, runs every registered Worker, and settles with whichever responds or
+   * rejects first.
+   */
+  protected override stageWork<U>(
+    transformer: Transformer<T, U, "sync" | "async">,
+    stageIndex: number,
+  ): InternalTransformer<T, U> {
+    const eventName = `stage:${stageIndex}`;
+    if (!this._registeredStages.has(eventName)) {
+      const runnable = transformer.runnable();
+      // A synchronous throw here (no Transformer.onError() row handler registered) is caught by
+      // the dispatch loop's own try/catch below, the same as any external Worker's - this listener
+      // needs no guard of its own.
+      this.emitter.on(eventName, (event: WorkEvent<T, U>) => {
+        Promise.resolve(runnable(event.chunk, event.ctx)).then(event.respond, event.reject);
+      });
+      this._registeredStages.add(eventName);
+    }
+
+    const emitter = this.emitter;
+    // Computed once per stage (not once per chunk) - stageWork() itself already replays on every
+    // bound call, but the string never varies across a single such call's own dispatches.
+    const dispatchedEvent = `${eventName}:dispatched`;
+    const doneEvent = `${eventName}:done`;
+    const errorEvent = `${eventName}:error`;
+    return (chunk, ctx) =>
+      new Promise<U[]>((resolve, reject) => {
+        // Every lifecycle emit, `:dispatched` included, goes through `emitSafely` - a throwing
+        // observer on ANY of them surfaces as its own separate uncaught exception, never silently
+        // absorbed as if it were a Worker's own failure and never masking a real one.
+        emitSafely(emitter, dispatchedEvent, { chunk, ctx });
+
+        // ONE settle path for both outcomes - settles the REAL dispatch first, unconditionally,
+        // THEN emits the matching lifecycle event, so a throwing `:done`/`:error` listener can
+        // never leave this Promise hanging, only ever surface as its own separate, later failure.
+        let settled = false;
+        const settle = (
+          outcome: { ok: true; value: U[] } | { ok: false; error: unknown },
+        ): void => {
+          if (settled) return;
+          settled = true;
+          if (outcome.ok) {
+            resolve(outcome.value);
+            emitSafely(emitter, doneEvent, { chunk: outcome.value, ctx });
+          } else {
+            reject(
+              outcome.error instanceof Error ? outcome.error : new Error(String(outcome.error)),
+            );
+            emitSafely(emitter, errorEvent, { error: outcome.error, ctx });
+          }
+        };
+        const respond = (value: U[]): void => settle({ ok: true, value });
+        const doReject = (error: unknown): void => settle({ ok: false, error });
+
+        const listeners = emitter.listeners(eventName);
+        if (listeners.length === 0) {
+          doReject(new Error(`no worker registered on stage ${stageIndex} (${eventName})`));
+          return;
+        }
+        // One event object for every listener on this dispatch - none of its fields vary per
+        // listener, so building it once outside the loop saves a redundant allocation per Worker.
+        const event: WorkEvent<T, U> = { chunk, ctx, respond, reject: doReject };
+        for (const fn of listeners) {
+          try {
+            Promise.resolve((fn as (event: WorkEvent<T, U>) => unknown)(event)).catch(doReject);
+          } catch (error) {
+            // The Worker threw SYNCHRONOUSLY, before Promise.resolve ever wrapped it - caught here
+            // so it settles like any other failure instead of aborting the loop and skipping every
+            // Worker registered after this one.
+            doReject(error);
+          }
+        }
+      });
+  }
+
+  /**
+   * Wraps `Pipeline.drainable()`'s own `items`/`chunks` thunks so `pipeline:end` fires once the
+   * wrapped stream is exhausted - once per TERMINAL CALL, matching `PipelineResult`'s own "every
+   * terminal re-drains" contract: calling `.first()` then `.toArray()` on the same result fires it
+   * twice (Done-when 10), since each terminal calls `drainable()` fresh. `syncChunks` is always
+   * `null` here - a dispatching class forces `"async"` Mode, so there is no sync stream to wrap.
+   */
+  override drainable(input: PipelineSource<In>): {
     syncChunks: MaybeAsyncChunks<T> | null;
     items: () => AsyncIterable<T>;
     chunks: () => AsyncIterable<T[]>;
     context: IContextManager;
   } {
-    throw new Error("EventEmitterPipeline.drainable: not implemented (#124 L2)");
+    const base = super.drainable(input);
+    const emitter = this.emitter;
+    let fired = false;
+    const fireOnce = (): void => {
+      if (fired) return;
+      fired = true;
+      emitSafely(emitter, "pipeline:end");
+    };
+    return {
+      ...base,
+      items: () => withEndSignal(base.items(), fireOnce),
+      chunks: () => withEndSignal(base.chunks(), fireOnce),
+    };
+  }
+}
+
+/** The shape a registered Worker receives - a plain event object, never the raw
+ * `InternalTransformer` signature, so a Worker is a function of ONE argument regardless of what the
+ * composed transform's own arity looks like. */
+export interface WorkEvent<In, Out> {
+  chunk: In[];
+  ctx: IContextManager;
+  respond: (value: Out[]) => void;
+  reject: (error: unknown) => void;
+}
+
+/** Wraps `source`, calling `onEnd` exactly once after the LAST value is yielded - whether the
+ * consumer drains it to natural exhaustion or stops early (`.first(n)`'s own early return, which
+ * calls the generator's `.return()` per the iterator protocol and runs this `finally`). Shared by
+ * `apply()` (`stage:<n>:end`) and `drainable()` (`pipeline:end`) - the identical "fire once, on
+ * exit either way" shape, over two different streams. */
+async function* withEndSignal<V>(source: AsyncIterable<V>, onEnd: () => void): AsyncGenerator<V> {
+  try {
+    yield* source;
+  } finally {
+    onEnd();
+  }
+}
+
+/**
+ * Emits a lifecycle event through the ORDINARY `emitter.emit()` call - the simplest shape available,
+ * deliberately: a caller-supplied emitter's own `.emit()` override and Node's own `.once()` unwrap
+ * machinery both keep working exactly as documented. A SYNCHRONOUS listener throw is caught here and
+ * surfaced as its own separate uncaught exception on a later microtask, rather than escaping the
+ * `.then()` callback `respond()`/`doReject()` run inside (`stageWork()`, above), which has no
+ * downstream `.catch()` of its own. Two limitations this simplicity accepts, by decision, not fixed:
+ * a synchronous throw still stops `.emit()`'s own internal loop before a listener registered AFTER
+ * the throwing one on the SAME event ever runs - ordinary `EventEmitter` behavior, not a guarantee
+ * this class makes about listener isolation; an ASYNC listener throwing AFTER its own `await` leaks
+ * as a real `unhandledRejection` instead, since `.emit()` never awaits a listener's return value.
+ */
+function emitSafely(emitter: PipelineEmitter, event: string, payload?: unknown): void {
+  try {
+    emitter.emit(event, payload);
+  } catch (error) {
+    queueMicrotask(() => {
+      throw error;
+    });
   }
 }
