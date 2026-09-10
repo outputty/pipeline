@@ -28,7 +28,7 @@ async function run<I, O>(
   context?: SimpleContextManager,
   bufferSize?: number,
 ): Promise<[O[], Record<string, unknown>]> {
-  let pipeline: Pipeline<I, "unset", "shape", I> = context
+  let pipeline: Pipeline<I, "unset", I> = context
     ? new Pipeline<I>({ context })
     : new Pipeline<I>();
   if (bufferSize !== undefined) pipeline = pipeline.buffer(bufferSize);

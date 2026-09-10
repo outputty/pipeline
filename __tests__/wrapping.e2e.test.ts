@@ -326,7 +326,7 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
 describe("the wire format reads as the chain was built (#90 L10)", () => {
   /** Every path a mounted `.fetch` was asked for during `use`. */
   async function pathsFor(
-    chain: Pipeline<number, "unset", "shape", number>,
+    chain: Pipeline<number, "unset", number>,
     input: number[],
   ): Promise<{ out: number[]; paths: string[] }> {
     const paths: string[] = [];
@@ -412,7 +412,7 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
 
   /** Every path a mounted `.fetch` was asked for while `use` ran. */
   async function servedBy<R>(
-    chain: Pipeline<any, any, any, any>,
+    chain: Pipeline<any, any, any>,
     use: (url: string) => Promise<R>,
   ): Promise<{ value: R; paths: string[] }> {
     const paths: string[] = [];
@@ -432,7 +432,7 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
       // BOTH sides declare the branch, because both run the same entry module - that is what makes
       // `/branch/0/big` mean the same arm on each. Before this layer an arm carried a `Transformer`,
       // which has no class and therefore no WHERE, so every arm ran in the orchestrating process.
-      const declare = (p: HttpPipeline<Order, "async", Order>) =>
+      const declare = (p: HttpPipeline<Order, Order>) =>
         p.branch((b) =>
           b
             .when(
@@ -632,7 +632,7 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
     async () => {
       // `serveReduceRequest` read the PARENT's `_reduceStages`, ignoring the branch trail: a 404
       // when the parent has no reduce, and silently the parent's own fold when it does.
-      const declare = (p: HttpPipeline<Order, "async", Order>) =>
+      const declare = (p: HttpPipeline<Order, Order>) =>
         p.branch((b) =>
           b.when(
             "big",

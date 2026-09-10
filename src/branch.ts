@@ -13,7 +13,7 @@
  */
 
 import type { AnyPipeline, Pipeline } from "./pipeline";
-import type { PipelineMode, SourcePolicy } from "./types";
+import type { JoinMode, PipelineMode } from "./types";
 
 /** The record a builder's arms produce, read off the builder the caller's callback returned. */
 export type ResultsOf<B> =
@@ -22,14 +22,6 @@ export type ResultsOf<B> =
 /** The Mode a builder's arms join to: `"async"` the moment ONE arm is, because the runtime widens
  * the whole record rather than one key. Read off the builder alongside `ResultsOf`. */
 export type ModeOfArms<B> = B extends BranchBuilder<any, any, infer AM> ? AM : never;
-
-/** The Mode two arms join to: `"async"` the moment either is, since the runtime widens the whole
- * record rather than one key. `"unset"` is an arm that names no pipeline, or one still undecided. */
-export type JoinArmMode<A extends PipelineMode, B extends PipelineMode> = A extends "async"
-  ? "async"
-  : B extends "async"
-    ? "async"
-    : "unset";
 
 /** One arm, as the builder collects it. `build` absent means the arm routes only and its items pass
  * through unchanged - the friction `.transform()` never had, since it takes a builder (#87). */
@@ -65,11 +57,11 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
   when<K extends string, U = T, M2 extends PipelineMode = "unset">(
     name: K,
     predicate: (item: T) => boolean,
-    build?: (pipeline: Pipeline<T, "unset", "shape", T>) => Pipeline<U, M2, SourcePolicy, any>,
-  ): BranchBuilder<T, R & Record<K, U[]>, JoinArmMode<AM, M2>> {
+    build?: (pipeline: Pipeline<T, "unset", T>) => Pipeline<U, M2, any>,
+  ): BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>> {
     this.claim(name);
     this._arms.push({ name, predicate, build: build as BranchArm<T>["build"] });
-    return this as unknown as BranchBuilder<T, R & Record<K, U[]>, JoinArmMode<AM, M2>>;
+    return this as unknown as BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>>;
   }
 
   /**
@@ -87,8 +79,8 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
    */
   otherwise<K extends string, U = T, M2 extends PipelineMode = "unset">(
     name: K,
-    build?: (pipeline: Pipeline<T, "unset", "shape", T>) => Pipeline<U, M2, SourcePolicy, any>,
-  ): BranchBuilder<T, R & Record<K, U[]>, JoinArmMode<AM, M2>> {
+    build?: (pipeline: Pipeline<T, "unset", T>) => Pipeline<U, M2, any>,
+  ): BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>> {
     this.claim(name);
     if (this._arms.some((arm) => arm.isCatchAll)) {
       throw new Error(`.otherwise() is already declared as "${this.catchAllName()}"`);
@@ -99,7 +91,7 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
       build: build as BranchArm<T>["build"],
       isCatchAll: true,
     });
-    return this as unknown as BranchBuilder<T, R & Record<K, U[]>, JoinArmMode<AM, M2>>;
+    return this as unknown as BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>>;
   }
 
   /**

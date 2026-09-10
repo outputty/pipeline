@@ -20,33 +20,32 @@ export const DEFAULT_CHUNK_SIZE = 1000;
 export type PipelineMode = "unset" | "sync" | "async";
 
 /**
- * What a `Pipeline` class does to a source's own shape (#90). `"shape"` keeps it, so an array is
+ * What a `Pipeline` class does to an input's own shape (#90). `"shape"` keeps it, so an array is
  * `"sync"`; `"async"` overrides it, which is every dispatching class - `ConcurrentPipeline`,
  * `HttpPipeline` and `ClusterPipeline` all exist for I/O-bound work and have no synchronous case.
  *
- * It is a THIRD type parameter on `Pipeline` rather than a `this`-conditional because a subclass's
- * own `.from()` override must be a genuine NARROWING of the base's. Measured with `tsc --strict`
- * 7.0.2: with the policy carried on `this`, `ConcurrentPipeline<U, "async">` is not assignable to
- * the base's `Iterable` arm returning `Pipeline<U, "sync">` and the override fails `TS2416`. Carried
- * as a type parameter the base's own arm evaluates to `"async"` for that class, and it compiles.
- * `P` defaults, so no caller ever writes it: `Pipeline<number, "sync">` is still a two-argument
- * spelling.
+ * A RUNTIME value only, read by `sourcePolicy()`. It was also a type parameter on `Pipeline`, with
+ * an `AssignMode<P, S>` operator applying it on top of every stage's own `JoinMode` - deleted, and
+ * the reason is worth recording because the parameter outlived it twice over. Its stated reason was
+ * that a subclass's `.from()` override had to be a narrowing of the base's; `.from()` went with
+ * this ticket. What it was ACTUALLY still doing was collapsing `JoinMode<M, M2>` to the literal
+ * `"async"` on a dispatching class, because `JoinMode` tested `S` first and so never reduced while
+ * `M2` was abstract - the subclass's own narrowing overrides then failed `TS2416`, nine of them.
+ * `JoinMode` testing `M` first (below) short-circuits on the concrete `"async"` those classes pin,
+ * which is the same collapse one level up, with no parameter to carry.
  */
 export type SourcePolicy = "shape" | "async";
 
 /**
- * The Mode a class of policy `P` assigns a source whose own shape says `S` (#90).
- *
- * `Assign<"shape", "sync">` → `"sync"`. `Assign<"async", "sync">` → `"async"`.
- */
-export type AssignMode<P extends SourcePolicy, S extends PipelineMode> = P extends "async"
-  ? "async"
-  : S;
-
-/**
  * The Mode a stage produces from the chain's own Mode `M` and the stage's own Mode `S` (#90): a
  * stage runs synchronously only when the chain reaching it already does, since one asynchronous
- * half defers everything after it. `AssignMode` then applies the class's own policy on top.
+ * half defers everything after it.
+ *
+ * `M` is tested FIRST, and deliberately: a dispatching class pins `M` to the literal `"async"`, so
+ * `JoinMode<"async", M2>` reduces immediately even where `M2` is still abstract. Testing `S` first
+ * gives the identical answer at every concrete instantiation, but leaves the conditional deferred
+ * inside a generic scope - which is what made the three dispatching classes need a whole extra type
+ * parameter to state what this line now states.
  *
  * `"unset"` is the source-less chain, which the callable shape makes the ordinary case: a chain is
  * composed before its input exists, so a sync stage leaves the decision open for the input to make,
@@ -61,15 +60,15 @@ export type AssignMode<P extends SourcePolicy, S extends PipelineMode> = P exten
  * `JoinMode<"unset", "sync">` → `"unset"`. `JoinMode<"unset", "async">` → `"async"`.
  * `JoinMode<"sync", "unset">` → `"unset"`. `JoinMode<"async", "unset">` → `"async"`.
  */
-export type JoinMode<M extends PipelineMode, S extends PipelineMode> = S extends "async"
+export type JoinMode<M extends PipelineMode, S extends PipelineMode> = M extends "async"
   ? "async"
-  : M extends "sync"
-    ? S extends "unset"
-      ? "unset"
-      : S
-    : M extends "unset"
-      ? "unset"
-      : "async";
+  : S extends "async"
+    ? "async"
+    : M extends "sync"
+      ? S extends "unset"
+        ? "unset"
+        : S
+      : "unset";
 
 /**
  * The Mode the seed `Transformer` inside `.transform()` starts at, for a chain whose own Mode is

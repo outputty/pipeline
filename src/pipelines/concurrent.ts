@@ -194,12 +194,7 @@ async function* mergeUnordered<U>(sources: AsyncGenerator<U[]>[]): AsyncGenerato
 // `In` (#90) is the type this pipeline is CALLED with, fixed when the chain is declared and carried
 // unchanged through every stage - unlike `T`, which becomes each stage's own output. It defaults to
 // `T` so an existing two-argument spelling keeps meaning what it did.
-export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends Pipeline<
-  T,
-  "async",
-  "async",
-  In
-> {
+export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
   /** Chunks of the current stage kept in flight at once. */
   readonly maxConcurrency: number;
   /** Whether output order is restored to match input order once a chunk finishes. */
@@ -241,10 +236,10 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
-  ): ConcurrentPipeline<U, M, In> {
+  ): ConcurrentPipeline<U, In> {
     const Ctor = this.constructor as new (
       options?: ConcurrentPipelineConstructorOptions,
-    ) => ConcurrentPipeline<U, M, In>;
+    ) => ConcurrentPipeline<U, In>;
     return new Ctor({ ...options, ...this.concurrentOptions(), chunks });
   }
 
@@ -271,7 +266,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
     // `[]` at runtime - a chain composed with no engine decided, which is what the guard exists to
     // make impossible.
     builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
-  ): ConcurrentPipeline<U, M, In> {
+  ): ConcurrentPipeline<U, In> {
     // A dispatching class is `"async"` whatever its callbacks return, so the seed is typed there
     // rather than at the caller's own Mode.
     //
@@ -282,9 +277,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
     return this.apply(builder(seed));
   }
 
-  override apply<U>(
-    transformer: Transformer<T, U, "sync" | "async">,
-  ): ConcurrentPipeline<U, M, In> {
+  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ConcurrentPipeline<U, In> {
     // This body does not delegate to the base's `apply()`, so it repeats the base's own deferral
     // (#90): with no input yet, the call is recorded and replayed later - against THIS class, so
     // the replayed stage still dispatches. Without it a dispatching pipeline inherited the call
@@ -293,7 +286,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
     if (this.isDeferred()) {
       return this.defer<U>((p) =>
         p.apply(transformer as Transformer<unknown, U, "sync" | "async">),
-      ) as ConcurrentPipeline<U, M, In>;
+      ) as ConcurrentPipeline<U, In>;
     }
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
@@ -343,7 +336,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
    * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0)
    * .local((p)=>p.reduce((a,v)=>a+v,0)).toArray()` → `[15]`.
    */
-  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U, M, In> {
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U, In> {
     // Defers with no input yet, the same as `apply()` above (#90). Replaying it through this same
     // method is what keeps the partitioning (#62) identical either way.
     if (this.isDeferred()) {
@@ -352,7 +345,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
           fn as (acc: U, item: unknown, ctx: IContextManager, emit: (v: U) => void) => U,
           initial,
         ),
-      ) as ConcurrentPipeline<U, M, In>;
+      ) as ConcurrentPipeline<U, In>;
     }
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
@@ -394,11 +387,11 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
    *
    * `new ConcurrentPipeline(chain)([1, 2, 3])` runs on the async engine whatever `chain` was.
    */
-  protected override bind<U>(data: PipelineSource<U>): ConcurrentPipeline<U, M> {
+  protected override bind<U>(data: PipelineSource<U>): ConcurrentPipeline<U> {
     // `In` becomes `U` here, not the receiver's own: binding SPENDS whatever the chain accepted
     // before. Every other override carries `In` through unchanged. The policy comes from
     // `sourcePolicy()` rather than a second literal `"async"`, so a class states it once.
-    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as ConcurrentPipeline<U, M>;
+    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as ConcurrentPipeline<U>;
   }
 
   protected override sourcePolicy(): SourcePolicy {
@@ -406,9 +399,9 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
   }
 
   override local<U, M2 extends PipelineMode>(
-    build: (p: Pipeline<T, "async", "shape", any>) => Pipeline<U, M2, "shape", any>,
-  ): ConcurrentPipeline<U, M, In> {
-    return super.local(build) as unknown as ConcurrentPipeline<U, M, In>;
+    build: (p: Pipeline<T, "async", any>) => Pipeline<U, M2, any>,
+  ): ConcurrentPipeline<U, In> {
+    return super.local(build) as unknown as ConcurrentPipeline<U, In>;
   }
 
   /**
