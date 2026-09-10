@@ -7,6 +7,19 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-10 #90's own citation went stale mid-plan, and a whole question round was built on it
+
+Planning #118 (this docstring sweep), `.claude/roadmap.md`'s "Building" section and
+`architecture.md`'s "pending #90" language were carried as current status through an entire
+technical verification pass (scope inventory, README audit, a typedoc gate proven against the
+tree) and into an `AskUserQuestion` round asking whether to block on #90. #90 had already merged
+that same day, as a 16-layer stack rewriting `Pipeline`/`Transformer` completely, and the planning
+worktree was 18 commits stale before the session's first probe ever ran. Caught by the user - "isnt
+90 done? check PRs" - not self-caught; `git fetch` + `git rebase origin/main` (clean fast-forward)
+and a full re-run of every prior finding followed. `~/.claude/rules/issues.md`'s existing
+re-fetch-before-filing rule is sharpened: the same check now runs the moment a cited ticket's
+open/closed state becomes the premise of ANY mid-session decision, not only right before filing.
+
 ## 2026-09-10 A type parameter outlived its stated reason, and its real one was one level up
 
 `SourcePolicy` was a type parameter on `Pipeline` because - its own docstring said - a subclass's
