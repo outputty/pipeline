@@ -119,8 +119,10 @@ console.log(JSON.stringify(data)); // ["A","B","C"]
 ```
 
 `HttpPipeline` dispatches each chunk to another instance over HTTP; `ClusterPipeline` dispatches to
-worker processes on the same machine, brought up automatically. See [HttpPipeline](#httppipeline)
-and [ClusterPipeline](#clusterpipeline) in the API Reference for their constructors and knobs.
+worker processes on the same machine, brought up automatically; `EventEmitterPipeline` hands each
+chunk to Worker functions registered on `pipeline.emitter`, in this same process. See
+[HttpPipeline](#httppipeline), [ClusterPipeline](#clusterpipeline) and
+[EventEmitterPipeline](#eventemitterpipeline) in the API Reference for their constructors and knobs.
 
 The chunk is the unit of concurrency, so a `ConcurrentPipeline`'s parallelism is its buffer size
 times `maxConcurrency` - items in flight - never `maxConcurrency` alone. A chain left at the
@@ -190,7 +192,8 @@ two knobs and nothing else - everything a chain carries between calls is interna
 - **`.apply(transformer)`** - apply a pre-built transformer.
 - **`.transform(fn)`** - build and apply a transformer inline.
 - **`.local(build)`** - run a whole region of the chain in the orchestrating process; on
-  `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, nothing `build` does can dispatch.
+  `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline`, nothing `build` does
+  can dispatch.
 - **`.buffer(size)`** - collect items and re-chunk.
 - **`.tap(fn | transformer)`** - observe items without changing them. Always runs in the
   orchestrating process, on every class; the stages either side of it still dispatch. Use
@@ -282,11 +285,9 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { HttpPipeline, toNodeHandler } from "@outputty/pipeline";
 
-// The "another instance" side: an empty-source pipeline holding the SAME chain, so its
+// The "another instance" side: a source-less pipeline holding the SAME chain, so its
 // .fetch can serve it.
-const worker = new HttpPipeline<number>([], { url: "" }).transform((t) =>
-  t.map((x: number) => x * 2),
-);
+const worker = new HttpPipeline<number>({ url: "" }).transform((t) => t.map((x: number) => x * 2));
 
 const server = createServer(toNodeHandler(worker.fetch));
 await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -336,6 +337,41 @@ console.log(JSON.stringify(data)); // [2,4,6,8,10]
 
 - **`options.workers`** - worker processes to bring up on first drain. Default
   `os.availableParallelism()`.
+
+### EventEmitterPipeline
+
+Extends `ConcurrentPipeline`. Hands each chunk of a stage to whichever Worker functions are
+registered on `pipeline.emitter`, a `node:events`-shaped `EventEmitter` - no server, no separate
+process, no url. The chain's own composed function auto-registers as a stage's first Worker the
+moment the chain is built; registering an extra one is optional, for when other code in the same
+process wants to add capacity or take over the work entirely.
+
+<!-- compiles -->
+
+```typescript
+import { EventEmitterPipeline } from "@outputty/pipeline";
+
+const pipeline = new EventEmitterPipeline<number>().transform((t) => t.map((x: number) => x * 2));
+
+// Optional - registered from anywhere else, runs alongside the chain's own function.
+pipeline.emitter.on("stage:0", ({ chunk, respond }) => respond(chunk.map((x: number) => x * 2)));
+
+const data = await pipeline([1, 2, 3, 4, 5]).toArray();
+console.log(JSON.stringify(data)); // [2,4,6,8,10]
+```
+
+Every Worker registered on a stage runs on every chunk that reaches it; whichever settles first -
+`respond(value)` or `reject(error)` - decides that chunk. Lifecycle events
+(`stage:<n>:dispatched`/`:done`/`:error`/`:end`, `pipeline:end`) let other code watch a run without
+becoming a Worker itself, as long as it listens on one of those names rather than the bare
+`stage:<n>` channel - registering on the bare channel makes that listener a Worker too.
+
+- **`options.emitter`** - a caller-supplied `node:events`-compatible emitter. Optional; a fresh
+  `EventEmitter` is built when omitted. Validated at construction: a caller's own compatible
+  emitter (a namespaced one, a test double) must still carry `on`/`off`/`listeners`/
+  `listenerCount`/`emit`.
+- `.reduce()` is inherited unchanged from `ConcurrentPipeline` - it folds in-process, with no
+  emitter involvement.
 
 ### SimpleContextManager
 
@@ -567,8 +603,8 @@ const data = await new Pipeline<number>()
 console.log(data); // [60, 90]
 ```
 
-On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`, `.reduce()` partitions the stream into
-`maxConcurrency` independent accumulators. Each partition's own result - an `emit()` mid-fold, or
+On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline`, `.reduce()`
+partitions the stream into `maxConcurrency` independent accumulators. Each partition's own result - an `emit()` mid-fold, or
 its trailing accumulator once its share of the stream ends - flows downstream as an ordinary value,
 the same way `emit()` output already does above: no forced merge, no thrown error.
 

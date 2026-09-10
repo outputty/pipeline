@@ -349,27 +349,43 @@ none of it survived the hand-trim (#745).
   the wrong transform under a number that exists in both versions. An arm name must survive a URL
   path, so `BranchBuilder` refuses one that would not: `.when("big orders", …)` dispatched
   `/branch/0/big%20orders/…` and 404'd.
-- **EventEmitterPipeline / Worker** (#124, `pending`) - the fourth `Pipeline` family member:
-  dispatches a stage's chunk through a `node:events` `EventEmitter` (`pipeline.emitter`) instead of
-  HTTP or `node:cluster`. `.transform()`'s own composed function auto-registers as `stage:<n>`'s
-  first Worker, once per stage index - never once per RUN, since `stageWork()` replays on every
+- **EventEmitterPipeline / Worker** (#124) - the fourth `Pipeline` family member: dispatches a
+  stage's chunk through a `node:events`-shaped `EventEmitter` (`pipeline.emitter`, the minimal
+  `PipelineEmitter` interface) instead of HTTP or `node:cluster`. `.transform()`'s own composed
+  function auto-registers as `stage:<n>`'s first Worker, once per stage index - a `Set` carried BY
+  REFERENCE through `createPipeline()`, never once per RUN, since `stageWork()` replays on every
   bound call and a field-initializer-style registration would leak a listener per call. Any number
   of Workers may register on the SAME `stage:<n>` channel afterward; every one of them runs on
   EVERY chunk (broadcast, deliberately uncontrolled - this class does no selection, round-robin or
   readiness tracking), and the first to SETTLE - `respond(value)` or `reject(error)`, whichever
   resolves or rejects first - decides the chunk, not necessarily the first to call `respond()`.
-  Dispatch reads `emitter.listeners("stage:<n>")` itself and calls each directly, wrapped in
-  `Promise.resolve(…).catch(reject)`, never `emitter.emit()` - `emit()` cannot catch a Worker's
-  throw after its own `await`, an unhandled rejection Node/Bun may treat as fatal. Lifecycle events
-  (`stage:<n>:dispatched`/`:done`/`:error`/`:end`, `pipeline:end`) fire on channels separate from
-  the bare `stage:<n>` worker channel, so an observer registered on `:done` alone is never handed a
-  chunk to process - registering on the bare channel instead makes that listener a Worker. ⚠ "Worker"
+  Dispatch reads `emitter.listeners("stage:<n>")` itself and calls each directly, INSIDE a `try`,
+  wrapped in `Promise.resolve(…).catch(reject)`, never `emitter.emit()` - `emit()` cannot catch a
+  Worker's throw after its own `await`, an unhandled rejection Node/Bun may treat as fatal, and the
+  `try` is what stops one Worker's SYNCHRONOUS throw aborting the loop before every later Worker has
+  had its turn (review-caught: the first cut aborted the whole dispatch on a sync throw). Lifecycle
+  events (`stage:<n>:dispatched`/`:done`/`:error`/`:end`, `pipeline:end`) fire on channels separate
+  from the bare `stage:<n>` worker channel, so an observer registered on `:done` alone is never
+  handed a chunk to process - registering on the bare channel instead makes that listener a Worker.
+  The real dispatch settles (`resolve`/`reject`) BEFORE its own lifecycle event emits, through
+  `emitSafely()` - a `:done`/`:error` listener that itself throws would otherwise fire from inside a
+  `.then()` callback with no downstream `.catch()`, and since that throw happened before the real
+  settle, the dispatch could hang forever rather than merely leak an unhandled rejection;
+  `emitSafely()` instead surfaces it as its own uncaught exception on the next microtask. ⚠ "Worker"
   here is unrelated to a `ClusterPipeline` worker (an OS process, below) - the two terms collide by
   name only; write "EventEmitterPipeline Worker" near any `ClusterPipeline` discussion to keep them
   apart. `ConcurrentPipeline`'s own fan-out (`maxConcurrency`, `ordered`) is inherited UNCHANGED -
-  this class adds no scheduling of its own. A round-robin dispatch design (one chunk per Worker,
-  spiked during #124's own planning) was built, measured working, and killed anyway by the user's
-  own simplification request, not a defect (`.claude/roadmap.md`, Killed).
+  this class adds no scheduling of its own; `.reduce()` is inherited unchanged too, by decision (the
+  ticket's own Settle first), narrowed only for the static return type. The wrapping constructor
+  (`new EventEmitterPipeline(chain, options?)`) matches `HttpPipeline`/`ClusterPipeline`'s own shape;
+  a caller-supplied `options.emitter` is validated at construction against `PipelineEmitter`'s five
+  methods, failing loud rather than surfacing a generic `TypeError` deep inside `stageWork()` later.
+  A round-robin dispatch design (one chunk per Worker, spiked during #124's own planning) was built,
+  measured working, and killed anyway by the user's own simplification request, not a defect
+  (`.claude/roadmap.md`, Killed). ⚠ A `.branch()` arm built on this class reuses the PARENT's own
+  `stage:<n>` names (`emptyOfOwnClass()` carries the same `emitter`/registered-stages `Set` into the
+  arm while resetting its stage index to 0) - real, but out of scope by the ticket's own Settle
+  first: "an arm's own worker-channel naming is undesigned."
 - **Observation point / `.tap()`** - the ONE surface that watches data without changing it, at two
   levels with one meaning. `Transformer.tap(fn | transformer)` (`src/transformer.ts`) is a `pipe()`
   link: `fn` gets each item plus context via `Promise.all(chunk.map(...))`, the `transformer` form
