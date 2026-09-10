@@ -48,6 +48,9 @@ src/
                              index), .fetch() (/transform/<n> and /reduce/<n>), toNodeHandler
     cluster.ts               ClusterPipeline - worker bootstrap, the shared pipeline registry,
                              bootstrapAndSetUrl() shared by stageWork()/reduceWork()
+    eventemitter.ts           EventEmitterPipeline (pending #124) - stageWork() dispatches through
+                             pipeline.emitter instead of HTTP/cluster; apply()/drainable() overridden
+                             a second and third time for stage:<n>:end/pipeline:end
   context/
     types.ts              re-exported IContextManager shape
     simple.ts              SimpleContextManager - the one shipped IContextManager
@@ -207,6 +210,9 @@ Pipeline                one chunk at a time, in process              src/pipelin
   ConcurrentPipeline      N chunks in flight; owns the fan-out         src/pipelines/concurrent.ts
     HttpPipeline            a chunk POSTed to another instance         src/pipelines/http.ts
       ClusterPipeline         a chunk sent to another local process    src/pipelines/cluster.ts
+    EventEmitterPipeline    a chunk handed to Workers on an emitter    src/pipelines/eventemitter.ts
+                             (pending #124) - a SIBLING of HttpPipeline, not a subclass: it
+                             overrides stageWork() the same way, but never POSTs
 ```
 
 Each level overrides ONE thing. `ConcurrentPipeline` owns the fan-out window (`fanOutOrdered`/
@@ -271,6 +277,57 @@ How that product is SPLIT is a throughput choice, not a parallelism one. Two pai
 once where `.buffer(1)` pays it per item. The gap closes when the callback dominates - the same pair
 over a 2 ms-per-item workload, N=160, ran 23 ms each. Prefer the widest chunk that fits the
 in-flight budget.
+
+## EventEmitterPipeline - pending #124
+
+`stageWork()` is the only override, the same seam `HttpPipeline` overrides to POST - `apply()`'s
+own fan-out (`fanOutOrdered`/`fanOutUnordered`, `maxConcurrency`, `ordered`) is inherited
+UNCHANGED, and stays that way: no pool, no round-robin, no readiness tracking of its own. A
+free-slot-dealing pool design (`share()`, `src/utils/chunk.ts:454`, the mechanism
+`ConcurrentPipeline.reduce()` already uses to partition) was built and measured working during
+planning, then killed by the user's own simplification request - "not even think about
+concurrency at this stage" - not by a defect (`.claude/roadmap.md`, Killed).
+
+```text
+stageWork(transformer, stageIndex)
+  registers transformer.runnable() on pipeline.emitter, "stage:<n>", ONCE PER STAGE INDEX
+    (a Set keyed by event name, carried through createPipeline() - never once per RUN, since
+    stageWork() replays on every bound call and a naive registration there leaks a listener)
+  returns (chunk, ctx) => new Promise((resolve, reject) => {
+    emit "stage:<n>:dispatched"
+    for each fn in emitter.listeners("stage:<n>"):   <- composed fn is ALWAYS listeners()[0]
+      Promise.resolve(fn({chunk, ctx, respond, reject})).catch(reject)
+    (no listeners at all -> reject immediately, naming the stage)
+  })
+```
+
+Dispatch calls `emitter.listeners(workEvent)` itself and invokes each directly - never
+`emitter.emit()`, which cannot catch a Worker's throw after its own `await` (an unhandled
+rejection Node/Bun may treat as fatal; measured, isolated with the composed Worker removed: a
+plain `emit()`-based dispatch left the request permanently pending while the process still
+crashed on the side). Every registered Worker runs on every chunk - broadcast, deliberately
+uncontrolled - and the first one to SETTLE, `respond()` or `reject()`, decides the chunk: measured,
+a Worker rejecting at 5ms beat one resolving at 30ms even though the resolving one was registered
+first, so "first to settle" is the real contract, not "first to respond."
+
+`apply()` is overridden a second time, wrapping the stage's own output chunk stream so
+`stage:<n>:end` fires once, after every chunk that stage's fan-out produced has been yielded.
+`drainable()` (`src/pipeline.ts:1292`, the one seam every terminal calls) is overridden a third
+time, wrapping whichever of `items()`/`chunks()` a terminal actually calls so `pipeline:end` fires
+once the wrapped stream is exhausted - once per TERMINAL CALL, matching `PipelineResult`'s own
+"every terminal re-drains" contract: calling `.first()` then `.toArray()` on the same result fires
+it twice.
+
+`Pipeline.onError()` (the run handler) reaches a rejecting Worker for free, through
+`ConcurrentPipeline.apply()`'s existing wrapped `work` - no explicit `dropOrRethrow()` call is
+needed in this class's own code, unlike the killed pool design, which bypassed that machinery
+entirely and had to call it explicitly.
+
+One emitter per chain: two independently-built chains sharing one caller-supplied `emitter` option
+collide, since the composed-Worker dedupe `Set` is keyed by event name alone - the second chain's
+own composed function never registers, because `"stage:0"` is already taken. `#113`'s
+`pipelineIndex` fix for `ClusterPipeline` is the family's precedent for solving this properly;
+unbuilt here, named in `#124`'s own Settle first.
 
 ## The chain and the run - `Pipeline` and `PipelineResult` (#90)
 

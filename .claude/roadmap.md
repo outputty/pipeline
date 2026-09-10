@@ -54,8 +54,34 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   unclaimed. Layout and rationale in `.claude/architecture.md`'s new Internal overhead benchmarks
   section.
 
+- **`EventEmitterPipeline`, a fourth dispatch mode** (#124) - no mode lets another module attach a
+  worker to a named stage after the chain already exists, or observe a stage's chunks without
+  composing an observer into the chain. `.transform()`'s own composed function auto-registers as a
+  stage's first Worker on `pipeline.emitter`; any number of extra Workers may register afterward,
+  from anywhere in the process, running alongside it. `ConcurrentPipeline`'s own fan-out
+  (`maxConcurrency`, `ordered`) is inherited unchanged - deliberately the simplest version: no
+  pool, no round-robin selection, broadcast to every registered Worker with the first to settle
+  deciding the chunk. Revives the NAME from `#30` (closed unbuilt) for an unrelated capability -
+  `#30` was an observability class superseded by `.tap()` (#72); this is a dispatch mode, verified
+  during planning to have no overlap with `.tap()`'s own coverage.
+
 ### Later - not yet filed
 
+- **A distributed event emitter solution layer for `EventEmitterPipeline`** (#124's own planning) -
+  exactly-once delivery across a pool of Workers (one chunk per Worker, no redundant work) and
+  per-stage concurrency control, both spiked and measured working during `#124`'s planning, then
+  deliberately dropped from `#124` itself on the user's own simplification request ("not even
+  think about concurrency at this stage... a distributed event emitter solution layer" is future
+  work). Measured: plain broadcast dispatch floods a slow Worker with overlapping chunks once
+  `maxConcurrency` exceeds the registered Worker count (`max simultaneous invocations of the SAME
+  registered worker function: 2` at `maxConcurrency: 4` with one slow Worker). The fix, verified
+  working: `share()` (`src/utils/chunk.ts:454`, the same free-slot-dealing mechanism
+  `ConcurrentPipeline.reduce()` already uses to partition) instead of push-based dispatch - a slow
+  Worker then never receives a second chunk while its first is pending (`max overlap … 1`), and
+  registering the same Worker function twice gives real, additive capacity (two concurrent
+  invocations, ~32ms for 6 chunks at 30ms each against a serialized ~180ms). A `.concurrency(n)`
+  method mirroring `.buffer(size)`'s own shape (persists per-stage until called again) was also
+  built and verified for per-stage control. Start from these numbers rather than re-deriving them.
 - **A `ContextManager`'s write-back to the orchestrator.** #31 closed "which manager" - a caller's
   own `IContextManager` now survives `.context()`, `Pipeline.merge()`, and a `ClusterPipeline`
   worker's process boundary as the SAME instance. The write-back half stays unbuilt by decision, not
@@ -367,6 +393,45 @@ The two older candidates, still not filed:
   bought nothing `.tap()` did not already do, at the cost of a `fanOut()` seam, an emitter interface,
   five event names and a consumer-error containment path. Its Enable layer - deleting the old
   lifecycle-hooks knob - is what survives, as #72.
+
+  Amendment (#124's planning): the runtime-attach/detach axis - a consumer unknown in advance,
+  attaching and detaching mid-drain, isolated from a sibling's own throw - was re-tested against
+  this same closing verdict and confirmed still closed. A `.tap()` call whose body loops a plain
+  mutable listener array with a per-listener `try`/`catch` gives real runtime attach mid-drain (a
+  listener added after the pipeline was already called still saw only the chunks dispatched after
+  it attached), real isolation (a throwing listener never blocked its siblings or the run), and
+  real detach - no gap survives on that axis either. The NAME `EventEmitterPipeline` is reused by
+  `#124` for an UNRELATED capability - a fourth dispatch mode, not observability - so a reader
+  should not read `#124` as reviving this row's design.
+
+- **`EventEmitterPipeline` as a round-robin dispatch mode** (#124's planning, three designs spiked
+  and killed in sequence) - `.transform()`'s own composed function IS the worker, so the only
+  question was how MULTIPLE workers on one stage should share chunks.
+
+  Round-robin-by-counter (`(raw % pool.length)`-indexed dispatch, no readiness tracking) was
+  killed by measurement: `maxConcurrency: 4` over a pool of 2 (the composed function plus one slow
+  worker) produced `max simultaneous invocations of the SAME registered worker function: 2` - the
+  counter dispatches on a schedule set by `maxConcurrency`, completely decoupled from whether a
+  worker is still busy, flooding a slow one.
+
+  `share()`-based free-slot dealing (the fix, `src/utils/chunk.ts:454`) plus a `.concurrency(n)`
+  method mirroring `.buffer(size)`'s own persists-until-changed shape (per-stage worker-pool
+  sizing) was then built and verified working - `max overlap … 1`, real additive capacity from
+  registering one function twice, per-stage concurrency control confirmed with two stages at
+  different settings. Killed anyway: the user asked to drop concurrency control entirely for a
+  first ticket ("not even think about concurrency at this stage... a distributed event emitter
+  solution layer" is later work, `.claude/roadmap.md`'s own **Later** section). Not a defect - a
+  scope pullback. `apply()` fully overridden as the dispatch seam (bypassing
+  `ConcurrentPipeline.apply()`'s own fan-out) went with it.
+
+  Composed-function-as-fallback-only (only answers a stage when the pool is otherwise empty),
+  `.dispatch(name)` (a stage method taking no function, naming a channel instead), and `.serve()`
+  (explicit opt-in registration of the composed function) were three earlier candidate shapes for
+  "what does `.transform()`'s own function mean here", each offered and not picked before the user
+  confirmed the composed function is always an active pool participant, auto-registered.
+  `#124` ships the survivor: the composed function auto-registers as `stage:<n>`'s first worker,
+  once per stage index; broadcast dispatch (every registered worker runs, first to SETTLE wins) is
+  what remains once selection logic is dropped.
 
 - **A forward-descending `Transformer` composition** (#45) - each link calling the NEXT one rather
   than wrapping the previous one, so the stack descends in the order the caller wrote the chain.
