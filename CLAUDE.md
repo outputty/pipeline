@@ -239,7 +239,7 @@ none of it survived the hand-trim (#745).
   a `.fetch` handler; `ClusterPipeline` adds the worker bootstrap, brought up lazily on the first
   chunk actually dispatched. Each level overrides ONE thing, and the chain is identical in all four.
 - **Stage** - One `.apply()` call, and therefore one `.transform()` call, since `transform()` is
-  `return this.apply(transformer)` (`pipeline.ts:451-454`). A stage's identity is its INDEX in
+  `return this.apply(transformer)`. A stage's identity is its INDEX in
   `_chunkTransforms`, so a dispatching class sends a chunk plus an index and never a function.
   `.transform((t) => t.map(f).filter(g))` is ONE stage; two chained `.transform()` calls are TWO, and
   on a dispatching class that is two network hops. `_chunkTransforms` is `HttpPipeline`/
