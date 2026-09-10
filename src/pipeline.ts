@@ -22,6 +22,8 @@ import type {
   SeedMode,
   ChunkTransform,
   ReduceStage,
+  StageRegistries,
+  Drainable,
 } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
 import { SimpleContextManager } from "./context/simple";
@@ -46,28 +48,51 @@ import type {
 } from "./branch";
 import { foldChunkStream, foldSyncChunkStream } from "./utils/reduce";
 
+/** Builds a plain async-iterable from an async generator function (#133) - the
+ * `{ [Symbol.asyncIterator]: gen }` wrapper every hand-rolled adapter below repeats. */
+function asyncIterableFrom<U>(gen: () => AsyncGenerator<U>): AsyncIterable<U> {
+  return { [Symbol.asyncIterator]: gen };
+}
+
 /** The chunk stream a `Pipeline` that has no input yet carries, and the one a WORKER process's own
  * copy is reset to (`ClusterPipeline`'s constructor). Shared rather than rebuilt per instance: it
  * is empty, stateless and re-iterable, where a spent generator would read empty only once. */
-export const EMPTY_CHUNKS: AsyncIterable<never[]> = {
+export const EMPTY_CHUNKS: AsyncIterable<never[]> = asyncIterableFrom(
   // eslint-disable-next-line @typescript-eslint/require-await
-  async *[Symbol.asyncIterator]() {},
-};
+  async function* () {},
+);
+
+/** `EMPTY_CHUNKS`, cast to the chunk type a call site actually needs (#133) - the same
+ * `EMPTY_CHUNKS as AsyncIterable<U[]>` cast was spelled inline 8x across this file and
+ * `pipelines/cluster.ts` before this; `EMPTY_CHUNKS` itself stays typed `never[]` so a caller
+ * reading it directly (never a call site here) still sees "genuinely empty", not "empty of some
+ * particular type".
+ *
+ * `emptyChunks<number>()` → `EMPTY_CHUNKS`, typed `AsyncIterable<number[]>`.
+ */
+export function emptyChunks<U>(): AsyncIterable<U[]> {
+  return EMPTY_CHUNKS as AsyncIterable<U[]>;
+}
+
+/** Whether `data` is itself async-iterable, rather than merely iterable (#90) - the one test
+ * `.from()`'s own Mode decision and `toAsyncIterable()` below both need (#133: was spelled inline
+ * twice). */
+function isAsyncSource(data: PipelineSource<unknown>): boolean {
+  return Symbol.asyncIterator in Object(data);
+}
 
 /** Converts a sync iterable to an async one, for the `"async"` arm of `.from()` alone. A `"sync"`
  * source never goes through this: skipping it is most of what #90 recovers. */
 function toAsyncIterable<U>(data: PipelineSource<U>): AsyncIterable<U> {
-  if (Symbol.asyncIterator in Object(data)) {
+  if (isAsyncSource(data)) {
     return data as AsyncIterable<U>;
   }
   const syncIterable = data as Iterable<U>;
-  return {
-    [Symbol.asyncIterator]: async function* () {
-      for (const item of syncIterable) {
-        yield item;
-      }
-    },
-  };
+  return asyncIterableFrom(async function* () {
+    for (const item of syncIterable) {
+      yield item;
+    }
+  });
 }
 
 /**
@@ -338,18 +363,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   protected _branchStages!: Map<number, BranchArm<unknown>[]>;
   /** `registriesFor`'s memo, by trail - built on first serve, the same way `registries()` memoises
    * its own. Never carried through copy-on-write; the next instance's arms are its own. */
-  protected _armRegistries?: Map<
-    string,
-    { chunkTransforms: ChunkTransform[]; reduceStages: Map<number, ReduceStage> }
-  >;
+  protected _armRegistries?: Map<string, StageRegistries>;
   /** Whether an input has been bound to this chain - see `PipelineOptions.bound`. */
   protected _bound!: boolean;
   /** `registries()`'s memo - built on first serve, never carried through copy-on-write, since the
    * next instance's own stage list is different. */
-  protected _registries?: {
-    chunkTransforms: ChunkTransform[];
-    reduceStages: Map<number, ReduceStage>;
-  };
+  protected _registries?: StageRegistries;
 
   /**
    * Builds a chain over `T`, with no data. `T` is the type it will be CALLED with.
@@ -467,16 +486,15 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * cost sat - a chain with ZERO transform stages still paid it.
    */
   protected fromSource<U>(data: PipelineSource<U>, policy: SourcePolicy): AnyPipeline<U> {
-    const isAsyncSource = Symbol.asyncIterator in Object(data);
     // `this._mode` is read too, so a receiver already widened before `.from()` stays widened - see
     // `from`'s own Iterable overload for the case that made this necessary.
     const mode: "sync" | "async" =
-      isAsyncSource || policy === "async" || this._mode === "async" ? "async" : "sync";
+      isAsyncSource(data) || policy === "async" || this._mode === "async" ? "async" : "sync";
 
     if (mode === "sync") {
       const items = data as Iterable<U>;
       return this.replayPending(
-        this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
+        this.createPipeline<U>(emptyChunks<U>(), {
           // Every knob set BEFORE `.from()` carries through it - `.onError()` and `.context()` are
           // both callable on a source-less pipeline, and dropping them here made a registered run
           // handler silently never fire.
@@ -591,6 +609,20 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     };
   }
 
+  /** The pre-buffer reset every REAL stage needs, once it has consumed the chunk stream (#133) -
+   * nothing is left to recut a back-to-back `.buffer()` from except that stage's own output, so
+   * both views null out. Named once here rather than repeated as a `{ preBufferItems: null,
+   * syncPreBufferItems: null }` pair at `apply()`/`reduce()` (below) and
+   * `ConcurrentPipeline.apply()`/`.reduce()`'s own dispatched equivalents - a dispatching
+   * subclass has no sync chunk stream of its own, so nulling `syncPreBufferItems` there is a
+   * no-op, not a behavior change. */
+  protected freshPreBuffer(): Pick<
+    PipelineConstructorOptions,
+    "preBufferItems" | "syncPreBufferItems"
+  > {
+    return { preBufferItems: null, syncPreBufferItems: null };
+  }
+
   /** The context manager one RUN gets. A caller who named a `context` or a `contextFactory` keeps
    * the instance they own across every call; a default-built manager is per-run, so two calls of
    * one reusable chain never see each other's writes (#90). */
@@ -610,16 +642,23 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * chain and a `.from()` chain reach the identical `.apply()`/`.reduce()`/`.local()` body, and a
    * deferred stage's Mode, chunking and error handling need no separate implementation.
    *
+   * `R` is the caller's own return type (#133) - `createPipeline()` only ever produces the loosely
+   * typed `AnyPipeline<U>`, so every caller used to re-assert its own precise type in an `as X` at
+   * the CALL site (7 of them, across this file and `ConcurrentPipeline`'s own overrides). Naming
+   * `R` here moves that one assertion inside `defer()` itself - a caller writes
+   * `this.defer<U, Pipeline<U, JoinMode<M, M2>, In>>(...)` and gets the precise type back with no
+   * trailing cast of its own.
+   *
    * @example
    * `new Pipeline<number>().transform((t) => t.map((x) => x * 2))` records one stage; calling that
    * pipeline with `[1, 2, 3]` replays it and yields `[2, 4, 6]`.
    */
-  protected defer<U>(run: PendingStage, extra?: PipelineState): AnyPipeline<U> {
-    return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
+  protected defer<U, R = AnyPipeline<U>>(run: PendingStage, extra?: PipelineState): R {
+    return this.createPipeline<U>(emptyChunks<U>(), {
       ...this.carriedOptions(),
       ...extra,
       pendingStages: [...this._pendingStages, run],
-    });
+    }) as unknown as R;
   }
 
   /** Whether this pipeline records its stages rather than running them - true until an input
@@ -652,10 +691,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `registriesFor("/branch/0/big")` returns the stage table of the `big` arm of the first
    * `.branch()` call, so `/branch/0/big/transform/0` serves that arm's own first stage.
    */
-  protected registriesFor(trail: string): {
-    chunkTransforms: ChunkTransform[];
-    reduceStages: Map<number, ReduceStage>;
-  } | null {
+  protected registriesFor(trail: string): StageRegistries | null {
     const match = /^\/branch\/(\d+)\/([^/]+)$/.exec(trail);
     if (!match) return null;
     const arms = this._branchStages.get(Number(match[1]));
@@ -672,10 +708,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     return built;
   }
 
-  protected registries(): {
-    chunkTransforms: ChunkTransform[];
-    reduceStages: Map<number, ReduceStage>;
-  } {
+  protected registries(): StageRegistries {
     if (!this.isDeferred()) {
       return { chunkTransforms: this._chunkTransforms, reduceStages: this._reduceStages };
     }
@@ -741,17 +774,17 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * pipeline leaves `_chunks` empty and carries `_syncChunks` instead, so this is the one place
    * that difference is resolved. `asyncItems()` and `PipelineResult.chunks()` both read it. */
   protected chunkStream(): AsyncIterable<T[]> {
-    if (this._mode !== "sync" || this._syncChunks === null) return this._chunks;
-    const syncChunks = this._syncChunks;
-    return {
-      [Symbol.asyncIterator]: async function* () {
-        for (const chunk of syncChunks) yield await chunk;
-      },
-    };
+    if (!this.isSync()) return this._chunks;
+    const syncChunks = this._syncChunks!;
+    return asyncIterableFrom(async function* () {
+      for (const chunk of syncChunks) yield await chunk;
+    });
   }
 
-  /** Whether this pipeline runs on the synchronous engine (#90) - what `reduce()` asks before
-   * choosing between the sync and the async fold. */
+  /** Whether this pipeline runs on the synchronous engine (#90) - what `reduce()`/`apply()`/
+   * `buffer()`/`chunkStream()`/`syncChunkStream()` all ask before choosing between the sync and
+   * the async engine, rather than each raw-spelling `_mode === "sync" && _syncChunks !== null`
+   * (#133: was spelled inline 4x, its own negation included). */
   protected isSync(): boolean {
     return this._mode === "sync" && this._syncChunks !== null;
   }
@@ -760,10 +793,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `"sync"` has none, so this raises rather than inventing one; `isSync()` above is the guard
    * every caller checks first. */
   protected syncChunkStream(): MaybeAsyncChunks<T> {
-    if (this._mode !== "sync" || this._syncChunks === null) {
+    if (!this.isSync()) {
       throw new Error("no sync chunk stream: this pipeline runs on the asynchronous engine");
     }
-    return this._syncChunks;
+    return this._syncChunks!;
   }
 
   /** This pipeline's items, as one stream, whichever engine it runs on (#90) - the seam the async
@@ -858,7 +891,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // AFTER it, and setting `runHandler` on the deferred pipeline instead made it cover the whole
     // chain - a handler written after `.transform()` silently started catching that transform.
     if (this.isDeferred()) {
-      return this.defer<T>((p) => p.onError(handler)) as this;
+      return this.defer<T, this>((p) => p.onError(handler));
     }
     return this.createPipeline<T>(this._chunks, {
       ...this.carriedOptions(),
@@ -894,11 +927,9 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // No source yet: record the call and replay it when one arrives (#90). This is the ordinary
     // case for a callable pipeline, where the chain is composed before any data exists.
     if (this.isDeferred()) {
-      return this.defer<U>((p) => p.apply(transformer as Transformer<unknown, U, M2>)) as Pipeline<
-        U,
-        JoinMode<M, M2>,
-        In
-      >;
+      return this.defer<U, Pipeline<U, JoinMode<M, M2>, In>>((p) =>
+        p.apply(transformer as Transformer<unknown, U, M2>),
+      );
     }
     const runnable = transformer.runnable();
     const carried = {
@@ -906,15 +937,14 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       chunkTransforms: [...this._chunkTransforms, runnable as unknown as ChunkTransform],
       // A real stage just consumed the chunk stream - nothing left to recut a back-to-back
       // `.buffer()` from except this stage's own output, so the pre-buffer item views reset.
-      preBufferItems: null,
-      syncPreBufferItems: null,
+      ...this.freshPreBuffer(),
     };
 
     // A `"sync"` chain maps its chunks through the SAME `runnable` a `"sync"` one does, but through
     // a sync generator (#90): no `Promise` is created unless the transformer itself returns one,
     // and that chunk then travels the stream as a pending value the terminal op settles.
-    if (this._mode === "sync" && this._syncChunks !== null) {
-      const source = this._syncChunks;
+    if (this.isSync()) {
+      const source = this._syncChunks!;
       const ctx = this._context;
       const runHandler = this._runHandler;
       function* stageChunks(): Generator<U[] | Promise<U[]>> {
@@ -923,7 +953,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
             U[] | Promise<U[]>;
         }
       }
-      return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
+      return this.createPipeline<U>(emptyChunks<U>(), {
         ...carried,
         syncChunks: stageChunks(),
       }) as Pipeline<U, JoinMode<M, M2>, In>;
@@ -1011,26 +1041,26 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
         throw new Error("buffer size must be a whole number of at least 1");
       }
       const cutsTheSource = this._pendingStages.length === 0;
-      return this.defer<T>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {}) as this;
+      return this.defer<T, this>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {});
     }
 
     // The `"sync"` arm recuts with the sync chunker (#90) - going through the async one here would
     // make `.buffer()` alone widen a chain whose every callback is synchronous, which is exactly
     // the Mode/runtime divergence this ticket exists to remove.
-    if (this._mode === "sync" && this._syncChunks !== null) {
+    if (this.isSync()) {
       const items = this._syncPreBufferItems;
       // Nothing has consumed the stream since the last cut: re-cut from the raw items, so a run of
       // back-to-back `.buffer()` calls collapses to the LAST one, exactly as the async arm does.
       if (items !== null) {
-        return this.createPipeline<T>(EMPTY_CHUNKS as AsyncIterable<T[]>, {
+        return this.createPipeline<T>(emptyChunks<T>(), {
           ...this.carriedOptions(),
           syncChunks: buildSyncChunkGenerator<T>(size)(items),
           syncPreBufferItems: items,
         }) as this;
       }
-      return this.createPipeline<T>(EMPTY_CHUNKS as AsyncIterable<T[]>, {
+      return this.createPipeline<T>(emptyChunks<T>(), {
         ...this.carriedOptions(),
-        syncChunks: recutSyncChunks(this._syncChunks, size),
+        syncChunks: recutSyncChunks(this._syncChunks!, size),
         syncPreBufferItems: null,
       }) as this;
     }
@@ -1094,15 +1124,14 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       ...this.carriedOptions(),
       chunkTransforms,
       reduceStages,
-      preBufferItems: null,
-      syncPreBufferItems: null,
+      ...this.freshPreBuffer(),
     };
 
     // `foldSyncChunkStream` folds the same reducer over the sync chunk stream, deferring only at the
     // first thenable a chunk or the reducer itself produces. `foldChunkStream` is that fold over an
     // `AsyncIterable`, which is the only reason the second arm is always `"async"`.
     if (this.isSync()) {
-      return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
+      return this.createPipeline<U>(emptyChunks<U>(), {
         ...carried,
         mode: this.sourcePolicy() === "async" ? "async" : "sync",
         syncChunks: foldSyncChunkStream(fn, initial, this.syncChunkStream(), this._context),
@@ -1145,11 +1174,9 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // built region is what keeps `build`'s own stages recorded against the region's real pipeline,
     // which is where they pin themselves in the orchestrating process.
     if (this.isDeferred()) {
-      return this.defer<U>((p) => (p as unknown as Pipeline<T, M, In>).local(build)) as Pipeline<
-        U,
-        JoinMode<M, M2>,
-        In
-      >;
+      return this.defer<U, Pipeline<U, JoinMode<M, M2>, In>>((p) =>
+        (p as unknown as Pipeline<T, M, In>).local(build),
+      );
     }
     // Both option objects SPREAD their source pipeline's own carried knobs (#90) - see `reduce()`
     // for why: a hand-built list here dropped `bound`, so the region deferred instead of running
@@ -1159,7 +1186,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       chunks: this._chunks,
       pendingStages: [],
     });
-    const built = build(region as unknown as Pipeline<T, M, "shape">);
+    // `build`'s own declared parameter type is `Pipeline<T, M, any>` - cast straight to it rather
+    // than through the stale `"shape"` literal a deleted `SourcePolicy` type parameter left behind
+    // (#133): a `SourcePolicy` value never belonged in `In`'s own position, and nothing here reads
+    // it as one.
+    const built = build(region as unknown as Pipeline<T, M, any>);
     return this.createPipeline<U>(built._chunks, {
       ...built.carriedOptions(),
     }) as Pipeline<U, JoinMode<M, M2>, In>;
@@ -1206,7 +1237,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // `.from()` yet; `.tap()` is only reachable from a pipeline that already has a source, so the
     // narrowing is sound - `M` here is never `"unset"`.
     return this.local((p) => {
-      const sourced = p as Pipeline<T, "sync" | "async", "shape"> as Pipeline<T, "sync", "shape">;
+      // `unknown`, not the stale `"shape"` literal a deleted `SourcePolicy` type parameter left in
+      // `In`'s own position (#133) - a region's own `In` is never read inside `.local()`'s builder,
+      // so any placeholder does, and `unknown` names that honestly rather than borrowing a runtime
+      // value's own literal type.
+      const sourced = p as Pipeline<T, "sync" | "async", unknown> as Pipeline<T, "sync", unknown>;
       // Both arms call the identical runtime expression; the narrowing exists purely to pick one
       // of `Transformer.tap`'s own overloads, which a union-typed `arg` matches neither of. The
       // Mode cast on the transformer arm is safe for the same reason: `tap` runs its argument for
@@ -1217,7 +1252,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
         ? sourced.transform((t) => t.tap(tapped))
         : sourced.transform((t) =>
             t.tap(arg as PipelineFunction<T, unknown>),
-          )) as unknown as Pipeline<T, "sync", "shape">;
+          )) as unknown as Pipeline<T, "sync", unknown>;
       // `as unknown` first: `.local()`'s return names a concrete `In`, which `this` need not share
       // (#90 added `In` as the class's fourth type parameter), so the two no longer overlap enough
       // for a direct cast. `.tap()` keeps `T` and every knob, so the receiver's own type is right.
@@ -1236,11 +1271,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   protected pushReduceStage<U>(
     fn: ReduceFunction<U, T>,
     initial: U,
-  ): {
-    stageIndex: number;
-    chunkTransforms: ChunkTransform[];
-    reduceStages: Map<number, ReduceStage>;
-  } {
+  ): { stageIndex: number } & StageRegistries {
     const stageIndex = this._chunkTransforms.length;
     const reduceStages = new Map(this._reduceStages);
     reduceStages.set(stageIndex, { fn, initial } as ReduceStage);
@@ -1266,12 +1297,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * A bound sync pipeline over `[1, 2, 3]` returns `{ syncChunks: <generator>, … }`; an async one
    * returns `{ syncChunks: null, … }` and the caller reads `items()` instead.
    */
-  drainable(input: PipelineSource<In>): {
-    syncChunks: MaybeAsyncChunks<T> | null;
-    items: () => AsyncIterable<T>;
-    chunks: () => AsyncIterable<T[]>;
-    context: IContextManager;
-  } {
+  drainable(input: PipelineSource<In>): Drainable<T> {
     const bound = this.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
     return {
       syncChunks: bound.isSync() ? bound._syncChunks : null,
@@ -1339,7 +1365,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * context, with no stages of its own yet.
    */
   protected emptyOfOwnClass<U>(context: IContextManager, routeTrail = ""): AnyPipeline<U> {
-    return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
+    return this.createPipeline<U>(emptyChunks<U>(), {
       ...this.carriedOptions(),
       context,
       contextIsDefault: false,

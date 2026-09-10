@@ -334,9 +334,9 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     // signature and typed fine, then threw `no source: call .from(data) before composing a stage`
     // the moment a stage was composed.
     if (this.isDeferred()) {
-      return this.defer<U>((p) =>
+      return this.defer<U, ConcurrentPipeline<U, In>>((p) =>
         p.apply(transformer as Transformer<unknown, U, "sync" | "async">),
-      ) as ConcurrentPipeline<U, In>;
+      );
     }
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
@@ -366,8 +366,10 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
         transformer.runnable() as unknown as ChunkTransform,
       ],
       // A dispatched stage's own output IS a real chunk stream now (#39) - a later `.buffer()`
-      // flattens it like any other stage's output, so no pre-buffer item view survives this call.
-      preBufferItems: null,
+      // flattens it like any other stage's output, so no pre-buffer item view survives this call
+      // (`freshPreBuffer()` also nulls `syncPreBufferItems`, a no-op here - this class is always
+      // `"async"` and has no sync chunk stream of its own to reset).
+      ...this.freshPreBuffer(),
     });
   }
 
@@ -390,12 +392,12 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     // Defers with no input yet, the same as `apply()` above (#90). Replaying it through this same
     // method is what keeps the partitioning (#62) identical either way.
     if (this.isDeferred()) {
-      return this.defer<U>((p) =>
+      return this.defer<U, ConcurrentPipeline<U, In>>((p) =>
         p.reduce(
           fn as (acc: U, item: unknown, ctx: IContextManager, emit: (v: U) => void) => U,
           initial,
         ),
-      ) as ConcurrentPipeline<U, In>;
+      );
     }
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
@@ -417,7 +419,7 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
       ...this.carriedOptions(),
       chunkTransforms,
       reduceStages,
-      preBufferItems: null,
+      ...this.freshPreBuffer(),
     });
   }
 
