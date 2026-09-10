@@ -144,9 +144,13 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
     // The name goes straight into a route - `/branch/<i>/<name>/transform/<n>` - and `.fetch()`
     // matches against an ENCODED pathname, so anything needing encoding never resolves. Measured:
     // `.when("big orders", …)` dispatched `/branch/0/big%20orders/transform/0` and 404'd.
-    if (!/^[A-Za-z0-9_.~-]+$/.test(name)) {
+    // `.` and `..` pass the character class but are RELATIVE path segments: `new URL()` rewrites
+    // `/branch/0/./transform/0` to `/branch/0/transform/0`, which misses `.fetch()`'s trail regex
+    // and serves the PARENT chain's stage 0 - wrong data, no error. `..` normalises to
+    // `/branch/transform/0` and 404s.
+    if (!/^[A-Za-z0-9_.~-]+$/.test(name) || name === "." || name === "..") {
       throw new Error(
-        `branch "${name}" is not usable in a route - use letters, digits, and any of _ . ~ -`,
+        `branch "${name}" is not usable in a route - use letters, digits, and any of _ . ~ -, and not "." or ".." alone`,
       );
     }
   }

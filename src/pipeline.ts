@@ -469,11 +469,13 @@ export class Pipeline<
     // `node --disallow-code-generation-from-strings`, and would on a CSP page or a Cloudflare
     // Worker. Reparenting the prototype costs nothing and runs everywhere.
     //
-    // ⚠ One exception to substitutability: `.apply` is a STAGE method here, so it shadows
-    // `Function.prototype.apply`. Measured: `score.call(null, [1,2,3])` returns a `PipelineResult`,
-    // `score.apply(null, [[1,2,3]])` returns a `Pipeline` - it reached `Pipeline.apply()`. `.bind`
-    // and `.call` are unaffected. A consumer that invokes callbacks via `fn.apply(ctx, args)` needs
-    // a wrapper: `(input) => score(input)`.
+    // ⚠ TWO exceptions to substitutability: `.apply` is a STAGE method here and `.bind` is
+    // `.from()`'s protected survivor, so both shadow `Function.prototype`'s. `protected` is erased
+    // at runtime, so a JS consumer reaches `.bind` too. Measured: `score.call(null, [1,2,3])`
+    // returns a `PipelineResult`, `score.apply(null, [[1,2,3]])` returns a `Pipeline` - it reached
+    // `Pipeline.apply()` - and `score.bind(null)` returns a `Pipeline` bound to `null` that throws
+    // when called. Only `.call` is unaffected. A consumer that invokes callbacks via
+    // `fn.apply(ctx, args)` or `fn.bind(ctx)` needs a wrapper: `(input) => score(input)`.
     const self = ((input: PipelineSource<unknown>) => {
       // A pipeline that already named a source through `.from()` has materialised its stages into
       // a chunk stream, and only stages recorded SINCE then can be replayed onto a new input - so
@@ -483,7 +485,7 @@ export class Pipeline<
       // does, at which point every pipeline is callable and none is bound.
       if (self._bound) {
         throw new Error(
-          "cannot call a pipeline that already named a source with .from() - build the chain without .from() and call it with the input instead",
+          "cannot call a pipeline that is already bound to a source - build the chain, then call it with the input. Note that Pipeline.bind() is a stage method, not Function.prototype.bind: wrap the pipeline as `(input) => pipeline(input)` to bind a receiver",
         );
       }
       return new PipelineResult<T, PipelineMode>(
@@ -795,7 +797,7 @@ export class Pipeline<
   protected static adopt(pipeline: AnyPipeline<any>): PipelineOptions {
     if (pipeline._bound) {
       throw new Error(
-        "cannot wrap a pipeline that already named a source with .from() - build the chain without .from() and wrap that",
+        "cannot wrap a pipeline that is already bound to a source - wrap the unbound chain instead",
       );
     }
     return {

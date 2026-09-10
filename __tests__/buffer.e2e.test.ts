@@ -93,6 +93,66 @@ describe("#39 two .buffer() calls back to back collapse to the last one (Done-wh
   });
 });
 
+describe("#90 review - an early exit closes the source on both engines", () => {
+  /** A generator that records when its own `finally` runs. 100 items, so a `.buffer(10)` chain
+   * stops well short of exhausting it. */
+  function counted(state: { closed: boolean }) {
+    return (function* () {
+      try {
+        for (let i = 0; i < 100; i++) yield i;
+      } finally {
+        state.closed = true;
+      }
+    })();
+  }
+
+  it("closes a sync generator when .first(1) stops a chain that re-cuts after a stage", () => {
+    // `recutSyncChunks` drives its source through a MANUAL iterator, so closing the recut
+    // generator taught the source nothing. Measured before the fix: `closed` stayed `false` here
+    // and `true` on the async source below - two engines disagreeing on user code that differed
+    // only in its source.
+    const state = { closed: false };
+    const chain = new Pipeline<number>()
+      .buffer(10)
+      .transform((t) => t.map((x) => x * 2))
+      .buffer(2);
+
+    expect(chain(counted(state)).first(1)).toEqual([0]);
+    expect(state.closed).toBe(true);
+  });
+
+  it("closes an async generator on the same chain", async () => {
+    const state = { closed: false };
+    const source = (async function* () {
+      try {
+        for (let i = 0; i < 100; i++) yield i;
+      } finally {
+        state.closed = true;
+      }
+    })();
+    const chain = new Pipeline<number>()
+      .buffer(10)
+      .transform((t) => t.map((x) => x * 2))
+      .buffer(2);
+
+    expect(await chain(source).first(1)).toEqual([0]);
+    expect(state.closed).toBe(true);
+  });
+
+  it("closes the source when the re-cut runs over a pending tail", async () => {
+    // `recutPending` takes the iterator over the moment a chunk is a Promise, so it owns the close
+    // from that point on; `recutSyncChunks` must not close one it no longer drives.
+    const state = { closed: false };
+    const chain = new Pipeline<number>()
+      .buffer(10)
+      .transform((t) => t.map(async (x) => x * 2))
+      .buffer(2);
+
+    expect(await chain(counted(state)).first(1)).toEqual([0]);
+    expect(state.closed).toBe(true);
+  });
+});
+
 // #39's own Done-when 4 and 5 - lifecycle hooks firing identically across every consumption path,
 // and async iteration reading the same persisted chunk stream a terminal op does - are covered by
 // __tests__/transforms.e2e.test.ts's single tap observation case now that #72 deletes hooks in
