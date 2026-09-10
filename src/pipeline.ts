@@ -42,16 +42,17 @@ import {
   buildSyncChunkGenerator,
   flattenChunks,
   recutSyncChunks,
-  drainSync,
+  collectItems,
 } from "./utils/chunk";
-import { chain, isThenable, dropOrRethrow, settleMaybe } from "./utils/helpers";
+import { chain, runStageChunk, settleMaybe } from "./utils/helpers";
 import { PipelineResult } from "./result";
 import { BranchBuilder, type ResultsOf, type ModeOfArms, type BranchArm } from "./branch";
 import { foldChunkStream, foldSyncChunkStream } from "./utils/reduce";
 
-/** The chunk stream a `Pipeline` that has no source yet carries - `.from()` is what replaces it.
- * Shared rather than rebuilt per instance: it is empty and stateless. */
-const EMPTY_CHUNKS: AsyncIterable<never[]> = {
+/** The chunk stream a `Pipeline` that has no input yet carries, and the one a WORKER process's own
+ * copy is reset to (`ClusterPipeline`'s constructor). Shared rather than rebuilt per instance: it
+ * is empty, stateless and re-iterable, where a spent generator would read empty only once. */
+export const EMPTY_CHUNKS: AsyncIterable<never[]> = {
   // eslint-disable-next-line @typescript-eslint/require-await
   async *[Symbol.asyncIterator]() {},
 };
@@ -317,36 +318,9 @@ function reduceStagePlaceholder(stageIndex: number): ChunkTransform {
   return () => {
     throw new Error(
       `stage ${stageIndex} is a reduce stage, not a plain per-chunk transform - it cannot serve ` +
-        `/stage/${stageIndex}`,
+        `/transform/${stageIndex}`,
     );
   };
-}
-
-/**
- * Runs one chunk through a stage on the `"sync"` engine (#90), applying `Pipeline.onError()`'s own
- * RUN handler exactly as `runSequentially` does for the async engine - the two engines must agree on
- * what a chunk failure means, and `dropOrRethrow` is where that decision already lives.
- *
- * A dropped chunk becomes `[]` rather than disappearing: the sync stream is a generator of chunks,
- * so an empty chunk is how "this one contributed nothing" is spelled. A synchronous handler keeps
- * the whole thing synchronous; an async one widens the run from this chunk on.
- *
- * `runStageChunk(doubler, [1, 2], ctx, undefined)` → `[2, 4]`, no `Promise` created.
- */
-function runStageChunk<In, Out>(
-  runnable: (chunk: In[], ctx: IContextManager) => Out[] | Promise<Out[]>,
-  chunk: In[],
-  ctx: IContextManager,
-  runHandler?: PipelineErrorHandler,
-): Out[] | Promise<Out[]> {
-  const dropped = (error: Error): Out[] | Promise<Out[]> =>
-    chain(dropOrRethrow(runHandler, error, ctx), () => [] as Out[]);
-  try {
-    const result = runnable(chunk, ctx);
-    return isThenable(result) ? Promise.resolve(result).catch(dropped) : result;
-  } catch (error) {
-    return dropped(error as Error);
-  }
 }
 
 /**
@@ -828,8 +802,9 @@ export class Pipeline<
     return (first ?? second ?? {}) as O;
   }
 
-  /** This pipeline's CHUNKS as an async stream, whichever engine it runs on (#90) - what a merge
-   * reads, since a `"sync"` pipeline leaves `_chunks` empty and carries `_syncChunks` instead. */
+  /** This pipeline's CHUNKS as an async stream, whichever engine it runs on (#90) - a `"sync"`
+   * pipeline leaves `_chunks` empty and carries `_syncChunks` instead, so this is the one place
+   * that difference is resolved. `asyncItems()` and `PipelineResult.chunks()` both read it. */
   protected chunkStream(): AsyncIterable<T[]> {
     if (this._mode !== "sync" || this._syncChunks === null) return this._chunks;
     const syncChunks = this._syncChunks;
@@ -838,22 +813,6 @@ export class Pipeline<
         for (const chunk of syncChunks) yield await chunk;
       },
     };
-  }
-
-  /**
-   * Refuses a DRAIN on a pipeline that was given no input (#90). `asyncItems()` is the only caller:
-   * every terminal op reads through it, so one check covers them all.
-   *
-   * It used to refuse a STAGE too, from `apply()` and `ConcurrentPipeline.apply()`, because
-   * composing before a source was the mistake. Deferral replaced that - composing ahead of the data
-   * is now the ordinary case, and every class records its stages rather than refusing them. What
-   * this still catches is the case it was written for: `new Pipeline().toArray()` resolving to `[]`,
-   * a plausible-looking answer for a caller who simply has no data.
-   */
-  protected requireSource(): void {
-    if (!this._bound) {
-      throw new Error("no input: call the pipeline with the items to process");
-    }
   }
 
   /** Whether this pipeline runs on the synchronous engine (#90) - what `reduce()` asks before
@@ -875,21 +834,7 @@ export class Pipeline<
   /** This pipeline's items, as one stream, whichever engine it runs on (#90) - the seam the async
    * terminal ops and `[Symbol.asyncIterator]` read, so neither has to branch on `_mode` itself. */
   protected asyncItems(): AsyncIterable<T> {
-    // A drain refuses a source-less pipeline for the same reason a stage does (#90): without this,
-    // `new Pipeline().toArray()` resolved to `[]`, a plausible-looking answer for a caller who
-    // simply forgot `.from()`, where composing any stage on the same pipeline throws.
-    this.requireSource();
-    if (this._mode !== "sync" || this._syncChunks === null) {
-      return flattenChunks(this._chunks);
-    }
-    const syncChunks = this._syncChunks;
-    return {
-      [Symbol.asyncIterator]: async function* () {
-        for (const chunk of syncChunks) {
-          yield* await chunk;
-        }
-      },
-    };
+    return flattenChunks(this.chunkStream());
   }
 
   // ===== Static Factory Methods =====
@@ -1445,18 +1390,7 @@ export class Pipeline<
       // ONE bind for the whole branch: the parent chain runs, and the arms below share the
       // context that run created rather than the chain's own.
       const { syncChunks, items: itemsOf, context } = owner.drainable(input);
-      const collected: T[] = [];
-      const items = (
-        syncChunks !== null
-          ? chain(
-              drainSync(syncChunks, (item) => void collected.push(item as T)),
-              () => collected,
-            )
-          : (async () => {
-              for await (const item of itemsOf()) collected.push(item);
-              return collected;
-            })()
-      ) as T[] | Promise<T[]>;
+      const items = collectItems(syncChunks, itemsOf) as T[] | Promise<T[]>;
 
       // `chain` defers only at a real thenable, so a synchronous parent stays synchronous here.
       return chain(items, (settled: T[]) => {

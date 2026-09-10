@@ -19,7 +19,7 @@ import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { SimpleContextManager } from "@src/context/simple";
 import { DROP } from "@src/types";
-import { buildSyncChunkGenerator, flattenSyncChunks } from "@src/utils/chunk";
+import { buildSyncChunkGenerator } from "@src/utils/chunk";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
 import { ClusterPipeline } from "@src/pipelines/cluster";
@@ -182,13 +182,12 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     ]);
   });
 
-  it("L2: the sync chunk utils cut and flatten the same way their async counterparts do", () => {
+  it("L2: the sync chunk generator cuts the same way its async counterpart does", () => {
     expect([...buildSyncChunkGenerator<number>(3)([1, 2, 3, 4, 5, 6, 7])]).toEqual([
       [1, 2, 3],
       [4, 5, 6],
       [7],
     ]);
-    expect([...flattenSyncChunks([[1, 2], [3]])]).toEqual([1, 2, 3]);
     expect(() => buildSyncChunkGenerator<number>(0)).toThrow("chunkSize must be at least 1");
     expect(countPromises(() => [...buildSyncChunkGenerator<number>(2)([1, 2, 3])])).toBe(0);
   });

@@ -28,7 +28,7 @@ import type { ChunkTransform } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
 import { share } from "@src/utils/chunk";
-import { dropOrRethrow } from "@src/utils/helpers";
+import { runStageChunk } from "@src/utils/helpers";
 
 /** Construction-time knobs for `ConcurrentPipeline` and every class that extends it. */
 export interface ConcurrentPipelineOptions {
@@ -297,19 +297,13 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
     }
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
-    // The run handler's own chunk-drop decision (#78) - `dropOrRethrow` (`utils/helpers.ts`) is the
-    // same "call the handler, or propagate" `Transformer.process()`'s own `runSequentially` loop
-    // makes for a local stage; a handler that returns (rather than throws) means "drop this chunk",
-    // and `[]` is the empty-chunk answer the fan-out below needs for that. No handler registered:
-    // `dropOrRethrow` rethrows, same as before #78.
-    const work: InternalTransformer<T, U> = async (chunk, ctx) => {
-      try {
-        return await rawWork(chunk, ctx);
-      } catch (error) {
-        await dropOrRethrow(this._runHandler, error as Error, ctx);
-        return [];
-      }
-    };
+    // `runStageChunk` (`utils/helpers.ts`) is the same "call the handler, or propagate" decision
+    // the sync engine makes (#78/#90) - a handler that returns rather than throws means "drop this
+    // chunk", and `[]` is the empty-chunk answer the fan-out below needs for that. Kept `async` on
+    // purpose: it turns a synchronous throw from a LOCAL `rawWork` into a rejection, which
+    // `fanOutOrdered` needs to fail at the chunk's own ordered position.
+    const work: InternalTransformer<T, U> = async (chunk, ctx) =>
+      runStageChunk(rawWork, chunk, ctx, this._runHandler);
     const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;
     // `this._chunks` handed straight to the fan-out - no chunking call of this class's own (#39):
     // whatever boundary `.buffer()` (or the constructor's own default) already cut is what gets
@@ -321,7 +315,6 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
       // dropped `mode`, so the pipeline reverted to `"unset"` after its first `.transform()` and
       // `.local()`'s own region then refused to compose a stage at all.
       ...this.carriedOptions(),
-      context: this._context,
       chunkTransforms: [
         ...this._chunkTransforms,
         // `transformer.runnable()` (#78), not `transformer.transform` directly - the seam that
@@ -329,14 +322,9 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
         // (`HttpPipeline.fetch()`'s own `_chunkTransforms[requested]` lookup) gets row recovery too.
         transformer.runnable() as unknown as ChunkTransform,
       ],
-      // Carried forward like every base `Pipeline` copy-on-write method already does (#45) - a
-      // dropped `_reduceStages` here would silently lose a stage a prior `.reduce()` registered
-      // the moment `ConcurrentPipeline.reduce()` (#45 L3) stops throwing and starts populating it.
-      reduceStages: this._reduceStages,
       // A dispatched stage's own output IS a real chunk stream now (#39) - a later `.buffer()`
       // flattens it like any other stage's output, so no pre-buffer item view survives this call.
       preBufferItems: null,
-      runHandler: this._runHandler,
     });
   }
 
@@ -384,7 +372,6 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
 
     return this.createPipeline<U>(newChunks, {
       ...this.carriedOptions(),
-      context: this._context,
       chunkTransforms,
       reduceStages,
       preBufferItems: null,
@@ -405,12 +392,13 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
    * argument on the `extends` clause above is the compile-time half, and is what makes this
    * override a genuine narrowing of the base's own two arms rather than a conflict with them.
    *
-   * `new ConcurrentPipeline().from([1, 2, 3])` → `ConcurrentPipeline<number, "async">`.
+   * `new ConcurrentPipeline(chain)([1, 2, 3])` runs on the async engine whatever `chain` was.
    */
   protected override bind<U>(data: PipelineSource<U>): ConcurrentPipeline<U, M> {
-    // `In` becomes `U` here, not the receiver's own: `.from()` BINDS an input, so whatever the
-    // chain accepted before is spent. Every other override carries `In` through unchanged.
-    return this.fromSource<U>(data, "async") as unknown as ConcurrentPipeline<U, M>;
+    // `In` becomes `U` here, not the receiver's own: binding SPENDS whatever the chain accepted
+    // before. Every other override carries `In` through unchanged. The policy comes from
+    // `sourcePolicy()` rather than a second literal `"async"`, so a class states it once.
+    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as ConcurrentPipeline<U, M>;
   }
 
   protected override sourcePolicy(): SourcePolicy {
