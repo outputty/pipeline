@@ -19,7 +19,7 @@ import { availableParallelism } from "node:os";
 import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
-import { Pipeline } from "@src/pipeline";
+import { EMPTY_CHUNKS, Pipeline } from "@src/pipeline";
 import type { PipelineOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
@@ -139,10 +139,6 @@ if (cluster.isWorker) {
   startWorkerServer();
 }
 
-/** A worker's own `_chunks` (constructor, below) - the worker exists to serve `.fetch()`
- * requests, never to drain a pipeline itself. */
-async function* emptyAsyncIterable(): AsyncGenerator<never> {}
-
 /**
  * Each chunk of a stage dispatched to another process on the SAME machine (#17). Brings up its
  * own `node:cluster` workers on first run; every later `ClusterPipeline` in the process reuses
@@ -165,8 +161,8 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
 
   /** Wraps a chain built elsewhere, dispatching its stages to forked worker processes (#90). The
    * CALLER no longer writes a placeholder source, because a wrapped chain has none by construction.
-   * `emptyAsyncIterable()` below is a different thing and still runs: it empties a WORKER process's
-   * own already-bound copy, so a worker never orchestrates a drain of its own. */
+   * `EMPTY_CHUNKS` below is a different thing and still runs: it empties a WORKER process's own
+   * already-bound copy, so a worker never orchestrates a drain of its own. */
   constructor(pipeline: WrappablePipeline<T, In>, options?: ClusterPipelineOptions);
   constructor(options?: ClusterPipelineConstructorOptions);
   constructor(
@@ -194,7 +190,7 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
     // copy-on-write step automatically: a fan-out built over an empty source yields nothing, so
     // the NEXT instance's own `_chunks` (that fan-out's generator) is empty too.
     if (cluster.isWorker) {
-      this._chunks = emptyAsyncIterable();
+      this._chunks = EMPTY_CHUNKS as AsyncIterable<T[]>;
       this._preBufferItems = null;
     }
   }
@@ -253,11 +249,11 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
    * argument on the `extends` clause above is the compile-time half, and is what makes this
    * override a genuine narrowing of the base's own two arms rather than a conflict with them.
    *
-   * `new ClusterPipeline().from([1, 2, 3])` → `ClusterPipeline<number, "async">`.
+   * `new ClusterPipeline(chain)([1, 2, 3])` runs on the async engine whatever `chain` was.
    */
   protected override bind<U>(data: PipelineSource<U>): ClusterPipeline<U, M> {
-    // `In` becomes `U` here - see `ConcurrentPipeline.from()`.
-    return this.fromSource<U>(data, "async") as unknown as ClusterPipeline<U, M>;
+    // `In` becomes `U` here - see `ConcurrentPipeline.bind()`.
+    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as ClusterPipeline<U, M>;
   }
 
   protected override sourcePolicy(): SourcePolicy {
@@ -274,14 +270,9 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
    * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`http.ts`) exists for, so several
    * `ClusterPipeline`s can share one worker server without colliding on stage 0. */
   protected override routePath(verb: "transform" | "reduce", index: number): string {
-    return `/pipeline/${this.pipelineIndex}${this._routeTrail}/${verb}/${index}`;
+    return `/pipeline/${this.pipelineIndex}${super.routePath(verb, index)}`;
   }
 
-  /**
-   * Lazily bootstraps the shared worker set on the FIRST actual dispatch (never at build time -
-   * the class docstring above explains why), sets `this._url` to the bootstrapped port, then
-   * delegates to `HttpPipeline`'s own dispatch logic (`routePath()` above already redirects it).
-   */
   /** Bootstraps the shared worker set (memoized, `bootstrapCluster()`) and points `this._url` at
    * it - the one bit `stageWork()` (once per chunk) and `reduceWork()` (once per whole stream)
    * share, rather than each inlining the same two lines. */

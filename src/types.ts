@@ -251,26 +251,3 @@ export interface TransformerOptions<In, Out> {
    */
   transform?: InternalTransformer<In, Out>;
 }
-
-/**
- * Options for the branch operation.
- *
- * Python equivalent:
- * ```python
- * def branch(
- *   self,
- *   branches: Mapping[str, tuple[Transformer, Callable[[T], bool]]],
- *   *,
- *   first_match: bool = True,
- * ) -> tuple[dict[str, list], dict[str, Any]]:
- * ```
- */
-export interface BranchOptions {
-  /**
-   * When true (default), items are routed to the first matching branch only.
-   * When false (broadcast mode), items are sent to ALL matching branches.
-   *
-   * Python equivalent: `first_match` parameter
-   */
-  firstMatch?: boolean;
-}

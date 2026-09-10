@@ -153,3 +153,41 @@ function disarm<R>(created: (R | Promise<R>)[]): void {
     if (isThenable(value)) void Promise.resolve(value).catch(() => {});
   }
 }
+
+/**
+ * Runs one chunk through a stage on the `"sync"` engine (#90), applying `Pipeline.onError()`'s own
+ * RUN handler exactly as `runSequentially` does for the async engine - the two engines must agree on
+ * what a chunk failure means, and `dropOrRethrow` is where that decision already lives.
+ *
+ * A dropped chunk becomes `[]` rather than disappearing: the sync stream is a generator of chunks,
+ * so an empty chunk is how "this one contributed nothing" is spelled. A synchronous handler keeps
+ * the whole thing synchronous; an async one widens the run from this chunk on.
+ *
+ * `runStageChunk(doubler, [1, 2], ctx, undefined)` → `[2, 4]`, no `Promise` created.
+ */
+export function runStageChunk<In, Out>(
+  runnable: (chunk: In[], ctx: IContextManager) => Out[] | Promise<Out[]>,
+  chunk: In[],
+  ctx: IContextManager,
+  runHandler?: PipelineErrorHandler,
+): Out[] | Promise<Out[]> {
+  // The drop closure is built on the two failure arms rather than before the call, so a chunk that
+  // simply succeeds allocates nothing: the same reason `Reducer.fold` inlines its own commit.
+  try {
+    const result = runnable(chunk, ctx);
+    if (!isThenable(result)) return result;
+    return Promise.resolve(result).catch((error: Error) => dropChunk<Out>(runHandler, error, ctx));
+  } catch (error) {
+    return dropChunk<Out>(runHandler, error as Error, ctx);
+  }
+}
+
+/** One chunk's failure answer: run the handler, then contribute nothing. Its own function so
+ * `runStageChunk`'s happy path never builds a closure for it. */
+function dropChunk<Out>(
+  runHandler: PipelineErrorHandler | undefined,
+  error: Error,
+  ctx: IContextManager,
+): Out[] | Promise<Out[]> {
+  return chain(dropOrRethrow(runHandler, error, ctx), () => [] as Out[]);
+}

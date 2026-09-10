@@ -14,8 +14,8 @@
 import type { PipelineMode, SourcePolicy } from "./types";
 import type { Pipeline, PipelineSource } from "./pipeline";
 import type { MaybeAsyncChunks } from "./utils/chunk";
-import { chain, isThenable } from "./utils/helpers";
-import { drainSync, drainSyncSettled } from "./utils/chunk";
+import { isThenable } from "./utils/helpers";
+import { collectItems, drainSyncSettled } from "./utils/chunk";
 
 /** The pipeline shape a result drains, with the Mode and policy erased - a result is handed its
  * pipeline by `Pipeline`'s own call signature, which has already fixed both. */
@@ -90,29 +90,7 @@ export class PipelineResult<T, M extends PipelineMode> {
    * `score([1, 2, 3]).toArray()` → `[2, 4, 6]`, typed `number[]`, no `await`.
    */
   toArray(): M extends "sync" ? T[] : Promise<T[]> {
-    const results: T[] = [];
-    const { syncChunks, items } = this.drainable();
-    if (syncChunks !== null) {
-      return chain(
-        drainSync(syncChunks, (item) => void results.push(item)),
-        () => results,
-      ) as M extends "sync" ? T[] : Promise<T[]>;
-    }
-    return this.collectAsync(results, undefined, items) as M extends "sync" ? T[] : Promise<T[]>;
-  }
-
-  /** The async engine's own collect loop, shared by `toArray` and `first` (#90) - `limit` is
-   * `first`'s early exit, `undefined` for the whole stream. */
-  private async collectAsync(
-    results: T[],
-    limit: number | undefined,
-    items: () => AsyncIterable<T>,
-  ): Promise<T[]> {
-    for await (const item of items()) {
-      results.push(item);
-      if (limit !== undefined && results.length >= limit) break;
-    }
-    return results;
+    return this.collect(undefined);
   }
 
   /**
@@ -125,40 +103,28 @@ export class PipelineResult<T, M extends PipelineMode> {
     if (n < 1) {
       throw new Error("n must be at least 1");
     }
+    return this.collect(n);
+  }
 
-    const results: T[] = [];
+  /** Collects up to `limit` items, `undefined` for the whole stream (#90) - `first` IS `toArray`
+   * with an early exit, so the two engines' collect decision is made once here rather than twice
+   * per method. Calls `drainable()` exactly once, like every other terminal. */
+  private collect(limit: number | undefined): M extends "sync" ? T[] : Promise<T[]> {
     const { syncChunks, items } = this.drainable();
-    if (syncChunks !== null) {
-      return chain(
-        drainSync(syncChunks, (item) => {
-          results.push(item);
-          return results.length >= n;
-        }),
-        () => results,
-      ) as M extends "sync" ? T[] : Promise<T[]>;
-    }
-    return this.collectAsync(results, n, items) as M extends "sync" ? T[] : Promise<T[]>;
+    return collectItems(syncChunks, items, limit) as M extends "sync" ? T[] : Promise<T[]>;
   }
 
   /**
    * Run the chain for its side effects, collecting nothing.
    *
+   * `forEach` with a no-op callback IS this, on both engines: it drains the same stream and settles
+   * nothing, since a no-op returns no thenable.
+   *
    * @example
    * `score([1, 2, 3]).consume()` → `undefined`, every stage having run.
    */
   consume(): M extends "sync" ? void : Promise<void> {
-    const { syncChunks, items } = this.drainable();
-    if (syncChunks !== null) {
-      return drainSync(syncChunks, () => {}) as M extends "sync" ? void : Promise<void>;
-    }
-    return this.consumeAsync(items) as M extends "sync" ? void : Promise<void>;
-  }
-
-  /** `consume`'s async arm, split out so the method above stays a single expression per engine. */
-  private async consumeAsync(items: () => AsyncIterable<T>): Promise<void> {
-    for await (const _ of items()) {
-      // Just consume, don't collect
-    }
+    return this.forEach(() => {});
   }
 
   /**

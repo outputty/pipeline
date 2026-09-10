@@ -16,6 +16,7 @@ import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Pipeline } from "@src/pipeline";
 import type {
+  ChunkTransform,
   PipelineOptions,
   PipelineSource,
   ReduceStage,
@@ -164,6 +165,29 @@ async function flushTrailing(
 }
 
 /**
+ * Reads back the route grammar `HttpPipeline.routePath()` builds (#90): `/transform/<n>`,
+ * `/reduce/<n>`, and either prefixed by a `/branch/<i>/<name>` trail, with `ClusterPipeline`'s own
+ * `/pipeline/<i>` ahead of all of it. Written and parsed in one file so the two cannot drift.
+ *
+ * Deliberately NOT anchored at the start: `ClusterPipeline`'s shared worker server hands the whole
+ * pathname through after looking the pipeline up by index, so the prefix it added is still on it.
+ *
+ * `parseRoute("/pipeline/0/branch/1/big/transform/2")` →
+ * `{ trail: "/branch/1/big", verb: "transform", index: 2 }`.
+ */
+function parseRoute(
+  pathname: string,
+): { trail: string | null; verb: "transform" | "reduce"; index: number } | null {
+  const match = /(\/branch\/\d+\/[^/]+)?\/(transform|reduce)\/(\d+)$/.exec(pathname);
+  if (match === null) return null;
+  return {
+    trail: match[1] ?? null,
+    verb: match[2] as "transform" | "reduce",
+    index: Number(match[3]),
+  };
+}
+
+/**
  * Each chunk of a stage dispatched over HTTP to another instance running the SAME code (#17).
  * Mounts one route per stage index (`readonly fetch`); the caller gives it the url where that
  * `.fetch` is mounted. `.local(build)` (#61) keeps a whole region here instead.
@@ -251,12 +275,11 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    * argument on the `extends` clause above is the compile-time half, and is what makes this
    * override a genuine narrowing of the base's own two arms rather than a conflict with them.
    *
-   * `new HttpPipeline({}).from([1, 2, 3])` → `HttpPipeline<number, "async">`.
+   * `new HttpPipeline(chain, { url })([1, 2, 3])` runs on the async engine whatever `chain` was.
    */
   protected override bind<U>(data: PipelineSource<U>): HttpPipeline<U, M> {
-    // `In` becomes `U` here - see `ConcurrentPipeline.from()`: binding an input spends whatever the
-    // chain accepted before.
-    return this.fromSource<U>(data, "async") as unknown as HttpPipeline<U, M>;
+    // `In` becomes `U` here - see `ConcurrentPipeline.bind()`.
+    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as HttpPipeline<U, M>;
   }
 
   protected override sourcePolicy(): SourcePolicy {
@@ -300,31 +323,26 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    */
   readonly fetch = async (request: Request): Promise<Response> => {
     const { pathname } = new URL(request.url);
-    // A `/branch/<i>/<name>/` trail addresses an ARM's own stages, so it resolves into that arm's
-    // registry rather than this pipeline's - without it an arm's stage 0 collided with the
-    // parent's, and the worker served the parent's transform for both.
-    const trail = /\/(branch\/\d+\/[^/]+)\/(?:transform|reduce)\/\d+$/.exec(pathname);
-    const match = /\/(transform|reduce)\/(\d+)$/.exec(pathname);
-    const verb = match?.[1] as "transform" | "reduce" | undefined;
-    const requested = match ? Number(match[2]) : NaN;
+    const route = parseRoute(pathname);
 
-    if (verb === "reduce") {
-      return this.serveReduceRequest(requested, request, trail ? `/${trail[1]}` : null);
+    if (route?.verb === "reduce") {
+      return this.serveReduceRequest(route.index, request, route.trail);
     }
 
     // A path that is not a stage route is answered before anything else runs. `registries()` below
     // can replay a whole deferred chain, and it sat ahead of this guard - so an unrelated request
     // paid that replay for a `maxIndex` it then ignored, and a replay that threw turned a 404 into
     // a rejected `fetch` promise instead of an error response.
-    if (!match) {
+    if (route === null) {
       return Response.json({ error: `unknown stage ${pathname}` }, { status: 404 });
     }
+    const requested = route.index;
 
     // `registries()`, not `_chunkTransforms` directly (#90): a worker holds a chain and never
     // binds an input, so its stages are still recorded calls until something replays them. Reading
     // the raw field reported `unknown stage 0; this deployment serves 0..-1` for a chain that had
     // one stage.
-    const resolved = trail ? this.registriesFor(`/${trail[1]}`) : this.registries();
+    const resolved = this.resolveRegistries(route.trail);
     if (resolved === null) {
       return Response.json({ error: `unknown branch route ${pathname}` }, { status: 404 });
     }
@@ -378,7 +396,7 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
     // recorded calls until something replays them. A `/branch/<i>/<name>/` trail resolves into the
     // ARM's own registry - reading the parent's instead 404s when the parent has no reduce, and
     // silently serves the parent's own fold when it does.
-    const resolved = trail !== null ? this.registriesFor(trail) : this.registries();
+    const resolved = this.resolveRegistries(trail);
     if (resolved === null) {
       return Response.json({ error: `unknown branch route ${trail}` }, { status: 404 });
     }
@@ -420,6 +438,15 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    * or `.fetch()`'s parsing at all. */
   protected routePath(verb: "transform" | "reduce", index: number): string {
     return `${this._routeTrail}/${verb}/${index}`;
+  }
+
+  /** This pipeline's own stage registries, or an ARM's when `trail` names one - `null` for a trail
+   * naming no arm this deployment holds. The one place `fetch()` and `serveReduceRequest()` both
+   * resolve, rather than each spelling the same ternary. */
+  private resolveRegistries(
+    trail: string | null,
+  ): { chunkTransforms: ChunkTransform[]; reduceStages: Map<number, ReduceStage> } | null {
+    return trail === null ? this.registries() : this.registriesFor(trail);
   }
 
   /**
