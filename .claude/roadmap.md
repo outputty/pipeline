@@ -123,7 +123,7 @@ The two older candidates, still not filed:
   during planning to have no overlap with `.tap()`'s own coverage. `.branch()` arm naming and two
   chains sharing one caller-supplied `emitter` both stay unsupported by decision - `.claude/architecture.md`'s
   own EventEmitterPipeline section, `#124`'s own Settle first/Constraints. PR #129 (test layer), PR
-  #130 (dispatch + lifecycle), docs PR (this one).
+  #130 (dispatch + lifecycle), PR #132 (docs).
 - **A pipeline holds its input type, not its data** (#90, `feat!`) - a chain is composed once,
   without data, and RUN by calling it: `new Pipeline<Order>().transform(f)(orders).toArray()`.
   Calling one returns a `PipelineResult`, which is where `toArray`/`first`/`consume`/`forEach`,
