@@ -155,6 +155,35 @@ function disarm<R>(created: (R | Promise<R>)[]): void {
 }
 
 /**
+ * The try/catch-if-thenable/recover skeleton every ROW- or CHUNK-level recovery site shares (#133):
+ * try `attempt`; a synchronous throw OR a rejected `Promise` both route to `recover`. Neither path
+ * builds a closure this function doesn't already need - `recover` is a plain function the CALLER
+ * already holds, invoked directly at the failure site, never wrapped or hoisted here. Serves
+ * `runStageChunk` below and `transformer.ts`'s own `attemptRow` (was spelled out separately, 2
+ * copies, before this).
+ *
+ * `Reducer.fold` (`utils/reduce.ts`) does NOT use this, by decision: its own docstring records a
+ * measured perf note (372.5 ns/item for a hoisted commit/recover pair against 8.9 ns/item inlined)
+ * that is specifically about its PER-ITEM fold path - the two sites this helper serves are each
+ * called at most once per chunk's own row or once per chunk, never once per item inside a hot fold,
+ * so the trade that note rejects for `Reducer.fold` does not apply here.
+ *
+ * `tryRecover(() => parseStrict("3"), () => -1)` → `3`, no `Promise` created, `recover` never
+ * called.
+ */
+export function tryRecover<R>(
+  attempt: () => R | Promise<R>,
+  recover: (error: Error) => R | Promise<R>,
+): R | Promise<R> {
+  try {
+    const result = attempt();
+    return isThenable(result) ? Promise.resolve(result).catch(recover) : result;
+  } catch (error) {
+    return recover(error as Error);
+  }
+}
+
+/**
  * Runs one chunk through a stage on the `"sync"` engine (#90), applying `Pipeline.onError()`'s own
  * RUN handler exactly as `runSequentially` does for the async engine - the two engines must agree on
  * what a chunk failure means, and `dropOrRethrow` is where that decision already lives.
@@ -171,15 +200,10 @@ export function runStageChunk<In, Out>(
   ctx: IContextManager,
   runHandler?: PipelineErrorHandler,
 ): Out[] | Promise<Out[]> {
-  // The drop closure is built on the two failure arms rather than before the call, so a chunk that
-  // simply succeeds allocates nothing: the same reason `Reducer.fold` inlines its own commit.
-  try {
-    const result = runnable(chunk, ctx);
-    if (!isThenable(result)) return result;
-    return Promise.resolve(result).catch((error: Error) => dropChunk<Out>(runHandler, error, ctx));
-  } catch (error) {
-    return dropChunk<Out>(runHandler, error as Error, ctx);
-  }
+  return tryRecover(
+    () => runnable(chunk, ctx),
+    (error) => dropChunk<Out>(runHandler, error, ctx),
+  );
 }
 
 /** One chunk's failure answer: run the handler, then contribute nothing. Its own function so

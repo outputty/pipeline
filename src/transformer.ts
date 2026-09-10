@@ -27,7 +27,14 @@ import type {
 } from "./types";
 import { DROP } from "./types";
 import { SimpleContextManager } from "./context/simple";
-import { isContextAware, dropOrRethrow, chain, mapSettle, isThenable } from "./utils/helpers";
+import {
+  isContextAware,
+  dropOrRethrow,
+  chain,
+  mapSettle,
+  isThenable,
+  tryRecover,
+} from "./utils/helpers";
 import { Reducer, foldChunk } from "./utils/reduce";
 
 /**
@@ -114,13 +121,10 @@ function attemptRow<T, R>(
   // shape instead cannot tell them apart: `.flatMap()`'s success is already an array, so a handler
   // that legitimately returns an array had its value spread across the output rather than placed in
   // the failing row's slot - wrong for any `U` that is itself an array type.
-  const recover = (error: Error) => chain(rowHandler(item, error, ctx), onRecovered);
-  try {
-    const result = attempt(item);
-    return isThenable(result) ? Promise.resolve(result).catch(recover) : result;
-  } catch (error) {
-    return recover(error as Error);
-  }
+  return tryRecover(
+    () => attempt(item),
+    (error) => chain(rowHandler(item, error, ctx), onRecovered),
+  );
 }
 
 /**
@@ -348,23 +352,19 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   ): Transformer<In, U, M>;
   map<U>(fn: (item: Out, ctx: IContextManager) => U): Transformer<In, U, "async">;
   map<U>(fn: PipelineFunction<Out, U>): Transformer<In, U, "sync" | "async"> {
-    if (isContextAware(fn)) {
-      return this.pipe((chunk, ctx, run) => {
-        // No handler registered: the plain path (#78 Done-when 11 - the seam costs nothing until
-        // `.onError()` is actually called). `mapSettle`, not `Promise.all` (#90): a chunk whose
-        // items all came back as plain values is returned as-is, creating no `Promise` at all.
-        if (!run?.rowHandler) {
-          return mapSettle(chunk, (x) => fn(x, ctx));
-        }
-        return settleRows(chunk, (x) => fn(x, ctx), run.rowHandler, ctx);
-      });
-    }
-    return this.pipe((chunk, _ctx, run) => {
-      const plain = fn as (item: Out) => U | Promise<U>;
+    // ONE `call` closure picked once (#133), context-aware or not, rather than the whole `pipe()`
+    // body written twice per arm - `filter`/`flatMap`/`tap(fn)` below share this exact shape.
+    const call = isContextAware(fn)
+      ? (x: Out, ctx: IContextManager) => fn(x, ctx)
+      : (x: Out, _ctx: IContextManager) => (fn as (item: Out) => U | Promise<U>)(x);
+    return this.pipe((chunk, ctx, run) => {
+      // No handler registered: the plain path (#78 Done-when 11 - the seam costs nothing until
+      // `.onError()` is actually called). `mapSettle`, not `Promise.all` (#90): a chunk whose
+      // items all came back as plain values is returned as-is, creating no `Promise` at all.
       if (!run?.rowHandler) {
-        return mapSettle(chunk, (x) => plain(x));
+        return mapSettle(chunk, (x) => call(x, ctx));
       }
-      return settleRows(chunk, (x) => plain(x), run.rowHandler, _ctx);
+      return settleRows(chunk, (x) => call(x, ctx), run.rowHandler, ctx);
     });
   }
 
@@ -390,35 +390,22 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   ): Transformer<In, Out, "async">;
   filter(predicate: (item: Out, ctx: IContextManager) => boolean): Transformer<In, Out, M>;
   filter(predicate: PipelineFunction<Out, boolean>): Transformer<In, Out, "sync" | "async"> {
-    if (isContextAware(predicate)) {
-      return this.pipe((chunk, ctx, run) => {
-        if (!run?.rowHandler) {
-          return chain(
-            mapSettle(chunk, (x) => predicate(x, ctx)),
-            (keep) => chunk.filter((_x, i) => keep[i]),
-          );
-        }
-        return settleRows(
-          chunk,
-          (x) => chain(predicate(x, ctx), (keep) => (keep ? x : DROP)),
-          run.rowHandler,
-          ctx,
-        );
-      });
-    }
-    return this.pipe((chunk, _ctx, run) => {
-      const fn = predicate as (item: Out) => boolean | Promise<boolean>;
+    const call = isContextAware(predicate)
+      ? (x: Out, ctx: IContextManager) => predicate(x, ctx)
+      : (x: Out, _ctx: IContextManager) =>
+          (predicate as (item: Out) => boolean | Promise<boolean>)(x);
+    return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
         return chain(
-          mapSettle(chunk, (x) => fn(x)),
+          mapSettle(chunk, (x) => call(x, ctx)),
           (keep) => chunk.filter((_x, i) => keep[i]),
         );
       }
       return settleRows(
         chunk,
-        (x) => chain(fn(x), (keep) => (keep ? x : DROP)),
+        (x) => chain(call(x, ctx), (keep) => (keep ? x : DROP)),
         run.rowHandler,
-        _ctx,
+        ctx,
       );
     });
   }
@@ -452,22 +439,15 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   flatMap<U>(fn: (item: Out, ctx: IContextManager) => Promise<U[]>): Transformer<In, U, "async">;
   flatMap<U>(fn: (item: Out, ctx: IContextManager) => U[]): Transformer<In, U, M>;
   flatMap<U>(fn: PipelineFunction<Out, U[]>): Transformer<In, U, "sync" | "async"> {
-    if (isContextAware(fn)) {
-      return this.pipe((chunk, ctx, run) => {
-        if (!run?.rowHandler) {
-          const results = mapSettle(chunk, (x) => fn(x, ctx) as U[] | Promise<U[]>);
-          return chain(results, (rows) => rows.flat());
-        }
-        return settleRowsFlat(chunk, (x) => fn(x, ctx) as U[] | Promise<U[]>, run.rowHandler, ctx);
-      });
-    }
-    return this.pipe((chunk, _ctx, run) => {
-      const plain = fn as (item: Out) => U[] | Promise<U[]>;
+    const call = isContextAware(fn)
+      ? (x: Out, ctx: IContextManager) => fn(x, ctx) as U[] | Promise<U[]>
+      : (x: Out, _ctx: IContextManager) => (fn as (item: Out) => U[] | Promise<U[]>)(x);
+    return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
-        const results = mapSettle(chunk, (x) => plain(x));
+        const results = mapSettle(chunk, (x) => call(x, ctx));
         return chain(results, (rows) => rows.flat());
       }
-      return settleRowsFlat(chunk, (x) => plain(x), run.rowHandler, _ctx);
+      return settleRowsFlat(chunk, (x) => call(x, ctx), run.rowHandler, ctx);
     });
   }
 
@@ -516,27 +496,17 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
 
     // Handle function case
     const fn = arg;
-    if (isContextAware(fn)) {
-      return this.pipe((chunk, ctx, run) => {
-        if (!run?.rowHandler) {
-          return chain(
-            mapSettle(chunk, (x) => fn(x, ctx)),
-            () => chunk,
-          );
-        }
-        return settleRows(chunk, (x) => chain(fn(x, ctx), () => x), run.rowHandler, ctx);
-      });
-    }
-
-    const nonContextFn = fn as (item: Out) => unknown;
-    return this.pipe((chunk, _ctx, run) => {
+    const call = isContextAware(fn)
+      ? (x: Out, ctx: IContextManager) => fn(x, ctx)
+      : (x: Out, _ctx: IContextManager) => (fn as (item: Out) => unknown)(x);
+    return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
         return chain(
-          mapSettle(chunk, (x) => nonContextFn(x)),
+          mapSettle(chunk, (x) => call(x, ctx)),
           () => chunk,
         );
       }
-      return settleRows(chunk, (x) => chain(nonContextFn(x), () => x), run.rowHandler, _ctx);
+      return settleRows(chunk, (x) => chain(call(x, ctx), () => x), run.rowHandler, ctx);
     });
   }
 
@@ -627,7 +597,10 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
     maxIterations?: number,
   ): Transformer<In, Out, "sync" | "async"> {
     const loopedTransform = loopTransformer.transform;
-    const conditionIsContextAware = condition.length >= 2;
+    // Reuses the same arity check every element-wise link already does (#133), rather than
+    // re-inlining `condition.length >= 2` - `condition` operates on a whole chunk, not one item, but
+    // `isContextAware`'s own arity test is generic over the callback's first parameter's type.
+    const conditionIsContextAware = isContextAware<Out[], boolean>(condition);
 
     // A real `while` loop carries the synchronous case (#90), and `drain` re-enters itself ONLY
     // across an async boundary, where the continuation runs on a fresh stack in its own microtask.
