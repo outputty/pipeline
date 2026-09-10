@@ -379,6 +379,18 @@ resolves immediately with an EMPTY result - the worker exists only to hold the t
 (`_chunkTransforms`, registered by running the same entry module the primary runs) and serve
 `.fetch()` requests against them.
 
+## Internal overhead benchmarks - pending #120
+
+`bench/` is a committed, in-repo, single-runtime harness - independent of `benchmarks/` above, which
+stays the Docker/six-runtime/`npm pack` comparison against OTHER libraries. This one compares the
+package against ITSELF: one leg per pipeline runner class (`Pipeline`, `ConcurrentPipeline`,
+`HttpPipeline`, `ClusterPipeline`), each against a hand-rolled, output-matched, non-`Pipeline`
+equivalent - the quickest in-process code producing the identical result, even where that skips a
+real network/IPC boundary a dispatching class would cross. A committed baseline gates future runs
+(20% tolerance on absolute ns/row, 10% on the ratio, one warm-up round discarded); each dispatching
+class's own `.local()` row is measured and its correctness asserted (a pinned region never reaches
+`stageWork()`/serves a request/runs on a worker pid).
+
 ## Constraints in dependencies
 
 - TypeScript removed `baseUrl` at 7.0; a tsconfig that sets it fails with `TS5102`.
