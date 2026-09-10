@@ -19,14 +19,14 @@ import { availableParallelism } from "node:os";
 import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
+import type { HttpPipelineOptions } from "@src/pipelines/http";
 import { emptyChunks, Pipeline } from "@src/pipeline";
-import type { PipelineConstructorOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
+import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
   IContextManager,
   InternalTransformer,
   ReduceFunction,
-  SourcePolicy,
   PipelineMode,
 } from "@src/types";
 
@@ -226,27 +226,21 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
   }
 
   /**
-   * Carries `workers`/`pipelineIndex` into the NEXT instance a copy-on-write call builds, alongside
-   * `maxConcurrency`/`ordered` (`concurrentOptions()`, inherited) and `url` (kept correct once a
-   * real dispatch has set it, so a `.context()` call after the pipeline is already live does not
-   * reset it back to "").
+   * Carries `workers`/`pipelineIndex` into the NEXT instance a copy-on-write call builds, on top of
+   * `HttpPipeline.carriedKnobs()`'s own `maxConcurrency`/`ordered`/`url` (#133 - `url` needs no
+   * re-spelling here: `super.carriedKnobs()` already reads `this._url`, and `this` is this
+   * instance's own `_url`, kept correct once a real dispatch has set it, so a `.context()` call
+   * after the pipeline is already live does not reset it back to "").
    */
-  protected override createPipeline<U>(
-    chunks: AsyncIterable<U[]>,
-    options: PipelineConstructorOptions,
-  ): ClusterPipeline<U, In> {
-    const Ctor = this.constructor as new (
-      options?: ClusterPipelineConstructorOptions & { url: string },
-    ) => ClusterPipeline<U, In>;
-    const merged = {
-      ...options,
-      ...this.concurrentOptions(),
+  protected override carriedKnobs(): HttpPipelineOptions & {
+    workers: number;
+    pipelineIndex: number;
+  } {
+    return {
+      ...super.carriedKnobs(),
       workers: this.workers,
       pipelineIndex: this.pipelineIndex,
-      url: this._url,
-      chunks,
     };
-    return new Ctor(merged);
   }
 
   override transform<U, M2 extends "sync" | "async">(
@@ -270,26 +264,10 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
   /**
    * Re-declared ONLY to narrow `Pipeline.local()`'s return type (#61,
    * `~/.claude/rules/typescript.md`) - same reason as `.transform()`/`.apply()`/`.reduce()` above.
-   * `HttpPipeline.local()`'s own logic runs unchanged via `super`.
+   * `HttpPipeline.local()`'s own logic runs unchanged via `super`. `bind()`/`sourcePolicy()` need no
+   * such re-declaration (#133) - see `ConcurrentPipeline.sourcePolicy()`'s own docstring for why
+   * this class has neither any more.
    */
-  /**
-   * Forced `"async"` whatever the source's shape (#90) - ClusterPipeline exists for I/O-bound work and
-   * has no synchronous case, so an array source runs on the async engine here exactly as an
-   * `AsyncIterable` one does. `sourcePolicy()` below is the runtime half; the `"async"` third type
-   * argument on the `extends` clause above is the compile-time half, and is what makes this
-   * override a genuine narrowing of the base's own two arms rather than a conflict with them.
-   *
-   * `new ClusterPipeline(chain)([1, 2, 3])` runs on the async engine whatever `chain` was.
-   */
-  protected override bind<U>(data: PipelineSource<U>): ClusterPipeline<U> {
-    // `In` becomes `U` here - see `ConcurrentPipeline.bind()`.
-    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as ClusterPipeline<U>;
-  }
-
-  protected override sourcePolicy(): SourcePolicy {
-    return "async";
-  }
-
   override local<U, M2 extends PipelineMode>(
     build: (p: Pipeline<T, "async", any>) => Pipeline<U, M2, any>,
   ): ClusterPipeline<U, In> {

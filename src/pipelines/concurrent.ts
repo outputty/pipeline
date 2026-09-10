@@ -19,12 +19,7 @@ import type {
   PipelineMode,
   ChunkTransform,
 } from "@src/types";
-import {
-  Pipeline,
-  type PipelineConstructorOptions,
-  type PipelineSource,
-  type WrappablePipeline,
-} from "@src/pipeline";
+import { Pipeline, type PipelineConstructorOptions, type WrappablePipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
 import { share } from "@src/utils/chunk";
@@ -273,32 +268,18 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
 
   /**
    * Carries `maxConcurrency`/`ordered` into the NEXT instance a copy-on-write call
-   * (`.context()`, `.buffer()`, `.transform()`, `.apply()`) builds, the same way
-   * `HttpPipeline`/`ClusterPipeline` (#17 L4/L5) override this method again for their own extra
-   * knobs (`url`, `workers`).
+   * (`.context()`, `.buffer()`, `.transform()`, `.apply()`) builds, via `Pipeline.createPipeline()`'s
+   * own `carriedKnobs()` seam (#133) - `HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline` each
+   * override this method again, `{ ...super.carriedKnobs(), <their own field(s)> }`, for their own
+   * extra knobs (`url`, `workers`, `emitter`).
    *
    * @example
-   * `new ConcurrentPipeline([1], { maxConcurrency: 8 }).context({ k: 1 }).maxConcurrency` → `8`,
-   * not the constructor default `4` - without this override, `Pipeline.createPipeline()`'s base
-   * implementation reconstructs via `this.constructor` but only forwards `PipelineConstructorOptions` fields,
-   * which do not include `maxConcurrency`.
+   * `new ConcurrentPipeline({ maxConcurrency: 8 }).context({ k: 1 }).maxConcurrency` → `8`, not the
+   * constructor default `4` - without this override, `Pipeline.createPipeline()`'s base
+   * implementation reconstructs via `this.constructor` but only forwards `PipelineConstructorOptions`
+   * fields, which do not include `maxConcurrency`.
    */
-  protected override createPipeline<U>(
-    chunks: AsyncIterable<U[]>,
-    options: PipelineConstructorOptions,
-  ): ConcurrentPipeline<U, In> {
-    const Ctor = this.constructor as new (
-      options?: ConcurrentPipelineConstructorOptions,
-    ) => ConcurrentPipeline<U, In>;
-    return new Ctor({ ...options, ...this.concurrentOptions(), chunks });
-  }
-
-  /** This level's OWN knobs, for a subclass's `createPipeline()` override to spread alongside its
-   * own extra ones (`HttpPipeline.url`, `ClusterPipeline.workers`) - the one place
-   * `maxConcurrency`/`ordered` are listed, so a future knob added here needs no edit in
-   * `HttpPipeline`/`ClusterPipeline` to keep surviving copy-on-write (review: three separate
-   * hand-copied field lists is exactly the shape that drops a knob when one copy is missed). */
-  protected concurrentOptions(): ConcurrentPipelineOptions {
+  protected override carriedKnobs(): ConcurrentPipelineOptions {
     return {
       maxConcurrency: this.maxConcurrency,
       ordered: this.ordered,
@@ -353,6 +334,10 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     // dispatched, chunk for chunk.
     const newChunks = fanOut(this._chunks, work, this._context, this.maxConcurrency);
 
+    // `createPipeline()`'s own declared return type is the loose `AnyPipeline<U>` (#133: this class
+    // no longer overrides it to narrow the return type - only `carriedKnobs()`, below). The cast is
+    // honest because `this.carriedKnobs()` is what `createPipeline()` spreads in, and it is THIS
+    // class's own override.
     return this.createPipeline<U>(newChunks, {
       // Spread first (#90): a dispatched stage that rebuilt its options field by field silently
       // dropped `mode`, so the pipeline reverted to `"unset"` after its first `.transform()` and
@@ -370,7 +355,7 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
       // (`freshPreBuffer()` also nulls `syncPreBufferItems`, a no-op here - this class is always
       // `"async"` and has no sync chunk stream of its own to reset).
       ...this.freshPreBuffer(),
-    });
+    }) as ConcurrentPipeline<U, In>;
   }
 
   /**
@@ -415,12 +400,13 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     );
     const newChunks = mergeUnordered(partitions);
 
+    // See `apply()`'s own identical cast above for why one is needed here.
     return this.createPipeline<U>(newChunks, {
       ...this.carriedOptions(),
       chunkTransforms,
       reduceStages,
       ...this.freshPreBuffer(),
-    });
+    }) as ConcurrentPipeline<U, In>;
   }
 
   /**
@@ -431,21 +417,19 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
    * comes after the region.
    */
   /**
-   * Forced `"async"` whatever the source's shape (#90) - ConcurrentPipeline exists for I/O-bound work and
-   * has no synchronous case, so an array source runs on the async engine here exactly as an
-   * `AsyncIterable` one does. `sourcePolicy()` below is the runtime half; the `"async"` third type
-   * argument on the `extends` clause above is the compile-time half, and is what makes this
-   * override a genuine narrowing of the base's own two arms rather than a conflict with them.
+   * Forced `"async"` whatever the source's shape (#90) - `ConcurrentPipeline`, `HttpPipeline` and
+   * `ClusterPipeline` all exist for I/O-bound work and have no synchronous case, so an array source
+   * runs on the async engine here exactly as an `AsyncIterable` one does. `HttpPipeline`/
+   * `ClusterPipeline` inherit this override unchanged rather than re-declaring it (#133: both used
+   * to redeclare an identical `return "async"`, and their own `bind()` overrides, which narrowed
+   * `Pipeline.bind()`'s return type to their own class and nothing else, added no behavior at all -
+   * `Pipeline.bind()` already dispatches through `this.sourcePolicy()` polymorphically, so the base
+   * implementation alone is correct on every subclass).
    *
-   * `new ConcurrentPipeline(chain)([1, 2, 3])` runs on the async engine whatever `chain` was.
+   * `new ConcurrentPipeline(chain)([1, 2, 3])` runs on the async engine whatever `chain` was; so does
+   * `new HttpPipeline(chain, { url })` and `new ClusterPipeline(chain)`, both through this same
+   * override.
    */
-  protected override bind<U>(data: PipelineSource<U>): ConcurrentPipeline<U> {
-    // `In` becomes `U` here, not the receiver's own: binding SPENDS whatever the chain accepted
-    // before. Every other override carries `In` through unchanged. The policy comes from
-    // `sourcePolicy()` rather than a second literal `"async"`, so a class states it once.
-    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as ConcurrentPipeline<U>;
-  }
-
   protected override sourcePolicy(): SourcePolicy {
     return "async";
   }

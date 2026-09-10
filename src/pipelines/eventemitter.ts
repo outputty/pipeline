@@ -96,25 +96,20 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
 
   /**
    * Carries `emitter`/`_registeredStages` into the NEXT instance a copy-on-write call builds, on
-   * top of what `ConcurrentPipeline.createPipeline()` already carries forward - same reason,
+   * top of what `ConcurrentPipeline.carriedKnobs()` already carries forward (#133) - same reason,
    * two more fields. Both BY REFERENCE, never copied: the Set's own dedup (Done-when 3) and the
    * `emitter`'s own identity (a caller-supplied one, or the one built above) must be the SAME object
    * across every instance a `.transform()`/`.buffer()`/`.context()` call derives.
    */
-  protected override createPipeline<U>(
-    chunks: AsyncIterable<U[]>,
-    options: PipelineConstructorOptions,
-  ): EventEmitterPipeline<U, In> {
-    const Ctor = this.constructor as new (
-      options: EventEmitterPipelineConstructorOptions,
-    ) => EventEmitterPipeline<U, In>;
-    return new Ctor({
-      ...options,
-      ...this.concurrentOptions(),
+  protected override carriedKnobs(): ConcurrentPipelineOptions & {
+    emitter: PipelineEmitter;
+    registeredStages: Set<string>;
+  } {
+    return {
+      ...super.carriedKnobs(),
       emitter: this.emitter,
       registeredStages: this._registeredStages,
-      chunks,
-    });
+    };
   }
 
   /**

@@ -15,13 +15,12 @@
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Pipeline } from "@src/pipeline";
-import type { PipelineConstructorOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
+import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
   IContextManager,
   InternalTransformer,
   ReduceFunction,
-  SourcePolicy,
   PipelineMode,
   ChunkTransform,
   ReduceStage,
@@ -31,10 +30,14 @@ import { ndjsonFrame, readNdjsonLines } from "@src/utils/ndjson";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 
+/** Construction-time knobs for `HttpPipeline` and every class that extends it - the same pattern
+ * `ClusterPipelineOptions` (`pipelines/cluster.ts`) already uses (#133: was spelled inline 3x here
+ * as `{ url: string } & ConcurrentPipelineOptions`). */
+export type HttpPipelineOptions = { url: string } & ConcurrentPipelineOptions;
+
 /** `HttpPipeline`'s real constructor parameter type - see `ConcurrentPipelineConstructorOptions`
  * (`pipelines/concurrent.ts`) for why the base `Pipeline` internals must be included here too. */
-type HttpPipelineConstructorOptions = { url: string } & ConcurrentPipelineOptions &
-  PipelineConstructorOptions;
+type HttpPipelineConstructorOptions = HttpPipelineOptions & PipelineConstructorOptions;
 
 /** The body `stageWork()` POSTs, and `.fetch()` (below) expects on the way in. */
 interface StageRequestBody {
@@ -199,14 +202,11 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * WORKER and the TRIGGER share one definition: the worker constructs the wrapper and mounts
    * `.fetch` without ever naming data, and the trigger constructs it and calls it with different
    * data each time. Neither writes the `.from([])` placeholder the worker used to need. */
-  constructor(
-    pipeline: WrappablePipeline<T, In>,
-    options: { url: string } & ConcurrentPipelineOptions,
-  );
+  constructor(pipeline: WrappablePipeline<T, In>, options: HttpPipelineOptions);
   constructor(options: HttpPipelineConstructorOptions);
   constructor(
     first: WrappablePipeline<T, In> | HttpPipelineConstructorOptions,
-    second?: { url: string } & ConcurrentPipelineOptions,
+    second?: HttpPipelineOptions,
   ) {
     const options = Pipeline.wrapping<HttpPipelineConstructorOptions>(first, second);
     super(options);
@@ -259,26 +259,10 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * `~/.claude/rules/typescript.md`) - the body is an unchanged `super()` call, since `local()`'s
    * own base implementation already builds a plain `Pipeline` for the region and carries the
    * result back through THIS class's own `createPipeline()`, which is what keeps `url` alive for
-   * whatever comes after the region.
+   * whatever comes after the region. `bind()`/`sourcePolicy()` need no such re-declaration here
+   * (#133) - `ConcurrentPipeline.sourcePolicy()`'s own `"async"` override is inherited unchanged,
+   * and nothing reads `bind()`'s own narrowed return type, so this class has neither any more.
    */
-  /**
-   * Forced `"async"` whatever the source's shape (#90) - HttpPipeline exists for I/O-bound work and
-   * has no synchronous case, so an array source runs on the async engine here exactly as an
-   * `AsyncIterable` one does. `sourcePolicy()` below is the runtime half; the `"async"` third type
-   * argument on the `extends` clause above is the compile-time half, and is what makes this
-   * override a genuine narrowing of the base's own two arms rather than a conflict with them.
-   *
-   * `new HttpPipeline(chain, { url })([1, 2, 3])` runs on the async engine whatever `chain` was.
-   */
-  protected override bind<U>(data: PipelineSource<U>): HttpPipeline<U> {
-    // `In` becomes `U` here - see `ConcurrentPipeline.bind()`.
-    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as HttpPipeline<U>;
-  }
-
-  protected override sourcePolicy(): SourcePolicy {
-    return "async";
-  }
-
   override local<U, M2 extends PipelineMode>(
     build: (p: Pipeline<T, "async", any>) => Pipeline<U, M2, any>,
   ): HttpPipeline<U, In> {
@@ -287,16 +271,11 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
 
   /**
    * Carries `url` into the NEXT instance a copy-on-write call builds, on top of what
-   * `ConcurrentPipeline.createPipeline()` already carries forward - same reason, one more field.
+   * `ConcurrentPipeline.carriedKnobs()` already carries forward (#133) - same reason, one more
+   * field.
    */
-  protected override createPipeline<U>(
-    chunks: AsyncIterable<U[]>,
-    options: PipelineConstructorOptions,
-  ): HttpPipeline<U, In> {
-    const Ctor = this.constructor as new (
-      options: HttpPipelineConstructorOptions,
-    ) => HttpPipeline<U, In>;
-    return new Ctor({ ...options, ...this.concurrentOptions(), url: this._url, chunks });
+  protected override carriedKnobs(): HttpPipelineOptions {
+    return { ...super.carriedKnobs(), url: this._url };
   }
 
   /**

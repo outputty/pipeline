@@ -565,10 +565,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * default-cutting branch entirely.
    *
    * A subclass whose constructor takes EXTRA knobs (`ConcurrentPipeline.maxConcurrency`,
-   * `HttpPipeline.url`, …) overrides this method to carry them forward explicitly — `this.
-   * constructor` alone only reproduces knobs `PipelineOptions` itself already carries. This base
-   * implementation is correct for `Pipeline` itself and for any subclass whose constructor takes
-   * nothing beyond `(source, options)`.
+   * `HttpPipeline.url`, …) overrides `carriedKnobs()` below to carry them forward, rather than this
+   * method itself (#133: every dispatching class used to override `createPipeline()` wholesale,
+   * repeating the identical `new Ctor({ ...options, ...knobs, chunks })` shape around its own one or
+   * two extra fields) — `this.constructor` alone only reproduces knobs `PipelineOptions` itself
+   * already carries. This base implementation is correct for `Pipeline` itself and for any subclass
+   * whose constructor takes nothing beyond `(source, options)`.
    *
    * @example
    * A `Sub extends Pipeline` with no extra constructor params: `new Sub([1]).transform(f)
@@ -580,7 +582,22 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     options: PipelineConstructorOptions,
   ): AnyPipeline<U> {
     const Ctor = this.constructor as new (options?: PipelineConstructorOptions) => AnyPipeline<U>;
-    return new Ctor({ ...options, chunks });
+    return new Ctor({ ...options, ...this.carriedKnobs(), chunks });
+  }
+
+  /** A dispatching subclass's own EXTRA constructor knobs, beyond what `PipelineOptions` itself
+   * already carries (#133) - `createPipeline()` above spreads this onto every copy-on-write
+   * instance it builds, which is the one seam a subclass needs to override rather than
+   * `createPipeline()` as a whole. The base has none. `ConcurrentPipeline` overrides it to return
+   * `{ maxConcurrency, ordered }`; `HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline` each
+   * extend their PARENT's own override with `{ ...super.carriedKnobs(), <their own field(s)> }`.
+   *
+   * Typed `object`, not `Record<string, unknown>`: a subclass's own named-field interface
+   * (`ConcurrentPipelineOptions`, `HttpPipelineOptions`, …) has no index signature, so `tsc` refuses
+   * it as an override of a `Record<string, unknown>`-returning method even though every field it
+   * declares is itself spreadable into one. */
+  protected carriedKnobs(): object {
+    return {};
   }
 
   /** Every knob a copy-on-write call carries into the next instance (#90) - named once here rather
