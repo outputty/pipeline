@@ -195,11 +195,7 @@ function parseRoute(
  * `new HttpPipeline([1,2,3,4,5], { url }).transform((t) => t.map((x) => x * 2)).toArray()` →
  * `[2,4,6,8,10]`, across two real instances.
  */
-export class HttpPipeline<T, M extends "async" = "async", In = T> extends ConcurrentPipeline<
-  T,
-  "async",
-  In
-> {
+export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   protected _url: string;
 
   /** Wraps a chain built elsewhere, dispatching its stages over HTTP (#90). This is what lets the
@@ -240,16 +236,16 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
     // read `M extends "unset"`, and this class fixes `M` at `"async"`, so it never once refused
     // anything - and once `In` existed it actively broke a SECOND type-changing `.transform()`,
     // because the guard's own type pins `In` to `T` while the two diverge at the first stage that
-    // changes the item type: `TS2684: The 'this' context of type 'HttpPipeline<string, "async",
-    // number>' is not assignable to method's 'this' of type 'Pipeline<string, "async", "async",
+    // changes the item type: `TS2684: The 'this' context of type 'HttpPipeline<string,
+    // number>' is not assignable to method's 'this' of type 'Pipeline<string, "async",
     // string>'`.
     builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
-  ): HttpPipeline<U, M, In> {
-    return super.transform(builder) as unknown as HttpPipeline<U, M, In>;
+  ): HttpPipeline<U, In> {
+    return super.transform(builder) as unknown as HttpPipeline<U, In>;
   }
 
-  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): HttpPipeline<U, M, In> {
-    return super.apply(transformer) as unknown as HttpPipeline<U, M, In>;
+  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): HttpPipeline<U, In> {
+    return super.apply(transformer) as unknown as HttpPipeline<U, In>;
   }
 
   /**
@@ -257,8 +253,8 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    * `.transform()`/`.apply()` above. `ConcurrentPipeline.reduce()`'s own logic runs unchanged via
    * `super`.
    */
-  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): HttpPipeline<U, M, In> {
-    return super.reduce(fn, initial) as unknown as HttpPipeline<U, M, In>;
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): HttpPipeline<U, In> {
+    return super.reduce(fn, initial) as unknown as HttpPipeline<U, In>;
   }
 
   /**
@@ -277,9 +273,9 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    *
    * `new HttpPipeline(chain, { url })([1, 2, 3])` runs on the async engine whatever `chain` was.
    */
-  protected override bind<U>(data: PipelineSource<U>): HttpPipeline<U, M> {
+  protected override bind<U>(data: PipelineSource<U>): HttpPipeline<U> {
     // `In` becomes `U` here - see `ConcurrentPipeline.bind()`.
-    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as HttpPipeline<U, M>;
+    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as HttpPipeline<U>;
   }
 
   protected override sourcePolicy(): SourcePolicy {
@@ -287,9 +283,9 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
   }
 
   override local<U, M2 extends PipelineMode>(
-    build: (p: Pipeline<T, "async", "shape", any>) => Pipeline<U, M2, "shape", any>,
-  ): HttpPipeline<U, M, In> {
-    return super.local(build) as unknown as HttpPipeline<U, M, In>;
+    build: (p: Pipeline<T, "async", any>) => Pipeline<U, M2, any>,
+  ): HttpPipeline<U, In> {
+    return super.local(build) as unknown as HttpPipeline<U, In>;
   }
 
   /**
@@ -299,10 +295,10 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
-  ): HttpPipeline<U, M, In> {
+  ): HttpPipeline<U, In> {
     const Ctor = this.constructor as new (
       options: HttpPipelineConstructorOptions,
-    ) => HttpPipeline<U, M, In>;
+    ) => HttpPipeline<U, In>;
     return new Ctor({ ...options, ...this.concurrentOptions(), url: this._url, chunks });
   }
 

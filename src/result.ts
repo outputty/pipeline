@@ -11,7 +11,7 @@
  * the data arrives, never after.
  */
 
-import type { PipelineMode, SourcePolicy } from "./types";
+import type { PipelineMode } from "./types";
 import type { Pipeline, PipelineSource } from "./pipeline";
 import type { MaybeAsyncChunks } from "./utils/chunk";
 import { isThenable } from "./utils/helpers";
@@ -19,7 +19,7 @@ import { collectItems, drainSyncSettled } from "./utils/chunk";
 
 /** The pipeline shape a result drains, with the Mode and policy erased - a result is handed its
  * pipeline by `Pipeline`'s own call signature, which has already fixed both. */
-type BoundPipeline<T> = Pipeline<T, "sync" | "async", SourcePolicy, unknown>;
+type BoundPipeline<T> = Pipeline<T, "sync" | "async", unknown>;
 
 /**
  * One call of a `Pipeline` over one input.

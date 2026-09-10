@@ -29,7 +29,6 @@ import type {
   PipelineErrorHandler,
   PipelineMode,
   SourcePolicy,
-  AssignMode,
   JoinMode,
   SeedMode,
 } from "./types";
@@ -105,7 +104,7 @@ export type PipelineSource<T> = AsyncIterable<T> | Iterable<T>;
  * `"sync" | "async"` at each site means a reader sees "the Mode is re-asserted above" rather than
  * "this really can be either".
  */
-export type AnyPipeline<U> = Pipeline<U, PipelineMode, SourcePolicy, any>;
+export type AnyPipeline<U> = Pipeline<U, PipelineMode, any>;
 
 /**
  * A chain a wrapping class can adopt (#90): source-less, so its stages are still recorded calls to
@@ -117,7 +116,7 @@ export type AnyPipeline<U> = Pipeline<U, PipelineMode, SourcePolicy, any>;
  * that ran fine at runtime. `"unset"` is what makes wrapping a `.from()`-bound pipeline a compile
  * error rather than only a runtime throw.
  */
-export type WrappablePipeline<T, In> = Pipeline<T, "unset", SourcePolicy, In>;
+export type WrappablePipeline<T, In> = Pipeline<T, "unset", In>;
 
 /**
  * One stage recorded on a source-less pipeline, replayed against the bound pipeline once an input
@@ -348,22 +347,12 @@ function reduceStagePlaceholder(stageIndex: number): ChunkTransform {
  * separately from `T` - `T` moves to each stage's output type as the chain is composed, and by the
  * last stage no longer says what the chain accepts.
  */
-export interface Pipeline<
-  T,
-  M extends PipelineMode = "unset",
-  P extends SourcePolicy = "shape",
-  In = T,
-> {
+export interface Pipeline<T, M extends PipelineMode = "unset", In = T> {
   (input: AsyncIterable<In>): PipelineResult<T, "async">;
-  (input: Iterable<In>): PipelineResult<T, M extends "async" ? "async" : AssignMode<P, "sync">>;
+  (input: Iterable<In>): PipelineResult<T, M extends "async" ? "async" : "sync">;
 }
 
-export class Pipeline<
-  T,
-  M extends PipelineMode = "unset",
-  P extends SourcePolicy = "shape",
-  In = T,
-> {
+export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   // Protected (#17), not private: a dispatching subclass's own overridden `createPipeline()`
   // (below) reads these to carry them into the next instance the same way this base
   // implementation does - `private` would put them out of reach from `src/pipelines/`.
@@ -463,10 +452,10 @@ export class Pipeline<
         );
       }
       return new PipelineResult<T, PipelineMode>(
-        self as unknown as Pipeline<unknown, "sync" | "async", SourcePolicy, unknown>,
+        self as unknown as Pipeline<unknown, "sync" | "async", unknown>,
         input,
       );
-    }) as unknown as Pipeline<T, M, P, In>;
+    }) as unknown as Pipeline<T, M, In>;
     Object.setPrototypeOf(self, new.target.prototype);
 
     // `contextFactory` runs ONLY when `context` is absent, and only HERE - every copy-on-write
@@ -513,17 +502,15 @@ export class Pipeline<
    * `new Pipeline().from([1, 2, 3]).toArray()` → `[1, 2, 3]`, typed `number[]`, no `await`.
    * `new Pipeline().from(asyncSource).toArray()` → typed `Promise<number[]>`.
    */
-  protected bind<U>(data: AsyncIterable<U>): Pipeline<U, "async", P, In>;
+  protected bind<U>(data: AsyncIterable<U>): Pipeline<U, "async", In>;
   // A receiver already widened to `"async"` stays async whatever the source's own shape (#90):
   // `.onError()` and `.context()` are both callable BEFORE `.from()`, so an async run handler
   // registered there had its widening discarded here - the chain typed `number[]` while
   // `dropOrRethrow` deferred on that handler the moment a chunk failed. `"unset"` is the ordinary
   // case and still takes the source's own shape, which is what keeps `.from([1,2,3])` synchronous.
-  protected bind<U>(
-    data: Iterable<U>,
-  ): Pipeline<U, M extends "async" ? "async" : AssignMode<P, "sync">, P>;
-  protected bind<U>(data: PipelineSource<U>): Pipeline<U, "sync" | "async", P> {
-    return this.fromSource<U>(data, this.sourcePolicy()) as Pipeline<U, "sync" | "async", P>;
+  protected bind<U>(data: Iterable<U>): Pipeline<U, M extends "async" ? "async" : "sync">;
+  protected bind<U>(data: PipelineSource<U>): Pipeline<U, "sync" | "async"> {
+    return this.fromSource<U>(data, this.sourcePolicy()) as Pipeline<U, "sync" | "async">;
   }
 
   /**
@@ -911,9 +898,9 @@ export class Pipeline<
    */
   onError(
     handler: (error: Error, ctx: IContextManager) => Promise<void>,
-  ): M extends "async" ? this : Pipeline<T, "async", P, In>;
+  ): M extends "async" ? this : Pipeline<T, "async", In>;
   onError(handler: (error: Error, ctx: IContextManager) => void): this;
-  onError(handler: PipelineErrorHandler): this | Pipeline<T, "async", P, In> {
+  onError(handler: PipelineErrorHandler): this | Pipeline<T, "async", In> {
     // An ASYNC handler widens the chain (#90), the same rule `.tap()` follows. `PipelineErrorHandler`
     // declares a bare `void` return, which accepts an `async` function silently, so without the
     // overload above the chain kept its `"sync"` type while `dropOrRethrow` deferred on the handler's
@@ -963,14 +950,13 @@ export class Pipeline<
    */
   apply<U, M2 extends "sync" | "async">(
     transformer: Transformer<T, U, M2>,
-  ): Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P, In> {
+  ): Pipeline<U, JoinMode<M, M2>, In> {
     // No source yet: record the call and replay it when one arrives (#90). This is the ordinary
     // case for a callable pipeline, where the chain is composed before any data exists.
     if (this.isDeferred()) {
       return this.defer<U>((p) => p.apply(transformer as Transformer<unknown, U, M2>)) as Pipeline<
         U,
-        AssignMode<P, JoinMode<M, M2>>,
-        P,
+        JoinMode<M, M2>,
         In
       >;
     }
@@ -1000,7 +986,7 @@ export class Pipeline<
       return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
         ...carried,
         syncChunks: stageChunks(),
-      }) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P, In>;
+      }) as Pipeline<U, JoinMode<M, M2>, In>;
     }
 
     return this.createPipeline<U>(
@@ -1009,7 +995,7 @@ export class Pipeline<
         ...carried,
         syncChunks: null,
       },
-    ) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P, In>;
+    ) as Pipeline<U, JoinMode<M, M2>, In>;
   }
 
   /**
@@ -1030,9 +1016,9 @@ export class Pipeline<
    */
   transform<U, M2 extends "sync" | "async">(
     t: (transformer: Transformer<T, T, SeedMode<M>>) => Transformer<T, U, M2>,
-  ): Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P, In> {
+  ): Pipeline<U, JoinMode<M, M2>, In> {
     const transformer = t(new Transformer<T, T, SeedMode<M>>({ transform: (chunk) => chunk }));
-    return this.apply(transformer) as unknown as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P, In>;
+    return this.apply(transformer) as unknown as Pipeline<U, JoinMode<M, M2>, In>;
   }
 
   /**
@@ -1129,11 +1115,11 @@ export class Pipeline<
   reduce<U>(
     fn: (acc: U, item: T, ctx: IContextManager, emit: (value: U) => void) => Promise<U>,
     initial: U,
-  ): Pipeline<U, "async", P, In>;
+  ): Pipeline<U, "async", In>;
   reduce<U>(
     fn: (acc: U, item: T, ctx: IContextManager, emit: (value: U) => void) => U,
     initial: U,
-  ): Pipeline<U, AssignMode<P, JoinMode<M, "sync">>, P, In>;
+  ): Pipeline<U, JoinMode<M, "sync">, In>;
   reduce<U>(fn: ReduceFunction<U, T>, initial: U): AnyPipeline<U> {
     // A reduce stage defers like any other (#90) - see `apply()`. Replaying it through this same
     // method is what keeps its own registry (`_reduceStages`) and its Mode rule identical either
@@ -1202,16 +1188,15 @@ export class Pipeline<
    * dispatching two separate stages.
    */
   local<U, M2 extends PipelineMode>(
-    build: (p: Pipeline<T, M, "shape", any>) => Pipeline<U, M2, "shape", any>,
-  ): Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P, In> {
+    build: (p: Pipeline<T, M, any>) => Pipeline<U, M2, any>,
+  ): Pipeline<U, JoinMode<M, M2>, In> {
     // A region defers whole (#90) - see `apply()`. Deferring the `.local()` CALL rather than its
     // built region is what keeps `build`'s own stages recorded against the region's real pipeline,
     // which is where they pin themselves in the orchestrating process.
     if (this.isDeferred()) {
-      return this.defer<U>((p) => (p as unknown as Pipeline<T, M, P, In>).local(build)) as Pipeline<
+      return this.defer<U>((p) => (p as unknown as Pipeline<T, M, In>).local(build)) as Pipeline<
         U,
-        AssignMode<P, JoinMode<M, M2>>,
-        P,
+        JoinMode<M, M2>,
         In
       >;
     }
@@ -1226,7 +1211,7 @@ export class Pipeline<
     const built = build(region as unknown as Pipeline<T, M, "shape">);
     return this.createPipeline<U>(built._chunks, {
       ...built.carriedOptions(),
-    }) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P, In>;
+    }) as Pipeline<U, JoinMode<M, M2>, In>;
   }
 
   /**
@@ -1248,15 +1233,15 @@ export class Pipeline<
    */
   tap(
     fn: (item: T, ctx: IContextManager) => Promise<unknown>,
-  ): M extends "async" ? this : Pipeline<T, "async", P, In>;
+  ): M extends "async" ? this : Pipeline<T, "async", In>;
   tap(fn: (item: T, ctx: IContextManager) => unknown): this;
   tap(
     transformer: Transformer<T, unknown, "async">,
-  ): M extends "async" ? this : Pipeline<T, "async", P, In>;
+  ): M extends "async" ? this : Pipeline<T, "async", In>;
   tap(transformer: Transformer<T, unknown, "sync">): this;
   tap(
     arg: PipelineFunction<T, unknown> | Transformer<T, unknown, "sync" | "async">,
-  ): this | Pipeline<T, "async", P, In> {
+  ): this | Pipeline<T, "async", In> {
     // Both arms below call the exact same runtime expression, `t.tap(arg)` - this is NOT dead code:
     // `Transformer.tap` is itself overloaded, and a union-typed `arg` matches neither overload on
     // its own, so the instanceof check exists purely to narrow `arg`'s STATIC type per arm before
@@ -1406,7 +1391,7 @@ export class Pipeline<
           const armPipeline = owner.emptyOfOwnClass<T>(
             context,
             `/branch/${branchIndex}/${arm.name}`,
-          ) as unknown as Pipeline<T, "unset", "shape", T>;
+          ) as unknown as Pipeline<T, "unset", T>;
           const builtArm = arm.build(armPipeline) as unknown as (i: T[]) => {
             toArray(): unknown[] | Promise<unknown[]>;
           };

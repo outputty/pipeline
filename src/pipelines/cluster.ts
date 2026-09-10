@@ -147,11 +147,7 @@ if (cluster.isWorker) {
  * `new ClusterPipeline([1,2,3,4,5]).transform((t) => t.map((x) => x * 2)).toArray()` →
  * `[2,4,6,8,10]`, served by real worker processes.
  */
-export class ClusterPipeline<T, M extends "async" = "async", In = T> extends HttpPipeline<
-  T,
-  "async",
-  In
-> {
+export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
   /** Worker processes to bring up on first drain. Default `os.availableParallelism()`. */
   readonly workers: number;
   /** This pipeline's stable position among every `ClusterPipeline` constructed in this process -
@@ -204,10 +200,10 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
-  ): ClusterPipeline<U, M, In> {
+  ): ClusterPipeline<U, In> {
     const Ctor = this.constructor as new (
       options?: ClusterPipelineConstructorOptions & { url: string },
-    ) => ClusterPipeline<U, M, In>;
+    ) => ClusterPipeline<U, In>;
     const merged = {
       ...options,
       ...this.concurrentOptions(),
@@ -223,18 +219,18 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
     // The conditional `this` is deleted with the base's own - see `HttpPipeline.transform()` for
     // the `TS2684` a second type-changing `.transform()` hit while it was still here (#90).
     builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
-  ): ClusterPipeline<U, M, In> {
-    return super.transform(builder) as unknown as ClusterPipeline<U, M, In>;
+  ): ClusterPipeline<U, In> {
+    return super.transform(builder) as unknown as ClusterPipeline<U, In>;
   }
 
-  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ClusterPipeline<U, M, In> {
-    return super.apply(transformer) as unknown as ClusterPipeline<U, M, In>;
+  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ClusterPipeline<U, In> {
+    return super.apply(transformer) as unknown as ClusterPipeline<U, In>;
   }
 
   /** Re-declared ONLY to narrow the static return type back to `ClusterPipeline<U>` - same reason
    * as `.transform()`/`.apply()` above. `HttpPipeline.reduce()`'s own logic runs unchanged. */
-  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ClusterPipeline<U, M, In> {
-    return super.reduce(fn, initial) as unknown as ClusterPipeline<U, M, In>;
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ClusterPipeline<U, In> {
+    return super.reduce(fn, initial) as unknown as ClusterPipeline<U, In>;
   }
 
   /**
@@ -251,9 +247,9 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
    *
    * `new ClusterPipeline(chain)([1, 2, 3])` runs on the async engine whatever `chain` was.
    */
-  protected override bind<U>(data: PipelineSource<U>): ClusterPipeline<U, M> {
+  protected override bind<U>(data: PipelineSource<U>): ClusterPipeline<U> {
     // `In` becomes `U` here - see `ConcurrentPipeline.bind()`.
-    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as ClusterPipeline<U, M>;
+    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as ClusterPipeline<U>;
   }
 
   protected override sourcePolicy(): SourcePolicy {
@@ -261,9 +257,9 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
   }
 
   override local<U, M2 extends PipelineMode>(
-    build: (p: Pipeline<T, "async", "shape", any>) => Pipeline<U, M2, "shape", any>,
-  ): ClusterPipeline<U, M, In> {
-    return super.local(build) as unknown as ClusterPipeline<U, M, In>;
+    build: (p: Pipeline<T, "async", any>) => Pipeline<U, M2, any>,
+  ): ClusterPipeline<U, In> {
+    return super.local(build) as unknown as ClusterPipeline<U, In>;
   }
 
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain

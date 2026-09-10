@@ -29,8 +29,8 @@ import {
 // stage OUTPUT - the two diverge the moment a stage changes the item type, which every caller here
 // does.
 function makeWorker<U>(
-  builder: (t: HttpPipeline<number>) => HttpPipeline<U, "async", any>,
-): HttpPipeline<U, "async", any> {
+  builder: (t: HttpPipeline<number>) => HttpPipeline<U, any>,
+): HttpPipeline<U, any> {
   return builder(new HttpPipeline<number>({ url: "" }));
 }
 
