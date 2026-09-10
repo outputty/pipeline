@@ -540,16 +540,15 @@ describe("#90 L4 - a fold keeps the chain's Mode instead of always widening it",
     // Regression: `Transformer`'s Mode parameter defaults to `"sync"`, so the pre-#90 spelling
     // `Transformer<T, U>` in `.branch()`'s own signature narrowed it to sync-only transformers,
     // rejecting an async one that compiled on `main`.
-    const data = await new Pipeline<number>().branch({
-      doubled: {
-        predicate: (x: number) => x % 2 === 0,
-        transformer: new Transformer<number, number>().map(async (x: number) => x * 2),
-      },
-      plain: {
-        predicate: (x: number) => x % 2 !== 0,
-        transformer: new Transformer<number, number>(),
-      },
-    })([1, 2, 3, 4, 5]);
+    const data = await new Pipeline<number>().branch((b) =>
+      b
+        .when(
+          "doubled",
+          (x) => x % 2 === 0,
+          (q) => q.transform((t) => t.map(async (x) => x * 2)),
+        )
+        .when("plain", (x) => x % 2 !== 0),
+    )([1, 2, 3, 4, 5]);
 
     expect(data.doubled).toEqual([4, 8]);
     expect(data.plain).toEqual([1, 3, 5]);

@@ -24,8 +24,6 @@
 
 import type {
   IContextManager,
-  BranchDefinition,
-  BranchOptions,
   ReduceFunction,
   PipelineFunction,
   PipelineErrorHandler,
@@ -44,9 +42,11 @@ import {
   buildSyncChunkGenerator,
   flattenChunks,
   recutSyncChunks,
+  drainSync,
 } from "./utils/chunk";
-import { chain, isThenable, dropOrRethrow } from "./utils/helpers";
+import { chain, isThenable, dropOrRethrow, settleMaybe } from "./utils/helpers";
 import { PipelineResult } from "./result";
+import { BranchBuilder, type ResultsOf, type BranchArm } from "./branch";
 import { foldChunkStream, foldSyncChunkStream } from "./utils/reduce";
 
 /** The chunk stream a `Pipeline` that has no source yet carries - `.from()` is what replaces it.
@@ -130,42 +130,59 @@ export type WrappablePipeline<T, In> = Pipeline<T, "unset", SourcePolicy, In>;
 export type PendingStage = (pipeline: AnyPipeline<any>) => AnyPipeline<any>;
 
 /**
- * What `.branch()` returns (#90): the branch definitions bound once, callable with any input.
+ * Groups one run's items by the arm each belongs to (#90) - `.branch()`'s demux.
  *
- * `.branch()` is a terminal - it drains, routes each item into named buckets and hands back a plain
- * object, and nothing chains after it. Returning a runner rather than the buckets themselves is
- * what keeps the definitions written once: `split(a)` and `split(b)` reuse them, where a terminal
- * that drained immediately made the caller re-pass every predicate and transformer per input.
+ * Runs in the ORCHESTRATING process by decision, never dispatched: a predicate decides WHICH arm an
+ * item enters, so sending it out would cost every item two trips (one to be classified, one to be
+ * worked on) and would stop a predicate closing over anything the caller holds.
  *
- * The no-argument form is for a pipeline that already named a source through `.from()`.
- *
- * `split(orders)` → `{ big: ["BIG:2", "BIG:4"], eu: ["EU:1", "EU:3"], rest: [] }`.
+ * @example
+ * `demux(orders, [big, rest], false)` → `Map { "big" => [order 2, order 4], "rest" => [order 1] }`.
  */
-export interface BranchRunner<In, R> {
-  (input: AsyncIterable<In>): Promise<R>;
-  (input: Iterable<In>): Promise<R>;
+function demux<T>(items: T[], arms: readonly BranchArm<T>[], broadcast: boolean): Map<string, T[]> {
+  const grouped = new Map<string, T[]>(arms.map((arm) => [arm.name, []]));
+  for (const item of items) {
+    claimItem(item, arms, grouped, broadcast);
+  }
+  return grouped;
 }
 
-/** The branch map `.branch()` accepts - a name per branch, each pairing a predicate with an
- * optional transformer (#87). Inferred from the caller's own object literal rather than declared,
- * which is what lets `BranchResults` below read each branch's own output type. */
-export type BranchMap<T> = Record<
-  string,
-  BranchDefinition<T, unknown, Transformer<T, any, "sync" | "async">>
->;
+/** One item's own routing pass, split out so `demux` stays within this repo's nesting limit. */
+function claimItem<T>(
+  item: T,
+  arms: readonly BranchArm<T>[],
+  grouped: Map<string, T[]>,
+  broadcast: boolean,
+): void {
+  for (const arm of arms) {
+    if (!arm.predicate(item)) continue;
+    grouped.get(arm.name)!.push(item);
+    if (!broadcast) return;
+  }
+}
 
 /**
- * What a branch map produces, PER BRANCH (#90): the branch's own transformer output, or the
- * pipeline's own item type where a branch names no transformer.
+ * What `.branch()` returns (#90): the arms bound once, callable with any input.
  *
- * One shared `U` across every branch was unsound once `transformer` became optional: `U` inferred
- * from whichever branches named one, and a transformer-less branch then pushed its items in as that
- * type. Measured - a map pairing a `Order → string` branch with a routing-only one typed the
- * routing branch `string[]` and filled it with `Order` objects, no cast anywhere.
+ * `.branch()` is a STAGE, not a terminal - it hands back a runner rather than the results, so the
+ * definitions are written once and the caller picks what to do with each call's record. The Mode
+ * follows the same rule every other terminal does: every arm synchronous returns the record plainly,
+ * and one asynchronous arm widens the whole record to a single `Promise`.
+ *
+ * `split(orders)` → `{ big: ["BIG:2"], eu: [1, 3], rest: [] }`.
  */
-export type BranchResults<T, B extends BranchMap<T>> = {
-  [K in keyof B]: B[K] extends { transformer: Transformer<any, infer V, any> } ? V[] : T[];
-};
+export interface BranchRunner<In, R, M extends PipelineMode> {
+  (input: AsyncIterable<In>): Promise<R>;
+  // Keyed on `"async"`, not on `"sync"`: `"unset"` is the ordinary state of a composed chain and is
+  // synchronous over a synchronous input, so testing for `"sync"` would type every undecided chain's
+  // record a `Promise` while the runtime handed back the record plainly.
+  (input: Iterable<In>): M extends "async" ? Promise<R> : R;
+}
+
+/** What `.branch()` produces: one record, keyed by arm name, joined on the orchestrator - the only
+ * process that sees every arm, since arms can be remote. Typed loosely on the arms' own outputs,
+ * because a builder's arms are collected at runtime rather than inferred from an object literal. */
+export type BranchResults = Record<string, unknown[]>;
 
 /** Construction-time knobs for a `Pipeline` — every field optional. */
 export interface PipelineOptions {
@@ -249,6 +266,19 @@ export interface PipelineOptions {
    * `.from()` once an input arrives (#90). Not intended for direct external use.
    */
   pendingStages?: PendingStage[];
+  /**
+   * Internal: the route prefix an arm's own stages address themselves under, `/branch/<i>/<name>`
+   * (#90). Empty on a chain's own stages. Without it an arm's stage 0 collided with the parent's
+   * stage 0 on the worker, which served the parent's transform for both. Not intended for direct
+   * external use.
+   */
+  routeTrail?: string;
+  /**
+   * Internal: every `.branch()` stage's own arms, keyed by the branch's index in the shared stage
+   * space (#90) - the registry a serving side walks to resolve a `/branch/<i>/<name>/` trail. Not
+   * intended for direct external use.
+   */
+  branchStages?: Map<number, BranchArm<unknown>[]>;
   /**
    * Internal: whether `context` was invented by a `Pipeline` rather than named by the caller (#90).
    * A default-built manager belongs to one run, so a reusable chain gets a fresh one per call; a
@@ -393,6 +423,10 @@ export class Pipeline<
   /** Whether `_context` was invented here rather than named by the caller - see
    * `PipelineOptions.contextIsDefault`. */
   protected _contextIsDefault!: boolean;
+  /** The route prefix this pipeline's stages sit under - see `PipelineOptions.routeTrail`. */
+  protected _routeTrail!: string;
+  /** Every `.branch()` stage's arms, by branch index - see `PipelineOptions.branchStages`. */
+  protected _branchStages!: Map<number, BranchArm<unknown>[]>;
   /** Whether an input has been bound to this chain - see `PipelineOptions.bound`. */
   protected _bound!: boolean;
   /** `registries()`'s memo - built on first serve, never carried through copy-on-write, since the
@@ -475,6 +509,8 @@ export class Pipeline<
     self._chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
     self._pendingStages = options?.pendingStages ?? [];
     self._bound = options?.bound ?? false;
+    self._routeTrail = options?.routeTrail ?? "";
+    self._branchStages = options?.branchStages ?? new Map();
     return self;
   }
 
@@ -631,6 +667,8 @@ export class Pipeline<
       pendingStages: this._pendingStages,
       contextIsDefault: this._contextIsDefault,
       bound: this._bound,
+      routeTrail: this._routeTrail,
+      branchStages: this._branchStages,
     };
   }
 
@@ -686,6 +724,30 @@ export class Pipeline<
    * A worker holding one `.transform()` serves stage index `0` after this, where before it reported
    * `unknown stage 0; this deployment serves 0..-1`.
    */
+  /**
+   * The registries a `/branch/<i>/<name>/` trail addresses (#90): the ARM's own, not this
+   * pipeline's. The worker runs the same entry module, so its `.branch()` call built the same arms
+   * in the same order - resolving the trail rebuilds the arm's pipeline and reads what it registered.
+   *
+   * @example
+   * `registriesFor("/branch/0/big")` returns the stage table of the `big` arm of the first
+   * `.branch()` call, so `/branch/0/big/transform/0` serves that arm's own first stage.
+   */
+  registriesFor(trail: string): {
+    chunkTransforms: ChunkTransform[];
+    reduceStages: Map<number, ReduceStage>;
+  } | null {
+    const match = /^\/branch\/(\d+)\/([^/]+)$/.exec(trail);
+    if (!match) return null;
+    const arms = this._branchStages.get(Number(match[1]));
+    const arm = arms?.find((candidate) => candidate.name === match[2]);
+    if (!arm?.build) return null;
+    const armPipeline = arm.build(
+      this.emptyOfOwnClass<unknown>(this._context, trail) as AnyPipeline<unknown>,
+    ) as AnyPipeline<unknown>;
+    return armPipeline.registries();
+  }
+
   protected registries(): {
     chunkTransforms: ChunkTransform[];
     reduceStages: Map<number, ReduceStage>;
@@ -1312,12 +1374,17 @@ export class Pipeline<
     syncChunks: MaybeAsyncChunks<T> | null;
     items: () => AsyncIterable<T>;
     chunks: () => AsyncIterable<T[]>;
+    context: IContextManager;
   } {
     const bound = this.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
     return {
       syncChunks: bound.isSync() ? bound._syncChunks : null,
       items: () => bound.asyncItems(),
       chunks: () => bound.chunkStream(),
+      // THIS run's manager, which is a fresh one per call unless the caller named their own (#90).
+      // `.branch()` reads it so an arm's own pipeline sees the writes the parent chain just made,
+      // rather than the chain's manager, which holds the previous call's.
+      context: bound._context,
     };
   }
 
@@ -1351,112 +1418,98 @@ export class Pipeline<
    *   becomes `await p.branch({…})()`; awaiting the runner alone yields the function.
    *   Read context via `.contextManager` afterward if needed (#744).
    */
-  branch<B extends BranchMap<T>>(
-    // `B` is inferred from the caller's own object literal, so each branch's result type comes from
-    // that branch's own transformer (`BranchResults`) rather than one `U` shared across the map.
-    //
-    // Either Mode (#90). `Transformer`'s Mode parameter DEFAULTS to `"sync"`, so the pre-#90
-    // spelling `Transformer<T, U>` would have silently narrowed this to sync-only transformers and
-    // rejected `new Transformer<T, U>().map(async (x) => …)`, which compiled before. `.branch()`
-    // awaits every branch's own result regardless, so accepting both is the behaviour it always had.
-    branches: B,
-    options?: BranchOptions,
-  ): BranchRunner<In, BranchResults<T, B>> {
-    const firstMatch = options?.firstMatch !== false; // Default to true (router mode)
+  branch<B extends BranchBuilder<T, any>>(
+    build: (builder: BranchBuilder<T>) => B,
+  ): BranchRunner<In, ResultsOf<B>, M> {
+    const builder = build(new BranchBuilder<T>());
+    const arms = builder.arms();
+    const broadcast = builder.isBroadcast();
     const owner = this;
+    // The branch's own index in the shared stage space. Both sides walk the same entry module in
+    // the same order, so an orchestrator and a worker agree on it without exchanging anything.
+    const branchIndex = this._branchStages.size;
+    this._branchStages.set(branchIndex, arms as BranchArm<unknown>[]);
 
-    const run = async (input?: PipelineSource<In>): Promise<BranchResults<T, B>> => {
+    const run = (input?: PipelineSource<In>): BranchResults | Promise<BranchResults> => {
       if (input === undefined) {
         throw new Error(
           "no input: a pipeline holds no data, so .branch()'s runner needs one - call it with the items to route",
         );
       }
-      const source = owner.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
 
-      const results: Record<string, unknown[]> = {};
-      for (const key of Object.keys(branches)) {
-        results[key] = [];
-      }
-      // The RUN's own context, not the owner's (#90). A branch transformer reading the owner's saw
-      // none of this run's writes and every one of the last run's: measured, a chain writing
-      // `ctx.set("seenByChain", n)` gave its branch transformer `null` for every item, then leaked
-      // the previous call's values into the next.
-      for await (const item of source.asyncItems()) {
-        await owner.routeItemToBranches(item as T, branches, results, firstMatch, source._context);
-      }
-      return results as BranchResults<T, B>;
+      // ONE bind for the whole branch: the parent chain runs, and the arms below share the
+      // context that run created rather than the chain's own.
+      const { syncChunks, items: itemsOf, context } = owner.drainable(input);
+      const collected: T[] = [];
+      const items = (
+        syncChunks !== null
+          ? chain(
+              drainSync(syncChunks, (item) => void collected.push(item as T)),
+              () => collected,
+            )
+          : (async () => {
+              for await (const item of itemsOf()) collected.push(item);
+              return collected;
+            })()
+      ) as T[] | Promise<T[]>;
+
+      // `chain` defers only at a real thenable, so a synchronous parent stays synchronous here.
+      return chain(items, (settled: T[]) => {
+        const grouped = demux(settled, arms, broadcast);
+
+        // ROUTER - each arm's own pipeline over its own items, of THIS pipeline's class, so an
+        // arm's stages dispatch wherever the parent's do and `.local()` inside pins one. A
+        // synchronous arm returns an array right here; only an asynchronous one hands back a
+        // promise.
+        const outputs = arms.map((arm) => {
+          const armItems = grouped.get(arm.name)!;
+          if (arm.build === undefined) return armItems as unknown[];
+          const armPipeline = owner.emptyOfOwnClass<T>(
+            context,
+            `/branch/${branchIndex}/${arm.name}`,
+          );
+          return arm.build(armPipeline)(armItems).toArray() as unknown[] | Promise<unknown[]>;
+        });
+
+        // JOIN - a plain record unless at least one arm is pending, and then only those are
+        // awaited. On the orchestrator by necessity: arms can be remote, so it is the only process
+        // that sees all of them.
+        return chain(settleMaybe(outputs), (armResults: unknown[][]) =>
+          Object.fromEntries(arms.map((arm, i) => [arm.name, armResults[i]])),
+        ) as BranchResults | Promise<BranchResults>;
+      }) as BranchResults | Promise<BranchResults>;
     };
 
-    return run as BranchRunner<In, BranchResults<T, B>>;
+    return run as BranchRunner<In, ResultsOf<B>, M>;
   }
 
   /**
-   * Route a single item to every matching branch (or just the first, under
-   * router mode), pushing each branch's transformed output into `results`.
+   * A stage-less pipeline of THIS pipeline's own class, for one `.branch()` arm to build on (#90).
    *
-   * Runs once per item from within `branch()`'s consumption loop.
-   *
-   * @example
-   * `routeItemToBranches(4, { even: { predicate: (n) => n % 2 === 0,
-   * transformer } }, results, true)` pushes `transformer`'s output for `4`
-   * onto `results.even`.
-   */
-  private async routeItemToBranches(
-    item: T,
-    branches: BranchMap<T>,
-    results: Record<string, unknown[]>,
-    firstMatch: boolean,
-    ctx: IContextManager,
-  ): Promise<void> {
-    for (const [key, { predicate, transformer }] of Object.entries(branches)) {
-      const matches = await predicate(item);
-      if (!matches) continue;
-
-      await this.pushBranchOutput(item, transformer, results, key, ctx);
-
-      // In router mode, stop after first match; in broadcast mode, continue
-      if (firstMatch) {
-        break;
-      }
-    }
-  }
-
-  /**
-   * Run a single item through a branch's transformer and collect its output.
-   *
-   * Runs once per matched (item, branch) pair from `routeItemToBranches`. The item is its own
-   * one-item CHUNK (#39: `Transformer.process()` takes chunks, not items) - no default-chunking
-   * question here, since a branch always sends exactly one item at a time.
+   * The class is the whole point: an arm built on `HttpPipeline` dispatches its stages the way the
+   * parent's do, and `.local()` inside the arm's builder pins it here instead. The `Transformer`
+   * this replaces had no class, so every arm ran where the caller was however the chain was built.
    *
    * @example
-   * `pushBranchOutput(4, doubler, { even: [] }, "even")` mutates
-   * `results.even` to `[8]`.
+   * On an `HttpPipeline`, `emptyOfOwnClass()` is an `HttpPipeline` sharing the parent's url and
+   * context, with no stages of its own yet.
    */
-  private async pushBranchOutput(
-    item: T,
-    transformer: Transformer<T, any, "sync" | "async"> | undefined,
-    results: Record<string, unknown[]>,
-    key: string,
-    ctx: IContextManager,
-  ): Promise<void> {
-    // A routing-only branch names no transformer (#87, folded into #90), so the item passes
-    // through as it is. Before, the caller had to hand-build `new Transformer<T, T>()` per branch
-    // purely to fill the field - the friction `.transform()` never had, since it takes a BUILDER.
-    if (transformer === undefined) {
-      results[key].push(item);
-      return;
-    }
-
-    async function* oneItem() {
-      yield item;
-    }
-    const singleItemChunk = buildChunkGenerator<T>(1)(oneItem());
-
-    // `ctx` is the RUN's context, threaded down from `branch()` - not `this._context`, which on a
-    // reusable chain belongs to the pipeline rather than to this call.
-    for await (const chunk of transformer.process(singleItemChunk, ctx)) {
-      results[key].push(...chunk);
-    }
+  protected emptyOfOwnClass<U>(context: IContextManager, routeTrail = ""): AnyPipeline<U> {
+    return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
+      ...this.carriedOptions(),
+      context,
+      contextIsDefault: false,
+      routeTrail,
+      branchStages: new Map(),
+      chunkTransforms: [],
+      reduceStages: new Map(),
+      pendingStages: [],
+      preBufferItems: null,
+      syncPreBufferItems: null,
+      syncChunks: null,
+      mode: "unset",
+      bound: false,
+    });
   }
 }
 

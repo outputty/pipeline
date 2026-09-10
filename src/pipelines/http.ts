@@ -300,6 +300,10 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    */
   readonly fetch = async (request: Request): Promise<Response> => {
     const { pathname } = new URL(request.url);
+    // A `/branch/<i>/<name>/` trail addresses an ARM's own stages, so it resolves into that arm's
+    // registry rather than this pipeline's - without it an arm's stage 0 collided with the
+    // parent's, and the worker served the parent's transform for both.
+    const trail = /\/(branch\/\d+\/[^/]+)\/(?:transform|reduce)\/\d+$/.exec(pathname);
     const match = /\/(transform|reduce)\/(\d+)$/.exec(pathname);
     const verb = match?.[1] as "transform" | "reduce" | undefined;
     const requested = match ? Number(match[2]) : NaN;
@@ -320,7 +324,11 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
     // binds an input, so its stages are still recorded calls until something replays them. Reading
     // the raw field reported `unknown stage 0; this deployment serves 0..-1` for a chain that had
     // one stage.
-    const { chunkTransforms } = this.registries();
+    const resolved = trail ? this.registriesFor(`/${trail[1]}`) : this.registries();
+    if (resolved === null) {
+      return Response.json({ error: `unknown branch route ${pathname}` }, { status: 404 });
+    }
+    const { chunkTransforms } = resolved;
     const maxIndex = chunkTransforms.length - 1;
     if (requested > maxIndex) {
       return Response.json(
@@ -401,7 +409,7 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    * (`/pipeline/<i>/<verb>/<n>`) without touching `stageWork()`/`reduceWork()`'s own dispatch logic
    * or `.fetch()`'s parsing at all. */
   protected routePath(verb: "transform" | "reduce", index: number): string {
-    return `/${verb}/${index}`;
+    return `${this._routeTrail}/${verb}/${index}`;
   }
 
   /**

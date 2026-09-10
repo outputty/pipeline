@@ -12,11 +12,28 @@
 import { describe, it, expect } from "vitest";
 
 import { Pipeline } from "@src/pipeline";
-import { Transformer } from "@src/transformer";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
 import { ClusterPipeline } from "@src/pipelines/cluster";
 import { withServer, HTTP_TIMEOUT } from "./helpers/fixtures";
+import { createHook } from "node:async_hooks";
+
+/** Every `Promise` created while `fn` runs - the same instrument the sync-mode suite uses. */
+function countPromises(fn: () => unknown): number {
+  let created = 0;
+  const hook = createHook({
+    init(_id, type) {
+      if (type === "PROMISE") created++;
+    },
+  });
+  hook.enable();
+  try {
+    fn();
+  } finally {
+    hook.disable();
+  }
+  return created;
+}
 
 type Order = { id: number; total: number; region: string };
 
@@ -35,9 +52,6 @@ const ordersB: Order[] = [
 const withVat = new Pipeline<Order>().transform((t) =>
   t.map((o) => ({ ...o, total: Math.round(o.total * 1.2) })),
 );
-
-const label = (text: string): Transformer<Order, string, "sync"> =>
-  new Transformer<Order, Order>().map((o) => `${text}:${o.id}`);
 
 describe("a wrapping class takes (pipeline, options) and runs the chain elsewhere", () => {
   it("runs a wrapped chain concurrently and returns what the plain chain returns (Done-when 5)", async () => {
@@ -135,11 +149,20 @@ describe("a ClusterPipeline wraps a chain too", () => {
 });
 
 describe(".branch() is built once and called with any data (Done-when 13, 14)", () => {
-  const split = withVat.branch({
-    big: { predicate: (o: Order) => o.total > 200, transformer: label("BIG") },
-    eu: { predicate: (o: Order) => o.region === "eu", transformer: label("EU") },
-    rest: { predicate: () => true, transformer: label("REST") },
-  });
+  const split = withVat.branch((b) =>
+    b
+      .when(
+        "big",
+        (o) => o.total > 200,
+        (q) => q.transform((t) => t.map((o) => `BIG:${o.id}`)),
+      )
+      .when(
+        "eu",
+        (o) => o.region === "eu",
+        (q) => q.transform((t) => t.map((o) => `EU:${o.id}`)),
+      )
+      .otherwise("rest", (q) => q.transform((t) => t.map((o) => `REST:${o.id}`))),
+  );
 
   it("routes two different inputs through one set of definitions (Done-when 14)", async () => {
     expect(await split(ordersA)).toEqual({
@@ -157,13 +180,20 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
   });
 
   it("broadcasts to every matching branch under firstMatch: false", async () => {
-    const broadcast = withVat.branch(
-      {
-        big: { predicate: (o: Order) => o.total > 200, transformer: label("BIG") },
-        eu: { predicate: (o: Order) => o.region === "eu", transformer: label("EU") },
-        rest: { predicate: () => true, transformer: label("REST") },
-      },
-      { firstMatch: false },
+    const broadcast = withVat.branch((b) =>
+      b
+        .when(
+          "big",
+          (o) => o.total > 200,
+          (q) => q.transform((t) => t.map((o) => `BIG:${o.id}`)),
+        )
+        .when(
+          "eu",
+          (o) => o.region === "eu",
+          (q) => q.transform((t) => t.map((o) => `EU:${o.id}`)),
+        )
+        .otherwise("rest", (q) => q.transform((t) => t.map((o) => `REST:${o.id}`)))
+        .broadcast(),
     );
     expect(await broadcast(ordersA)).toEqual({
       big: ["BIG:2", "BIG:4"],
@@ -175,10 +205,9 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
   it("routes with no transformer at all (Done-when 13, #87)", async () => {
     // Before: a routing-only branch still had to name `new Transformer<Order, Order>()` purely to
     // fill a required field - friction `.transform()` never had, since it takes a builder.
-    const routed = await withVat.branch({
-      eu: { predicate: (o: Order) => o.region === "eu" },
-      rest: { predicate: () => true },
-    })(ordersA);
+    const routed = await withVat.branch((b) =>
+      b.when("eu", (o) => o.region === "eu").otherwise("rest"),
+    )(ordersA);
     expect(routed.eu.map((o) => o.id)).toEqual([1, 3]);
     expect(routed.rest.map((o) => o.id)).toEqual([2, 4]);
     // Passed through unchanged means the VAT stage still ran - these are transformed items.
@@ -191,10 +220,15 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
     // `Order → string` branch with a routing-only one typed the routing branch `string[]` and
     // filled it with `Order` objects, no cast anywhere. This version needs no annotation and no
     // cast; the two annotations below are the assertion.
-    const mixed = await withVat.branch({
-      big: { predicate: (o: Order) => o.total > 200, transformer: label("BIG") },
-      eu: { predicate: (o: Order) => o.region === "eu" },
-    })(ordersA);
+    const mixed = await withVat.branch((b) =>
+      b
+        .when(
+          "big",
+          (o) => o.total > 200,
+          (q) => q.transform((t) => t.map((o) => `BIG:${o.id}`)),
+        )
+        .when("eu", (o) => o.region === "eu"),
+    )(ordersA);
 
     const labelled: string[] = mixed.big;
     const routed: Order[] = mixed.eu;
@@ -204,9 +238,7 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
 
   it("still works with no argument on a pipeline that named a source", async () => {
     const bound = new Pipeline<Order>();
-    expect(
-      await bound.branch({ eu: { predicate: (o: Order) => o.region === "eu" } })(ordersA),
-    ).toEqual({
+    expect(await bound.branch((b) => b.when("eu", (o) => o.region === "eu"))(ordersA)).toEqual({
       eu: [ordersA[0], ordersA[2]],
     });
   });
@@ -215,9 +247,11 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
     // Before: a bound pipeline's runner silently DISCARDED an input it was handed. Measured,
     // typechecking clean: `.from([1,2,3]).branch({all})([9,9,9])` returned `{ all: [1,2,3] }`, then
     // `{ all: [] }` on the second call as the bound stream ran dry.
-    const deferredRunner = new Pipeline<number>().branch({ all: { predicate: () => true } });
-    // @ts-expect-error a deferred runner needs the items to route
-    await expect(deferredRunner()).rejects.toThrow(/no input/);
+    const deferredRunner = new Pipeline<number>().branch((b) => b.otherwise("all"));
+    // Thrown, not rejected (#90): every callback here is synchronous, so the chain creates no
+    // Promise and there is nothing for a rejection to travel on.
+    // @ts-expect-error a runner needs the items to route
+    expect(() => deferredRunner()).toThrow(/no input/);
   });
 
   it("gives a branch transformer the RUN's context, not the chain's", async () => {
@@ -232,15 +266,16 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
       }),
     );
     const seen: unknown[] = [];
-    const split = chain.branch({
-      all: {
-        predicate: () => true,
-        transformer: new Transformer<number, number>().map((n, ctx) => {
-          seen.push(ctx?.get("seenByChain"));
-          return n;
-        }),
-      },
-    });
+    const split = chain.branch((b) =>
+      b.otherwise("all", (q) =>
+        q.transform((t) =>
+          t.map((n, ctx) => {
+            seen.push(ctx?.get("seenByChain"));
+            return n;
+          }),
+        ),
+      ),
+    );
 
     // `[3, 3, 3]`, not `[1, 2, 3]`: a context write is chunk-granular, never item-granular - the
     // whole chunk passes through the map before any of it is routed, so every branch read sees the
@@ -255,9 +290,11 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
     expect(seen).toEqual([8, 8]);
   });
 
-  it("reads item by item once the chunk boundary is one item", async () => {
-    // The control for the case above: at `.buffer(1)` each item IS its own chunk, so the branch
-    // reads that item's own write rather than the chunk's last.
+  it("reads the chain's final context whatever the chunk boundary was", async () => {
+    // The control for the case above, and it now reads the SAME either way. `.branch()` drains the
+    // parent chain in full before any arm runs - that is what a record of arrays joined on the
+    // orchestrator requires - so an arm sees the chain's last write, not its own item's. Per-chunk
+    // granularity belonged to the per-item routing this layer replaced.
     const chain = new Pipeline<number>().buffer(1).transform((t) =>
       t.map((n, ctx) => {
         ctx?.set("seenByChain", n);
@@ -265,16 +302,17 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
       }),
     );
     const seen: unknown[] = [];
-    await chain.branch({
-      all: {
-        predicate: () => true,
-        transformer: new Transformer<number, number>().map((n, ctx) => {
-          seen.push(ctx?.get("seenByChain"));
-          return n;
-        }),
-      },
-    })([1, 2, 3]);
-    expect(seen).toEqual([1, 2, 3]);
+    await chain.branch((b) =>
+      b.otherwise("all", (q) =>
+        q.transform((t) =>
+          t.map((n, ctx) => {
+            seen.push(ctx?.get("seenByChain"));
+            return n;
+          }),
+        ),
+      ),
+    )([1, 2, 3]);
+    expect(seen).toEqual([3, 3, 3]);
   });
 });
 
@@ -348,5 +386,207 @@ describe("the wire format reads as the chain was built (#90 L10)", () => {
     );
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "unknown stage /stage/0" });
+  });
+});
+
+describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", () => {
+  type Order = { id: number; total: number; region: string };
+
+  const orders: Order[] = [
+    { id: 1, total: 50, region: "eu" },
+    { id: 2, total: 300, region: "us" },
+    { id: 3, total: 120, region: "eu" },
+    { id: 4, total: 900, region: "us" },
+  ];
+
+  const withVat = new Pipeline<Order>().transform((t) =>
+    t.map((o) => ({ ...o, total: Math.round(o.total * 1.2) })),
+  );
+
+  /** Every path a mounted `.fetch` was asked for while `use` ran. */
+  async function servedBy<R>(
+    chain: Pipeline<any, any, any, any>,
+    use: (url: string) => Promise<R>,
+  ): Promise<{ value: R; paths: string[] }> {
+    const paths: string[] = [];
+    const worker = new HttpPipeline(chain as never, { url: "" });
+    return withServer(
+      async (request) => {
+        paths.push(new URL(request.url).pathname);
+        return worker.fetch(request);
+      },
+      async (url) => ({ value: await use(url), paths }),
+    );
+  }
+
+  it(
+    "dispatches an arm's own stages, where the Transformer form ran them here (Done-when 18)",
+    async () => {
+      // BOTH sides declare the branch, because both run the same entry module - that is what makes
+      // `/branch/0/big` mean the same arm on each. Before this layer an arm carried a `Transformer`,
+      // which has no class and therefore no WHERE, so every arm ran in the orchestrating process.
+      const declare = (p: HttpPipeline<Order, "async", Order>) =>
+        p.branch((b) =>
+          b
+            .when(
+              "big",
+              (o) => o.total > 200,
+              (q) => q.transform((t) => t.map((o) => `BIG:${o.id}`)),
+            )
+            .otherwise("rest"),
+        );
+
+      const paths: string[] = [];
+      const worker = new HttpPipeline(withVat, { url: "" });
+      declare(worker);
+
+      const value = await withServer(
+        async (request) => {
+          paths.push(new URL(request.url).pathname);
+          return worker.fetch(request);
+        },
+        async (url) => declare(new HttpPipeline(withVat, { url }))(orders),
+      );
+
+      expect(value).toEqual({
+        big: ["BIG:2", "BIG:4"],
+        rest: [
+          { id: 1, total: 60, region: "eu" },
+          { id: 3, total: 144, region: "eu" },
+        ],
+      });
+      // The parent's own stage AND the arm's, each under its own path.
+      expect(paths).toContain("/transform/0");
+      expect(paths).toContain("/branch/0/big/transform/0");
+    },
+    HTTP_TIMEOUT,
+  );
+
+  it(
+    "runs an arm in the orchestrating process when its builder pins it (Done-when 19)",
+    async () => {
+      const { value, paths } = await servedBy(withVat, async (url) => {
+        const live = new HttpPipeline(withVat, { url });
+        return live.branch((b) =>
+          b.when(
+            "eu",
+            (o) => o.region === "eu",
+            (q) => q.local((r) => r.transform((t) => t.map((o) => o.id))),
+          ),
+        )(orders);
+      });
+
+      expect(value).toEqual({ eu: [1, 3] });
+      // Only the parent's stage crossed: the arm's own transform was pinned by `.local()`.
+      expect(paths).toEqual(["/transform/0"]);
+    },
+    HTTP_TIMEOUT,
+  );
+
+  it("never dispatches the demux, so a predicate may close over local state (Done-when 20)", () => {
+    // Matching decides WHICH arm an item enters, so dispatching it would send every item out twice
+    // and would stop a predicate reading anything the caller holds.
+    let threshold = 200;
+    const split = withVat.branch((b) =>
+      b.when("big", (o) => o.total > threshold).otherwise("rest"),
+    );
+
+    expect(split(orders).big.map((o) => o.id)).toEqual([2, 4]);
+    threshold = 100;
+    expect(split(orders).big.map((o) => o.id)).toEqual([2, 3, 4]);
+  });
+
+  it("returns one record of arrays, each key typed by its own arm (Done-when 21)", () => {
+    const split = withVat.branch((b) =>
+      b
+        .when(
+          "big",
+          (o) => o.total > 200,
+          (q) => q.transform((t) => t.map((o) => `BIG:${o.id}`)),
+        )
+        .when("eu", (o) => o.region === "eu")
+        .otherwise("rest", (q) => q.transform((t) => t.map((o) => o.id))),
+    );
+
+    const out = split(orders);
+    // The two annotations ARE the assertion: `big` is `string[]` from its own arm, `eu` is
+    // `Order[]` because it names no pipeline, and `rest` is `number[]` from its own.
+    const labelled: string[] = out.big;
+    const routed: Order[] = out.eu;
+    const ids: number[] = out.rest;
+    expect(labelled).toEqual(["BIG:2", "BIG:4"]);
+    expect(routed.map((o) => o.id)).toEqual([1, 3]);
+    expect(ids).toEqual([]);
+  });
+
+  it("creates zero promises when every arm is synchronous (Done-when 22)", () => {
+    const split = withVat.branch((b) =>
+      b
+        .when(
+          "big",
+          (o) => o.total > 200,
+          (q) => q.transform((t) => t.map((o) => o.id)),
+        )
+        .otherwise("rest"),
+    );
+
+    const out = split(orders);
+    expect(typeof (out as unknown as { then?: unknown }).then).toBe("undefined");
+    expect(countPromises(() => split(orders))).toBe(0);
+  });
+
+  it("widens the whole record on one async arm, awaiting only that arm (Done-when 23)", async () => {
+    const split = withVat.branch((b) =>
+      b
+        .when(
+          "big",
+          (o) => o.total > 200,
+          (q) => q.transform((t) => t.map(async (o) => o.id)),
+        )
+        .otherwise("rest", (q) => q.transform((t) => t.map((o) => o.id))),
+    );
+
+    const pending = split(orders);
+    expect(typeof (pending as unknown as { then?: unknown }).then).toBe("function");
+    expect(await pending).toEqual({ big: [2, 4], rest: [1, 3] });
+
+    // Only the async arm was ever a promise: its sibling returned an array before the join saw it.
+    const asyncArm = new Pipeline<Order>()
+      .transform((t) => t.map(async (o) => o.id))(orders)
+      .toArray();
+    const syncArm = new Pipeline<Order>()
+      .transform((t) => t.map((o) => o.id))(orders)
+      .toArray();
+    expect(typeof (asyncArm as unknown as { then?: unknown }).then).toBe("function");
+    expect(Array.isArray(syncArm)).toBe(true);
+  });
+
+  it("routes the catch-all last however it was written, and broadcasts on demand (Done-when 24)", () => {
+    // `.otherwise()` written FIRST still routes last - where `predicate: () => true` declared first
+    // used to swallow every arm below it.
+    const catchAllFirst = withVat.branch((b) =>
+      b.otherwise("rest").when("big", (o) => o.total > 200),
+    );
+    expect(catchAllFirst(orders).big.map((o) => o.id)).toEqual([2, 4]);
+    expect(catchAllFirst(orders).rest.map((o) => o.id)).toEqual([1, 3]);
+
+    const broadcast = withVat.branch((b) =>
+      b
+        .when("big", (o) => o.total > 200)
+        .when("eu", (o) => o.region === "eu")
+        .broadcast(),
+    );
+    const out = broadcast(orders);
+    expect(out.big.map((o) => o.id)).toEqual([2, 4]);
+    expect(out.eu.map((o) => o.id)).toEqual([1, 3]);
+  });
+
+  it("refuses one name twice in a single .branch() call", () => {
+    expect(() => withVat.branch((b) => b.when("a", () => true).when("a", () => false))).toThrow(
+      /already declared in this .branch\(\) call/,
+    );
+    expect(() => withVat.branch((b) => b.otherwise("x").otherwise("y"))).toThrow(
+      /already declared as "x"/,
+    );
   });
 });

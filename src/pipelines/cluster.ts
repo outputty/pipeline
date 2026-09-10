@@ -268,7 +268,7 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
    * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`http.ts`) exists for, so several
    * `ClusterPipeline`s can share one worker server without colliding on stage 0. */
   protected override routePath(verb: "transform" | "reduce", index: number): string {
-    return `/pipeline/${this.pipelineIndex}/${verb}/${index}`;
+    return `/pipeline/${this.pipelineIndex}${this._routeTrail}/${verb}/${index}`;
   }
 
   /**

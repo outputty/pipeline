@@ -378,11 +378,12 @@ describe("L8 review findings, each reproduced before it was fixed", () => {
     // gone every pipeline is deferred, so an async chain typed the runner `() => Promise<R>` -
     // `TS2554` on the call that works, and `no input:` thrown by the call that compiled.
     const asyncChain = new Pipeline<number>().transform((t) => t.map(async (x) => x * 2));
-    const split = asyncChain.branch({ big: { predicate: (x: number) => x > 2 } });
+    const split = asyncChain.branch((b) => b.when("big", (x) => x > 2));
     expect(await split([1, 2, 3])).toEqual({ big: [4, 6] });
 
-    const runner = new Pipeline<number>().branch({ all: { predicate: () => true } });
-    await expect((runner as unknown as () => Promise<unknown>)()).rejects.toThrow(/no input/);
+    const runner = new Pipeline<number>().branch((b) => b.otherwise("all"));
+    // Thrown, not rejected: a synchronous chain creates no Promise (#90).
+    expect(() => (runner as unknown as () => unknown)()).toThrow(/no input/);
   });
 
   it("runs a .local() region once per terminal, not twice", async () => {
