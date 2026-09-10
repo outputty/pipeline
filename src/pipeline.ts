@@ -439,7 +439,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     self._runHandler = options?.runHandler;
     self._mode = options?.mode ?? "unset";
     self._syncChunks = (options?.syncChunks ?? null) as MaybeAsyncChunks<T> | null;
-    self._chunks = (options?.chunks ?? EMPTY_CHUNKS) as AsyncIterable<T[]>;
+    self._chunks = (options?.chunks ?? emptyChunks<T>()) as AsyncIterable<T[]>;
     self._preBufferItems = (options?.preBufferItems ?? null) as AsyncIterable<T> | null;
     self._syncPreBufferItems = (options?.syncPreBufferItems ?? null) as Iterable<T> | null;
     self._chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
