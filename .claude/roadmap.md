@@ -54,16 +54,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   unclaimed. Layout and rationale in `.claude/architecture.md`'s new Internal overhead benchmarks
   section.
 
-- **`EventEmitterPipeline`, a fourth dispatch mode** (#124) - no mode lets another module attach a
-  worker to a named stage after the chain already exists, or observe a stage's chunks without
-  composing an observer into the chain. `.transform()`'s own composed function auto-registers as a
-  stage's first Worker on `pipeline.emitter`; any number of extra Workers may register afterward,
-  from anywhere in the process, running alongside it. `ConcurrentPipeline`'s own fan-out
-  (`maxConcurrency`, `ordered`) is inherited unchanged - deliberately the simplest version: no
-  pool, no round-robin selection, broadcast to every registered Worker with the first to settle
-  deciding the chunk. Revives the NAME from `#30` (closed unbuilt) for an unrelated capability -
-  `#30` was an observability class superseded by `.tap()` (#72); this is a dispatch mode, verified
-  during planning to have no overlap with `.tap()`'s own coverage.
 - **`.queue(n)` prefetches chunks ahead of the consumer** (#123) - `.buffer()` pulls a chunk exactly
   when the consumer asks for it, so a slow producer or a slow consumer always pays the other's
   latency in full; `ConcurrentPipeline`'s own `fanOutUnordered` already overlaps pulling with WORK
@@ -116,6 +106,24 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`EventEmitterPipeline`, a fourth dispatch mode** (#124, `feat`) - no mode lets another module
+  attach a worker to a named stage after the chain already exists, or observe a stage's chunks
+  without composing an observer into the chain. `.transform()`'s own composed function
+  auto-registers as `stage:<n>`'s first Worker on `pipeline.emitter`, once per stage index; any
+  number of extra Workers may register afterward, from anywhere in the process, running alongside
+  it, and the first to SETTLE - `respond()` or `reject()` - decides the chunk, measured: a Worker
+  rejecting at 5ms beat one resolving at 30ms despite registering second. `ConcurrentPipeline`'s own
+  fan-out (`maxConcurrency`, `ordered`) is inherited unchanged - deliberately the simplest version:
+  no pool, no round-robin selection. A code-review pass on the dispatch found and fixed two real
+  gaps before merge: a Worker's own SYNCHRONOUS throw used to abort the dispatch loop before every
+  later Worker ran, and a throwing `stage:<n>:done`/`:error` lifecycle listener could leave the real
+  dispatch hanging rather than merely leak an unhandled rejection - both verified fixed against a
+  real, thrown-away repro. Revives the NAME from `#30` (closed unbuilt) for an unrelated capability
+  - `#30` was an observability class superseded by `.tap()` (#72); this is a dispatch mode, verified
+  during planning to have no overlap with `.tap()`'s own coverage. `.branch()` arm naming and two
+  chains sharing one caller-supplied `emitter` both stay unsupported by decision - `.claude/architecture.md`'s
+  own EventEmitterPipeline section, `#124`'s own Settle first/Constraints. PR #129 (test layer), PR
+  #130 (dispatch + lifecycle), PR #132 (docs).
 - **A pipeline holds its input type, not its data** (#90, `feat!`) - a chain is composed once,
   without data, and RUN by calling it: `new Pipeline<Order>().transform(f)(orders).toArray()`.
   Calling one returns a `PipelineResult`, which is where `toArray`/`first`/`consume`/`forEach`,

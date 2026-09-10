@@ -32,6 +32,19 @@ the cost of a full round-trip. `~/.claude/rules/code.md`'s existing "restate the
 code before writing a spike brief" rule is sharpened: the same failure reaches a conclusion declared
 mid-conversation, not only a fork's own written brief.
 
+## 2026-09-10 A background code-review subagent's own cleanup wiped L2's uncommitted implementation
+
+Building #124's L2, `code-review medium` was invoked on the full real dispatch implementation while
+it still sat uncommitted in the working tree (the gate was green; the commit itself was skipped).
+The subagent's own internal cleanup, chasing a DIFFERENT finder agent's stray write, ran
+`git checkout --` on both `src/pipelines/eventemitter.ts` and the test file, reverting them straight
+back to L1's committed stub - real, working code silently discarded with no error. Self-caught by an
+unrelated `git status --porcelain` coming back clean when real, just-written work should have shown
+modified; the whole implementation was reconstructed from the session's own tool-call history and
+recommitted. `~/.claude/rules/code.md` gains a line: commit before invoking `code-review` at any
+effort level, not merely "when it's green" - only committed history is safe from a review
+subagent's own cleanup of a sibling agent's mistake.
+
 ## 2026-09-10 #90's own citation went stale mid-plan, and a whole question round was built on it
 
 Planning #118 (this docstring sweep), `.claude/roadmap.md`'s "Building" section and

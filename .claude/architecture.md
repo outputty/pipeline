@@ -48,7 +48,7 @@ src/
                              index), .fetch() (/transform/<n> and /reduce/<n>), toNodeHandler
     cluster.ts               ClusterPipeline - worker bootstrap, the shared pipeline registry,
                              bootstrapAndSetUrl() shared by stageWork()/reduceWork()
-    eventemitter.ts           EventEmitterPipeline (pending #124) - stageWork() dispatches through
+    eventemitter.ts           EventEmitterPipeline (#124) - stageWork() dispatches through
                              pipeline.emitter instead of HTTP/cluster; apply()/drainable() overridden
                              a second and third time for stage:<n>:end/pipeline:end
   context/
@@ -273,7 +273,7 @@ Pipeline                one chunk at a time, in process              src/pipelin
     HttpPipeline            a chunk POSTed to another instance         src/pipelines/http.ts
       ClusterPipeline         a chunk sent to another local process    src/pipelines/cluster.ts
     EventEmitterPipeline    a chunk handed to Workers on an emitter    src/pipelines/eventemitter.ts
-                             (pending #124) - a SIBLING of HttpPipeline, not a subclass: it
+                             (#124) - a SIBLING of HttpPipeline, not a subclass: it
                              overrides stageWork() the same way, but never POSTs
 ```
 
@@ -340,15 +340,19 @@ once where `.buffer(1)` pays it per item. The gap closes when the callback domin
 over a 2 ms-per-item workload, N=160, ran 23 ms each. Prefer the widest chunk that fits the
 in-flight budget.
 
-## EventEmitterPipeline - pending #124
+## EventEmitterPipeline - #124
 
-`stageWork()` is the only override, the same seam `HttpPipeline` overrides to POST - `apply()`'s
-own fan-out (`fanOutOrdered`/`fanOutUnordered`, `maxConcurrency`, `ordered`) is inherited
-UNCHANGED, and stays that way: no pool, no round-robin, no readiness tracking of its own. A
-free-slot-dealing pool design (`share()`, `src/utils/chunk.ts:454`, the mechanism
-`ConcurrentPipeline.reduce()` already uses to partition) was built and measured working during
-planning, then killed by the user's own simplification request - "not even think about
-concurrency at this stage" - not by a defect (`.claude/roadmap.md`, Killed).
+`stageWork()` is the only DISPATCH override, the same seam `HttpPipeline` overrides to POST -
+`apply()`'s own fan-out (`fanOutOrdered`/`fanOutUnordered`, `maxConcurrency`, `ordered`) is
+inherited UNCHANGED, and stays that way: no pool, no round-robin, no readiness tracking of its
+own. `apply()`/`local()`/`transform()`/`reduce()` are each re-declared only to narrow the static
+return type back to `EventEmitterPipeline<U, In>`, the same shape `HttpPipeline` uses - `.reduce()`
+dispatch stays exactly `ConcurrentPipeline`'s own (folds in-process, no emitter involvement), left
+that way by decision (`#124`'s own Settle first). A free-slot-dealing pool design (`share()`,
+`src/utils/chunk.ts:454`, the mechanism `ConcurrentPipeline.reduce()` already uses to partition)
+was built and measured working during planning, then killed by the user's own simplification
+request - "not even think about concurrency at this stage" - not by a defect
+(`.claude/roadmap.md`, Killed).
 
 ```text
 stageWork(transformer, stageIndex)
@@ -356,24 +360,79 @@ stageWork(transformer, stageIndex)
     (a Set keyed by event name, carried through createPipeline() - never once per RUN, since
     stageWork() replays on every bound call and a naive registration there leaks a listener)
   returns (chunk, ctx) => new Promise((resolve, reject) => {
-    emit "stage:<n>:dispatched"
+    emitSafely("stage:<n>:dispatched")                <- every lifecycle emit is emitSafely, no exceptions
     for each fn in emitter.listeners("stage:<n>"):   <- composed fn is ALWAYS listeners()[0]
-      Promise.resolve(fn({chunk, ctx, respond, reject})).catch(reject)
-    (no listeners at all -> reject immediately, naming the stage)
-  })
+      try: Promise.resolve(fn({chunk, ctx, respond, reject})).catch(doReject)
+      catch (sync throw): doReject(error)             <- one Worker's throw never skips the rest
+    (no listeners at all -> doReject immediately, naming the stage)
+  settle(outcome):  resolve/reject first, THEN emitSafely("stage:<n>:done" | ":error")
+    respond(value) = settle({ok:true, value}); doReject(error) = settle({ok:false, error})
 ```
 
-Dispatch calls `emitter.listeners(workEvent)` itself and invokes each directly - never
-`emitter.emit()`, which cannot catch a Worker's throw after its own `await` (an unhandled
-rejection Node/Bun may treat as fatal; measured, isolated with the composed Worker removed: a
-plain `emit()`-based dispatch left the request permanently pending while the process still
-crashed on the side). Every registered Worker runs on every chunk - broadcast, deliberately
+Dispatch calls `emitter.listeners(workEvent)` itself and invokes each directly, inside its own
+`try` - never `emitter.emit()`, which cannot catch a Worker's throw after its own `await` (an
+unhandled rejection Node/Bun may treat as fatal; measured, isolated with the composed Worker
+removed: a plain `emit()`-based dispatch left the request permanently pending while the process
+still crashed on the side). Every registered Worker runs on every chunk - broadcast, deliberately
 uncontrolled - and the first one to SETTLE, `respond()` or `reject()`, decides the chunk: measured,
 a Worker rejecting at 5ms beat one resolving at 30ms even though the resolving one was registered
-first, so "first to settle" is the real contract, not "first to respond."
+first, so "first to settle" is the real contract, not "first to respond." The per-Worker `try`
+(review-caught, first cut lacked it) is what stops a Worker's SYNCHRONOUS throw aborting the whole
+loop before every Worker registered after it gets its turn - verified live: a throwing Worker
+registered ahead of a correct one still leaves the correct one's own body run, even though the
+throw settles the dispatch first. `settle()` (both `respond()`/`doReject()` narrow to it - one
+guard, not two, review-caught: the first cut hand-rolled the same `if (settled) return; settled =
+true;` guard twice) settles the REAL `Promise` (`resolve`/`reject`) BEFORE emitting its own
+lifecycle event, through `emitSafely()` - EVERY lifecycle emit in this class goes through it,
+`:dispatched` included, not only `:done`/`:error` (review-caught: the first cut left `:dispatched`
+as a raw `emitter.emit()` call, so a throwing `:dispatched` listener synchronously rejected the
+whole dispatch Promise as if it were a Worker's own failure, silently absorbed by `.onError()` -
+measured: `out` came back `[]` with no error surfaced anywhere). A `:done`/`:error` listener that
+itself throws would otherwise fire inside a `.then()` callback with no downstream `.catch()`, and
+since that throw would happen BEFORE the real settle, the dispatch could hang forever rather than
+merely leak an unhandled rejection (review-caught, verified live: a throwing `stage:0:done`
+listener produced zero unhandled rejections and no hang, surfacing instead as its own separate
+`uncaughtException` on the next microtask via `emitSafely`'s `queueMicrotask`).
+
+`emitSafely()` itself (shared by every lifecycle emit in this class) is a plain
+`try { emitter.emit(event, payload) } catch { queueMicrotask(() => { throw error }) }` - the
+simplest event-emitter shape available: one real `.emit()` call, so a caller-supplied emitter's own
+`.emit()` override and Node's own `.once()` unwrap machinery both still run exactly as documented,
+and every listener still SEES the event through the ordinary `EventEmitter` contract. ⚠ Two
+consequences of staying this simple, both deliberate, neither fixed: a listener that throws
+SYNCHRONOUSLY stops `.emit()`'s own internal loop, so a sibling listener registered AFTER it on the
+SAME lifecycle event silently never runs for that dispatch - ordinary `EventEmitter` behavior a
+caller registering two listeners on one event is expected to already know, not a guarantee this
+class makes about listener isolation. A listener that throws ASYNCHRONOUSLY, after its own `await`,
+leaks as a real `unhandledRejection` instead of surfacing through `emitSafely`'s own `queueMicrotask`
+rethrow at all - `.emit()` never awaits a listener's return value, so nothing here can attach a
+`.catch()` to it without abandoning plain `.emit()` for manual listener invocation, priced and
+rejected as not worth the cost (a custom emitter's own `.emit()` bypassed entirely, `.once()` broken
+for every event this class touches, not only the Worker channel). ⚠ A LOSING Worker's own failure on
+a multi-Worker `stage:<n>` is discarded with no trace once another Worker has already settled -
+`settle()`'s `if (settled) return` guard means no `:error` emit, no log, nothing observable anywhere
+for it. This matches "first to settle wins" for the WINNER; nothing catches a bug in a Worker that
+merely lost the race.
 
 `apply()` is overridden a second time, wrapping the stage's own output chunk stream so
-`stage:<n>:end` fires once, after every chunk that stage's fan-out produced has been yielded.
+`stage:<n>:end` fires once, after every chunk that stage's fan-out produced has been yielded from
+THIS WRAPPED STREAM - the stage index it wraps under is read OFF THE RESULT
+(`dispatched._chunkTransforms.length - 1`, the slot `super.apply()` just appended), never
+independently re-derived, so it can never drift from `ConcurrentPipeline.apply()`'s own internal
+computation. Both the wrapped generator's `onEnd` here and `drainable()`'s own `fireOnce` (below)
+call `emitSafely()`, never a raw `emitter.emit()` - the callback runs inside the stream's own
+`finally` block, and JS's finally-overrides-exception semantics mean an unguarded throw there would
+REPLACE whatever real stream error was already propagating with the observer's own unrelated one
+(review-caught, measured: a chunk that genuinely fails combined with a throwing `stage:0:end`
+listener rejected with the OBSERVER's error, not the real one, before this fix). ⚠ Under
+`maxConcurrency > 1` with an early terminal (`.first(n)`), `stage:<n>:end` can fire BEFORE some of
+that same stage's own `:done`/`:error` events: an early return stops PULLING from the wrapped
+stream, but a chunk already dispatched into `ConcurrentPipeline`'s own fan-out keeps running in the
+background and settles independently of when the consumer stopped reading - measured, `maxConcurrency:
+4` with a 50ms map over four items and `.first(1)`: event order `[done, end, done, done, done]`,
+three more `:done`s after `:end`. Treat `:end` as "no more chunks will be YIELDED here", never as
+"every in-flight Worker for this stage has finished."
+
 `drainable()` (`src/pipeline.ts:1292`, the one seam every terminal calls) is overridden a third
 time, wrapping whichever of `items()`/`chunks()` a terminal actually calls so `pipeline:end` fires
 once the wrapped stream is exhausted - once per TERMINAL CALL, matching `PipelineResult`'s own
@@ -385,11 +444,42 @@ it twice.
 needed in this class's own code, unlike the killed pool design, which bypassed that machinery
 entirely and had to call it explicitly.
 
-One emitter per chain: two independently-built chains sharing one caller-supplied `emitter` option
-collide, since the composed-Worker dedupe `Set` is keyed by event name alone - the second chain's
-own composed function never registers, because `"stage:0"` is already taken. `#113`'s
-`pipelineIndex` fix for `ClusterPipeline` is the family's precedent for solving this properly;
-unbuilt here, named in `#124`'s own Settle first.
+The constructor mirrors `HttpPipeline`'s own two-overload shape (`Pipeline.wrapping()`, `(pipeline,
+options)` wraps a chain built elsewhere, `(options)` builds standalone), and validates a
+caller-supplied `options.emitter` against `PipelineEmitter`'s five methods at construction - a
+trust-boundary value, so a missing method fails loud there rather than as a generic `TypeError`
+deep inside `stageWork()`'s dispatch closure later. Validated ONCE, at the ORIGINAL caller-facing
+construction only - gated on the ABSENCE of the internal `registeredStages` option, which only
+`createPipeline()` (below) ever sets, so a long chain's own copy-on-write calls
+(`.transform()`/`.buffer()`/`.context()`) never re-validate the identical, unchanged `emitter`
+object a second time.
+
+One emitter per chain, in two DIFFERENT failure shapes depending on where the `Set` comes from -
+`#113`'s `pipelineIndex` fix for `ClusterPipeline` is the family's precedent for solving either
+properly; unbuilt here, both named in `#124`'s own Settle first.
+
+- Two INDEPENDENTLY-CONSTRUCTED `EventEmitterPipeline`s sharing one caller-supplied `emitter`
+  option each get their OWN fresh `_registeredStages` (no `registeredStages` option was carried
+  in), so BOTH composed functions register on the shared emitter's `"stage:0"` - measured, not
+  "the second never registers" as an earlier draft of this section claimed: `listenerCount` reaches
+  `2`, and the two RACE on every dispatch. Since neither's own work is genuinely async, the
+  EARLIER-registered chain's function won: its `.then()` microtask is scheduled first in the same
+  dispatch loop, so for two purely synchronous transforms the outcome is not a coin flip - the
+  second chain's own transform never ran at all, its output silently the first chain's.
+- Two chains FORKED from the SAME unbound instance - two `.transform()` calls off one shared base,
+  or two `.branch()` arms (`Pipeline.branch()`'s own `emptyOfOwnClass()` resets the arm's
+  `_chunkTransforms` to `[]`, so its first stage is index 0 again, while `createPipeline()` still
+  carries the SAME `emitter`/registered-stages `Set` into it) - collide the OPPOSITE way: the
+  `Set` is the SAME object by reference, so the second fork's own `stage:0` is already marked
+  registered and its composed function never registers at all; its dispatch silently reuses the
+  FIRST fork's Worker instead. `#124`'s own Settle first already names ARM naming as "undesigned."
+
+`.once(eventName, fn)` is not supported as "handle exactly one chunk": dispatch reads
+`emitter.listeners(eventName)` and invokes each function directly (the reason above - `emit()`
+cannot catch a throw after `await`), so Node's own once-unwrap machinery, which lives INSIDE
+`EventEmitter.emit()`, never runs - measured, a Worker registered via `.once()` alongside the
+composed function (`listenerCount` `2`) still fired on a SECOND, later chunk, `listenerCount`
+unchanged at `2` after both calls.
 
 ## The chain and the run - `Pipeline` and `PipelineResult` (#90)
 
