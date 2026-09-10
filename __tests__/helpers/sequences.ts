@@ -4,7 +4,8 @@
  * `sync-mode`/`wrapping`/`callable`, moved here, plus `sync-mode`'s own missed one folded in later),
  * `chunksOf` (`callable.e2e.test.ts`'s own definition, used wherever a case wants the whole chunk
  * stream rather than items), `parseStrict` (3 byte-identical copies: `pipeline`/`transforms`/
- * `pipelines`), `closingSource`/`closingAsyncSource` (5 near-duplicate inline generators across
+ * `pipelines`, plus `sync-mode`'s own non-identical 4th - see its own docstring for the delta),
+ * `closingSource`/`closingAsyncSource` (5 near-duplicate inline generators across
  * `buffer`/`pipelines`/`callable`, each proving an early exit ran a source's own `finally`).
  */
 
@@ -42,7 +43,11 @@ export async function chunksOf(result: { chunks(): AsyncIterable<unknown> }): Pr
 }
 
 /** Parses `s`, throwing on anything that is not a real integer - the row-recovery cases' own
- * "a callback that can genuinely fail" fixture.
+ * "a callback that can genuinely fail" fixture. `sync-mode.e2e.test.ts`'s own pre-#133 copy called
+ * `parseInt(s, 10)` and threw `bad: ${s}`; this is the one other caller settled on
+ * (`parseInt(s)`, no radix, and `Invalid: ${s}`) - no current case reads the thrown message or
+ * passes a radix-sensitive string (a leading `0x`), so folding sync-mode's copy into this one is
+ * safe today, but a future case asserting on either would need to know this changed.
  *
  * `parseStrict("3")` → `3`. `parseStrict("x")` throws `Error("Invalid: x")`. */
 export function parseStrict(s: string): number {
