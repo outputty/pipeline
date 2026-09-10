@@ -11,8 +11,9 @@
  * Done-when 12 (`pnpm check` passes, no file outside the ticket's own Where) is a repo-wide gate,
  * not a per-case assertion - checked once at the end of the build, not here.
  *
- * Every case ran as `it.fails` against L1's stub, then flipped live once L2's real dispatch landed
- * (`pipelines.e2e.test.ts`'s own convention, #17) - every case below is live.
+ * Every Done-when case ran as `it.fails` against L1's stub, then flipped live once L2's real
+ * dispatch landed (`pipelines.e2e.test.ts`'s own convention, #17). The two "review round" describes
+ * below are not Done-when cases - they are regression tests for review-found fixes, added after.
  */
 import { describe, it, expect } from "vitest";
 import { EventEmitterPipeline } from "../src";
@@ -257,14 +258,15 @@ describe("#124 review round 1 - a synchronously-throwing Worker never aborts the
   });
 });
 
-describe("#124 review round 2 - a throwing lifecycle observer never absorbs or masks a real outcome", () => {
+describe("#124 review round 1/2 - a throwing lifecycle observer never absorbs or masks a real outcome", () => {
   it(
-    "F3 (:dispatched) and F5 (:end/pipeline:end) each surface as their own separate failure, never the dispatch's own",
+    "F3 (:dispatched), F4 (:done) and F5 (:end/pipeline:end) each surface as their own separate failure, never the dispatch's own",
     async () => {
       const fixture = await runFixture("__tests__/fixtures/eventemitter-throwing-observers.ts");
       expectFixtureOk(fixture);
       const result = JSON.parse(fixture.stdout.trim()) as {
         dispatched: { out: number[] | null; rejection: string | null };
+        done: { out: number[] | null; rejection: string | null };
         ended: { rejection: string | null };
         unhandled: string[];
         uncaught: string[];
@@ -275,11 +277,17 @@ describe("#124 review round 2 - a throwing lifecycle observer never absorbs or m
       expect(result.dispatched.rejection).toBeNull();
       expect(result.dispatched.out).toEqual([2, 4, 6]);
 
-      // F5: a throwing :end listener used to REPLACE a real, already-propagating chunk error with
-      // its own unrelated one.
+      // F4: a throwing :done listener fired inside the .then() callback that settles the real
+      // dispatch - a raw emitter.emit() there would have escaped as an unhandled rejection instead
+      // of settling the chunk first.
+      expect(result.done.rejection).toBeNull();
+      expect(result.done.out).toEqual([2, 4, 6]);
+
+      // F5: a throwing :end/pipeline:end listener used to REPLACE a real, already-propagating chunk
+      // error with its own unrelated one - both apply()'s and drainable()'s own wrap are covered.
       expect(result.ended.rejection).toBe("real-chunk-failure");
 
-      // Both observers' own throws still surface - as their own separate uncaughtException, never
+      // Every observer's own throw still surfaces - as its own separate uncaughtException, never
       // as a silent unhandledRejection.
       expect(result.unhandled).toEqual([]);
       expect(result.uncaught.length).toBeGreaterThan(0);
