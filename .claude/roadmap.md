@@ -72,6 +72,21 @@ The two older candidates, still not filed:
   dispatching class's own pinned `"async"`, which is what `SourcePolicy` and `AssignMode` had been
   carried through thirty signatures to do. PRs #92, #93, #95, #97, #102, #103, #104, #105, #106,
   #107, #108, #109, #110, #111, #112.
+- **Eight pre-existing defects a whole-project review found** (#113, `fix`) - two returned wrong
+  values with no error. A partitioned reduce handed every partition the ONE seed the caller passed,
+  so a mutable accumulator was shared by all of them (`[[1,2,3,4],[1,2,3,4]]` where two partitions
+  owe `[[1,3],[2,4]]`); each partition copies its own now, and a seed `structuredClone` cannot copy
+  raises rather than reverting to the shared object. Two sibling `ClusterPipeline` chains off one
+  base both inherited the base's `pipelineIndex` and the second overwrote the first in the worker
+  registry, so calling the first returned the second's output; a composed, trail-less, unbound
+  instance claims its own slot now, and a bound replay does not - which is what keeps the
+  orchestrator and the lazily-replaying worker on the same index. The rest: `fanOutUnordered` closes
+  its source on an early exit as `ordered: true` already did, a worker that dies before reporting
+  its port rejects the bootstrap instead of hanging every dispatch forever, the reduce request body
+  enqueues per `pull` so `desiredSize` backpressures the shared iterator, `writeStreamedBody` drops
+  both listeners when either fires, `getOrDefault` tests key presence rather than
+  `value !== undefined`, and the dead private `Transformer.toAsyncIterable` is deleted. PRs #114
+  (code, tests), #115 (docs).
 - **Error handling moves onto the function that failed** (#78, `feat!`) - `Transformer.onError(fn)`
   is now the ROW handler: returning a value replaces the row, the exported `DROP` sentinel removes
   it, throwing escalates. It reaches every element-wise call - `.map()`, `.filter()`, `.flatMap()`,
