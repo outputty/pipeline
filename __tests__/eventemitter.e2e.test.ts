@@ -232,3 +232,58 @@ describe("#124 .local() dispatches nothing, and the stage after it resumes at th
     expect(pipeline.emitter.listenerCount("stage:2")).toBe(1);
   });
 });
+
+// Not Done-when cases - real correctness gaps the review found in this class's own documented
+// "every registered Worker runs on every chunk, first to settle decides" contract. Committed per
+// this repo's Tests rule: the spike that proved each fix is deleted, and the answer survives here.
+describe("#124 review round 1 - a synchronously-throwing Worker never aborts the dispatch loop", () => {
+  it("F2: settles the dispatch with the throw, but a Worker registered after it still runs", async () => {
+    const pipeline = new EventEmitterPipeline<number>()
+      .buffer(1)
+      .transform((t) => t.map((x: number) => x * 2));
+
+    pipeline.emitter.on("stage:0", () => {
+      throw new Error("sync-throw-from-first-worker");
+    });
+
+    let laterWorkerRan = false;
+    pipeline.emitter.on("stage:0", ({ chunk, respond }: WorkerEvent) => {
+      laterWorkerRan = true;
+      respond(chunk.map((x) => x * 2));
+    });
+
+    await expect(pipeline([1]).toArray()).rejects.toThrow("sync-throw-from-first-worker");
+    expect(laterWorkerRan).toBe(true);
+  });
+});
+
+describe("#124 review round 2 - a throwing lifecycle observer never absorbs or masks a real outcome", () => {
+  it(
+    "F3 (:dispatched) and F5 (:end/pipeline:end) each surface as their own separate failure, never the dispatch's own",
+    async () => {
+      const fixture = await runFixture("__tests__/fixtures/eventemitter-throwing-observers.ts");
+      expectFixtureOk(fixture);
+      const result = JSON.parse(fixture.stdout.trim()) as {
+        dispatched: { out: number[] | null; rejection: string | null };
+        ended: { rejection: string | null };
+        unhandled: string[];
+        uncaught: string[];
+      };
+
+      // F3: a throwing :dispatched listener used to reject the whole dispatch as if it were a
+      // Worker failure - .onError() silently absorbed it and `out` came back [].
+      expect(result.dispatched.rejection).toBeNull();
+      expect(result.dispatched.out).toEqual([2, 4, 6]);
+
+      // F5: a throwing :end listener used to REPLACE a real, already-propagating chunk error with
+      // its own unrelated one.
+      expect(result.ended.rejection).toBe("real-chunk-failure");
+
+      // Both observers' own throws still surface - as their own separate uncaughtException, never
+      // as a silent unhandledRejection.
+      expect(result.unhandled).toEqual([]);
+      expect(result.uncaught.length).toBeGreaterThan(0);
+    },
+    FIXTURE_TIMEOUT,
+  );
+});
