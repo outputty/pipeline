@@ -6,26 +6,13 @@
  * anywhere in that process would show up as a HIGHER max than 1 for that worker's pid.
  */
 import { ClusterPipeline } from "../../src";
-import type { IContextManager } from "../../src";
+import { SimpleContextManager } from "../../src";
 
 let factoryCalls = 0;
 
-class CountingContext implements IContextManager {
-  private data: Record<string, unknown> = {};
-  get(key: string): unknown {
-    return this.data[key];
-  }
-  set(key: string, value: unknown): void {
-    this.data[key] = value;
-  }
-  getOrDefault<T>(key: string, defaultValue: T): T {
-    const value = this.data[key];
-    return value !== undefined ? (value as T) : defaultValue;
-  }
-  toDict(): Record<string, unknown> {
-    return { ...this.data };
-  }
-}
+/** No real difference of its own from `SimpleContextManager` (#133) - kept as a distinct class
+ * purely so `contextFactory`'s own `factoryCalls++` closure counts invocations that build one. */
+class CountingContext extends SimpleContextManager {}
 
 const workers = 2;
 const chunkCount = 20;

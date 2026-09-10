@@ -21,6 +21,7 @@ import {
   expectFixtureOk,
   lastJsonLine,
 } from "./helpers/fixtures";
+import { parseStrict } from "./helpers/sequences";
 
 /** The "another instance" side of an `HttpPipeline` chain: an empty-source pipeline whose only
  * job is to hold the SAME stage definitions `builder` describes, so its `.fetch` can serve them. */
@@ -320,11 +321,6 @@ describe("#78 the row handler reaches a dispatched stage identically to a local 
   );
 
   it("Done-when 9: ConcurrentPipeline maxConcurrency 2 - Pipeline.onError(() => undefined) drops the failing chunk", async () => {
-    const parseStrict = (s: string): number => {
-      const n = parseInt(s);
-      if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-      return n;
-    };
     const out = await new ConcurrentPipeline<string>({ maxConcurrency: 2 })
 
       .buffer(1)

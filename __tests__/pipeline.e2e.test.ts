@@ -3,6 +3,7 @@ import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { SimpleContextManager } from "@src/context/simple";
 import { LoggingContext, SealedContext } from "./fixtures/context-managers";
+import { parseStrict } from "./helpers/sequences";
 
 describe("Pipeline", () => {
   describe("constructor", () => {
@@ -449,12 +450,6 @@ describe("Pipeline", () => {
   });
 
   describe("Pipeline.onError() — the RUN handler (#78)", () => {
-    const parseStrict = (s: string): number => {
-      const n = parseInt(s);
-      if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-      return n;
-    };
-
     it("Done-when 7: a chunk that can't be repaired is dropped, the run continues", async () => {
       const logged: string[] = [];
       const out = await new Pipeline<string>()

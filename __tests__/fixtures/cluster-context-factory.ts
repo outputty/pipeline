@@ -8,7 +8,7 @@
  */
 import cluster from "node:cluster";
 import { ClusterPipeline } from "../../src";
-import type { IContextManager } from "../../src";
+import { SimpleContextManager } from "../../src";
 
 let factoryCalls = 0;
 
@@ -16,23 +16,10 @@ let factoryCalls = 0;
  * context values onto whichever manager serves a request (`.fetch()`'s own `.set()` loop,
  * `src/pipelines/http.ts`), so a value stored through `.set()`/`.get()` would be overwritten by
  * the orchestrator's OWN `builtPid` the moment a request lands, rather than surviving as "which
- * pid built THIS instance". */
-class PoolContext implements IContextManager {
+ * pid built THIS instance". Extends `SimpleContextManager` (#133) rather than hand-rolling
+ * `get`/`set`/`getOrDefault`/`toDict` - `builtPid` is its only real difference. */
+class PoolContext extends SimpleContextManager {
   readonly builtPid = process.pid;
-  private data: Record<string, unknown> = {};
-  get(key: string): unknown {
-    return this.data[key];
-  }
-  set(key: string, value: unknown): void {
-    this.data[key] = value;
-  }
-  getOrDefault<T>(key: string, defaultValue: T): T {
-    const value = this.data[key];
-    return value !== undefined ? (value as T) : defaultValue;
-  }
-  toDict(): Record<string, unknown> {
-    return { ...this.data };
-  }
 }
 
 // Only the PRIMARY gets an already-built instance handed in - a worker re-executing this same

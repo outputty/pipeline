@@ -9,14 +9,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { Pipeline, ConcurrentPipeline, Transformer, SimpleContextManager, DROP } from "../src";
-
-/** The ticket's own canonical example (#78): throws `Invalid: <s>` for anything that doesn't parse
- * as an int. */
-const parseStrict = (s: string): number => {
-  const n = parseInt(s);
-  if (isNaN(n)) throw new Error(`Invalid: ${s}`);
-  return n;
-};
+import { parseStrict } from "./helpers/sequences";
 
 /** Run `input` through a real pipeline built on `transformer`, returning [results, contextSnapshot].
  * `Pipeline.toArray()` itself carries no context slot (#744) - this LOCAL helper builds its own
