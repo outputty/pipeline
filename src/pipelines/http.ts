@@ -300,8 +300,8 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    */
   readonly fetch = async (request: Request): Promise<Response> => {
     const { pathname } = new URL(request.url);
-    const match = /\/(stage|reduce)\/(\d+)$/.exec(pathname);
-    const verb = match?.[1] as "stage" | "reduce" | undefined;
+    const match = /\/(transform|reduce)\/(\d+)$/.exec(pathname);
+    const verb = match?.[1] as "transform" | "reduce" | undefined;
     const requested = match ? Number(match[2]) : NaN;
 
     if (verb === "reduce") {
@@ -375,7 +375,7 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
     }
     // A registered stage with no body is a DIFFERENT problem than an unknown one (review: the OLD
     // message said "unknown reduce stage N" even when N was real) - reported as its own 400, the
-    // same shape /stage/<n>'s own parseStageRequest() uses for a missing body.
+    // same shape /transform/<n>'s own parseStageRequest() uses for a missing body.
     if (!request.body) {
       return Response.json({ error: "request body is missing" }, { status: 400 });
     }
@@ -390,12 +390,17 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
   }
 
   /** The outgoing path for `verb`/`index`, and (via `.fetch()`'s prefix-agnostic trailing-segment
-   * match) the incoming one too - one shared stage-index space for both `/stage/<n>` and
-   * `/reduce/<n>` (#45; replaces `stagePath(stageIndex)`, `/stage/<n>` only). `ClusterPipeline`
+   * match) the incoming one too - one shared stage-index space for both `/transform/<n>` and
+   * `/reduce/<n>` (#45).
+   *
+   * The verb is `transform`, not `stage` (#90): a route now reads as the chain was BUILT rather
+   * than as a flat counter, so a reader can walk `/transform/1` back to the second `.transform()`
+   * call without counting dispatched stages. `.branch()`'s own arms extend the same scheme with a
+   * `/branch/<i>/<name>/` trail. `ClusterPipeline`
    * overrides this alone to route several pipeline definitions through one shared worker server
    * (`/pipeline/<i>/<verb>/<n>`) without touching `stageWork()`/`reduceWork()`'s own dispatch logic
    * or `.fetch()`'s parsing at all. */
-  protected routePath(verb: "stage" | "reduce", index: number): string {
+  protected routePath(verb: "transform" | "reduce", index: number): string {
     return `/${verb}/${index}`;
   }
 
@@ -413,7 +418,7 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
     stageIndex: number,
   ): InternalTransformer<T, U> {
     return async (chunk, ctx) => {
-      const response = await fetch(`${this._url}${this.routePath("stage", stageIndex)}`, {
+      const response = await fetch(`${this._url}${this.routePath("transform", stageIndex)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ chunk, context: ctx.toDict() } satisfies StageRequestBody),
@@ -601,7 +606,7 @@ async function handleOverBridge(
   }
 
   // Streams the response body out as it arrives, instead of buffering it whole first (#45) - a
-  // one-shot handler (`/stage/<n>`) still works identically, since its body is one chunk either
+  // one-shot handler (`/transform/<n>`) still works identically, since its body is one chunk either
   // way; a reduce stage's duplex response (`/reduce/<n>`, L5) is what this actually unblocks.
   const bodyStream = Readable.fromWeb(response.body as ReadableStream<Uint8Array>);
   // A client that disconnects mid-stream must stop this loop pulling from `handler`'s own
