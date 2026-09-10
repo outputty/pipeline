@@ -36,7 +36,11 @@ The `node:cluster`/`node:http` boundary above is oxlint-enforced - pending #117.
 ```text
 src/
   types.ts              PipelineFunction, IContextManager, InternalTransformer, every options
-                          interface, plus DROP/RowErrorHandler/PipelineErrorHandler/RunScope (#78)
+                          interface, plus DROP/RowErrorHandler/PipelineErrorHandler/RunScope (#78);
+                          pending #133: RowErrorHandler's return respelled to bare `unknown` (the
+                          `| typeof DROP | Promise<...>` union was already compiler-identical to
+                          it), plus new shared types collapsing inline-spelled duplicates elsewhere
+                          - Drainable<T>, StageRegistries, ReduceWork<T,U>
   pipeline.ts            Pipeline: the chain, context, stages and Pipeline.drainable +
                           createPipeline() + onError() (#78)
   transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError()
@@ -47,16 +51,24 @@ src/
     http.ts                 HttpPipeline - stageWork()/reduceWork() overrides, routePath(verb,
                              index), .fetch() (/transform/<n> and /reduce/<n>), toNodeHandler
     cluster.ts               ClusterPipeline - worker bootstrap, the shared pipeline registry,
-                             bootstrapAndSetUrl() shared by stageWork()/reduceWork()
+                             bootstrapAndSetUrl() shared by stageWork()/reduceWork(); the module-
+                             level bootstrap state (nextPipelineIndex/registry/bootstrapPromise/
+                             inFlight/idleTimer + killWorkers/scheduleIdleCheck/bootstrapCluster/
+                             startWorkerServer) becomes one per-process WorkerSet class, pending
+                             #133
     eventemitter.ts           EventEmitterPipeline (#124) - stageWork() dispatches through
                              pipeline.emitter instead of HTTP/cluster; apply()/drainable() overridden
                              a second and third time for stage:<n>:end/pipeline:end
   context/
-    types.ts              re-exported IContextManager shape
+    types.ts              re-exported IContextManager shape - deleted, pending #133 (zero
+                             importers anywhere; IContextManager's one real home stays types.ts)
     simple.ts              SimpleContextManager - the one shipped IContextManager
   utils/
     chunk.ts                buildChunkGenerator (cuts) / flattenChunks (undoes) / normalize (dead
-                             in production code post-#39, kept as public API)
+                             in production code post-#39, dropped from the public barrel pending
+                             #133 - stays defined and used internally here) - splits into three
+                             files pending #133: cut/flatten/normalize/share stay here, sync drains
+                             + collect move to sync-drain.ts, the recut family to recut.ts
     helpers.ts               isContextAware - fn.length arity check (isContextAwareReduce, its
                              reduce-side twin, is gone: every reduce path always passes all four
                              ReduceFunction arguments, #45); dropOrRethrow - the run handler's own
@@ -299,7 +311,15 @@ subclass survives a `.transform()`/`.context()`/`.buffer()` chain; each level ov
 `createPipeline()` again to carry its OWN extra knobs forward (`ConcurrentPipeline`'s own
 `concurrentOptions()` helper is the one place `maxConcurrency`/`ordered` are listed - `chunkSize`
 dropped out of it (#39), since `.buffer()` is `Pipeline`'s own knob now, not
-`ConcurrentPipelineOptions`' - so `HttpPipeline`/`ClusterPipeline` only add their own field). What
+`ConcurrentPipelineOptions`' - so `HttpPipeline`/`ClusterPipeline` only add their own field).
+Pending #133: a base-level `protected carriedKnobs()` hook (default `{}`) replaces the 3 hand-rolled
+`createPipeline()` bodies - `Pipeline.createPipeline()` spreads `this.carriedKnobs()` once, and each
+subclass overrides only the hook (`{ ...super.carriedKnobs(), ...ownKnobs }`), narrowing
+`createPipeline()`'s own return type only where something in-file reads it (`ConcurrentPipeline`;
+`HttpPipeline`/`ClusterPipeline` don't, so their `createPipeline()` overrides go with it). Probed
+live during #133's planning: `pnpm typecheck` and the full suite (real forked `ClusterPipeline`
+workers included) stay clean, and the exact knob-survives-copy-on-write and sibling-`pipelineIndex`
+cases this section documents below both re-run correct under the hook. What
 `createPipeline()` carries is `PipelineState`, declared apart from the exported `PipelineOptions`
 (#90): a caller writes `context`/`contextFactory`, and every carried knob is named once in
 `carriedOptions()` rather than field by field at each call site - which is what stops one being
