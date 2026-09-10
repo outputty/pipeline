@@ -12,7 +12,10 @@ import { drainSync, type MaybeAsyncChunks } from "@src/utils/drain";
 /** The `chunkSize`/`size` guard `buildChunkGenerator`, `buildSyncChunkGenerator` and
  * `recut.ts`'s own `recutSyncChunks` each need before doing any real work (#133: was spelled
  * inline 3x, collapsed to this one call). The message stays verbatim -
- * `sync-mode.e2e.test.ts` asserts it. */
+ * `sync-mode.e2e.test.ts` asserts it.
+ *
+ * `assertPositiveChunkSize(0)` throws `Error("chunkSize must be at least 1")`;
+ * `assertPositiveChunkSize(3)` returns, no error. */
 export function assertPositiveChunkSize(size: number): void {
   if (size < 1) {
     throw new Error("chunkSize must be at least 1");

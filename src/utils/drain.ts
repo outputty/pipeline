@@ -134,7 +134,9 @@ export function drainSyncSettled<T>(
 /** Closes a source iterator that a consumer stopped reading early, so a generator's own `finally`
  * runs and whatever it holds - a file handle, a cursor - is released. `for await`/`break` does this
  * for the async engine; the sync drains have to do it themselves. Exported (#133) - `recut.ts`'s own
- * `recutSyncChunks` calls this too, rather than hand-inlining the identical `iterator.return?.()`. */
+ * `recutSyncChunks` calls this too, rather than hand-inlining the identical `iterator.return?.()`.
+ *
+ * `close([1, 2, 3][Symbol.iterator]())` → `undefined`, the iterator's own `.return()` called. */
 export function close(iterator: Iterator<unknown>): void {
   iterator.return?.();
 }
