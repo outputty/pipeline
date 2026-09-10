@@ -17,7 +17,7 @@ import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Pipeline } from "@src/pipeline";
 import type {
   ChunkTransform,
-  PipelineOptions,
+  PipelineConstructorOptions,
   PipelineSource,
   ReduceStage,
   WrappablePipeline,
@@ -37,7 +37,8 @@ import { Readable } from "node:stream";
 
 /** `HttpPipeline`'s real constructor parameter type - see `ConcurrentPipelineConstructorOptions`
  * (`pipelines/concurrent.ts`) for why the base `Pipeline` internals must be included here too. */
-type HttpPipelineConstructorOptions = { url: string } & ConcurrentPipelineOptions & PipelineOptions;
+type HttpPipelineConstructorOptions = { url: string } & ConcurrentPipelineOptions &
+  PipelineConstructorOptions;
 
 /** The body `stageWork()` POSTs, and `.fetch()` (below) expects on the way in. */
 interface StageRequestBody {
@@ -294,7 +295,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    */
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
-    options: PipelineOptions,
+    options: PipelineConstructorOptions,
   ): HttpPipeline<U, In> {
     const Ctor = this.constructor as new (
       options: HttpPipelineConstructorOptions,

@@ -20,7 +20,7 @@ import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
 import { EMPTY_CHUNKS, Pipeline } from "@src/pipeline";
-import type { PipelineOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
+import type { PipelineConstructorOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
   IContextManager,
@@ -37,7 +37,7 @@ export type ClusterPipelineOptions = { workers?: number } & ConcurrentPipelineOp
  * (`pipelines/concurrent.ts`) for why the base `Pipeline` internals must be included here too.
  * `pipelineIndex` is internal plumbing (below), never set by a caller. */
 type ClusterPipelineConstructorOptions = ClusterPipelineOptions &
-  PipelineOptions & { pipelineIndex?: number };
+  PipelineConstructorOptions & { pipelineIndex?: number };
 
 // ---- module-level, per-PROCESS state - one shared bootstrap and one shared registry for every
 // ClusterPipeline instance, on both the primary and every worker (`cluster.fork()` re-execs the
@@ -199,7 +199,7 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
    */
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
-    options: PipelineOptions,
+    options: PipelineConstructorOptions,
   ): ClusterPipeline<U, In> {
     const Ctor = this.constructor as new (
       options?: ClusterPipelineConstructorOptions & { url: string },
