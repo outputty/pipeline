@@ -20,6 +20,8 @@ import type {
   SourcePolicy,
   JoinMode,
   SeedMode,
+  ChunkTransform,
+  ReduceStage,
 } from "./types";
 import { DEFAULT_CHUNK_SIZE } from "./types";
 import { SimpleContextManager } from "./context/simple";
@@ -67,19 +69,6 @@ function toAsyncIterable<U>(data: PipelineSource<U>): AsyncIterable<U> {
     },
   };
 }
-
-/**
- * A chunk-wise transform function: takes one chunk (array) and produces the
- * next chunk (array), optionally reading/writing the shared context.
- *
- * Exported (#17) so a dispatching subclass (`ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`,
- * `src/pipelines/`) can type its own `_chunkTransforms`-adjacent bookkeeping against the same shape
- * `Pipeline` itself uses, rather than re-declaring it.
- */
-export type ChunkTransform = (
-  chunk: unknown[],
-  ctx: IContextManager,
-) => unknown[] | Promise<unknown[]>;
 
 /**
  * What a `Pipeline<T>` may be built from - a stream/collection of items. Terminal ops
@@ -262,18 +251,6 @@ export interface PipelineState {
 /** What the constructor and `createPipeline()` take: a caller's own knobs plus the carried state.
  * Every internal call site passes both, which is why they were one interface to begin with. */
 export type PipelineConstructorOptions = PipelineOptions & PipelineState;
-
-/** A registered reduce stage's own definition - `pushReduceStage()` (below) is the one place that
- * builds one, `HttpPipeline.fetch()` (#45 L5) the one place that reads one back to serve
- * `/reduce/<n>`. Untyped on `U`/`T` (kept as `unknown`) since a `Pipeline`'s own map holds reduce
- * stages of every type a chain has ever registered, not just its current `T`.
- *
- * `{ fn: (acc, x) => acc + x, initial: 0 }` → the stage `HttpPipeline.fetch()` (#45 L5) looks up to
- * serve `/reduce/<n>` for a chain built as `.reduce((acc, x) => acc + x, 0)`. */
-export interface ReduceStage<U = unknown, T = unknown> {
-  fn: ReduceFunction<U, T>;
-  initial: U;
-}
 
 /** The `_chunkTransforms` slot a reduce stage occupies - a reduce stage isn't a per-chunk
  * `ChunkTransform` (it folds across chunks, not one chunk in for one chunk out), so its slot throws

@@ -15,13 +15,7 @@
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Pipeline } from "@src/pipeline";
-import type {
-  ChunkTransform,
-  PipelineConstructorOptions,
-  PipelineSource,
-  ReduceStage,
-  WrappablePipeline,
-} from "@src/pipeline";
+import type { PipelineConstructorOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
   IContextManager,
@@ -29,6 +23,8 @@ import type {
   ReduceFunction,
   SourcePolicy,
   PipelineMode,
+  ChunkTransform,
+  ReduceStage,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
 import { ndjsonFrame, readNdjsonLines } from "@src/utils/ndjson";
