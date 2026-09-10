@@ -35,7 +35,7 @@ direction (#743, #745).
 src/
   types.ts              PipelineFunction, IContextManager, InternalTransformer, every options
                           interface, plus DROP/RowErrorHandler/PipelineErrorHandler/RunScope (#78)
-  pipeline.ts            Pipeline: source + context + terminal ops + Pipeline.merge +
+  pipeline.ts            Pipeline: the chain, context, stages and Pipeline.drainable +
                           createPipeline() + onError() (#78)
   transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError()
                           (the row handler, #78) and runnable() (the seam that carries it in)
@@ -226,7 +226,7 @@ bare `Pipeline`'s own `.transform()`/`.reduce()` never fan out or POST.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
 createPipeline()` calling `this.constructor` rather than a hard-coded `new Pipeline<U>`, so a
-subclass survives a `.transform()`/`.context()`/`.buffer()`/`.merge()` chain; each level overrides
+subclass survives a `.transform()`/`.context()`/`.buffer()` chain; each level overrides
 `createPipeline()` again to carry its OWN extra knobs forward (`ConcurrentPipeline`'s own
 `concurrentOptions()` helper is the one place `maxConcurrency`/`ordered` are listed - `chunkSize`
 dropped out of it (#39), since `.buffer()` is `Pipeline`'s own knob now, not
@@ -235,14 +235,6 @@ stage's identity is its INDEX in `_chunkTransforms` - the table `apply()` alread
 dispatching class sends a chunk plus an index, never a function. Every instance runs the same code,
 so index N means the same transform on both sides; a mixed-version fleet breaks that assumption
 silently, which is why atomic deploys are a documented requirement rather than a check.
-
-`pipeline.merge(...others)` (#41) is the instance-method sibling of the static `Pipeline.merge()`,
-and goes through the SAME `createPipeline()` seam - the reason it never restarts `_chunkTransforms`
-at 0 the way the static's own hard-coded `new Pipeline(...)` does. The static builds a fresh, class-
-less pipeline because it has no instance of its own to continue; the instance method has one, so it
-carries THIS pipeline's own class, knobs and stage table forward instead of starting over. Both
-share one context-merge loop and one chunk-concatenation generator (`mergeContextsInto()`/
-`concatChunks()`, `src/pipeline.ts`) rather than two independent copies of the same logic.
 
 `ConcurrentPipeline.apply()` does NOT call `transformer.process()` for a non-local stage - that
 bypass IS the mechanism, since `process()` runs a chain sequentially, one chunk at a time. It fans
@@ -275,6 +267,49 @@ once where `.buffer(1)` pays it per item. The gap closes when the callback domin
 over a 2 ms-per-item workload, N=160, ran 23 ms each. Prefer the widest chunk that fits the
 in-flight budget.
 
+## The chain and the run - `Pipeline` and `PipelineResult` (#90)
+
+A `Pipeline` declares the type it ACCEPTS, holds no data, and IS the function you call. Calling one
+returns a `PipelineResult`, which is where every drain lives. The split is what makes draining
+without an input a compile error rather than a call resolving to `[]`, and what lets one chain serve
+any number of inputs.
+
+```text
+new Pipeline<In>(options?)      the chain. Stages are RECORDED, not run.
+  .transform / .apply           each records its own call in _pendingStages
+  .buffer / .reduce / .local    same - which is what keeps each one's POSITION
+  .branch(defs)                 -> BranchRunner, the definitions bound once
+  (input)                       -> PipelineResult
+                                     .toArray / .first / .consume / .forEach
+                                     [Symbol.iterator] (sync results only)
+                                     [Symbol.asyncIterator] (items) / .chunks()
+```
+
+Three mechanics make it work.
+
+An instance is callable because the constructor RETURNS a function and reparents it onto
+`new.target.prototype` - which restores the methods, `instanceof`, and the `this.constructor` that
+`createPipeline()`'s copy-on-write depends on. `Pipeline.prototype` is itself reparented onto
+`Function.prototype` once, below the class, so every instance is a real function. Never `class
+Pipeline extends Function`: its `super()` runs `CreateDynamicFunction`, which throws `EvalError:
+Code generation from strings disallowed for this context` wherever code generation is banned - a CSP
+page, a Cloudflare Worker, `node --disallow-code-generation-from-strings`.
+
+A stage composed before an input is recorded as its own CALL, not its result, and replayed against
+the bound pipeline when one arrives. Recording the call is what keeps a deferred chain and a bound
+one on identical code, and what preserves a stage's position - recording only a `.buffer()`'s SIZE
+instead applied it to the source cut, so a `.buffer()` written after a stage took effect before it.
+
+`Pipeline.drainable(input)` is the ONE seam between the two classes: it binds, then returns the sync
+chunk stream where there is one, the item stream, and the chunk stream. Each terminal calls it
+exactly once and threads what it got into its own async arm; calling it again there ran a user's
+`.local(build)` callback twice per call.
+
+Two knobs that look alike are deliberately apart. `PipelineMode` (`"unset" | "sync" | "async"`) is a
+TYPE fact about what a chain produces; `_bound` is the RUNTIME fact of whether an input is attached.
+`"unset"` answered both until a callable chain - `"unset"` for its whole life, bound only for the
+duration of one call - made that impossible.
+
 ## Benchmarks - pending #11
 
 `benchmarks/` is a separate project, outside the pnpm workspace, that installs its comparators once
@@ -301,7 +336,7 @@ resolves immediately with an EMPTY result - the worker exists only to hold the t
 
 - TypeScript removed `baseUrl` at 7.0; a tsconfig that sets it fails with `TS5102`.
 - A conditional type distributes only over a naked type parameter. `Ps[number] extends Pipeline<infer
-  U> ? U : never` is an indexed access, so it compiles and evaluates to `never`; `Pipeline.merge`
+  U> ? U : never` is an indexed access, so it compiles and evaluates to `never`; the deleted merge
   extracts it as `ElementOf<P>` to make it distribute (#5).
 - `Pipeline<T>` is invariant, because `apply<U>(transformer: Transformer<T, U>)` puts `T` in a
   parameter position. Only `Pipeline<any>` works as a constraint over pipelines of mixed item types.

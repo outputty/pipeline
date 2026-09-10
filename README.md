@@ -10,18 +10,28 @@ pnpm add @outputty/pipeline
 
 ## Quick Start
 
+A pipeline declares the type it accepts, holds no data, and IS the function you call.
+
 <!-- compiles -->
 
 ```typescript
 import { Pipeline } from "@outputty/pipeline";
 
-// Basic transformation
-const data = await new Pipeline([1, 2, 3, 4, 5])
-  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
-  .toArray();
+// Compose once, with no data.
+const doubled = new Pipeline<number>().transform((t) => t.map((x) => x * 2).filter((x) => x > 4));
 
-console.log(data); // [6, 8, 10]
+// Call it with any input. Every callback is synchronous, so no `await` and no `Promise`.
+console.log(doubled([1, 2, 3, 4, 5]).toArray()); // [6, 8, 10]
+console.log(doubled([10, 20]).toArray()); // [20, 40]
+
+// One async callback, or an async input, widens the whole chain.
+const slow = new Pipeline<number>().transform((t) => t.map(async (x) => x * 2));
+console.log(await slow([1, 2, 3]).toArray()); // [2, 4, 6]
 ```
+
+Calling a pipeline returns a `PipelineResult`. That is where the terminal ops live -
+`toArray()`, `first(n)`, `consume()`, `forEach(fn)`, `chunks()`, and both iteration protocols - so
+a chain cannot be drained without an input, and a result cannot be extended.
 
 ## Core Concepts
 
@@ -31,7 +41,7 @@ in, fewer chunks out). Nothing here decides WHERE a stage runs; that is the clas
 covered in [Where the work runs](#where-the-work-runs) below.
 
 ```text
-new Pipeline(items)
+new Pipeline<In>()
 	.buffer(size)          cuts items into chunks once - In[] chunks, 1000 by default
 	.transform(...)        a Transformer stage: chunk in, chunk out, one call per chunk
 	.reduce(...)           a reducer stage: folds every chunk, emits fewer chunks onward
@@ -53,9 +63,11 @@ High-level API for composing data sources with transformers:
 ```typescript
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = await new Pipeline<number>()
   .context({ multiplier: 10 })
-  .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))
+  .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))([
+    1, 2, 3, 4, 5,
+  ])
   .toArray();
 
 console.log(data); // [10, 20, 30, 40, 50]
@@ -99,8 +111,8 @@ changes, only the class name does:
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
 // Up to 10 chunks in flight at once, in this process - Pipeline (one at a time) is the default
-const data = await new ConcurrentPipeline(["a", "b", "c"], { maxConcurrency: 10 })
-  .transform((t) => t.map((s: string) => s.toUpperCase()))
+const data = await new ConcurrentPipeline<string>({ maxConcurrency: 10 })
+  .transform((t) => t.map((s: string) => s.toUpperCase()))(["a", "b", "c"])
   .toArray();
 
 console.log(JSON.stringify(data)); // ["A","B","C"]
@@ -132,14 +144,15 @@ at pipeline level lands where you can see it. The stages either side of it still
 ```typescript
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
-const pipeline = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const shared = new SimpleContextManager();
+const pipeline = new ConcurrentPipeline<number>({ maxConcurrency: 2, context: shared })
   .buffer(2)
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
   .tap((x: number, ctx) => {
     ctx.set("seen", (ctx.getOrDefault("seen", 0) as number) + 1);
   });
 
-console.log(await pipeline.toArray(), pipeline.contextManager.toDict());
+console.log(await pipeline([1, 2, 3, 4, 5]).toArray(), shared.toDict());
 // [ 6, 8, 10 ] { seen: 3 }
 ```
 
@@ -168,11 +181,6 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 
 #### Static Methods
 
-- **`Pipeline.merge(pipelines, options?)`** - concatenate several pipelines' data and contexts into
-  a fresh, plain `Pipeline`. See [Merging](#merging).
-
-#### Instance Methods
-
 - **`.context(obj)`** - merge values into the pipeline's OWN context manager, mutating it in place;
   a manager that rejects an unknown key propagates that error instead of being bypassed.
 - **`.apply(transformer)`** - apply a pre-built transformer.
@@ -188,8 +196,6 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.consume()`** - process all items without collecting.
 - **`.forEach(fn)`** - execute side-effect for each item.
 - **`.branch(definitions)`** - split into multiple branches.
-- **`.merge(...others)`** - concatenate other pipelines' items and contexts onto THIS one, keeping
-  THIS pipeline's own class, knobs and stage numbering. See [Merging](#merging).
 - **`.onError(fn)`** - the run handler. `fn` receives the error and the context; returning drops
   the failing chunk and the run continues, throwing stops the run. Position-dependent: only a
   stage applied AFTER this call is covered. See [Error Handling](#error-handling).
@@ -227,8 +233,8 @@ chunk is never overtaken by a faster one; `false` yields whichever chunk finishe
 ```typescript
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
-const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
-  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+const data = await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))([1, 2, 3, 4, 5])
   .toArray();
 
 console.log(JSON.stringify(data)); // [6,8,10]
@@ -265,8 +271,8 @@ const server = createServer(toNodeHandler(worker.fetch));
 await new Promise<void>((resolve) => server.listen(0, resolve));
 const { port } = server.address() as AddressInfo;
 
-const data = await new HttpPipeline([1, 2, 3, 4, 5], { url: `http://localhost:${port}` })
-  .transform((t) => t.map((x: number) => x * 2))
+const data = await new HttpPipeline<number>({ url: `http://localhost:${port}` })
+  .transform((t) => t.map((x: number) => x * 2))([1, 2, 3, 4, 5])
   .toArray();
 
 console.log(JSON.stringify(data)); // [2,4,6,8,10]
@@ -299,8 +305,8 @@ canonical example below exits on its own with no explicit teardown:
 ```typescript
 import { ClusterPipeline } from "@outputty/pipeline";
 
-const data = await new ClusterPipeline([1, 2, 3, 4, 5])
-  .transform((t) => t.map((x: number) => x * 2))
+const data = await new ClusterPipeline<number>()
+  .transform((t) => t.map((x: number) => x * 2))([1, 2, 3, 4, 5])
   .toArray();
 
 // Last line only - every worker also re-executes this module, each printing its own empty result first.
@@ -356,7 +362,7 @@ writes included, and `.context()` merges into it rather than replacing it.
 <!-- illustrative -->
 
 ```typescript
-const pipeline = new Pipeline([1, 2, 3], { context: myContextManager });
+const pipeline = new Pipeline<number>({ context: myContextManager });
 ```
 
 Pass `contextFactory` when a manager cannot travel - a `ClusterPipeline` worker or a separate
@@ -366,7 +372,7 @@ result, so a manager owning a connection opens one pool per worker rather than o
 <!-- illustrative -->
 
 ```typescript
-const pipeline = new ClusterPipeline([1, 2, 3], {
+const pipeline = new ClusterPipeline<number>({
   workers: 3,
   contextFactory: () => new PgContext(pool),
 });
@@ -391,13 +397,13 @@ const orders: Order[] = [
 ];
 
 // `o` / `acc` are INFERRED from the typed source — no annotation, no implicit `any`.
-const totals = await new Pipeline(orders)
+const totals = await new Pipeline<Order>()
   .transform((t) =>
     t
       .filter((o) => o.cents > 0)
       .map((o) => o.cents / 100)
       .reduce((acc, cents) => acc + cents, 0),
-  )
+  )(orders)
   .toArray();
 ```
 
@@ -423,10 +429,10 @@ chunks `[1,2] [3,4] [5]` and sums `[3,7,5]`; `.buffer(1)` gives one item per chu
 ```typescript
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = await new Pipeline<number>()
   .buffer(2) // never applied - superseded before any stage reads it
   .buffer(1) // this is the boundary every later stage actually sees
-  .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))
+  .transform((t) => t.reduce((acc: number, x: number) => acc + x, 0))([1, 2, 3, 4, 5])
   .toArray();
 
 console.log(JSON.stringify(data)); // [1,2,3,4,5] - buffer(2) would have printed [3,7,5]
@@ -508,9 +514,9 @@ either - downstream stages run over every value a reducer produced.
 ```typescript
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = await new Pipeline<number>()
   .reduce((acc: number, x: number) => acc + x, 0)
-  .transform((t) => t.map((n: number) => n * 10))
+  .transform((t) => t.map((n: number) => n * 10))([1, 2, 3, 4, 5])
   .toArray();
 
 console.log(data); // [150]
@@ -525,7 +531,7 @@ threshold, with no trailing value when the last item already banked one:
 ```typescript
 import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5])
+const data = await new Pipeline<number>()
   .reduce((acc: number, x: number, _ctx, emit: (v: number) => void) => {
     acc += x;
     if (acc >= 6) {
@@ -534,7 +540,7 @@ const data = await new Pipeline([1, 2, 3, 4, 5])
     }
     return acc;
   }, 0)
-  .transform((t) => t.map((n: number) => n * 10))
+  .transform((t) => t.map((n: number) => n * 10))([1, 2, 3, 4, 5])
   .toArray();
 
 console.log(data); // [60, 90]
@@ -550,9 +556,12 @@ the same way `emit()` output already does above: no forced merge, no thrown erro
 ```typescript
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
-const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const data = await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
   .buffer(2)
-  .reduce((acc: number, x: number) => acc + x, 0)
+  .reduce(
+    (acc: number, x: number) => acc + x,
+    0,
+  )([1, 2, 3, 4, 5])
   .toArray();
 
 console.log(data); // two numbers summing to 15, e.g. [7, 8] - split is timing-dependent
@@ -566,10 +575,10 @@ down any other multi-value reduce output - nothing named "combine":
 ```typescript
 import { ConcurrentPipeline } from "@outputty/pipeline";
 
-const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+const data = await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
   .buffer(2)
   .reduce((acc: number, x: number) => acc + x, 0)
-  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
+  .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))([1, 2, 3, 4, 5])
   .toArray();
 
 console.log(data); // [15]
@@ -596,17 +605,17 @@ const parseStrict = (s: string): number => {
 };
 
 // A dropped row is repaired out of the chunk, not lost with it.
-const recovered = await new Pipeline(["a", "b", "3", "d", "5"])
-  .transform((t) => t.onError(() => DROP).map(parseStrict))
+const recovered = await new Pipeline<string>()
+  .transform((t) => t.onError(() => DROP).map(parseStrict))(["a", "b", "3", "d", "5"])
   .toArray();
 
 console.log(recovered); // [ 3, 5 ]
 
 // The run handler is what keeps a stream alive past a chunk nothing could repair.
-const survived = await new Pipeline(["1", "x", "3", "4"])
+const survived = await new Pipeline<string>()
   .buffer(1)
   .onError((err) => console.warn("dropping chunk:", err.message))
-  .transform((t) => t.map(parseStrict))
+  .transform((t) => t.map(parseStrict))(["1", "x", "3", "4"])
   .toArray();
 
 console.log(survived); // [ 1, 3, 4 ]
@@ -621,65 +630,13 @@ Split processing into multiple paths:
 ```typescript
 import { Pipeline, Transformer } from "@outputty/pipeline";
 
-const data = await new Pipeline([1, 2, 3, 4, 5]).branch({
+const data = await new Pipeline<number>()([1, 2, 3, 4, 5]).branch({
   evens: { predicate: (x: number) => x % 2 === 0, transformer: new Transformer<number, number>() },
   odds: { predicate: (x: number) => x % 2 !== 0, transformer: new Transformer<number, number>() },
 });
 
 console.log(data.evens); // [2, 4]
 console.log(data.odds); // [1, 3, 5]
-```
-
-## Merging
-
-Several sources concatenate back into one - the other direction from branching, and there are two
-ways to do it, pinned in [`.claude/examples.md`](.claude/examples.md) Case 5 and Case 8.
-
-`Pipeline.merge(pipelines, options?)` concatenates every source pipeline's data and context into a
-FRESH, plain `Pipeline`, for a caller who holds no pipeline of its own to continue. `pipelines` is
-an array; `options.context`, when given, is the SAME instance returned as the merged pipeline's
-`.contextManager`, later pipelines still winning on a shared key. With no `options`, a fresh
-manager is built the same way.
-
-<!-- compiles -->
-
-```typescript
-import { Pipeline } from "@outputty/pipeline";
-
-const pipeline1 = new Pipeline([1, 2, 3]);
-const pipeline2 = new Pipeline([4, 5, 6]);
-
-const merged = Pipeline.merge([pipeline1, pipeline2]);
-const data = await merged.toArray();
-
-console.log(data); // [ 1, 2, 3, 4, 5, 6 ]
-```
-
-`pipeline.merge(...others)` continues a pipeline you already hold instead: it keeps THIS
-pipeline's own class, knobs and stage numbering, so a stage applied after the merge runs at this
-pipeline's own next index rather than restarting at 0. Reach for this over the static form
-whenever work after the merge must stay concurrent, remote or clustered - the static form always
-returns a plain `Pipeline`, so a merged `HttpPipeline` gaining one more stage would otherwise
-collide with its own first stage on `/stage/0`.
-
-<!-- illustrative -->
-
-```typescript
-import { HttpPipeline, ConcurrentPipeline } from "@outputty/pipeline";
-
-const remote = new HttpPipeline([1, 2, 3, 4], { url: process.env.WORKER_URL! })
-  .buffer(1)
-  .transform((t) => t.map((x: number) => x + 1)); // stage 0, dispatched over HTTP
-
-const local = new ConcurrentPipeline([10, 20])
-  .buffer(1)
-  .transform((t) => t.map((x: number) => x + 5)); // its own in-process fan-out, never the wire
-
-const merged = remote.merge(local).transform((t) => t.map((x: number) => x * 100)); // stage 1 - THIS pipeline's own next index
-
-const data = await merged.toArray();
-
-console.log(data); // [ 200, 300, 400, 500, 1500, 2500 ]
 ```
 
 ## Patterns
@@ -704,8 +661,8 @@ const parseStrict = (s: string): number => {
   return n;
 };
 
-const data = await new Pipeline(["a", "1", "b", "3", "5"])
-  .transform((t) => t.onError(() => DROP).map(parseStrict))
+const data = await new Pipeline<string>()
+  .transform((t) => t.onError(() => DROP).map(parseStrict))(["a", "1", "b", "3", "5"])
   .toArray();
 
 console.log(JSON.stringify(data)); // [1,3,5]
@@ -729,15 +686,15 @@ async function fetchScore(id: number): Promise<number> {
 }
 
 // Pipeline: one item's wait finishes before the next one starts.
-const sequential = await new Pipeline([1, 2, 3, 4, 5])
+const sequential = await new Pipeline<number>()
   .buffer(1)
-  .transform((t) => t.map(fetchScore))
+  .transform((t) => t.map(fetchScore))([1, 2, 3, 4, 5])
   .toArray();
 
 // ConcurrentPipeline: up to 4 items waiting at once - the SAME chain, unchanged.
-const concurrent = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 4 })
+const concurrent = await new ConcurrentPipeline<number>({ maxConcurrency: 4 })
   .buffer(1)
-  .transform((t) => t.map(fetchScore))
+  .transform((t) => t.map(fetchScore))([1, 2, 3, 4, 5])
   .toArray();
 
 console.log(JSON.stringify({ sequential, concurrent })); // identical - only the wait overlaps

@@ -139,24 +139,50 @@ none of it survived the hand-trim (#745).
 
 ## Language
 
-- **Pipeline** - the high-level API composing a data source with a `Transformer` chain: `new
-  Pipeline(options?)` (#90, BREAKING - `options` only, no `data`), `.from(source)` to attach the
-  data, `.context()`, `.apply()`/`.transform()`, `.tap()` (#72), the terminal ops
-  (`.toArray()`/`.first()`/`.consume()`/`.forEach()`/`.branch()`), the static
-  `Pipeline.merge(pipelines, options?)` concatenating several pipelines' sources and contexts into a
-  FRESH plain `Pipeline` - `pipelines` is an array, not a rest param (#31, BREAKING), and
-  `options.context` carries a caller's own manager through the merge as the SAME instance - and the
-  instance `.merge(...others)` (#41), concatenating other pipelines onto ONE already held, keeping
-  its own class, knobs and stage numbering instead of building a stranger.
-- **`PipelineMode`** (#90) - `"unset" | "sync" | "async"`, a phantom type parameter on `Pipeline`/
-  `Transformer` deciding whether a chain runs synchronously. `new Pipeline(options?)` alone is
-  `"unset"` - no chain method is callable on it, a compile error, since there is no source to decide
-  sync or async against. `.from(source)` resolves it: a plain `Iterable` source starts `"sync"`, an
-  `AsyncIterable` source starts `"async"`. A `"sync"` chain widens to `"async"` the first time any
-  stage's own function returns a `Promise`, or `.merge()` combines in an already-`"async"`
-  pipeline - never the other direction. `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` are
-  always `"async"`, since each dispatches a chunk across a real boundary regardless of the caller's
-  own callbacks.
+- **Pipeline** - the chain, and nothing else (#90, BREAKING): `new Pipeline<In>(options?)` declares
+  the type it ACCEPTS, holds no data, and IS the function you call. `.context()`,
+  `.apply()`/`.transform()`, `.buffer()`, `.reduce()`, `.local()`, `.tap()` (#72) and `.branch()`
+  compose it; calling it runs it. `.from(source)` and the two-argument constructor are both deleted,
+  as are the static `Pipeline.merge(pipelines, options?)` (#31) and the instance `.merge(...others)`
+  (#41) - both concatenated SOURCES, which a source-less pipeline has none of, and they go
+  unreplaced by decision: a caller concatenates inputs before calling. An instance is a real
+  function - `instanceof Function`, `.call`, `.apply` - because the constructor returns one and
+  `Pipeline.prototype` is reparented onto `Function.prototype` ONCE, below the class. Never `class
+  Pipeline extends Function`: its `super()` runs `CreateDynamicFunction`, which throws `EvalError:
+  Code generation from strings disallowed for this context` wherever code generation is banned.
+  ⚠ `.apply` and `.bind` are Pipeline methods, so they shadow `Function.prototype`'s; `.call` does
+  not. A stage composed before an input is RECORDED, and `.from()`'s protected survivor `bind()`
+  replays it when one arrives - which is why a deferred `.buffer()`/`.onError()`/`.local()` keeps
+  its position in the chain rather than applying to the whole of it.
+- **PipelineResult** - what calling a `Pipeline` produces (#90): one call's output over one input,
+  and the only place a chain can be drained. `.toArray()`/`.first(n)`/`.consume()`/`.forEach(fn)`,
+  `[Symbol.iterator]` (sync results only), `[Symbol.asyncIterator]` (items) and `.chunks()` all live
+  here, so `new Pipeline().toArray()` is `TS2339` rather than a call resolving to `[]`, and a result
+  is not chainable back into a pipeline. Every terminal RE-DRAINS - replayability cannot be detected
+  at runtime, so no detection is attempted: an array or a `Set` re-drains correctly and a spent
+  generator or stream reads empty. `Pipeline.drainable(input)` is the one seam between the two
+  classes, and each terminal calls it exactly once. `.chunks()` drops empty chunks, which is what
+  makes the two engines agree on what a consumer sees.
+- **Mode** - whether a chain runs synchronously, carried in `Pipeline<In, M, P, T>`'s own type
+  (#90). `PipelineMode` is `"unset" | "sync" | "async"`. `"unset"` is the ORDINARY state of a
+  composed chain: nothing about it is async yet, and either an async callback or an async input
+  decides otherwise later. Every terminal on a `PipelineResult` returns
+  `M extends "sync" ? T[] : Promise<T[]>`, so a fully synchronous chain hands back an array with no
+  `await` and no `Promise` created anywhere - measured at 0 with `node:async_hooks`, not a
+  wall-clock threshold. Calling with an `Iterable` keeps the chain's Mode, an `AsyncIterable` widens
+  it, and ONE callback returning a `Promise` widens it through `.transform()`'s own overload links.
+  `JoinMode<M, S>` joins the chain's Mode with a stage's, `SeedMode<M>` is what the seed
+  `Transformer` inside `.transform()` starts at (`"sync"` for an undecided chain - the intersection
+  `M & ("sync" | "async")` that preceded it is `never` for `"unset"`, which made every source-less
+  `.transform()` return `Pipeline<U, never, …>`), and `AssignMode<P, S>` applies the class's own
+  policy on top. `SourcePolicy` (`P`) records what a class does to an input's shape - the
+  dispatching classes are `"async"` whatever their callbacks return. ⚠ Mode is a TYPE fact only:
+  whether an input is BOUND is the runtime field `_bound`, kept separate because a callable chain is
+  `"unset"` for its whole life and becomes bound only for the duration of one call. Two
+  consequences, both BREAKING: a failure on a sync chain THROWS out of the terminal op instead of
+  rejecting, and `.onError(async …)` widens the type but not the runtime, so a sync input still
+  returns a plain array under a `Promise<T[]>` type - `await` on it is a no-op, `.then(…)` is a
+  `TypeError`, and the handler cannot be inspected for asynchrony without guessing.
 - **Transformer** - the chainable chunk-transformation builder: `new Transformer<In, Out>(options?)`,
   `.map()`/`.flatMap()`/`.filter()`/`.reduce()`/`.tap()`/`.onError()`. Chunk-agnostic (#39) - it never decides how its own input was cut, only
   processes whatever chunk it is handed. `.process(chunks, context?)` runs it directly over an
@@ -256,10 +282,18 @@ none of it survived the hand-trim (#745).
   construction code. Context is forward-looking - the wire carries `{ chunk, context }` out and
   `{ chunk }` back, so a worker's `ctx.set()` reaches other processes only through the caller's own
   manager class and its store.
-- **Branch** - `Pipeline.branch(definitions)` routing items to one or more named sub-pipelines by
-  predicate: `BranchDefinition<T, U>` pairs a `predicate` with a `Transformer`; `BranchOptions.firstMatch`
-  (default `true`) sends an item to only the first matching branch, `false` broadcasts it to every
-  matching branch.
+- **Branch** - `Pipeline.branch(definitions, options?)` routing items to one or more named
+  sub-pipelines by predicate. It returns a `BranchRunner`, not the results (#90, BREAKING): the
+  definitions are written ONCE and the runner is called with any input, so `await p.branch({…})`
+  becomes `await p.branch({…})(items)` - awaiting the runner alone yields the function.
+  `BranchDefinition<T, U>` pairs a `predicate` with an OPTIONAL `transformer` (#87, folded into
+  #90): a routing-only branch names none and its items pass through unchanged, where before every
+  branch had to hand-build `new Transformer<T, T>()` purely to fill the field. Each branch's result
+  type comes from its OWN transformer (`BranchResults`), never one type shared across the map - one
+  shared `U` typed a routing-only branch as another branch's output and filled it with the wrong
+  values, no cast anywhere. `BranchOptions.firstMatch` (default `true`) sends an item to only the
+  first matching branch, `false` broadcasts it to every matching branch; declaration order is
+  routing order. A branch transformer reads the RUN's context, not the chain's.
 - **Observation point / `.tap()`** - the ONE surface that watches data without changing it, at two
   levels with one meaning. `Transformer.tap(fn | transformer)` (`src/transformer.ts`) is a `pipe()`
   link: `fn` gets each item plus context via `Promise.all(chunk.map(...))`, the `transformer` form
