@@ -231,9 +231,11 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
       //
       // The ban is a process-level flag, so this runs in a child process. It is the real assertion;
       // the in-process checks below only say what the reparenting buys.
-      const result = await runFixtureJson("__tests__/fixtures/no-codegen.ts", [
-        "--disallow-code-generation-from-strings",
-      ]);
+      const result = await runFixtureJson(
+        "__tests__/fixtures/no-codegen.ts",
+        ["--disallow-code-generation-from-strings"],
+        true,
+      );
       expect(result).toEqual({
         values: [2, 4, 6],
         isFunction: true,

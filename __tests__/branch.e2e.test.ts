@@ -6,7 +6,7 @@
  * before its own fix. Moved here from `wrapping.e2e.test.ts` (#133), every `describe`/`it` and every
  * `expect` unchanged; later #133 passes then folded this file's own `servedBy`/inline path-recording
  * onto the shared `withTrackedServer`, and its `runFixture`/`expectFixtureOk` pairs onto
- * `runFixtureJson`, on top of the shared `Order`/`orders`/`withVat`/`countPromises` imports
+ * `runFixtureJson`, on top of the shared `Order`/`ordersA`/`withVat`/`countPromises` imports
  * (replacing in-file shadowed re-declarations of the identical values).
  */
 
@@ -22,7 +22,7 @@ import {
   runFixtureJson,
 } from "./helpers/fixtures";
 import { countPromises } from "./helpers/sequences";
-import { type Order, ordersA, ordersB, orders, withVat } from "./helpers/domain";
+import { type Order, ordersA, ordersB, withVat } from "./helpers/domain";
 
 describe(".branch() is built once and called with any data (Done-when 13, 14)", () => {
   const split = withVat.branch((b) =>
@@ -224,7 +224,7 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
 
       const { value, paths } = await withTrackedServer(
         (request) => worker.fetch(request),
-        async (url) => declare(new HttpPipeline(withVat, { url }))(orders),
+        async (url) => declare(new HttpPipeline(withVat, { url }))(ordersA),
       );
 
       expect(value).toEqual({
@@ -252,7 +252,7 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
             (o) => o.region === "eu",
             (q) => q.local((r) => r.transform((t) => t.map((o) => o.id))),
           ),
-        )(orders);
+        )(ordersA);
       });
 
       expect(value).toEqual({ eu: [1, 3] });
@@ -270,9 +270,9 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
       b.when("big", (o) => o.total > threshold).otherwise("rest"),
     );
 
-    expect(split(orders).big.map((o) => o.id)).toEqual([2, 4]);
+    expect(split(ordersA).big.map((o) => o.id)).toEqual([2, 4]);
     threshold = 100;
-    expect(split(orders).big.map((o) => o.id)).toEqual([2, 3, 4]);
+    expect(split(ordersA).big.map((o) => o.id)).toEqual([2, 3, 4]);
   });
 
   it("returns one record of arrays, each key typed by its own arm (Done-when 21)", () => {
@@ -287,7 +287,7 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
         .otherwise("rest", (q) => q.transform((t) => t.map((o) => o.id))),
     );
 
-    const out = split(orders);
+    const out = split(ordersA);
     // The two annotations ARE the assertion: `big` is `string[]` from its own arm, `eu` is
     // `Order[]` because it names no pipeline, and `rest` is `number[]` from its own.
     const labelled: string[] = out.big;
@@ -309,9 +309,9 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
         .otherwise("rest"),
     );
 
-    const out = split(orders);
+    const out = split(ordersA);
     expect(typeof (out as unknown as { then?: unknown }).then).toBe("undefined");
-    expect(countPromises(() => split(orders))).toBe(0);
+    expect(countPromises(() => split(ordersA))).toBe(0);
   });
 
   it("widens the whole record on one async arm, awaiting only that arm (Done-when 23)", async () => {
@@ -325,16 +325,16 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
         .otherwise("rest", (q) => q.transform((t) => t.map((o) => o.id))),
     );
 
-    const pending = split(orders);
+    const pending = split(ordersA);
     expect(typeof (pending as unknown as { then?: unknown }).then).toBe("function");
     expect(await pending).toEqual({ big: [2, 4], rest: [1, 3] });
 
     // Only the async arm was ever a promise: its sibling returned an array before the join saw it.
     const asyncArm = new Pipeline<Order>()
-      .transform((t) => t.map(async (o) => o.id))(orders)
+      .transform((t) => t.map(async (o) => o.id))(ordersA)
       .toArray();
     const syncArm = new Pipeline<Order>()
-      .transform((t) => t.map((o) => o.id))(orders)
+      .transform((t) => t.map((o) => o.id))(ordersA)
       .toArray();
     expect(typeof (asyncArm as unknown as { then?: unknown }).then).toBe("function");
     expect(Array.isArray(syncArm)).toBe(true);
@@ -346,8 +346,8 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
     const catchAllFirst = withVat.branch((b) =>
       b.otherwise("rest").when("big", (o) => o.total > 200),
     );
-    expect(catchAllFirst(orders).big.map((o) => o.id)).toEqual([2, 4]);
-    expect(catchAllFirst(orders).rest.map((o) => o.id)).toEqual([1, 3]);
+    expect(catchAllFirst(ordersA).big.map((o) => o.id)).toEqual([2, 4]);
+    expect(catchAllFirst(ordersA).rest.map((o) => o.id)).toEqual([1, 3]);
 
     const broadcast = withVat.branch((b) =>
       b
@@ -355,7 +355,7 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
         .when("eu", (o) => o.region === "eu")
         .broadcast(),
     );
-    const out = broadcast(orders);
+    const out = broadcast(ordersA);
     expect(out.big.map((o) => o.id)).toEqual([2, 4]);
     expect(out.eu.map((o) => o.id)).toEqual([1, 3]);
   });
@@ -416,7 +416,7 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
       declare(worker);
 
       const value = await withServer(worker.fetch, async (url) =>
-        declare(new HttpPipeline(withVat, { url }))(orders),
+        declare(new HttpPipeline(withVat, { url }))(ordersA),
       );
       // 360 + 1080, folded on the worker under the arm's own reduce route.
       expect(value).toEqual({ big: [1440] });
@@ -434,7 +434,7 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
         (q) => q.transform((t) => t.map(async (o) => o.id)),
       ),
     );
-    const out = split(orders);
+    const out = split(ordersA);
     expect(typeof (out as unknown as { then?: unknown }).then).toBe("function");
     expect(await out).toEqual({ big: [2, 4] });
   });
@@ -473,8 +473,8 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
 
   it("refuses an arm name that could not survive a route", () => {
     // The name goes straight into `/branch/<i>/<name>/transform/<n>`, and `.fetch()` matches an
-    // ENCODED pathname - so `.when("big orders", …)` dispatched `/branch/0/big%20orders/…` and 404'd.
-    expect(() => withVat.branch((b) => b.when("big orders", () => true))).toThrow(
+    // ENCODED pathname - so `.when("big ordersA", …)` dispatched `/branch/0/big%20orders/…` and 404'd.
+    expect(() => withVat.branch((b) => b.when("big ordersA", () => true))).toThrow(
       /not usable in a route/,
     );
     expect(() => withVat.branch((b) => b.when("a/b", () => true))).toThrow(/not usable in a route/);
@@ -491,7 +491,7 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
     // The docstring claimed "every item no earlier arm claimed", which holds only in router mode:
     // broadcast means every MATCHING arm, and a catch-all's predicate accepts all of them.
     const routerMode = withVat.branch((b) => b.when("big", (o) => o.total > 200).otherwise("rest"));
-    expect(routerMode(orders).rest.map((o) => o.id)).toEqual([1, 3]);
+    expect(routerMode(ordersA).rest.map((o) => o.id)).toEqual([1, 3]);
 
     const broadcastMode = withVat.branch((b) =>
       b
@@ -499,6 +499,6 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
         .otherwise("rest")
         .broadcast(),
     );
-    expect(broadcastMode(orders).rest.map((o) => o.id)).toEqual([1, 2, 3, 4]);
+    expect(broadcastMode(ordersA).rest.map((o) => o.id)).toEqual([1, 2, 3, 4]);
   });
 });

@@ -366,6 +366,8 @@ describe("#17 a chunk failure never leaks an unhandled rejection (Done-when 8)",
     async () => {
       const result = await runFixtureJson<{ ordered: string[]; unordered: string[] }>(
         "__tests__/fixtures/concurrent-unhandled.ts",
+        [],
+        true,
       );
       expect(result.ordered).toEqual([]);
       expect(result.unordered).toEqual([]);

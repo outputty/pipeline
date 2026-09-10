@@ -94,9 +94,15 @@ export function expectFixtureOk(result: FixtureResult): void {
 
 /** Parses a fixture's REAL result off its stdout's LAST line - a `ClusterPipeline` fixture's own
  * worker re-executes the entry module and prints its own empty placeholder first
- * (architecture.md's own documented constraint), so only the final line is the primary's own. */
-export function lastJsonLine<T>(fixture: FixtureResult): T {
+ * (architecture.md's own documented constraint), so only the final line is the primary's own.
+ * `strict` additionally asserts stdout is EXACTLY one line - the right choice for a fixture that
+ * never forks, where a second line can only mean an unexpected extra print, not a worker's own
+ * placeholder. */
+export function lastJsonLine<T>(fixture: FixtureResult, strict = false): T {
   const lines = fixture.stdout.trim().split("\n");
+  if (strict && lines.length !== 1) {
+    throw new Error(`expected exactly one stdout line, got ${lines.length}:\n${fixture.stdout}`);
+  }
   return JSON.parse(lines.at(-1) ?? "") as T;
 }
 
@@ -104,15 +110,17 @@ export function lastJsonLine<T>(fixture: FixtureResult): T {
  * `runFixture` → `expectFixtureOk` → `lastJsonLine` triplet nearly every fixture-backed case
  * repeated (#133: was spelled inline 11+ times). A case that also needs the raw `FixtureResult`
  * (its `stderr`, say) still calls the three separately; this is for the ordinary case that only
- * wants the parsed JSON.
+ * wants the parsed JSON. `strict` forwards to `lastJsonLine` - pass it for a fixture that never
+ * forks, so a stray extra print fails loud here instead of silently reading the wrong line.
  *
  * `await runFixtureJson<{ distinctPids: number }>("__tests__/fixtures/cluster-pids.ts")` →
  * `{ distinctPids: 3 }`, having already asserted the fixture exited 0. */
 export async function runFixtureJson<T>(
   relativePath: string,
   nodeFlags: string[] = [],
+  strict = false,
 ): Promise<T> {
   const fixture = await runFixture(relativePath, nodeFlags);
   expectFixtureOk(fixture);
-  return lastJsonLine<T>(fixture);
+  return lastJsonLine<T>(fixture, strict);
 }

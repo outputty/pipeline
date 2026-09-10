@@ -130,6 +130,8 @@ describe("#124 an async Worker that throws after its own await never hangs or le
     async () => {
       const result = await runFixtureJson<{ rejection: string | null; unhandled: string[] }>(
         "__tests__/fixtures/eventemitter-async-throw.ts",
+        [],
+        true,
       );
       expect(result.rejection).toBe("worker-threw-after-await-1,2,3");
       expect(result.unhandled).toEqual([]);
@@ -262,7 +264,7 @@ describe("#124 review round 1/2 - a throwing lifecycle observer never absorbs or
         ended: { rejection: string | null };
         unhandled: string[];
         uncaught: string[];
-      }>("__tests__/fixtures/eventemitter-throwing-observers.ts");
+      }>("__tests__/fixtures/eventemitter-throwing-observers.ts", [], true);
 
       // F3: a throwing :dispatched listener used to reject the whole dispatch as if it were a
       // Worker failure - .onError() silently absorbed it and `out` came back [].
