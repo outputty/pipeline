@@ -72,6 +72,23 @@ describe("#45 Transformer.reduce still folds ONE chunk and still chains (Done-wh
   });
 });
 
+/** A request body that trickles `frames` out one at a time, 60ms apart, each JSON-encoded as its
+ * own NDJSON line - slow enough that a duplex-aware server can answer before the body closes.
+ * `onClosed` fires the moment the LAST frame is enqueued and the stream closes. */
+function trickleNdjsonBody(frames: unknown[], onClosed: () => void): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      for (const frame of frames) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        controller.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
+      }
+      controller.close();
+      onClosed();
+    },
+  });
+}
+
 describe("#45 a real duplex connection streams emits before the request body closes (Done-when 4)", () => {
   test(
     "emits [6,9], at least one arriving before the request body closes",
@@ -80,20 +97,13 @@ describe("#45 a real duplex connection streams emits before the request body clo
 
       await withServer(worker.fetch, async (url) => {
         let bodyClosed = false;
-        const encoder = new TextEncoder();
-        const framesToSend: number[][] = [[1, 2], [3, 4], [5]];
-
-        const requestBody = new ReadableStream<Uint8Array>({
-          async start(controller) {
-            controller.enqueue(encoder.encode(`${JSON.stringify({ context: {} })}\n`));
-            for (const chunk of framesToSend) {
-              await new Promise((resolve) => setTimeout(resolve, 60));
-              controller.enqueue(encoder.encode(`${JSON.stringify({ chunk })}\n`));
-            }
-            controller.close();
-            bodyClosed = true;
-          },
-        });
+        const framesToSend = [
+          { context: {} },
+          { chunk: [1, 2] },
+          { chunk: [3, 4] },
+          { chunk: [5] },
+        ];
+        const requestBody = trickleNdjsonBody(framesToSend, () => (bodyClosed = true));
 
         const response = await fetch(`${url}/reduce/0`, {
           method: "POST",
@@ -139,18 +149,10 @@ describe("#45 toNodeHandler streams both directions (Done-when 5)", () => {
     async () => {
       await withServer(echoHandler, async (url) => {
         let bodyClosed = false;
-        const encoder = new TextEncoder();
-
-        const requestBody = new ReadableStream<Uint8Array>({
-          async start(controller) {
-            for (const item of [1, 2, 3]) {
-              await new Promise((resolve) => setTimeout(resolve, 60));
-              controller.enqueue(encoder.encode(`${JSON.stringify({ item })}\n`));
-            }
-            controller.close();
-            bodyClosed = true;
-          },
-        });
+        const requestBody = trickleNdjsonBody(
+          [{ item: 1 }, { item: 2 }, { item: 3 }],
+          () => (bodyClosed = true),
+        );
 
         const response = await fetch(url, {
           method: "POST",
