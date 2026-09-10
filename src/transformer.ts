@@ -171,7 +171,14 @@ function settleRowsFlat<T, U>(
  *
  * `new Transformer<number, number>().map((n) => n * 2)` → a transformer a pipeline can `.apply()`.
  */
-export class Transformer<In, Out> {
+export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
+  /**
+   * Type-only (#90), never assigned and never read at runtime: `M` appears in no member's parameter
+   * or return type on its own, so without this field TypeScript treats two `Transformer`s differing
+   * only in `M` as the same type and the Mode never reaches `Pipeline.transform()`'s inference.
+   */
+  declare readonly __mode: M;
+
   /** The internal transform function */
   readonly transform: InternalTransformer<In, Out>;
 
@@ -308,7 +315,7 @@ export class Transformer<In, Out> {
    */
   protected pipe<U>(
     operation: (chunk: Out[], ctx: IContextManager, run?: RunScope) => U[] | Promise<U[]>,
-  ): Transformer<In, U> {
+  ): Transformer<In, U, M> {
     const currentTransform = this.transform;
 
     // `chain`, not `await` (#90): a link whose own operation returns a plain array composes with
@@ -319,7 +326,7 @@ export class Transformer<In, Out> {
     const newTransform: InternalTransformer<In, U> = (chunk, ctx, run) =>
       chain(currentTransform(chunk, ctx, run), (intermediate) => operation(intermediate, ctx, run));
 
-    return new Transformer<In, U>({
+    return new Transformer<In, U, M>({
       transform: newTransform,
       // rowHandler is keyed on no type parameter at all (`unknown` item), unaffected by the
       // Out -> U change, so it carries forward - this is what makes `.onError()` position-
@@ -345,7 +352,12 @@ export class Transformer<In, Out> {
    * @param fn - Mapping function (can be context-aware)
    * @returns New Transformer with map operation applied
    */
-  map<U>(fn: PipelineFunction<Out, U>): Transformer<In, U> {
+  map<U>(fn: (item: Out, ctx: IContextManager) => Promise<U>): Transformer<In, U, "async">;
+  map<U>(
+    fn: (item: Out, ctx: IContextManager) => U extends Promise<unknown> ? never : U,
+  ): Transformer<In, U, M>;
+  map<U>(fn: (item: Out, ctx: IContextManager) => U): Transformer<In, U, "async">;
+  map<U>(fn: PipelineFunction<Out, U>): Transformer<In, U, "sync" | "async"> {
     if (isContextAware(fn)) {
       return this.pipe((chunk, ctx, run) => {
         // No handler registered: the plain path (#78 Done-when 11 - the seam costs nothing until
@@ -383,7 +395,11 @@ export class Transformer<In, Out> {
    * @param predicate - Filter function (can be context-aware)
    * @returns New Transformer with filter operation applied
    */
-  filter(predicate: PipelineFunction<Out, boolean>): Transformer<In, Out> {
+  filter(
+    predicate: (item: Out, ctx: IContextManager) => Promise<boolean>,
+  ): Transformer<In, Out, "async">;
+  filter(predicate: (item: Out, ctx: IContextManager) => boolean): Transformer<In, Out, M>;
+  filter(predicate: PipelineFunction<Out, boolean>): Transformer<In, Out, "sync" | "async"> {
     if (isContextAware(predicate)) {
       return this.pipe((chunk, ctx, run) => {
         if (!run?.rowHandler) {
@@ -430,7 +446,7 @@ export class Transformer<In, Out> {
    *
    * @returns New Transformer with flattened output
    */
-  flatten<U>(this: Transformer<In, U[]>): Transformer<In, U> {
+  flatten<U>(this: Transformer<In, U[], M>): Transformer<In, U, M> {
     return this.pipe((chunk, _ctx) => chunk.flat());
   }
 
@@ -443,7 +459,9 @@ export class Transformer<In, Out> {
    * @param fn - Mapping function that returns an array (can be async)
    * @returns New Transformer with flatMap operation applied
    */
-  flatMap<U>(fn: PipelineFunction<Out, U[]>): Transformer<In, U> {
+  flatMap<U>(fn: (item: Out, ctx: IContextManager) => Promise<U[]>): Transformer<In, U, "async">;
+  flatMap<U>(fn: (item: Out, ctx: IContextManager) => U[]): Transformer<In, U, M>;
+  flatMap<U>(fn: PipelineFunction<Out, U[]>): Transformer<In, U, "sync" | "async"> {
     if (isContextAware(fn)) {
       return this.pipe((chunk, ctx, run) => {
         if (!run?.rowHandler) {
@@ -487,9 +505,13 @@ export class Transformer<In, Out> {
    */
 
   // Overload signatures
-  tap(fn: PipelineFunction<Out, unknown>): Transformer<In, Out>;
-  tap(transformer: Transformer<Out, unknown>): Transformer<In, Out>;
-  tap(arg: PipelineFunction<Out, unknown> | Transformer<Out, unknown>): Transformer<In, Out> {
+  tap(fn: (item: Out, ctx: IContextManager) => Promise<unknown>): Transformer<In, Out, "async">;
+  tap(fn: (item: Out, ctx: IContextManager) => unknown): Transformer<In, Out, M>;
+  tap(transformer: Transformer<Out, unknown, "async">): Transformer<In, Out, "async">;
+  tap(transformer: Transformer<Out, unknown, "sync">): Transformer<In, Out, M>;
+  tap(
+    arg: PipelineFunction<Out, unknown> | Transformer<Out, unknown, "sync" | "async">,
+  ): Transformer<In, Out, "sync" | "async"> {
     // Check if arg is a Transformer instance - chunk-aware, keeps chunk semantics (row handling
     // does not reach it, per the ticket's own Constraints: a chunk-aware link cannot take per-row
     // semantics).
@@ -544,7 +566,9 @@ export class Transformer<In, Out> {
    * @param fn - Function that receives this transformer and returns a new one
    * @returns Result of applying the function to this transformer
    */
-  apply<U>(fn: (t: this) => Transformer<In, U>): Transformer<In, U> {
+  apply<U, M2 extends "sync" | "async">(
+    fn: (t: this) => Transformer<In, U, M2>,
+  ): Transformer<In, U, M2> {
     return fn(this);
   }
 
@@ -574,8 +598,8 @@ export class Transformer<In, Out> {
    * @example
    * `t.onError(() => DROP).map(parseStrict)` over `["a","3"]` → `[3]`.
    */
-  onError(handler: RowErrorHandler): Transformer<In, Out> {
-    return new Transformer<In, Out>({
+  onError(handler: RowErrorHandler): Transformer<In, Out, M> {
+    return new Transformer<In, Out, M>({
       transform: this.transform,
       rowHandler: handler,
     });
@@ -598,10 +622,20 @@ export class Transformer<In, Out> {
    * @returns New transformer with loop operation applied
    */
   loop(
-    loopTransformer: Transformer<Out, Out>,
+    loopTransformer: Transformer<Out, Out, "async">,
     condition: (chunk: Out[], ctx: IContextManager) => boolean,
     maxIterations?: number,
-  ): Transformer<In, Out> {
+  ): Transformer<In, Out, "async">;
+  loop(
+    loopTransformer: Transformer<Out, Out, "sync">,
+    condition: (chunk: Out[], ctx: IContextManager) => boolean,
+    maxIterations?: number,
+  ): Transformer<In, Out, M>;
+  loop(
+    loopTransformer: Transformer<Out, Out, "sync" | "async">,
+    condition: (chunk: Out[], ctx: IContextManager) => boolean,
+    maxIterations?: number,
+  ): Transformer<In, Out, "sync" | "async"> {
     const loopedTransform = loopTransformer.transform;
     const conditionIsContextAware = condition.length >= 2;
 
@@ -664,7 +698,15 @@ export class Transformer<In, Out> {
    * `new Transformer<number, number>().reduce((acc, x) => acc + x, 0)` over chunks `[[1,2],[3]]` →
    * `[3]` then `[3]` (each chunk's own independent sum).
    */
-  reduce<U>(fn: ReduceFunction<U, Out>, initial: U): Transformer<In, U> {
+  reduce<U>(
+    fn: (acc: U, item: Out, ctx: IContextManager, emit: (value: U) => void) => Promise<U>,
+    initial: U,
+  ): Transformer<In, U, "async">;
+  reduce<U>(
+    fn: (acc: U, item: Out, ctx: IContextManager, emit: (value: U) => void) => U,
+    initial: U,
+  ): Transformer<In, U, M>;
+  reduce<U>(fn: ReduceFunction<U, Out>, initial: U): Transformer<In, U, "sync" | "async"> {
     return this.pipe((chunk, ctx, run) => {
       if (chunk.length === 0) return [];
       const reducer = new Reducer<U, Out>(fn, initial, run?.rowHandler);
@@ -711,7 +753,7 @@ export class Transformer<In, Out> {
    * @param fn - Function that returns true to stop execution
    * @returns New transformer with short-circuit condition applied
    */
-  shortCircuit(fn: (ctx: IContextManager) => boolean): Transformer<In, Out> {
+  shortCircuit(fn: (ctx: IContextManager) => boolean): Transformer<In, Out, M> {
     return this.pipe((chunk, ctx) => {
       if (fn(ctx)) {
         throw new Error("Short-circuit condition met, stopping execution.");

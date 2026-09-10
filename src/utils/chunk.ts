@@ -13,6 +13,7 @@
  */
 
 import type { ChunkerFunction } from "@src/types";
+import { isThenable } from "@src/utils/helpers";
 
 /**
  * Build a chunking function that breaks an async iterable into chunks of a specified size.
@@ -160,6 +161,181 @@ export function* flattenSyncChunks<T>(chunks: Iterable<T[]>): Generator<T> {
   for (const chunk of chunks) {
     yield* chunk;
   }
+}
+
+/**
+ * A sync chunk stream whose individual chunks may still be pending (#90) - what a `"sync"`-Mode
+ * `Pipeline` carries. A stage whose callbacks were all synchronous puts a plain array in; one that
+ * returned a thenable puts a `Promise` in, and that is where the run widens to async.
+ */
+export type MaybeAsyncChunks<T> = Iterable<T[] | Promise<T[]>>;
+
+/**
+ * Drains a `MaybeAsyncChunks` stream item by item into `onItem`, staying synchronous until the first
+ * pending chunk (#90) - the ONE drain every synchronous terminal op goes through (`toArray`,
+ * `first`, `consume`, `forEach`), so the "did this stay synchronous?" decision and the early-exit
+ * decision each live in one place rather than four.
+ *
+ * `onItem` returning `true` stops the drain, which is what `.first(n)` needs; returning anything
+ * else continues. A pending chunk hands the rest of the stream to a `.then` continuation running on
+ * its own microtask, so a long stream never grows the stack.
+ *
+ * `drainSync(chunksOf([[1, 2], [3]]), (x) => out.push(x) && false)` → `undefined`, no `Promise`
+ * created, with `out` `[1, 2, 3]`.
+ */
+export function drainSync<T>(
+  chunks: MaybeAsyncChunks<T>,
+  onItem: (item: T) => boolean | void,
+): void | Promise<void> {
+  const iterator = chunks[Symbol.iterator]();
+
+  // A plain loop for the synchronous case; `resume` re-enters only across an async boundary.
+  const resume = (): void | Promise<void> => {
+    for (;;) {
+      const step = iterator.next();
+      if (step.done === true) return;
+
+      const chunk = step.value;
+      if (isThenable(chunk)) {
+        return Promise.resolve(chunk).then((settled) =>
+          pushAll(settled, onItem) ? undefined : resume(),
+        );
+      }
+      if (pushAll(chunk, onItem)) return;
+    }
+  };
+
+  return resume();
+}
+
+/**
+ * `drainSync`'s sibling for a callback whose OWN return has to settle before the next item (#90) -
+ * what `Pipeline.forEach` needs, since a `forEach` callback is allowed to be async and its failures
+ * must still reach the caller.
+ *
+ * Stays synchronous while both the chunks and the callback do, and widens at the first thenable
+ * either produces. Items are settled strictly in order, so an async `forEach` behaves like the
+ * `for await` loop it replaces rather than a `Promise.all` fan-out.
+ *
+ * `drainSyncSettled(chunksOf([[1, 2]]), (x) => void out.push(x))` → `undefined`, no `Promise`
+ * created.
+ */
+export function drainSyncSettled<T>(
+  chunks: MaybeAsyncChunks<T>,
+  onItem: (item: T) => void | Promise<void>,
+): void | Promise<void> {
+  const iterator = chunks[Symbol.iterator]();
+
+  const runChunk = (chunk: T[], start: number): void | Promise<void> => {
+    for (let index = start; index < chunk.length; index++) {
+      const settled = onItem(chunk[index]);
+      if (isThenable(settled)) {
+        const resumeAt = index + 1;
+        return Promise.resolve(settled).then(() =>
+          chainVoid(runChunk(chunk, resumeAt), () => resume()),
+        );
+      }
+    }
+    return resume();
+  };
+
+  const resume = (): void | Promise<void> => {
+    for (;;) {
+      const step = iterator.next();
+      if (step.done === true) return;
+
+      const chunk = step.value;
+      if (isThenable(chunk)) {
+        return Promise.resolve(chunk).then((settled) => runChunk(settled, 0));
+      }
+      const ran = runChunk(chunk, 0);
+      if (isThenable(ran)) return ran;
+      return;
+    }
+  };
+
+  return resume();
+}
+
+/** `chain` for a `void`-producing step, kept here rather than imported so `chunk.ts` owns its own
+ * drain helpers. Runs `next` once `value` has settled, creating no `Promise` when it already has. */
+function chainVoid(
+  value: void | Promise<void>,
+  next: () => void | Promise<void>,
+): void | Promise<void> {
+  return isThenable(value) ? Promise.resolve(value).then(next) : next();
+}
+
+/**
+ * Re-cuts an already-staged sync chunk stream at a new boundary (#90) - `.buffer()`'s own fallback
+ * once a real stage has consumed the pre-buffer item view, so the re-cut runs over that stage's
+ * OUTPUT rather than the original source.
+ *
+ * Settled chunks re-cut exactly, synchronously, at `size`. A PENDING chunk cannot: its items are not
+ * known yet, and a sync generator has to decide it is done before that promise could resolve. From
+ * the first pending chunk on, the remainder is therefore delivered as ONE pending chunk rather than
+ * several of `size` - correct items, coarser boundary. A pending chunk only exists once a callback
+ * returned a thenable, which is a chain the overloads already typed `"async"`, so no chain that
+ * `.toArray()` types `T[]` ever reaches this arm.
+ *
+ * `[...recutSyncChunks([[1, 2], [3, 4, 5]], 2)]` → `[[1, 2], [3, 4], [5]]`.
+ */
+export function* recutSyncChunks<T>(
+  chunks: MaybeAsyncChunks<T>,
+  size: number,
+): Generator<T[] | Promise<T[]>> {
+  if (size < 1) {
+    throw new Error("chunkSize must be at least 1");
+  }
+
+  let carry: T[] = [];
+  const iterator = chunks[Symbol.iterator]();
+
+  for (;;) {
+    const step = iterator.next();
+    if (step.done === true) break;
+
+    const chunk = step.value;
+    if (isThenable(chunk)) {
+      yield collectRest(carry, chunk, iterator);
+      return;
+    }
+
+    carry.push(...chunk);
+    while (carry.length >= size) {
+      yield carry.slice(0, size);
+      carry = carry.slice(size);
+    }
+  }
+
+  if (carry.length > 0) {
+    yield carry;
+  }
+}
+
+/** Everything left in a re-cut once a pending chunk is met: the carry, that chunk, and every chunk
+ * after it, as one settled array. Its own function to keep `recutSyncChunks` at this repo's
+ * `max-depth: 2`. */
+async function collectRest<T>(
+  carry: T[],
+  pending: Promise<T[]>,
+  iterator: Iterator<T[] | Promise<T[]>>,
+): Promise<T[]> {
+  const rest = [...carry, ...(await pending)];
+  for (;;) {
+    const step = iterator.next();
+    if (step.done === true) return rest;
+    rest.push(...(await step.value));
+  }
+}
+
+/** Hands one settled chunk's items to `onItem`, reporting whether it asked to stop. Its own
+ * function to keep `drainSync`'s loop at this repo's `max-depth: 2`. */
+function pushAll<T>(chunk: T[], onItem: (item: T) => boolean | void): boolean {
+  for (const item of chunk) {
+    if (onItem(item) === true) return true;
+  }
+  return false;
 }
 
 /**

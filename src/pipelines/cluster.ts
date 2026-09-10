@@ -21,7 +21,12 @@ import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
 import type { Pipeline, PipelineOptions, PipelineSource } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import type { IContextManager, InternalTransformer, ReduceFunction } from "@src/types";
+import type {
+  IContextManager,
+  InternalTransformer,
+  ReduceFunction,
+  SourcePolicy,
+} from "@src/types";
 
 /** Construction-time knobs for `ClusterPipeline`. */
 export type ClusterPipelineOptions = { workers?: number } & ConcurrentPipelineOptions;
@@ -144,7 +149,7 @@ async function* emptyAsyncIterable(): AsyncGenerator<never> {}
  * `new ClusterPipeline([1,2,3,4,5]).transform((t) => t.map((x) => x * 2)).toArray()` →
  * `[2,4,6,8,10]`, served by real worker processes.
  */
-export class ClusterPipeline<T> extends HttpPipeline<T> {
+export class ClusterPipeline<T, M extends "async" = "async"> extends HttpPipeline<T> {
   /** Worker processes to bring up on first drain. Default `os.availableParallelism()`. */
   readonly workers: number;
   /** This pipeline's stable position among every `ClusterPipeline` constructed in this process -
@@ -152,10 +157,10 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
    * the SAME logical pipeline keeps the SAME route on both the primary and every worker. */
   readonly pipelineIndex: number;
 
-  constructor(source: PipelineSource<T>, options?: ClusterPipelineConstructorOptions) {
+  constructor(options?: ClusterPipelineConstructorOptions) {
     // The real url is only known once bootstrapCluster() (below) picks a port; "" is inert until
     // the first actual dispatch sets it, inside stageWork()'s own returned closure.
-    super(source, { ...options, url: "" });
+    super({ ...options, url: "" });
     this.workers = options?.workers ?? availableParallelism();
     this.pipelineIndex = options?.pipelineIndex ?? nextPipelineIndex++;
     registry.set(this.pipelineIndex, this as ClusterPipeline<unknown>);
@@ -181,11 +186,10 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
     options: PipelineOptions,
-  ): ClusterPipeline<U> {
+  ): ClusterPipeline<U, M> {
     const Ctor = this.constructor as new (
-      data: PipelineSource<U>,
       options?: ClusterPipelineConstructorOptions & { url: string },
-    ) => ClusterPipeline<U>;
+    ) => ClusterPipeline<U, M>;
     const merged = {
       ...options,
       ...this.concurrentOptions(),
@@ -194,21 +198,28 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
       url: this._url,
       chunks,
     };
-    return new Ctor([], merged);
+    return new Ctor(merged);
   }
 
-  override transform<U>(builder: (t: Transformer<T, T>) => Transformer<T, U>): ClusterPipeline<U> {
-    return super.transform(builder) as ClusterPipeline<U>;
+  override transform<U, M2 extends "sync" | "async">(
+    // The same `"unset"` refusal the base carries (#90). Without it here, an override re-declares
+    // `transform` WITHOUT the guard and a source-less dispatching chain compiles, then resolves to
+    // `[]` at runtime - a chain composed with no engine decided, which is what the guard exists to
+    // make impossible.
+    this: M extends "unset" ? never : Pipeline<T, "async", "async">,
+    builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
+  ): ClusterPipeline<U, M> {
+    return super.transform(builder) as unknown as ClusterPipeline<U, M>;
   }
 
-  override apply<U>(transformer: Transformer<T, U>): ClusterPipeline<U> {
-    return super.apply(transformer) as ClusterPipeline<U>;
+  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ClusterPipeline<U, M> {
+    return super.apply(transformer) as unknown as ClusterPipeline<U, M>;
   }
 
   /** Re-declared ONLY to narrow the static return type back to `ClusterPipeline<U>` - same reason
    * as `.transform()`/`.apply()` above. `HttpPipeline.reduce()`'s own logic runs unchanged. */
-  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ClusterPipeline<U> {
-    return super.reduce(fn, initial) as ClusterPipeline<U>;
+  override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ClusterPipeline<U, M> {
+    return super.reduce(fn, initial) as unknown as ClusterPipeline<U, M>;
   }
 
   /**
@@ -216,8 +227,27 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
    * `~/.claude/rules/typescript.md`) - same reason as `.transform()`/`.apply()`/`.reduce()` above.
    * `HttpPipeline.local()`'s own logic runs unchanged via `super`.
    */
-  override local<U>(build: (p: Pipeline<T>) => Pipeline<U>): ClusterPipeline<U> {
-    return super.local(build) as ClusterPipeline<U>;
+  /**
+   * Forced `"async"` whatever the source's shape (#90) - ClusterPipeline exists for I/O-bound work and
+   * has no synchronous case, so an array source runs on the async engine here exactly as an
+   * `AsyncIterable` one does. `sourcePolicy()` below is the runtime half; the `"async"` third type
+   * argument on the `extends` clause above is the compile-time half, and is what makes this
+   * override a genuine narrowing of the base's own two arms rather than a conflict with them.
+   *
+   * `new ClusterPipeline().from([1, 2, 3])` → `ClusterPipeline<number, "async">`.
+   */
+  override from<U>(data: PipelineSource<U>): ClusterPipeline<U, M> {
+    return this.fromSource<U>(data, "async") as unknown as ClusterPipeline<U, M>;
+  }
+
+  protected override sourcePolicy(): SourcePolicy {
+    return "async";
+  }
+
+  override local<U, M2 extends "sync" | "async">(
+    build: (p: Pipeline<T, "async", "shape">) => Pipeline<U, M2, "shape">,
+  ): ClusterPipeline<U, M> {
+    return super.local(build) as unknown as ClusterPipeline<U, M>;
   }
 
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain
@@ -241,7 +271,7 @@ export class ClusterPipeline<T> extends HttpPipeline<T> {
   }
 
   protected override stageWork<U>(
-    transformer: Transformer<T, U>,
+    transformer: Transformer<T, U, "sync" | "async">,
     stageIndex: number,
   ): InternalTransformer<T, U> {
     const dispatch = super.stageWork(transformer, stageIndex);

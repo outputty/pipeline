@@ -5,8 +5,8 @@ import { LoggingContext } from "./fixtures/context-managers";
 describe("Pipeline.merge", () => {
   describe("basic merging", () => {
     it("should merge two pipelines in sequence", async () => {
-      const pipeline1 = new Pipeline([1, 2, 3]);
-      const pipeline2 = new Pipeline([4, 5, 6]);
+      const pipeline1 = new Pipeline().from([1, 2, 3]);
+      const pipeline2 = new Pipeline().from([4, 5, 6]);
 
       const merged = Pipeline.merge([pipeline1, pipeline2]);
       const results = await merged.toArray();
@@ -15,9 +15,9 @@ describe("Pipeline.merge", () => {
     });
 
     it("should merge three or more pipelines", async () => {
-      const p1 = new Pipeline(["a", "b"]);
-      const p2 = new Pipeline(["c", "d"]);
-      const p3 = new Pipeline(["e", "f"]);
+      const p1 = new Pipeline().from(["a", "b"]);
+      const p2 = new Pipeline().from(["c", "d"]);
+      const p3 = new Pipeline().from(["e", "f"]);
 
       const merged = Pipeline.merge([p1, p2, p3]);
       const results = await merged.toArray();
@@ -26,21 +26,21 @@ describe("Pipeline.merge", () => {
     });
 
     it("infers a union of the merged pipelines' literal item types (#31, Done-when 7)", async () => {
-      // Explicit type args on the two `Pipeline` constructions - a bare `new Pipeline(["a", "b"])`
+      // Explicit type args on the two `Pipeline` constructions - a bare `new Pipeline().from(["a", "b"])`
       // widens to `Pipeline<string>` on its own (Pipeline's own constructor inference, unrelated
       // to `merge()`); `Pipeline<T>` is invariant (architecture.md), so the mismatched-type
       // assignment below would fail to COMPILE, not just to assert, if merge() collapsed the union.
       // The ARRAY-form call (#31) still distributes ElementOf<Ps[number]> over the union exactly
       // as the old rest-param form did.
-      const typed: Pipeline<"a" | "b" | "c" | "d"> = Pipeline.merge([
-        new Pipeline<"a" | "b">(["a", "b"]),
-        new Pipeline<"c" | "d">(["c", "d"]),
+      const typed: Pipeline<"a" | "b" | "c" | "d", "sync"> = Pipeline.merge([
+        new Pipeline().from<"a" | "b">(["a", "b"]),
+        new Pipeline().from<"c" | "d">(["c", "d"]),
       ]);
       expect(await typed.toArray()).toEqual(["a", "b", "c", "d"]);
     });
 
     it("should handle single pipeline", async () => {
-      const pipeline = new Pipeline([1, 2, 3]);
+      const pipeline = new Pipeline().from([1, 2, 3]);
 
       const merged = Pipeline.merge([pipeline]);
       const results = await merged.toArray();
@@ -65,9 +65,9 @@ describe("Pipeline.merge", () => {
 
   describe("empty pipeline handling", () => {
     it("should handle empty pipelines gracefully", async () => {
-      const pipeline1 = new Pipeline([1, 2]);
-      const emptyPipeline = new Pipeline<number>([]);
-      const pipeline2 = new Pipeline([3, 4]);
+      const pipeline1 = new Pipeline().from([1, 2]);
+      const emptyPipeline = new Pipeline().from<number>([]);
+      const pipeline2 = new Pipeline().from([3, 4]);
 
       const merged = Pipeline.merge([pipeline1, emptyPipeline, pipeline2]);
       const results = await merged.toArray();
@@ -76,8 +76,8 @@ describe("Pipeline.merge", () => {
     });
 
     it("should handle all empty pipelines", async () => {
-      const empty1 = new Pipeline<string>([]);
-      const empty2 = new Pipeline<string>([]);
+      const empty1 = new Pipeline().from<string>([]);
+      const empty2 = new Pipeline().from<string>([]);
 
       const merged = Pipeline.merge([empty1, empty2]);
       const results = await merged.toArray();
@@ -88,8 +88,8 @@ describe("Pipeline.merge", () => {
 
   describe("context merging", () => {
     it("should merge contexts from all pipelines", async () => {
-      const pipeline1 = new Pipeline([1]).context({ key1: "value1" });
-      const pipeline2 = new Pipeline([2]).context({ key2: "value2" });
+      const pipeline1 = new Pipeline().from([1]).context({ key1: "value1" });
+      const pipeline2 = new Pipeline().from([2]).context({ key2: "value2" });
 
       const merged = Pipeline.merge([pipeline1, pipeline2]);
       await merged.toArray();
@@ -102,8 +102,8 @@ describe("Pipeline.merge", () => {
     });
 
     it("should give precedence to later pipelines for overlapping keys, no options (#31, Done-when 4)", async () => {
-      const pipeline1 = new Pipeline([1]).context({ shared: "first", unique1: "a" });
-      const pipeline2 = new Pipeline([2]).context({ shared: "second", unique2: "b" });
+      const pipeline1 = new Pipeline().from([1]).context({ shared: "first", unique1: "a" });
+      const pipeline2 = new Pipeline().from([2]).context({ shared: "second", unique2: "b" });
 
       const merged = Pipeline.merge([pipeline1, pipeline2]);
 
@@ -117,8 +117,8 @@ describe("Pipeline.merge", () => {
 
     it("returns a pipeline whose .contextManager IS the given context, same precedence (#31, Done-when 3)", async () => {
       const mine = new LoggingContext();
-      const pipeline1 = new Pipeline([1]).context({ shared: "first", only1: "a" });
-      const pipeline2 = new Pipeline([2]).context({ shared: "second", only2: "b" });
+      const pipeline1 = new Pipeline().from([1]).context({ shared: "first", only1: "a" });
+      const pipeline2 = new Pipeline().from([2]).context({ shared: "second", only2: "b" });
 
       const merged = Pipeline.merge([pipeline1, pipeline2], { context: mine });
 
@@ -132,7 +132,7 @@ describe("Pipeline.merge", () => {
     });
 
     it("honors options.contextFactory too, not just options.context (review regression)", () => {
-      const pipeline1 = new Pipeline([1]).context({ key: "value" });
+      const pipeline1 = new Pipeline().from([1]).context({ key: "value" });
 
       const merged = Pipeline.merge([pipeline1], { contextFactory: () => new LoggingContext() });
 
@@ -158,8 +158,8 @@ describe("Pipeline.merge", () => {
         yield "d";
       }
 
-      const pipeline1 = new Pipeline(asyncGen1());
-      const pipeline2 = new Pipeline(asyncGen2());
+      const pipeline1 = new Pipeline().from(asyncGen1());
+      const pipeline2 = new Pipeline().from(asyncGen2());
 
       const merged = Pipeline.merge([pipeline1, pipeline2]);
       const results = await merged.toArray();
@@ -170,8 +170,8 @@ describe("Pipeline.merge", () => {
 
   describe("chaining after merge", () => {
     it("should allow transformations after merge", async () => {
-      const pipeline1 = new Pipeline([1, 2]);
-      const pipeline2 = new Pipeline([3, 4]);
+      const pipeline1 = new Pipeline().from([1, 2]);
+      const pipeline2 = new Pipeline().from([3, 4]);
 
       const merged = Pipeline.merge([pipeline1, pipeline2]);
       const results = await merged.transform((t) => t.map((x) => x * 2)).toArray();
@@ -180,8 +180,8 @@ describe("Pipeline.merge", () => {
     });
 
     it("should allow filtering after merge", async () => {
-      const pipeline1 = new Pipeline([1, 2, 3]);
-      const pipeline2 = new Pipeline([4, 5, 6]);
+      const pipeline1 = new Pipeline().from([1, 2, 3]);
+      const pipeline2 = new Pipeline().from([4, 5, 6]);
 
       const merged = Pipeline.merge([pipeline1, pipeline2]);
       const results = await merged.transform((t) => t.filter((x) => x % 2 === 0)).toArray();
@@ -193,12 +193,12 @@ describe("Pipeline.merge", () => {
   describe("fan-in pattern (diamond)", () => {
     it("should enable diamond pattern: split then merge", async () => {
       // Source data
-      const _source = new Pipeline([1, 2, 3, 4, 5]);
+      const _source = new Pipeline().from([1, 2, 3, 4, 5]);
 
       // Simulate fan-out by creating two pipelines from arrays
       // (In real usage, these would come from branch() results)
-      const evens = new Pipeline([2, 4]);
-      const odds = new Pipeline([1, 3, 5]);
+      const evens = new Pipeline().from([2, 4]);
+      const odds = new Pipeline().from([1, 3, 5]);
 
       // Fan-in: merge the branches back
       const merged = Pipeline.merge([evens, odds]);

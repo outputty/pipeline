@@ -3,9 +3,9 @@
  */
 import { ClusterPipeline } from "../../src";
 
-const p1 = new ClusterPipeline([1]);
-const p2 = new ClusterPipeline([2]);
-const p3 = new ClusterPipeline([3]);
+const p1 = new ClusterPipeline().from([1]);
+const p2 = new ClusterPipeline().from([2]);
+const p3 = new ClusterPipeline().from([3]);
 
 const [r1, r2, r3] = await Promise.all([
   p1.transform((t) => t.map((x: number) => x)).toArray(),

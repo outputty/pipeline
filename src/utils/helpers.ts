@@ -53,13 +53,19 @@ export function isContextAware<Out, T>(
  * `await dropOrRethrow(undefined, err, ctx)` throws `err`. `await dropOrRethrow((e) => log(e), err,
  * ctx)` calls the handler and returns normally - the caller drops the chunk and continues.
  */
-export async function dropOrRethrow(
+export function dropOrRethrow(
   runHandler: PipelineErrorHandler | undefined,
   error: Error,
   ctx: IContextManager,
-): Promise<void> {
+): void | Promise<void> {
   if (!runHandler) throw error;
-  await runHandler(error, ctx);
+  // Dual-mode (#90): a SYNCHRONOUS handler returns here without creating a `Promise`, so a
+  // `"sync"`-Mode chain that drops a chunk still returns its array rather than silently widening to
+  // a `Promise` its own compile-time type never promised. The async arm keeps the reason above: the
+  // rejection is settled HERE, so a handler that decides to rethrow only after an `await` of its own
+  // still reaches the caller instead of becoming an unhandled rejection.
+  const result: unknown = runHandler(error, ctx);
+  return isThenable(result) ? Promise.resolve(result).then(() => undefined) : undefined;
 }
 
 /**

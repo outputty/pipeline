@@ -10,6 +10,40 @@
 export const DEFAULT_CHUNK_SIZE = 1000;
 
 /**
+ * Whether a chain runs synchronously, and therefore whether its terminal ops return a value or a
+ * `Promise` (#90). `"unset"` is a `Pipeline` built but not yet given a source: `.transform()` refuses
+ * it, so a chain cannot be composed before `.from()` decides which engine it runs on.
+ *
+ * `new Pipeline()` is `"unset"`; `.from([1, 2, 3])` makes it `"sync"`; `.from(asyncSource)`, or a
+ * single `Promise`-returning callback anywhere in the chain, makes it `"async"`.
+ */
+export type PipelineMode = "unset" | "sync" | "async";
+
+/**
+ * What a `Pipeline` class does to a source's own shape (#90). `"shape"` keeps it, so an array is
+ * `"sync"`; `"async"` overrides it, which is every dispatching class - `ConcurrentPipeline`,
+ * `HttpPipeline` and `ClusterPipeline` all exist for I/O-bound work and have no synchronous case.
+ *
+ * It is a THIRD type parameter on `Pipeline` rather than a `this`-conditional because a subclass's
+ * own `.from()` override must be a genuine NARROWING of the base's. Measured with `tsc --strict`
+ * 7.0.2: with the policy carried on `this`, `ConcurrentPipeline<U, "async">` is not assignable to
+ * the base's `Iterable` arm returning `Pipeline<U, "sync">` and the override fails `TS2416`. Carried
+ * as a type parameter the base's own arm evaluates to `"async"` for that class, and it compiles.
+ * `P` defaults, so no caller ever writes it: `Pipeline<number, "sync">` is still a two-argument
+ * spelling.
+ */
+export type SourcePolicy = "shape" | "async";
+
+/**
+ * The Mode a class of policy `P` assigns a source whose own shape says `S` (#90).
+ *
+ * `Assign<"shape", "sync">` → `"sync"`. `Assign<"async", "sync">` → `"async"`.
+ */
+export type AssignMode<P extends SourcePolicy, S extends "sync" | "async"> = P extends "async"
+  ? "async"
+  : S;
+
+/**
  * A pipeline callback: maps `item` to `T` (or `Promise<T>`), with an optional shared `ctx`.
  *
  * ONE signature, not a union of `(item)` / `(item, ctx)` arms — TypeScript will not contextually

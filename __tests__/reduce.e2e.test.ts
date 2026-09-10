@@ -46,7 +46,8 @@ function emitAtSix(
 
 describe("#45 the whole dataset folds and the chain continues (Done-when 1)", () => {
   test("prints [150]", async () => {
-    const data = await new Pipeline([1, 2, 3, 4, 5])
+    const data = await new Pipeline()
+      .from([1, 2, 3, 4, 5])
       .reduce((acc: number, x: number) => acc + x, 0)
       .transform((t) => t.map((n: number) => n * 10))
       .toArray();
@@ -56,7 +57,8 @@ describe("#45 the whole dataset folds and the chain continues (Done-when 1)", ()
 
 describe("#45 emit() mid-fold, no trailing initial value (Done-when 2)", () => {
   test("prints [60,90]", async () => {
-    const data = await new Pipeline([1, 2, 3, 4, 5])
+    const data = await new Pipeline()
+      .from([1, 2, 3, 4, 5])
       .reduce(emitAtSix, 0)
       .transform((t) => t.map((n: number) => n * 10))
       .toArray();
@@ -66,7 +68,8 @@ describe("#45 emit() mid-fold, no trailing initial value (Done-when 2)", () => {
 
 describe("#45 Transformer.reduce still folds ONE chunk and still chains (Done-when 3)", () => {
   test("prints [30,70,50] at .buffer(2), re-spelled from chunkSize since #39 shipped", async () => {
-    const data = await new Pipeline([1, 2, 3, 4, 5])
+    const data = await new Pipeline()
+      .from([1, 2, 3, 4, 5])
       .buffer(2)
       .transform((t) => t.reduce((a: number, x: number) => a + x, 0).map((n: number) => n * 10))
       .toArray();
@@ -78,7 +81,7 @@ describe("#45 a real duplex connection streams emits before the request body clo
   test(
     "emits [6,9], at least one arriving before the request body closes",
     async () => {
-      const worker = new HttpPipeline<number>([], { url: "" }).reduce(emitAtSix, 0);
+      const worker = new HttpPipeline({ url: "" }).from<number>([]).reduce(emitAtSix, 0);
 
       await withServer(worker.fetch, async (url) => {
         let bodyClosed = false;
@@ -178,7 +181,8 @@ describe("#45 toNodeHandler streams both directions (Done-when 5)", () => {
 
 describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () => {
   test("Pipeline", async () => {
-    const data = await new Pipeline([1, 2, 3, 4, 5])
+    const data = await new Pipeline()
+      .from([1, 2, 3, 4, 5])
       .reduce((acc: number, x: number) => acc + x, 0)
       .transform((t) => t.map((n: number) => n * 10))
       .toArray();
@@ -192,7 +196,8 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
   // dealing means every OTHER partition sees no chunks and emits nothing, so the merged output is
   // naturally the same single `[150]` with no extra fold step needed.
   test("ConcurrentPipeline", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5])
+    const data = await new ConcurrentPipeline()
+      .from([1, 2, 3, 4, 5])
       .reduce((acc: number, x: number) => acc + x, 0)
       .transform((t) => t.map((n: number) => n * 10))
       .toArray();
@@ -210,7 +215,8 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
       // The worker must register the IDENTICAL stage sequence the orchestrator below dispatches
       // against, so the worker's own `.transform()` lands at the SAME index the orchestrator's
       // does (architecture.md: "index N means the same transform on both sides").
-      const worker = new HttpPipeline<number>([], { url: "" })
+      const worker = new HttpPipeline({ url: "" })
+        .from<number>([])
         .reduce((acc: number, x: number) => acc + x, 0)
         .transform((t) => t.map((n: number) => n * 10));
       const trackingHandler = async (request: Request): Promise<Response> => {
@@ -218,7 +224,8 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
         return worker.fetch(request);
       };
       await withServer(trackingHandler, async (url) => {
-        const data = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url })
+        const data = await new HttpPipeline({ url })
+          .from<number>([1, 2, 3, 4, 5])
           .reduce((acc: number, x: number) => acc + x, 0)
           .transform((t) => t.map((n: number) => n * 10))
           .toArray();
@@ -245,7 +252,8 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
 
 describe("#62 a dispatched reduce partitions - each partition's result flows through, no debt", () => {
   test("buffer(2), maxConcurrency 2: N values summing to 15, no throw", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+    const data = await new ConcurrentPipeline({ maxConcurrency: 2 })
+      .from([1, 2, 3, 4, 5])
       .buffer(2)
       .reduce((acc: number, x: number) => acc + x, 0)
       .toArray();
@@ -258,7 +266,8 @@ describe("#62 a dispatched reduce partitions - each partition's result flows thr
   // by the SAME fn counts the partials, giving 2, not 5) - this is exactly why there's no automatic
   // merge at all. Left as N raw values, the caller decides what to do with them.
   test("the count case: N partial counts summing to 5, no throw", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+    const data = await new ConcurrentPipeline({ maxConcurrency: 2 })
+      .from([1, 2, 3, 4, 5])
       .buffer(2)
       .reduce((acc: number, _x: number) => acc + 1, 0)
       .toArray();
@@ -266,7 +275,8 @@ describe("#62 a dispatched reduce partitions - each partition's result flows thr
   });
 
   test("the base Pipeline is untouched - never partitions, prints [15]", async () => {
-    const data = await new Pipeline([1, 2, 3, 4, 5])
+    const data = await new Pipeline()
+      .from([1, 2, 3, 4, 5])
       .buffer(2)
       .reduce((acc: number, x: number) => acc + x, 0)
       .toArray();
@@ -274,7 +284,8 @@ describe("#62 a dispatched reduce partitions - each partition's result flows thr
   });
 
   test("maxConcurrency 1 yields exactly one partition, prints [15] directly", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 1 })
+    const data = await new ConcurrentPipeline({ maxConcurrency: 1 })
+      .from([1, 2, 3, 4, 5])
       .buffer(2)
       .reduce((acc: number, x: number) => acc + x, 0)
       .toArray();
@@ -282,7 +293,8 @@ describe("#62 a dispatched reduce partitions - each partition's result flows thr
   });
 
   test("no .buffer() is one chunk, one partition - prints [15] directly, same as the base Pipeline", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+    const data = await new ConcurrentPipeline({ maxConcurrency: 2 })
+      .from([1, 2, 3, 4, 5])
       .reduce((acc: number, x: number) => acc + x, 0)
       .toArray();
     expect(data).toEqual([15]);
@@ -291,7 +303,8 @@ describe("#62 a dispatched reduce partitions - each partition's result flows thr
   // The one thing a caller who wants ONE final value writes by hand - an ordinary second reduce,
   // the same pattern as folding down any other multi-value reduce output. Nothing named "combine".
   test("a caller who wants one value writes an ordinary second reduce via .local()", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+    const data = await new ConcurrentPipeline({ maxConcurrency: 2 })
+      .from([1, 2, 3, 4, 5])
       .buffer(2)
       .reduce((acc: number, x: number) => acc + x, 0)
       .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
@@ -303,7 +316,8 @@ describe("#62 a dispatched reduce partitions - each partition's result flows thr
 describe("#62 an input chunk's emits stay together as one output chunk", () => {
   test("each output chunk holds exactly one input chunk's emits", async () => {
     const observedChunks: number[][] = [];
-    const partitioned = new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+    const partitioned = new ConcurrentPipeline({ maxConcurrency: 2 })
+      .from([1, 2, 3, 4, 5])
       .buffer(2)
       .reduce((_acc: number, x: number, _ctx: IContextManager, emit: (v: number) => void) => {
         emit(x * 10);
@@ -323,7 +337,8 @@ describe("#62 an input chunk's emits stay together as one output chunk", () => {
   });
 
   test(".toArray() itself returns the same raw partials directly, no throw", async () => {
-    const data = await new ConcurrentPipeline([1, 2, 3, 4, 5], { maxConcurrency: 2 })
+    const data = await new ConcurrentPipeline({ maxConcurrency: 2 })
+      .from([1, 2, 3, 4, 5])
       .buffer(2)
       .reduce((_acc: number, x: number, _ctx: IContextManager, emit: (v: number) => void) => {
         emit(x * 10);
@@ -338,12 +353,12 @@ describe("#62 the same chains behave identically over HttpPipeline and ClusterPi
   test(
     "HttpPipeline - sum and count both flow through as N values, no throw",
     async () => {
-      const sumWorker = new HttpPipeline<number>([], { url: "" }).reduce(
-        (acc: number, x: number) => acc + x,
-        0,
-      );
+      const sumWorker = new HttpPipeline({ url: "" })
+        .from<number>([])
+        .reduce((acc: number, x: number) => acc + x, 0);
       await withServer(sumWorker.fetch, async (url) => {
-        const sum = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url, maxConcurrency: 2 })
+        const sum = await new HttpPipeline({ url, maxConcurrency: 2 })
+          .from<number>([1, 2, 3, 4, 5])
           .buffer(2)
           .reduce((acc: number, x: number) => acc + x, 0)
           .toArray();
@@ -351,7 +366,8 @@ describe("#62 the same chains behave identically over HttpPipeline and ClusterPi
 
         // Same chain, merged by hand via .local() - the mechanism a caller reaches for, not just a
         // JS-side sum of the raw partials above.
-        const merged = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url, maxConcurrency: 2 })
+        const merged = await new HttpPipeline({ url, maxConcurrency: 2 })
+          .from<number>([1, 2, 3, 4, 5])
           .buffer(2)
           .reduce((acc: number, x: number) => acc + x, 0)
           .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
@@ -359,21 +375,22 @@ describe("#62 the same chains behave identically over HttpPipeline and ClusterPi
         expect(merged).toEqual([15]);
       });
 
-      const countWorker = new HttpPipeline<number>([], { url: "" }).reduce(
-        (acc: number, _x: number) => acc + 1,
-        0,
-      );
+      const countWorker = new HttpPipeline({ url: "" })
+        .from<number>([])
+        .reduce((acc: number, _x: number) => acc + 1, 0);
       await withServer(countWorker.fetch, async (url) => {
-        const count = await new HttpPipeline<number>([1, 2, 3, 4, 5], { url, maxConcurrency: 2 })
+        const count = await new HttpPipeline({ url, maxConcurrency: 2 })
+          .from<number>([1, 2, 3, 4, 5])
           .buffer(2)
           .reduce((acc: number, _x: number) => acc + 1, 0)
           .toArray();
         expect(count.reduce((a, b) => a + b, 0)).toBe(5);
 
-        const countMerged = await new HttpPipeline<number>([1, 2, 3, 4, 5], {
+        const countMerged = await new HttpPipeline({
           url,
           maxConcurrency: 2,
         })
+          .from<number>([1, 2, 3, 4, 5])
           .buffer(2)
           .reduce((acc: number, _x: number) => acc + 1, 0)
           .local((p) => p.reduce((acc: number, v: number) => acc + v, 0))
