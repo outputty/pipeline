@@ -11,7 +11,7 @@
  * the data arrives, never after.
  */
 
-import type { PipelineMode } from "./types";
+import type { Drainable, PipelineMode } from "./types";
 import type { Pipeline, PipelineSource } from "./pipeline";
 import type { MaybeAsyncChunks } from "./utils/chunk";
 import { isThenable } from "./utils/helpers";
@@ -48,17 +48,28 @@ export class PipelineResult<T, M extends PipelineMode> {
   /** Binds the input to the chain and returns the views a terminal drains through. Runs ONCE per
    * terminal call - which is what makes every terminal re-drain, and equally what stops one from
    * re-draining twice: each terminal destructures both halves here and threads `items` into its own
-   * async arm. Calling it again there ran a user's `.local(build)` callback twice per call. */
-  private drainable(): {
-    syncChunks: MaybeAsyncChunks<T> | null;
-    items: () => AsyncIterable<T>;
-    chunks: () => AsyncIterable<T[]>;
-  } {
-    return this._pipeline.drainable(this._input) as {
-      syncChunks: MaybeAsyncChunks<T> | null;
-      items: () => AsyncIterable<T>;
-      chunks: () => AsyncIterable<T[]>;
-    };
+   * async arm. Calling it again there ran a user's `.local(build)` callback twice per call.
+   *
+   * Typed `Drainable<T>` (#133) - the SAME shape `Pipeline.drainable()` itself returns, so this
+   * wrapper needs only the cast from `Drainable<unknown>` (this result's own `_pipeline` is bound
+   * to `T = unknown`) to `Drainable<T>`, never a second, independent spelling of the four fields.
+   * `context` goes unread here - only `branch.ts`'s own `runBranch` needs it. */
+  private drainable(): Drainable<T> {
+    return this._pipeline.drainable(this._input) as Drainable<T>;
+  }
+
+  /** The one sync/async dispatch every terminal that branches on the drain's OWN engine shares
+   * (#133: `forEach`/`[Symbol.iterator]` below each used to spell this `if (syncChunks !== null)`
+   * check themselves, one falling through to an async arm and the other throwing - two different
+   * shapes for the identical decision). `collect()` (above) does not use this: it hands
+   * `syncChunks` straight to `collectItems`, which makes the same decision internally as the ONE
+   * shared engine-decision point every collecting terminal already goes through. */
+  private dispatchSync<S, A>(
+    syncChunks: MaybeAsyncChunks<T> | null,
+    onSync: (chunks: MaybeAsyncChunks<T>) => S,
+    onAsync: () => A,
+  ): S | A {
+    return syncChunks !== null ? onSync(syncChunks) : onAsync();
   }
 
   /**
@@ -141,12 +152,13 @@ export class PipelineResult<T, M extends PipelineMode> {
   forEach(fn: (item: T) => void): M extends "sync" ? void : Promise<void>;
   forEach(fn: (item: T) => void | Promise<void>): void | Promise<void> {
     const { syncChunks, items } = this.drainable();
-    if (syncChunks !== null) {
-      // Each callback's own return is settled before the next item, so a `forEach` that turns out
-      // to be async still runs strictly in order and still reports its own failures.
-      return drainSyncSettled(syncChunks, fn);
-    }
-    return this.forEachAsync(fn, items);
+    // Each callback's own return is settled before the next item, so a `forEach` that turns out to
+    // be async still runs strictly in order and still reports its own failures.
+    return this.dispatchSync(
+      syncChunks,
+      (chunks) => drainSyncSettled(chunks, fn),
+      () => this.forEachAsync(fn, items),
+    );
   }
 
   /** `forEach`'s async arm, which awaits each callback in turn. */
@@ -168,12 +180,15 @@ export class PipelineResult<T, M extends PipelineMode> {
    */
   [Symbol.iterator](): M extends "sync" ? Iterator<T> : never {
     const { syncChunks } = this.drainable();
-    if (syncChunks === null) {
-      throw new TypeError(
-        "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
-      );
-    }
-    return syncItems(syncChunks) as unknown as M extends "sync" ? Iterator<T> : never;
+    return this.dispatchSync(
+      syncChunks,
+      (chunks) => syncItems(chunks),
+      () => {
+        throw new TypeError(
+          "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
+        );
+      },
+    ) as unknown as M extends "sync" ? Iterator<T> : never;
   }
 
   /**
