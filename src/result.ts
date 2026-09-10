@@ -16,6 +16,10 @@ import type { Pipeline, PipelineSource } from "./pipeline";
 import type { MaybeAsyncChunks } from "./utils/chunk";
 import { isThenable } from "./utils/helpers";
 import { collectItems, drainSyncSettled } from "./utils/chunk";
+// Straight from `drain.ts`, not the `chunk.ts` barrel (#133 review, same reason `recut.ts` reaches
+// `cut.ts`/`drain.ts` directly): `dispatchSync` is new, with no pre-existing public contract at the
+// barrel path to preserve, so it stays off that barrel's own re-export list.
+import { dispatchSync } from "./utils/drain";
 
 /** The pipeline shape a result drains, with the Mode and policy erased - a result is handed its
  * pipeline by `Pipeline`'s own call signature, which has already fixed both. */
@@ -56,20 +60,6 @@ export class PipelineResult<T, M extends PipelineMode> {
    * `context` goes unread here - only `branch.ts`'s own `runBranch` needs it. */
   private drainable(): Drainable<T> {
     return this._pipeline.drainable(this._input) as Drainable<T>;
-  }
-
-  /** The one sync/async dispatch every terminal that branches on the drain's OWN engine shares
-   * (#133: `forEach`/`[Symbol.iterator]` below each used to spell this `if (syncChunks !== null)`
-   * check themselves, one falling through to an async arm and the other throwing - two different
-   * shapes for the identical decision). `collect()` (above) does not use this: it hands
-   * `syncChunks` straight to `collectItems`, which makes the same decision internally as the ONE
-   * shared engine-decision point every collecting terminal already goes through. */
-  private dispatchSync<S, A>(
-    syncChunks: MaybeAsyncChunks<T> | null,
-    onSync: (chunks: MaybeAsyncChunks<T>) => S,
-    onAsync: () => A,
-  ): S | A {
-    return syncChunks !== null ? onSync(syncChunks) : onAsync();
   }
 
   /**
@@ -154,7 +144,7 @@ export class PipelineResult<T, M extends PipelineMode> {
     const { syncChunks, items } = this.drainable();
     // Each callback's own return is settled before the next item, so a `forEach` that turns out to
     // be async still runs strictly in order and still reports its own failures.
-    return this.dispatchSync(
+    return dispatchSync(
       syncChunks,
       (chunks) => drainSyncSettled(chunks, fn),
       () => this.forEachAsync(fn, items),
@@ -180,7 +170,7 @@ export class PipelineResult<T, M extends PipelineMode> {
    */
   [Symbol.iterator](): M extends "sync" ? Iterator<T> : never {
     const { syncChunks } = this.drainable();
-    return this.dispatchSync(
+    return dispatchSync(
       syncChunks,
       (chunks) => syncItems(chunks),
       () => {

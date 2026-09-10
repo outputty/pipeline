@@ -80,7 +80,7 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
     build?: (pipeline: Pipeline<T, "unset", T>) => Pipeline<U, M2, any>,
   ): BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>> {
     this.claim(name);
-    return this.pushArm<K, U, M2>({ name, predicate, build: build as BranchArm<T>["build"] });
+    return this.pushArm<K, U, M2>(name, predicate, build);
   }
 
   /**
@@ -105,12 +105,7 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
     if (existing !== undefined) {
       throw new Error(`.otherwise() is already declared as "${existing.name}"`);
     }
-    return this.pushArm<K, U, M2>({
-      name,
-      predicate: () => true,
-      build: build as BranchArm<T>["build"],
-      isCatchAll: true,
-    });
+    return this.pushArm<K, U, M2>(name, () => true, build, true);
   }
 
   /**
@@ -145,15 +140,21 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
     return this._broadcast;
   }
 
-  /** Pushes `arm` and recasts `this` to the builder's own next generic instantiation - the "push,
-   * recast" pair `.when()`/`.otherwise()` each repeated (#133), called after each has already
-   * `claim()`ed the arm's own name (and, for `.otherwise()`, checked for an existing catch-all) -
-   * two checks specific enough to each caller that folding them in here would either run the
-   * catch-all check for `.when()` too or skip it for `.otherwise()`. */
+  /** Builds the arm, pushes it, and recasts `this` to the builder's own next generic instantiation -
+   * the "cast `build`, push, recast" triplet `.when()`/`.otherwise()` each repeated (#133 review:
+   * an earlier cut still left each caller casting `build` to `BranchArm<T>["build"]` itself; typing
+   * `build` here at the SAME signature both callers already share moves that one cast inside,
+   * rather than repeating it at each call site). Called after each caller has already `claim()`ed
+   * the arm's own name (and, for `.otherwise()`, checked for an existing catch-all) - two checks
+   * specific enough to each caller that folding them in here would either run the catch-all check
+   * for `.when()` too or skip it for `.otherwise()`. */
   private pushArm<K extends string, U, M2 extends PipelineMode>(
-    arm: BranchArm<T>,
+    name: string,
+    predicate: (item: T) => boolean,
+    build: ((pipeline: Pipeline<T, "unset", T>) => Pipeline<U, M2, any>) | undefined,
+    isCatchAll?: boolean,
   ): BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>> {
-    this._arms.push(arm);
+    this._arms.push({ name, predicate, build: build as BranchArm<T>["build"], isCatchAll });
     return this as unknown as BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>>;
   }
 
@@ -268,7 +269,7 @@ interface ArmDispatch<T> {
 export function runBranch<T, In>(
   config: { owner: BranchOwner<T, In>; broadcast: boolean } & ArmDispatch<T>,
 ): (input?: PipelineSource<In>) => BranchResults | Promise<BranchResults> {
-  const { owner, arms, broadcast, branchIndex, makeArm } = config;
+  const { owner, arms, broadcast } = config;
 
   return (input?: PipelineSource<In>) => {
     if (input === undefined) {
@@ -283,8 +284,11 @@ export function runBranch<T, In>(
     const items = collectItems(syncChunks, itemsOf) as T[] | Promise<T[]>;
 
     // `chain` defers only at a real thenable, so a synchronous parent stays synchronous here.
+    // `config` itself already satisfies `ArmDispatch<T>` (#133 review: rebuilding
+    // `{ arms, branchIndex, makeArm }` here duplicated the object `ArmDispatch<T>` exists to let a
+    // caller forward directly).
     return chain(items, (settled: T[]) =>
-      joinArms(demux(settled, arms, broadcast), { arms, branchIndex, makeArm }, context),
+      joinArms(demux(settled, arms, broadcast), config, context),
     ) as BranchResults | Promise<BranchResults>;
   };
 }
