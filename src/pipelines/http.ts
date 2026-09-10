@@ -7,7 +7,7 @@
  *
  * Wire format, one route per stage index:
  * ```text
- * POST <mount>/stage/0   { "chunk": [1, 2], "context": { "multiplier": 10 } }
+ * POST <mount>/transform/0   { "chunk": [1, 2], "context": { "multiplier": 10 } }
  *                     -> { "chunk": [2, 4] }
  * ```
  */
@@ -58,7 +58,7 @@ interface StageResponseBody<U> {
  * expected field fails at the parse"). A discriminated result, not a throw - `.fetch()` (above)
  * turns a failure into a 400 response; a raw JSON parse exception left uncaught here previously
  * became an unhandled rejection inside `toNodeHandler`'s bridge, hanging the calling client
- * (review, verified live: a bodyless POST to `/stage/0` never got a response).
+ * (review, verified live: a bodyless POST to `/transform/0` never got a response).
  */
 async function parseStageRequest(
   request: Request,
@@ -113,7 +113,7 @@ async function runReduceStage(
 }
 
 /** The wire's own FIRST frame, `{"context":{…}}`, sent exactly once - applies its values onto `ctx`
- * via `.set()`, same as a `/stage/<n>` request's own context merge. */
+ * via `.set()`, same as a `/transform/<n>` request's own context merge. */
 function applyContextFrame(first: IteratorResult<string>, ctx: IContextManager): void {
   // Fails loud (this repo's own rule: "External data missing an expected field fails at the
   // parse") rather than silently dropping the frame - review found the OLD version no-opping
@@ -305,7 +305,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
 
   /**
    * Serves one stage's chunk of work over HTTP. Prefix-agnostic (`node-http-runtime` skill): reads
-   * only the trailing `/stage/<n>` segment, so a framework `.mount()` that rewrites the path ahead
+   * only the trailing `/transform/<n>` segment, so a framework `.mount()` that rewrites the path ahead
    * of it (Hono's own default) never breaks routing.
    *
    * An unknown stage index 404s naming the range this deployment actually serves. A stage that
@@ -315,7 +315,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * handler until `ConcurrentPipeline.apply()`'s wrapped `work` catches it there (#78), since the
    * HTTP round trip happens entirely outside any `Transformer` chain.
    *
-   * `fetch(new Request("http://x/stage/0", { method: "POST", body: JSON.stringify({ chunk: [1,2],
+   * `fetch(new Request("http://x/transform/0", { method: "POST", body: JSON.stringify({ chunk: [1,2],
    * context: {} }) }))` → `{ chunk: [2,4] }` (a `.map((x) => x*2)` stage 0).
    */
   readonly fetch = async (request: Request): Promise<Response> => {
@@ -447,7 +447,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   }
 
   /**
-   * POSTs the chunk to `${url}${routePath("stage", stageIndex)}` instead of running it in-process -
+   * POSTs the chunk to `${url}${routePath("transform", stageIndex)}` instead of running it in-process -
    * `ConcurrentPipeline`'s own `apply()` calls this for every stage; the fan-out and the
    * knob-violation check are otherwise unchanged, inherited as-is.
    *

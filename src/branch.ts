@@ -20,7 +20,7 @@ import type { AnyPipeline, Pipeline, PipelineSource } from "./pipeline";
 import type { IContextManager, JoinMode, PipelineMode } from "./types";
 import type { MaybeAsyncChunks } from "./utils/chunk";
 import { collectItems } from "./utils/chunk";
-import { chain, settleMaybe } from "./utils/helpers";
+import { chain, mapSettle } from "./utils/helpers";
 
 /** An arm's own pipeline, before its builder composes anything onto it. */
 export type ArmPipeline<T> = Pipeline<T, "unset", T>;
@@ -285,7 +285,13 @@ function joinArms<T>(
   makeArm: (context: IContextManager, routeTrail: string) => ArmPipeline<T>,
   context: IContextManager,
 ): BranchResults | Promise<BranchResults> {
-  const outputs = arms.map((arm) => {
+  // `mapSettle`, never a bare `arms.map(...)`: an arm's own callbacks can throw SYNCHRONOUSLY after
+  // an earlier arm already returned a pending `toArray()`. `Array.prototype.map` abandons the array
+  // there, so that promise never reaches `settleMaybe` and never gets a rejection handler - measured
+  // before this, a branch whose `evens` arm failed asynchronously and whose `odds` arm threw
+  // synchronously reported `odds arm failed` to the caller and then killed the process on `evens`.
+  // `mapSettle` disarms what was already created before rethrowing, and settles the rest.
+  const outputs = mapSettle(arms as BranchArm<T>[], (arm) => {
     const armItems = grouped.get(arm.name)!;
     if (arm.build === undefined) return armItems as unknown[];
     const built = arm.build(makeArm(context, `/branch/${branchIndex}/${arm.name}`)) as unknown as (
@@ -294,7 +300,7 @@ function joinArms<T>(
     return built(armItems).toArray();
   });
 
-  return chain(settleMaybe(outputs), (armResults: unknown[][]) =>
+  return chain(outputs, (armResults: unknown[][]) =>
     Object.fromEntries(arms.map((arm, index) => [arm.name, armResults[index]])),
   ) as BranchResults | Promise<BranchResults>;
 }

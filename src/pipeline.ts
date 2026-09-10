@@ -654,7 +654,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   }
 
   /**
-   * This pipeline's stage registries - the two maps a SERVING side reads to answer `/stage/<n>` and
+   * This pipeline's stage registries - the two maps a SERVING side reads to answer `/transform/<n>` and
    * `/reduce/<n>` (#90).
    *
    * A deferred pipeline has recorded its stages but not run them, so both registries are empty
@@ -1032,6 +1032,13 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // written BEFORE any stage must also cut the source itself, which is what it now does by
     // replaying against a pipeline whose source is already cut at that size.
     if (this.isDeferred()) {
+      // Validated HERE as well as in the chunkers, because a deferred `.buffer()` only records the
+      // call: `new Pipeline<number>().buffer(0)` used to return a pipeline and throw
+      // `chunkSize must be at least 1` later, at the drain, in a message that never names
+      // `.buffer()`. Every chain is source-less by default now, so that is the ordinary path.
+      if (size < 1) {
+        throw new Error("buffer size must be at least 1");
+      }
       const cutsTheSource = this._pendingStages.length === 0;
       return this.defer<T>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {}) as this;
     }
@@ -1176,7 +1183,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // Both option objects SPREAD their source pipeline's own carried knobs (#90) - see `reduce()`
     // for why: a hand-built list here dropped `bound`, so the region deferred instead of running
     // and `.local((p) => p.reduce(sum, 0))` over `[1..6]` returned the six items rather than `[21]`.
-    const region = new Pipeline<T, "sync" | "async", SourcePolicy>({
+    const region = new Pipeline<T, "sync" | "async">({
       ...this.carriedOptions(),
       chunks: this._chunks,
       pendingStages: [],

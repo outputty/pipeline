@@ -70,6 +70,20 @@ describe("#39 no .buffer() between two stages means no re-chunk (Done-when 2)", 
   });
 });
 
+describe("#90 review - .buffer() refuses an invalid size at the call, not at the drain", () => {
+  it("throws from .buffer(0) on a source-less chain", () => {
+    // A deferred `.buffer()` only RECORDS the call, so validation used to wait for the chunker an
+    // input eventually reached: `new Pipeline<number>().buffer(0)` returned a pipeline, and the
+    // drain then threw `chunkSize must be at least 1` - a message that never names `.buffer()`.
+    // Every chain is source-less by default now, so that is the ordinary path.
+    expect(() => new Pipeline<number>().buffer(0)).toThrow("buffer size must be at least 1");
+    expect(() => new Pipeline<number>().transform((t) => t.map((x) => x)).buffer(-5)).toThrow(
+      "buffer size must be at least 1",
+    );
+    expect(() => new Pipeline<number>().buffer(1)).not.toThrow();
+  });
+});
+
 describe("#39 two .buffer() calls back to back collapse to the last one (Done-when 3)", () => {
   it("matches .buffer(4) alone over [1..9]", async () => {
     const chained: number[][] = [];
