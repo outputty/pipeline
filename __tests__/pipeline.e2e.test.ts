@@ -293,16 +293,19 @@ describe("Pipeline", () => {
     it("routes items to different branches", async () => {
       const pipeline = new Pipeline<number>();
 
-      const results = await pipeline.branch({
-        even: {
-          predicate: (x: number) => x % 2 === 0,
-          transformer: new Transformer<number, number>().map((x: number) => x * 10),
-        },
-        odd: {
-          predicate: (x: number) => x % 2 !== 0,
-          transformer: new Transformer<number, number>().map((x: number) => x * 100),
-        },
-      })([1, 2, 3, 4, 5]);
+      const results = await pipeline.branch((b) =>
+        b
+          .when(
+            "even",
+            (x) => x % 2 === 0,
+            (q) => q.transform((t) => t.map((x) => x * 10)),
+          )
+          .when(
+            "odd",
+            (x) => x % 2 !== 0,
+            (q) => q.transform((t) => t.map((x) => x * 100)),
+          ),
+      )([1, 2, 3, 4, 5]);
 
       expect(results.even).toEqual([20, 40]);
       expect(results.odd).toEqual([100, 300, 500]);
@@ -311,16 +314,15 @@ describe("Pipeline", () => {
     it("uses first matching branch only", async () => {
       const pipeline = new Pipeline<number>();
 
-      const results = await pipeline.branch({
-        positive: {
-          predicate: (x) => x > 0,
-          transformer: new Transformer<number, number>().map(() => "positive"),
-        },
-        all: {
-          predicate: () => true,
-          transformer: new Transformer<number, number>().map(() => "all"),
-        },
-      })([1, 2, 3]);
+      const results = await pipeline.branch((b) =>
+        b
+          .when(
+            "positive",
+            (x) => x > 0,
+            (q) => q.transform((t) => t.map(() => "positive")),
+          )
+          .otherwise("all", (q) => q.transform((t) => t.map(() => "all"))),
+      )([1, 2, 3]);
 
       // All items match 'positive' first
       expect(results.positive).toEqual(["positive", "positive", "positive"]);
@@ -330,12 +332,7 @@ describe("Pipeline", () => {
     it("handles empty input", async () => {
       const pipeline = new Pipeline<number>();
 
-      const results = await pipeline.branch({
-        even: {
-          predicate: (x) => x % 2 === 0,
-          transformer: new Transformer<number, number>(),
-        },
-      })([]);
+      const results = await pipeline.branch((b) => b.when("even", (x) => x % 2 === 0))([]);
 
       expect(results.even).toEqual([]);
     });
@@ -343,12 +340,7 @@ describe("Pipeline", () => {
     it("handles no matching branches", async () => {
       const pipeline = new Pipeline<number>();
 
-      const results = await pipeline.branch({
-        negative: {
-          predicate: (x) => x < 0,
-          transformer: new Transformer<number, number>(),
-        },
-      })([1, 2, 3]);
+      const results = await pipeline.branch((b) => b.when("negative", (x) => x < 0))([1, 2, 3]);
 
       expect(results.negative).toEqual([]);
     });
@@ -356,12 +348,13 @@ describe("Pipeline", () => {
     it("supports async predicates", async () => {
       const pipeline = new Pipeline<number>();
 
-      const results = await pipeline.branch({
-        async: {
-          predicate: async (x) => x > 1,
-          transformer: new Transformer<number, number>().map((x: number) => x * 2),
-        },
-      })([1, 2, 3]);
+      const results = await pipeline.branch((b) =>
+        b.when(
+          "async",
+          (x) => x > 1,
+          (q) => q.transform((t) => t.map((x) => x * 2)),
+        ),
+      )([1, 2, 3]);
 
       expect(results.async).toEqual([4, 6]);
     });
@@ -370,12 +363,7 @@ describe("Pipeline", () => {
       const context = new SimpleContextManager({ key: "value" });
       const pipeline = new Pipeline<number>({ context });
 
-      await pipeline.branch({
-        all: {
-          predicate: () => true,
-          transformer: new Transformer<number, number>(),
-        },
-      })([1, 2]);
+      await pipeline.branch((b) => b.otherwise("all"))([1, 2]);
       const ctx = pipeline.contextManager.toDict();
 
       expect(ctx).toEqual({ key: "value" });
@@ -384,18 +372,19 @@ describe("Pipeline", () => {
     it("supports broadcast mode (firstMatch: false)", async () => {
       const pipeline = new Pipeline<number>();
 
-      const results = await pipeline.branch(
-        {
-          even: {
-            predicate: (x: number) => x % 2 === 0,
-            transformer: new Transformer<number, number>().map((x: number) => x * 10),
-          },
-          smallerThan4: {
-            predicate: (x: number) => x < 4,
-            transformer: new Transformer<number, number>().map((x: number) => x * 100),
-          },
-        },
-        { firstMatch: false }, // Broadcast mode
+      const results = await pipeline.branch((b) =>
+        b
+          .when(
+            "even",
+            (x) => x % 2 === 0,
+            (q) => q.transform((t) => t.map((x) => x * 10)),
+          )
+          .when(
+            "smallerThan4",
+            (x) => x < 4,
+            (q) => q.transform((t) => t.map((x) => x * 100)),
+          )
+          .broadcast(),
       )([1, 2, 3, 4, 5]);
 
       // In broadcast mode, items go to ALL matching branches
@@ -411,18 +400,18 @@ describe("Pipeline", () => {
     it("router mode (firstMatch: true) routes to first match only", async () => {
       const pipeline = new Pipeline<number>();
 
-      const results = await pipeline.branch(
-        {
-          even: {
-            predicate: (x: number) => x % 2 === 0,
-            transformer: new Transformer<number, number>().map((x: number) => x * 10),
-          },
-          smallerThan4: {
-            predicate: (x: number) => x < 4,
-            transformer: new Transformer<number, number>().map((x: number) => x * 100),
-          },
-        },
-        { firstMatch: true }, // Router mode (default)
+      const results = await pipeline.branch((b) =>
+        b
+          .when(
+            "even",
+            (x) => x % 2 === 0,
+            (q) => q.transform((t) => t.map((x) => x * 10)),
+          )
+          .when(
+            "smallerThan4",
+            (x) => x < 4,
+            (q) => q.transform((t) => t.map((x) => x * 100)),
+          ),
       )([1, 2, 3, 4, 5]);
 
       // In router mode, items go to FIRST matching branch only

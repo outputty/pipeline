@@ -243,32 +243,6 @@ export interface IContextManager {
 }
 
 /**
- * Branch definition for Pipeline.branch() routing.
- *
- * Python equivalent:
- * ```python
- * BranchDict = dict[str, tuple[Callable[[T], bool], Transformer[T, U]]]
- * ```
- *
- * Note: Uses generic type parameter as placeholder since Transformer is imported separately.
- * The actual Transformer class is defined in transformer.ts.
- */
-export interface BranchDefinition<T, _U, TTransformer = unknown> {
-  /**
-   * Predicate function to determine if item goes to this branch.
-   */
-  predicate: (item: T) => boolean | Promise<boolean>;
-
-  /**
-   * Transformer to apply to items that match the predicate. Optional (#87, folded into #90): a
-   * routing-only branch - a predicate and nothing else - used to force the caller to hand-build
-   * `new Transformer<T, T>()` per branch purely to satisfy this field. Omitted, matching items pass
-   * through unchanged, which makes `U` the item type `T`.
-   */
-  transformer?: TTransformer;
-}
-
-/**
  * Options for creating a Transformer.
  */
 export interface TransformerOptions<In, Out> {

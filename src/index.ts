@@ -13,8 +13,6 @@ export type {
   InternalTransformer,
   ChunkerFunction,
   IContextManager,
-  BranchDefinition,
-  BranchOptions,
   TransformerOptions,
   RowErrorHandler,
   PipelineErrorHandler,
@@ -30,6 +28,9 @@ export { buildChunkGenerator, normalize, isContextAware } from "./utils";
 
 // Transformer
 export { Transformer } from "./transformer";
+
+// Branching (#90) - the builder `.branch()` configures, and the arms it collects
+export { BranchBuilder, type BranchArm, type ResultsOf } from "./branch";
 
 // Pipeline
 export { Pipeline, type PipelineOptions, type PipelineSource } from "./pipeline";
