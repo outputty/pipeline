@@ -43,7 +43,7 @@ src/
     concurrent.ts          ConcurrentPipeline - the fan-out (fanOutOrdered/fanOutUnordered),
                              stageWork()/reduceWork()
     http.ts                 HttpPipeline - stageWork()/reduceWork() overrides, routePath(verb,
-                             index), .fetch() (/stage/<n> and /reduce/<n>), toNodeHandler
+                             index), .fetch() (/transform/<n> and /reduce/<n>), toNodeHandler
     cluster.ts               ClusterPipeline - worker bootstrap, the shared pipeline registry,
                              bootstrapAndSetUrl() shared by stageWork()/reduceWork()
   context/
@@ -168,9 +168,8 @@ The unit dropped is therefore the chunk; nothing smaller is in scope there.
 this._context)` with no `Transformer` anywhere, so only `Transformer.reduce()`'s fold gets row
 recovery.
 
-Async iteration (`for await` over a `Pipeline`, the `outputty/laygo` `m.from(pipeline)` seam) reads
-the exact same persisted `_chunks` every terminal op reads (#39) - there is no separate replay path
-any more. `.apply()` already ran `Transformer.process()` when it built `_chunks`, lazily, so `.tap()`
+Async iteration (`for await` over a `PipelineResult`) reads the exact same drained stream every
+terminal op reads (#39, #90) - there is no separate replay path any more. `.apply()` already ran `Transformer.process()` when it built `_chunks`, lazily, so `.tap()`
 and `.onError()` fire identically whichever consumption path drains it. The killed "source position"
 mechanism (`_rootSource`/`_sourcePositionViolations`/`inertKnobsOf`, `normalize(rootSource)`) existed
 only to protect against a knob a SEPARATE replay path couldn't honor; once every consumption path
@@ -213,7 +212,7 @@ Each level overrides ONE thing. `ConcurrentPipeline` owns the fan-out window (`f
 alone to POST instead, adds `.fetch()`/`stagePath()`/`toNodeHandler`; `ClusterPipeline` adds the
 worker bootstrap, wraps `stageWork()` to lazily bootstrap on first dispatch, and overrides
 `stagePath()` to route several pipeline definitions through one shared worker server
-(`/pipeline/<i>/stage/<n>`, `<i>` a construction-order index reproduced identically by every worker).
+(`/pipeline/<i>/transform/<n>`, `<i>` a construction-order index reproduced identically by every worker).
 `.local(build)` (#61) is the one way to keep a whole region in-process: it builds a bare `Pipeline`
 over `this._chunks`/`this._context` (never `this.constructor` - the region must never be able to
 dispatch, whatever class called it), runs `build` against that bare pipeline, and carries the built
@@ -278,7 +277,7 @@ any number of inputs.
 new Pipeline<In>(options?)      the chain. Stages are RECORDED, not run.
   .transform / .apply           each records its own call in _pendingStages
   .buffer / .reduce / .local    same - which is what keeps each one's POSITION
-  .branch(defs)                 -> BranchRunner, the definitions bound once
+  .branch(build)                -> a runner, the arms bound once
   (input)                       -> PipelineResult
                                      .toArray / .first / .consume / .forEach
                                      [Symbol.iterator] (sync results only)
@@ -309,6 +308,48 @@ Two knobs that look alike are deliberately apart. `PipelineMode` (`"unset" | "sy
 TYPE fact about what a chain produces; `_bound` is the RUNTIME fact of whether an input is attached.
 `"unset"` answered both until a callable chain - `"unset"` for its whole life, bound only for the
 duration of one call - made that impossible.
+
+## Branching - a stage whose arms run where the chain runs (#90)
+
+`.branch(build)` is a stage, not a terminal. Each arm receives a PIPELINE of the parent's own class,
+which is what decides where its work runs - a `Transformer` has no class, so the shape this replaces
+ran every arm in the orchestrating process however the chain was built.
+
+```text
+routed(orders)
+	parent chain drains          /transform/0                 worker
+	demux                                                     orchestrator
+		predicates, a plain loop   never dispatched
+		one chunk in, one chunk PER ARM out
+	router
+		big  -> its own pipeline   /branch/0/big/transform/0    worker
+		eu   -> its own pipeline   .local() pins it             orchestrator
+	join                                                      orchestrator
+	=> one record, keyed by arm name
+```
+
+Two placements are decisions rather than accidents. **Matching** stays on the orchestrator: a
+predicate decides WHICH arm an item enters, so dispatching it would cost every item two trips - one
+to be classified, one to be worked on - and would stop a predicate closing over anything the caller
+holds. **The join** stays there too, because arms can be remote and it is the only process that sees
+all of them.
+
+The record is arrays, never results the caller drains at will. Two consumers over one shared source
+can only buffer without bound, deadlock, or starve; measured on the shipped `share()`, draining one
+view to completion gives it everything and the other `[]`. Owning the concurrency inside the join is
+what makes that unrepresentable.
+
+Nothing here is new machinery: the demux is `Transformer.reduce()`'s own shape - fold one chunk, keep
+no state between chunks - and the join is `settleMaybe` + `chain`. That reuse is what makes the Mode
+rule reachable rather than aspirational: every arm synchronous creates ZERO promises, and one
+asynchronous arm widens the whole record to a single `Promise` while its synchronous siblings are
+never wrapped.
+
+An arm's stages address themselves under `/branch/<i>/<name>/`, the branch positional so two
+`.branch()` calls may each declare an arm called `rest`, the arm by name. Without the trail an arm's
+stage 0 collided with the parent's on the worker: measured, the parent's map ran twice
+(`300 -> 360 -> 432`) and the arm's own transform never ran. The name must survive a URL path, so the
+builder refuses one that would not.
 
 ## Benchmarks - pending #11
 
@@ -355,7 +396,7 @@ resolves immediately with an EMPTY result - the worker exists only to hold the t
   31 July 2026, Ecma TC55) standardises `Request`/`Response`/`Headers`/`fetch` as runtime capabilities
   and defines no server, handler or routing. `(request: Request) => Response` is a de facto convention.
 - Hono's `mount()` rewrites the path by default (`hono-base.js:241-248`), so a mounted handler receives
-  `/stage/0`, not `/pipeline/stage/0`. A mountable handler must be prefix-agnostic.
+  `/transform/0`, not `/pipeline/transform/0`. A mountable handler must be prefix-agnostic.
 - `listen(0)` inside `node:cluster` yields the SAME port to every worker - probe:
   `PORTS [63262,63262,63262] UNIQUE_COUNT 1 SHARED`. The primary allocates once and shares the socket,
   so no port-picking dependency is needed.
@@ -417,7 +458,7 @@ resolves immediately with an EMPTY result - the worker exists only to hold the t
   ended with `res.end(Buffer.from(await response.arrayBuffer()))`. Measured (pre-#45): a handler
   echoing per item saw nothing until the client closed its body at +457ms, then the client received
   all three replies in ONE frame at +477ms - no data lost, purely a streaming defect, invisible to
-  the one-shot `/stage/<n>` route. `Readable.toWeb(req)` as the request body plus `writeStreamedBody`
+  the one-shot `/transform/<n>` route. `Readable.toWeb(req)` as the request body plus `writeStreamedBody`
   (a `for await` pipe of the response into `res`, stopping once `res.destroyed`, awaiting `'drain'`
   on backpressure) fixes it (#45): first reply back at +163ms, `frames delivered BEFORE the request
   body closed = 2 of 3`. A response-body failure after bytes are already flushed destroys the
@@ -477,7 +518,7 @@ check is needed anywhere in the reduce path (unlike `map`/`filter`'s own `isCont
 still branches on arity to decide whether to pass `ctx` at all).
 
 A reduce stage takes the next index in the SHARED stage-index space `_chunkTransforms` already uses,
-so `/stage/<n>` and `/reduce/<n>` never collide: `pushReduceStage()` (`src/pipeline.ts`, shared by
+so `/transform/<n>` and `/reduce/<n>` never collide: `pushReduceStage()` (`src/pipeline.ts`, shared by
 base `Pipeline.reduce()` and `ConcurrentPipeline.reduce()`) registers the stage in `_reduceStages`
 and writes a placeholder into the SAME `_chunkTransforms` index that throws if ever invoked as a
 plain per-chunk transform - the fail-loud guard, and the only one needed: #39 already deleted the

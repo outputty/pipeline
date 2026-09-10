@@ -350,17 +350,19 @@ function runStageChunk<In, Out>(
 }
 
 /**
- * A lazy, chunked stream of `T`. Nothing runs until a terminal operation (`toArray`, `first`, async
- * iteration, …) pulls: `.apply()`/`.transform()` compose transformers, chunking is handled for
+ * A chain over `T`, holding its input TYPE and no data (#90). Nothing runs until the pipeline is
+ * CALLED and a terminal on the `PipelineResult` (`toArray`, `first`, iteration, …) pulls:
+ * `.apply()`/`.transform()` compose transformers, chunking is handled for
  * you, and a chunk's items flow to the next stage as a group. The whole chain shares one context
  * manager, so a context-aware transformer can read and write state across stages — `.context()`
  * itself still returns a NEW `Pipeline` (copy-on-write, like `.apply()`/`.transform()`/`.buffer()`),
  * carrying the SAME context manager forward, mutated in place (#31) — a caller's own
  * `IContextManager` class is never copied into a fresh `SimpleContextManager` and discarded.
  *
- * `await new Pipeline([1, 2, 3]).transform((t) => t.map((x) => x * 2)).toArray()` →
- * `[2, 4, 6]`. A terminal op's return carries no context snapshot (#744) - read `.contextManager`
- * for that.
+ * `new Pipeline<number>().transform((t) => t.map((x) => x * 2))([1, 2, 3]).toArray()` → `[2, 4, 6]`,
+ * with no `await`: every callback here is synchronous. A terminal's return carries no context
+ * snapshot (#744), and a CALL seeds a fresh manager from the chain's own values - so a run's
+ * `ctx.set()` reaches the caller only through a manager passed as `options.context`.
  */
 /**
  * The call signature every `Pipeline` carries (#90), declared as a merged interface because a class
@@ -1400,34 +1402,24 @@ export class Pipeline<
   }
 
   /**
-   * Route items to different branches based on predicates.
+   * Routes items into named arms, each with its own pipeline of THIS class (#90).
    *
-   * With `firstMatch: true` (default): Items are routed to the first matching branch only.
-   * With `firstMatch: false` (broadcast mode): Items are sent to ALL matching branches.
+   * A stage, not a terminal: matching and joining always run here, on the orchestrator, while an
+   * arm's own stages dispatch wherever this class's do - `/branch/<i>/<name>/transform/<n>` on
+   * `HttpPipeline`/`ClusterPipeline`, and in this process under `.local()`. The demux has no route
+   * of its own, so a predicate may close over a local variable.
    *
-   * Python equivalent:
-   * ```python
-   * def branch(
-   *   self,
-   *   branches: Mapping[str, tuple[Transformer[T, U], Callable[[T], bool]]],
-   *   *,
-   *   first_match: bool = True,
-   * ) -> dict[str, list[U]]:
-   *   if first_match:
-   *     # Router mode - item goes to first matching branch
-   *     ...
-   *   else:
-   *     # Broadcast mode - item goes to ALL matching branches
-   *     ...
-   * ```
+   * `build` configures a `BranchBuilder`: `.when(name, predicate, build?)` per arm, `.otherwise(
+   * name, build?)` for the catch-all, which is routed last whatever order it was written in, and
+   * `.broadcast()` to send an item to EVERY matching arm rather than only the first.
    *
-   * @param branches - Map of branch name to { predicate, transformer }
-   * @param options - Optional settings: firstMatch (default true)
-   * @returns A RUNNER, not the results (#90) - call it to route one input. On a source-less
-   *   pipeline it takes the items; on one already bound through `.from()` it takes none, and each
-   *   form refuses the other's argument rather than ignoring it. ⚠ BREAKING: `await p.branch({…})`
-   *   becomes `await p.branch({…})()`; awaiting the runner alone yields the function.
-   *   Read context via `.contextManager` afterward if needed (#744).
+   * @param build - Receives a fresh `BranchBuilder` and returns it with its arms declared.
+   * @returns A RUNNER, not the results - call it with one input per run. It produces ONE record
+   *   keyed by arm name, each key typed by its own arm, and widens to a single `Promise` the moment
+   *   one arm is asynchronous; every arm synchronous creates no `Promise` at all.
+   *
+   * `new Pipeline<number>().branch((b) => b.when("evens", (x) => x % 2 === 0).otherwise("odds"))([
+   * 1, 2, 3, 4])` → `{ evens: [2, 4], odds: [1, 3] }`.
    */
   branch<B extends BranchBuilder<T, any, any>>(
     build: (builder: BranchBuilder<T>) => B,

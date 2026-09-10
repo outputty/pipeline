@@ -142,7 +142,7 @@ at pipeline level lands where you can see it. The stages either side of it still
 <!-- compiles -->
 
 ```typescript
-import { ConcurrentPipeline } from "@outputty/pipeline";
+import { ConcurrentPipeline, SimpleContextManager } from "@outputty/pipeline";
 
 const shared = new SimpleContextManager();
 const pipeline = new ConcurrentPipeline<number>({ maxConcurrency: 2, context: shared })
@@ -169,8 +169,11 @@ next stage sees any of it.
 <!-- illustrative -->
 
 ```typescript
-new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
+new Pipeline<T>(options?: PipelineOptions)
 ```
+
+A pipeline holds its input TYPE, not its data: `T` is what it will be called with. Calling one
+returns a `PipelineResult`, which is where the terminal operations live.
 
 - **`options.context`** - an already-built `IContextManager`, for THIS process. Optional; survives
   every `.context()`/`.transform()`/`.buffer()` call as the SAME instance.
@@ -179,7 +182,7 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
   instance across the process boundary). Optional; invoked at most once per process, only when
   `context` is absent.
 
-#### Static Methods
+#### Chainable Operations
 
 - **`.context(obj)`** - merge values into the pipeline's OWN context manager, mutating it in place;
   a manager that rejects an unknown key propagates that error instead of being bypassed.
@@ -191,14 +194,31 @@ new Pipeline<T>(data: PipelineSource<T>, options?: PipelineOptions)
 - **`.tap(fn | transformer)`** - observe items without changing them. Always runs in the
   orchestrating process, on every class; the stages either side of it still dispatch. Use
   `Transformer.tap` inside a `.transform()` to observe beside the work instead.
-- **`.toArray()`** - collect all results into an array. Read `.contextManager` afterward for context.
-- **`.first(n)`** - take first n items.
-- **`.consume()`** - process all items without collecting.
-- **`.forEach(fn)`** - execute side-effect for each item.
-- **`.branch(definitions)`** - split into multiple branches.
+- **`.branch(build)`** - route items into named arms, each with its own pipeline. A stage, not a
+  terminal: it returns a runner, and the runner produces one record keyed by arm name.
 - **`.onError(fn)`** - the run handler. `fn` receives the error and the context; returning drops
   the failing chunk and the run continues, throwing stops the run. Position-dependent: only a
   stage applied AFTER this call is covered. See [Error Handling](#error-handling).
+
+#### Calling a pipeline
+
+`pipeline(input)` runs it. `input` is an `Iterable<T>` or an `AsyncIterable<T>`, and the result is a
+`PipelineResult<T>` - never another pipeline, so a result cannot be extended.
+
+### PipelineResult
+
+One call's output. Every operation below re-drains the input, so a spent generator or stream yields
+`[]` on a second read, by decision.
+
+- **`.toArray()`** - collect all results into an array. To read what the run wrote to context, build
+  the pipeline with `{ context: shared }` and read `shared` afterward; a call seeds a fresh manager
+  from the chain's own values, so nothing else sees those writes.
+- **`.first(n)`** - take first n items.
+- **`.consume()`** - process all items without collecting.
+- **`.forEach(fn)`** - execute side-effect for each item.
+- **`.chunks()`** - iterate the chunks rather than the items; empty chunks are dropped.
+- **`[Symbol.iterator]`** - a synchronous result spreads: `[...pipeline(rows)]`.
+- **`[Symbol.asyncIterator]`** - any result iterates with `for await`.
 
 ### Transformer
 
@@ -247,7 +267,7 @@ console.log(JSON.stringify(data)); // [6,8,10]
 
 Extends `ConcurrentPipeline`. Dispatches each chunk of a stage over HTTP to another instance
 running the same code, instead of running it here. A stage is its POSITION in the chain, never a
-function - the client POSTs `{ chunk, context }` to `/stage/<n>`, and the receiving instance's own
+function - the client POSTs `{ chunk, context }` to `/transform/<n>`, and the receiving instance's own
 `_chunkTransforms[n]` (populated by running the exact same `.transform()` calls) is what actually
 runs it. Both instances must run the same build.
 
@@ -283,7 +303,7 @@ await new Promise<void>((resolve) => server.close(() => resolve()));
 - **`options.url`** - required. Where another `HttpPipeline`/`ClusterPipeline` instance's `.fetch`
   is mounted.
 - **`.fetch`** - a `(request: Request) => Promise<Response>` handler serving this pipeline's
-  stages. Prefix-agnostic: it reads only its own trailing `/stage/<n>`/`/reduce/<n>` segment, so
+  stages. Prefix-agnostic: it reads only its own trailing `/transform/<n>`/`/reduce/<n>` segment, so
   mounting it under any path is safe.
 - **`toNodeHandler(handler)`** - bridges a `.fetch` handler to `node:http`'s `(req, res)` callback
   shape; Node exposes `Request`/`Response`/`fetch` but serves no fetch handler natively.
@@ -628,12 +648,13 @@ Split processing into multiple paths:
 <!-- compiles -->
 
 ```typescript
-import { Pipeline, Transformer } from "@outputty/pipeline";
+import { Pipeline } from "@outputty/pipeline";
 
-const data = await new Pipeline<number>()([1, 2, 3, 4, 5]).branch({
-  evens: { predicate: (x: number) => x % 2 === 0, transformer: new Transformer<number, number>() },
-  odds: { predicate: (x: number) => x % 2 !== 0, transformer: new Transformer<number, number>() },
-});
+const split = new Pipeline<number>().branch((b) =>
+  b.when("evens", (x) => x % 2 === 0).otherwise("odds"),
+);
+
+const data = split([1, 2, 3, 4, 5]);
 
 console.log(data.evens); // [2, 4]
 console.log(data.odds); // [1, 3, 5]
