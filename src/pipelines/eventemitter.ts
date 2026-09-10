@@ -218,12 +218,8 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       new Promise<U[]>((resolve, reject) => {
         // Every lifecycle emit, `:dispatched` included, goes through `emitSafely` - a throwing
         // observer on ANY of them surfaces as its own separate uncaught exception, never silently
-        // absorbed as if it were a Worker's own failure and never masking a real one. Guarded by
-        // `listenerCount()` - the payload is only built, and `emit()` only called, when something
-        // is actually registered to observe it.
-        if (emitter.listenerCount(dispatchedEvent) > 0) {
-          emitSafely(emitter, dispatchedEvent, { chunk, ctx });
-        }
+        // absorbed as if it were a Worker's own failure and never masking a real one.
+        emitSafely(emitter, dispatchedEvent, { chunk, ctx });
 
         // ONE settle path for both outcomes - settles the REAL dispatch first, unconditionally,
         // THEN emits the matching lifecycle event, so a throwing `:done`/`:error` listener can
@@ -236,16 +232,12 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           settled = true;
           if (outcome.ok) {
             resolve(outcome.value);
-            if (emitter.listenerCount(doneEvent) > 0) {
-              emitSafely(emitter, doneEvent, { chunk: outcome.value, ctx });
-            }
+            emitSafely(emitter, doneEvent, { chunk: outcome.value, ctx });
           } else {
             reject(
               outcome.error instanceof Error ? outcome.error : new Error(String(outcome.error)),
             );
-            if (emitter.listenerCount(errorEvent) > 0) {
-              emitSafely(emitter, errorEvent, { error: outcome.error, ctx });
-            }
+            emitSafely(emitter, errorEvent, { error: outcome.error, ctx });
           }
         };
         const respond = (value: U[]): void => settle({ ok: true, value });
