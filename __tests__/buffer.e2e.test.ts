@@ -25,14 +25,14 @@ describe("#39 buffer() is the one explicit chunk boundary (Done-when 1)", () => 
     const stage1Input: number[][] = [];
     const stage2Input: number[][] = [];
 
-    const out = await new ConcurrentPipeline({ maxConcurrency: 8 })
-      .from([1, 2, 3, 4, 5, 6, 7, 8])
+    const out = await new ConcurrentPipeline<number>({ maxConcurrency: 8 })
+
       .buffer(2)
       .apply(boundaryProbe(stage1Input))
       .transform((t) => t.map((x: number) => x + 1))
       .buffer(4)
       .apply(boundaryProbe(stage2Input))
-      .transform((t) => t.map((x: number) => x * 2))
+      .transform((t) => t.map((x: number) => x * 2))([1, 2, 3, 4, 5, 6, 7, 8])
       .toArray();
 
     expect(out).toEqual([4, 6, 8, 10, 12, 14, 16, 18]);
@@ -57,12 +57,12 @@ describe("#39 no .buffer() between two stages means no re-chunk (Done-when 2)", 
     const stage1Input: number[][] = [];
     const stage2Input: number[][] = [];
 
-    await new Pipeline()
-      .from([1, 2, 3, 4])
+    await new Pipeline<number>()
+
       .apply(boundaryProbe(stage1Input))
       .transform((t) => t.map((x: number) => x * 2))
       .apply(boundaryProbe(stage2Input))
-      .transform((t) => t.map((x: number) => x + 1))
+      .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4])
       .toArray();
 
     expect(stage1Input).toEqual([[1, 2, 3, 4]]);
@@ -73,16 +73,18 @@ describe("#39 no .buffer() between two stages means no re-chunk (Done-when 2)", 
 describe("#39 two .buffer() calls back to back collapse to the last one (Done-when 3)", () => {
   it("matches .buffer(4) alone over [1..9]", async () => {
     const chained: number[][] = [];
-    for await (const chunk of new Pipeline()
-      .from([1, 2, 3, 4, 5, 6, 7, 8, 9])
+    for await (const chunk of new Pipeline<number>()
       .buffer(2)
       .buffer(3)
-      .buffer(4)) {
+      .buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      .chunks()) {
       chained.push(chunk);
     }
 
     const direct: number[][] = [];
-    for await (const chunk of new Pipeline().from([1, 2, 3, 4, 5, 6, 7, 8, 9]).buffer(4)) {
+    for await (const chunk of new Pipeline<number>()
+      .buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      .chunks()) {
       direct.push(chunk);
     }
 

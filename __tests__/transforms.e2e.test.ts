@@ -1,6 +1,6 @@
 /**
  * transforms.e2e.test.ts — every `Transformer` operation proven through an ENTIRE PIPELINE RUN
- * (`new Pipeline().from(input).apply(transformer).toArray()`), never by poking a strategy/util/context
+ * (`new Pipeline<number>().from(input).apply(transformer).toArray()`), never by poking a strategy/util/context
  * function in isolation. A behavior is only "covered" here if it changes the output (or context) of
  * a full run — the same way a caller would observe it. Chunk-level ops (`reduce`/`loop`) pass
  * `run()` an explicit `bufferSize` so the run actually crosses chunk boundaries (#39: the
@@ -28,12 +28,12 @@ async function run<I, O>(
   context?: SimpleContextManager,
   bufferSize?: number,
 ): Promise<[O[], Record<string, unknown>]> {
-  let pipeline: Pipeline<I, "sync"> = context
-    ? new Pipeline({ context }).from(input)
-    : new Pipeline().from(input);
+  let pipeline: Pipeline<I, "unset", "shape", I> = context
+    ? new Pipeline<I>({ context })
+    : new Pipeline<I>();
   if (bufferSize !== undefined) pipeline = pipeline.buffer(bufferSize);
   const applied = pipeline.apply(transformer);
-  const results = await applied.toArray();
+  const results = await applied(input).toArray();
   return [results, applied.contextManager.toDict()];
 }
 
@@ -131,21 +131,25 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
     }
 
     const viaToArray = await countFor(async (tapped) => {
-      const pipeline = new Pipeline().from([1, 2, 3]).apply(tapped);
-      await pipeline.toArray();
-      return pipeline.contextManager.toDict();
+      const mine = new SimpleContextManager();
+      await new Pipeline<number>({ context: mine }).apply(tapped)([1, 2, 3]).toArray();
+      return mine.toDict();
     });
     const viaAsyncIteration = await countFor(async (tapped) => {
-      const pipeline = new Pipeline().from([1, 2, 3]).apply(tapped);
-      for await (const _chunk of pipeline) {
+      const mine = new SimpleContextManager();
+      const pipeline = new Pipeline<number>({ context: mine }).apply(tapped);
+      for await (const _chunk of pipeline([1, 2, 3]).chunks()) {
         // drain
       }
-      return pipeline.contextManager.toDict();
+      return mine.toDict();
     });
     const viaLocalStage = await countFor(async (tapped) => {
-      const pipeline = new ConcurrentPipeline().from([1, 2, 3]).local((p) => p.apply(tapped));
-      await pipeline.toArray();
-      return pipeline.contextManager.toDict();
+      const mine = new SimpleContextManager();
+      const pipeline = new ConcurrentPipeline<number>({ context: mine }).local((p) =>
+        p.apply(tapped),
+      );
+      await pipeline([1, 2, 3]).toArray();
+      return mine.toDict();
     });
 
     expect(viaToArray).toBe(3);

@@ -26,12 +26,12 @@ interface Tagged {
 
 const primaryPid = process.pid;
 
-const [folded] = await new ClusterPipeline()
-  .from([1, 2, 3, 4, 5])
+const [folded] = await new ClusterPipeline<number>()
+
   .reduce(
     (acc: Tagged, x: number): Tagged => ({ sum: acc.sum + x, pids: [...acc.pids, process.pid] }),
     { sum: 0, pids: [] },
-  )
+  )([1, 2, 3, 4, 5])
   .toArray();
 
 if (folded) {

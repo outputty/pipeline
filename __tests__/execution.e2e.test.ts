@@ -21,10 +21,8 @@ async function run<I, O>(
   bufferSize?: number,
 ): Promise<O[]> {
   const pipeline =
-    bufferSize !== undefined
-      ? new Pipeline().from(input).buffer(bufferSize)
-      : new Pipeline().from(input);
-  return pipeline.apply(transformer).toArray();
+    bufferSize !== undefined ? new Pipeline<I>().buffer(bufferSize) : new Pipeline<I>();
+  return pipeline.apply(transformer)(input).toArray();
 }
 
 describe("execution e2e — chunking through a full run", () => {

@@ -31,7 +31,7 @@ import {
 function makeWorker<U>(
   builder: (t: HttpPipeline<number>) => HttpPipeline<U, "async", any>,
 ): HttpPipeline<U, "async", any> {
-  return builder(new HttpPipeline({ url: "" }).from<number>([]));
+  return builder(new HttpPipeline<number>({ url: "" }));
 }
 
 describe("#17 ClusterPipeline canonical program (Done-when 1, 3)", () => {
@@ -86,9 +86,11 @@ describe("#17 HttpPipeline across two real instances (Done-when 5)", () => {
         t.transform((tr) => tr.map((x: number) => x * 2).filter((x: number) => x > 4)),
       );
       await withServer(worker.fetch, async (url) => {
-        const out = await new HttpPipeline({ url })
-          .from<number>([1, 2, 3, 4, 5])
-          .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+        const out = await new HttpPipeline<number>({ url })
+
+          .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))([
+            1, 2, 3, 4, 5,
+          ])
           .toArray();
         expect(out).toEqual([6, 8, 10]);
       });
@@ -99,19 +101,19 @@ describe("#17 HttpPipeline across two real instances (Done-when 5)", () => {
 
 describe("#61 .local(build) prints the ticket's own canonical program on every class (Done-when 1-3)", () => {
   it("ConcurrentPipeline.buffer(2).local((p) => p.reduce(...)).toArray() prints [15]", async () => {
-    const out = await new ConcurrentPipeline({ maxConcurrency: 2 })
-      .from([1, 2, 3, 4, 5])
+    const out = await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
+
       .buffer(2)
-      .local((p) => p.reduce((a: number, x: number) => a + x, 0))
+      .local((p) => p.reduce((a: number, x: number) => a + x, 0))([1, 2, 3, 4, 5])
       .toArray();
     expect(out).toEqual([15]);
   });
 
   it("the same chain over a base Pipeline prints [15]", async () => {
-    const out = await new Pipeline()
-      .from([1, 2, 3, 4, 5])
+    const out = await new Pipeline<number>()
+
       .buffer(2)
-      .local((p) => p.reduce((a: number, x: number) => a + x, 0))
+      .local((p) => p.reduce((a: number, x: number) => a + x, 0))([1, 2, 3, 4, 5])
       .toArray();
     expect(out).toEqual([15]);
   });
@@ -124,10 +126,10 @@ describe("#61 .local(build) prints the ticket's own canonical program on every c
       return worker.fetch(request);
     };
     await withServer(countingHandler, async (url) => {
-      const out = await new HttpPipeline({ url, maxConcurrency: 2 })
-        .from<number>([1, 2, 3, 4, 5])
+      const out = await new HttpPipeline<number>({ url, maxConcurrency: 2 })
+
         .buffer(2)
-        .local((p) => p.reduce((a: number, x: number) => a + x, 0))
+        .local((p) => p.reduce((a: number, x: number) => a + x, 0))([1, 2, 3, 4, 5])
         .toArray();
       expect(out).toEqual([15]);
       expect(requests).toBe(0); // a region with no dispatched stage never crosses the wire
@@ -147,13 +149,13 @@ describe("#61 .local(build) prints the ticket's own canonical program on every c
   );
 
   it("a multi-stage region runs entirely in the orchestrating process and prints [30]", async () => {
-    const out = await new ConcurrentPipeline({ maxConcurrency: 2 })
-      .from([1, 2, 3, 4, 5])
+    const out = await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
+
       .local((p) =>
         p
           .transform((t) => t.map((x: number) => x * 2))
           .reduce((acc: number, x: number) => acc + x, 0),
-      )
+      )([1, 2, 3, 4, 5])
       .toArray();
     expect(out).toEqual([30]);
   });
@@ -170,10 +172,10 @@ describe("#61 .local(build) keeps a whole region in-process, replacing { local: 
         return worker.fetch(request);
       };
       await withServer(countingHandler, async (url) => {
-        const out = await new HttpPipeline({ url })
-          .from<number>([1, 2, 3])
+        const out = await new HttpPipeline<number>({ url })
+
           .transform((t) => t.map((x: number) => x * 2))
-          .local((p) => p.transform((t) => t.filter((x: number) => x > 2)))
+          .local((p) => p.transform((t) => t.filter((x: number) => x > 2)))([1, 2, 3])
           .toArray();
         expect(out).toEqual([4, 6]);
         expect(requests).toBe(1); // only the first (dispatched) stage crossed the wire
@@ -187,10 +189,10 @@ describe("#61 .local(build) keeps a whole region in-process, replacing { local: 
     // fails (TS2578) if the call ever stopped erroring - the negative-case pattern
     // `.claude/rules/typescript.md` calls for over trusting a "should fail" claim.
     function typeOnlyCheck() {
-      const plain = new Pipeline().from<number>([1]);
+      const plain = new Pipeline<number>();
       // @ts-expect-error - .transform() takes no second argument on any Pipeline class now (#61)
       plain.transform((t) => t, { local: true });
-      const concurrent = new ConcurrentPipeline().from<number>([1]);
+      const concurrent = new ConcurrentPipeline<number>();
       // @ts-expect-error - the dispatching classes lost the same second argument (#61, BREAKING)
       concurrent.transform((t) => t, { local: true });
     }
@@ -200,32 +202,32 @@ describe("#61 .local(build) keeps a whole region in-process, replacing { local: 
 
 describe("#17 .constructor.name is the leaf class after two .transform() calls (Done-when 7)", () => {
   it("a plain Pipeline stays Pipeline", () => {
-    const p = new Pipeline()
-      .from([1])
+    const p = new Pipeline<number>()
+
       .transform((t) => t.map((x: number) => x))
       .transform((t) => t.map((x: number) => x));
     expect(p.constructor.name).toBe("Pipeline");
   });
 
   it("a ConcurrentPipeline stays ConcurrentPipeline", () => {
-    const p = new ConcurrentPipeline()
-      .from([1])
+    const p = new ConcurrentPipeline<number>()
+
       .transform((t) => t.map((x: number) => x))
       .transform((t) => t.map((x: number) => x));
     expect(p.constructor.name).toBe("ConcurrentPipeline");
   });
 
   it("an HttpPipeline stays HttpPipeline", () => {
-    const p = new HttpPipeline({ url: "http://localhost:1" })
-      .from([1])
+    const p = new HttpPipeline<number>({ url: "http://localhost:1" })
+
       .transform((t) => t.map((x: number) => x))
       .transform((t) => t.map((x: number) => x));
     expect(p.constructor.name).toBe("HttpPipeline");
   });
 
   it("a ClusterPipeline stays ClusterPipeline (constructed only - never drained, never forks)", () => {
-    const p = new ClusterPipeline()
-      .from([1])
+    const p = new ClusterPipeline<number>()
+
       .transform((t) => t.map((x: number) => x))
       .transform((t) => t.map((x: number) => x));
     expect(p.constructor.name).toBe("ClusterPipeline");
@@ -237,9 +239,9 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
   // .context() - Pipeline.createPipeline()'s base implementation only forwards PipelineOptions
   // fields, so a subclass with EXTRA constructor knobs must override it, which these two now do.
   it("ConcurrentPipeline keeps maxConcurrency/ordered through .context()", () => {
-    const p = new ConcurrentPipeline({ maxConcurrency: 8, ordered: false })
-      .from([1])
-      .context({ k: 1 });
+    const p = new ConcurrentPipeline<number>({ maxConcurrency: 8, ordered: false }).context({
+      k: 1,
+    });
     expect(p.constructor.name).toBe("ConcurrentPipeline");
     expect(p.maxConcurrency).toBe(8);
     expect(p.ordered).toBe(false);
@@ -247,13 +249,13 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
   });
 
   it("HttpPipeline keeps url through .context()", () => {
-    const p = new HttpPipeline({ url: "http://example.test" }).from([1]).context({ k: 1 });
+    const p = new HttpPipeline<number>({ url: "http://example.test" }).context({ k: 1 });
     expect(p.constructor.name).toBe("HttpPipeline");
     expect(p.url).toBe("http://example.test");
   });
 
   it("ClusterPipeline keeps workers through .context()", () => {
-    const p = new ClusterPipeline({ workers: 3 }).from([1]).context({ k: 1 });
+    const p = new ClusterPipeline<number>({ workers: 3 }).context({ k: 1 });
     expect(p.constructor.name).toBe("ClusterPipeline");
     expect(p.workers).toBe(3);
   });
@@ -261,15 +263,14 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
   it("a dispatched stage's own output survives .buffer(), async-iterable like any other chunk stream (#39)", async () => {
     // A dispatched stage's own output IS a real `_chunks` boundary now (#39) - there is no
     // separate "source position" mechanism left to lose track of it after `.buffer()` recuts.
-    const p = new ConcurrentPipeline()
-      .from([1, 2, 3])
+    const p = new ConcurrentPipeline<number>()
       .transform((t) => t.map((x: number) => x * 2))
       .buffer(10);
     const chunks: number[][] = [];
-    for await (const chunk of p) {
+    for await (const chunk of p([1, 2, 3, 4, 5]).chunks()) {
       chunks.push(chunk);
     }
-    expect(chunks.flat()).toEqual([2, 4, 6]);
+    expect(chunks.flat()).toEqual([2, 4, 6, 8, 10]);
   });
 });
 
@@ -285,19 +286,19 @@ describe("#78 the row handler reaches a dispatched stage identically to a local 
       });
 
   it("Pipeline: [1,2,-1,4] - the row is replaced, its chunk siblings unaffected", async () => {
-    const out = await new Pipeline()
-      .from([1, 2, 3, 4])
+    const out = await new Pipeline<number>()
+
       .buffer(2)
-      .transform((t) => throwOn3(t))
+      .transform((t) => throwOn3(t))([1, 2, 3, 4])
       .toArray();
     expect(out).toEqual([1, 2, -1, 4]);
   });
 
   it("ConcurrentPipeline: [1,2,-1,4] - identical recovery over a dispatched (in-process) stage", async () => {
-    const out = await new ConcurrentPipeline()
-      .from([1, 2, 3, 4])
+    const out = await new ConcurrentPipeline<number>()
+
       .buffer(2)
-      .transform((t) => throwOn3(t))
+      .transform((t) => throwOn3(t))([1, 2, 3, 4])
       .toArray();
     expect(out).toEqual([1, 2, -1, 4]);
   });
@@ -307,10 +308,10 @@ describe("#78 the row handler reaches a dispatched stage identically to a local 
     async () => {
       const worker = makeWorker((t) => t.transform((tr) => throwOn3(tr)));
       await withServer(worker.fetch, async (url) => {
-        const out = await new HttpPipeline({ url })
-          .from<number>([1, 2, 3, 4])
+        const out = await new HttpPipeline<number>({ url })
+
           .buffer(2)
-          .transform((t) => throwOn3(t))
+          .transform((t) => throwOn3(t))([1, 2, 3, 4])
           .toArray();
         expect(out).toEqual([1, 2, -1, 4]);
       });
@@ -324,11 +325,11 @@ describe("#78 the row handler reaches a dispatched stage identically to a local 
       if (isNaN(n)) throw new Error(`Invalid: ${s}`);
       return n;
     };
-    const out = await new ConcurrentPipeline({ maxConcurrency: 2 })
-      .from(["1", "x", "3", "4"])
+    const out = await new ConcurrentPipeline<string>({ maxConcurrency: 2 })
+
       .buffer(1)
       .onError(() => undefined)
-      .transform((t) => t.map(parseStrict))
+      .transform((t) => t.map(parseStrict))(["1", "x", "3", "4"])
       .toArray();
     expect(out).toEqual([1, 3, 4]);
   });
@@ -337,7 +338,7 @@ describe("#78 the row handler reaches a dispatched stage identically to a local 
     const withHandler = new Transformer<number, number>()
       .map((x: number) => x * 2)
       .onError(() => -1);
-    expect(() => new ConcurrentPipeline().from([1, 2, 3]).apply(withHandler)).not.toThrow();
+    expect(() => new ConcurrentPipeline<number>().apply(withHandler)).not.toThrow();
   });
 });
 
@@ -346,17 +347,17 @@ describe("#17 ConcurrentPipeline validates maxConcurrency eagerly", () => {
   // eagerly; ConcurrentPipeline's own constructor dropped that check, so maxConcurrency <= 0 made
   // fanOutUnordered's ramp-up loop never run at all - silently [] instead of an error.
   it("throws on a non-positive maxConcurrency", () => {
-    expect(() => new ConcurrentPipeline({ maxConcurrency: 0 }).from([1])).toThrow(
+    expect(() => new ConcurrentPipeline<number>({ maxConcurrency: 0 })).toThrow(
       "maxConcurrency must be at least 1",
     );
-    expect(() => new ConcurrentPipeline({ maxConcurrency: -3 }).from([1])).toThrow(
+    expect(() => new ConcurrentPipeline<number>({ maxConcurrency: -3 })).toThrow(
       "maxConcurrency must be at least 1",
     );
   });
 
   it("accepts the default and a positive value", () => {
-    expect(() => new ConcurrentPipeline().from([1])).not.toThrow();
-    expect(() => new ConcurrentPipeline({ maxConcurrency: 8 }).from([1])).not.toThrow();
+    expect(() => new ConcurrentPipeline<number>()).not.toThrow();
+    expect(() => new ConcurrentPipeline<number>({ maxConcurrency: 8 })).not.toThrow();
   });
 });
 
@@ -389,10 +390,10 @@ describe("#17 ordered: false streams instead of draining the source first (Done-
         yield x;
       }
     }
-    const cp = new ConcurrentPipeline({
+    const cp = new ConcurrentPipeline<number>({
       maxConcurrency: 2,
       ordered: false,
-    }).from<number>(source());
+    });
     await cp
       .buffer(1) // one item per chunk, so "not drained first" is actually observable
       .transform((t) =>
@@ -402,7 +403,7 @@ describe("#17 ordered: false streams instead of draining the source first (Done-
           if (x === 1) expect(pulled.length).toBeLessThan(6);
           return x;
         }),
-      )
+      )(source())
       .toArray();
   });
 });
@@ -410,10 +411,10 @@ describe("#17 ordered: false streams instead of draining the source first (Done-
 describe("#17 ordered: true restores source order under a slow first chunk (Done-when 10)", () => {
   it("chunk 0 made 12x slower still comes out first", async () => {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    const cp = new ConcurrentPipeline({
+    const cp = new ConcurrentPipeline<number>({
       maxConcurrency: 4,
       ordered: true,
-    }).from<number>([1, 2, 3, 4]);
+    });
     const out = await cp
       .buffer(1)
       .transform((t) =>
@@ -421,7 +422,7 @@ describe("#17 ordered: true restores source order under a slow first chunk (Done
           await delay(x === 1 ? 120 : 10);
           return x;
         }),
-      )
+      )([1, 2, 3, 4])
       .toArray();
     expect(out).toEqual([1, 2, 3, 4]);
   });
@@ -429,9 +430,9 @@ describe("#17 ordered: true restores source order under a slow first chunk (Done
 
 describe("#17 async map/filter results are awaited (Done-when 11)", () => {
   it("prints [4,6], not []", async () => {
-    const out = await new Pipeline()
-      .from([1, 2, 3])
-      .transform((t) => t.map(async (x: number) => x * 2).filter((x) => x > 2))
+    const out = await new Pipeline<number>()
+
+      .transform((t) => t.map(async (x: number) => x * 2).filter((x) => x > 2))([1, 2, 3])
       .toArray();
     expect(out).toEqual([4, 6]);
   });
@@ -445,9 +446,9 @@ describe("#17 the same async chain over HttpPipeline (Done-when 12)", () => {
         t.transform((tr) => tr.map(async (x: number) => x * 2).filter((x) => x > 2)),
       );
       await withServer(worker.fetch, async (url) => {
-        const out = await new HttpPipeline({ url })
-          .from<number>([1, 2, 3])
-          .transform((t) => t.map(async (x: number) => x * 2).filter((x) => x > 2))
+        const out = await new HttpPipeline<number>({ url })
+
+          .transform((t) => t.map(async (x: number) => x * 2).filter((x) => x > 2))([1, 2, 3])
           .toArray();
         expect(out).toEqual([4, 6]);
       });
@@ -537,10 +538,12 @@ describe("#17 .context() propagates through the wire (Done-when 14)", () => {
         t.transform((tr) => tr.map((x: number, ctx) => x * (ctx.get("multiplier") as number))),
       );
       await withServer(worker.fetch, async (url) => {
-        const out = await new HttpPipeline({ url })
-          .from<number>([1, 2, 3, 4, 5])
+        const out = await new HttpPipeline<number>({ url })
+
           .context({ multiplier: 10 })
-          .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))
+          .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))([
+            1, 2, 3, 4, 5,
+          ])
           .toArray();
         expect(out).toEqual([10, 20, 30, 40, 50]);
       });
@@ -573,11 +576,13 @@ describe("#17 a stage's HTTP 500 throws from the terminal op (Done-when 15)", ()
         ),
       );
       await withServer(worker.fetch, async (url) => {
-        const orchestrator = new HttpPipeline({ url })
-          .from<number>([1, 2, 3])
-          .transform((t) => t.map((x: number) => x));
+        const orchestrator = new HttpPipeline<number>({ url }).transform((t) =>
+          t.map((x: number) => x),
+        );
         const escapedUrl = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        await expect(orchestrator.toArray()).rejects.toThrow(new RegExp(`stage 0.*${escapedUrl}`));
+        await expect(orchestrator([1, 2, 3]).toArray()).rejects.toThrow(
+          new RegExp(`stage 0.*${escapedUrl}`),
+        );
       });
     },
     HTTP_TIMEOUT,
@@ -595,13 +600,13 @@ describe("#17 a stage's HTTP 500 throws from the terminal op (Done-when 15)", ()
         ),
       );
       await withServer(worker.fetch, async (url) => {
-        const out = await new HttpPipeline({ url })
-          .from<number>([1, 2, 3])
+        const out = await new HttpPipeline<number>({ url })
+
           .buffer(1)
           .onError(() => {
             /* drop the failing chunk, keep going */
           })
-          .transform((t) => t.map((x: number) => x))
+          .transform((t) => t.map((x: number) => x))([1, 2, 3])
           .toArray();
         expect(out).toEqual([1, 3]);
       });

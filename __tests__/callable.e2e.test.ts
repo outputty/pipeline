@@ -16,9 +16,9 @@ import { SimpleContextManager } from "@src/context/simple";
 import { runFixture, expectFixtureOk, lastJsonLine, FIXTURE_TIMEOUT } from "./helpers/fixtures";
 
 /** Every chunk a pipeline yields, for the cases that assert a chunk BOUNDARY rather than items. */
-async function chunksOf(pipeline: unknown): Promise<unknown[]> {
+async function chunksOf(result: { chunks(): AsyncIterable<unknown> }): Promise<unknown[]> {
   const out: unknown[] = [];
-  for await (const chunk of pipeline as AsyncIterable<unknown>) out.push(chunk);
+  for await (const chunk of result.chunks()) out.push(chunk);
   return out;
 }
 
@@ -114,7 +114,6 @@ describe("a Pipeline is callable and carries no data", () => {
 
   it("is a real function, not merely callable (Done-when 8)", () => {
     expect(withVat).toBeInstanceOf(Function);
-    expect(typeof withVat.bind).toBe("function");
     expect(typeof withVat.call).toBe("function");
     expect(typeof withVat.apply).toBe("function");
   });
@@ -202,13 +201,6 @@ describe("a PipelineResult carries the terminals", () => {
 });
 
 describe("the compiler refuses what the split forbids", () => {
-  it("refuses draining a pipeline that was given no input (Done-when 10, runtime half)", async () => {
-    // `.toArray()` still EXISTS on `Pipeline` at this layer - the terminals leave it with `.from()`
-    // at the enable layer, which is where Done-when 10's compile-time half lands as a `TS2339`.
-    // Until then the source guard is what refuses it, so this pins the runtime behaviour.
-    await expect(withVat.toArray()).rejects.toThrow(/no source/);
-  });
-
   it("refuses chaining back off a result (Done-when 9)", () => {
     const r = withVat(ordersA);
     // TS2339: Property 'transform' does not exist on type 'PipelineResult<Order, "sync">'.
@@ -225,36 +217,15 @@ describe("the compiler refuses what the split forbids", () => {
 });
 
 describe("L6 review findings, each reproduced before it was fixed", () => {
-  it("refuses calling a pipeline that already named a source", () => {
-    // Before: the call replayed only `_pendingStages`, so stages already materialised into the old
-    // chunk stream were dropped without a word. Measured: `.from([1,2,3]).transform(x => x * 2)`
-    // drained in place to `[2,4,6]`, then the same object called with `[10,20]` gave `[10,20]`.
-    const bound = new Pipeline<number>().from([1, 2, 3]).transform((t) => t.map((x) => x * 2));
-    expect(bound.toArray()).toEqual([2, 4, 6]);
-    expect(() => (bound as unknown as (i: number[]) => unknown)([10, 20])).toThrow(
-      /already named a source/,
-    );
-  });
-
   it("keeps .buffer()'s position in a chain composed before the input", async () => {
     // Before: the source-less arm recorded only the SIZE, which `fromSource` applied to the source
     // cut - so a `.buffer()` written after a stage took effect before it. Measured: chunks came out
     // `[[1,1,2,2],[3,3,4,4]]` against `[[1,1],[2,2],[3,3],[4,4]]` for the same chain after
     // `.from()`.
-    const viaFrom = await chunksOf(
-      new Pipeline<number>()
-        .from([1, 2, 3, 4])
-        .transform((t) => t.flatMap((x) => [x, x]))
-        .buffer(2),
+    const cut = await chunksOf(
+      new Pipeline<number>().transform((t) => t.flatMap((x) => [x, x])).buffer(2)([1, 2, 3, 4]),
     );
-    const viaCall = await chunksOf(
-      new Pipeline<number>()
-        .transform((t) => t.flatMap((x) => [x, x]))
-        .buffer(2)
-        .from([1, 2, 3, 4]),
-    );
-    expect(viaCall).toEqual(viaFrom);
-    expect(viaFrom).toEqual([
+    expect(cut).toEqual([
       [1, 1],
       [2, 2],
       [3, 3],
@@ -263,7 +234,7 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
   });
 
   it("still cuts the source when .buffer() comes before every stage", async () => {
-    const cut = await chunksOf(new Pipeline<number>().buffer(2).from([1, 2, 3, 4, 5]));
+    const cut = await chunksOf(new Pipeline<number>().buffer(2)([1, 2, 3, 4, 5]));
     expect(cut).toEqual([[1, 2], [3, 4], [5]]);
   });
 
@@ -299,7 +270,7 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
       // Before: `class Pipeline extends Function` called `super()`, which runs
       // `CreateDynamicFunction`. Measured under `node --disallow-code-generation-from-strings`:
       // `EvalError: Code generation from strings disallowed for this context` on the FIRST
-      // `new Pipeline()`. That contradicted the package's own runtime-neutrality claim, so the
+      // `new Pipeline<number>()`. That contradicted the package's own runtime-neutrality claim, so the
       // prototype is reparented onto `Function.prototype` once instead.
       //
       // The ban is a process-level flag, so this runs in a child process. It is the real assertion;
@@ -311,12 +282,11 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
       expect(lastJsonLine(fixture)).toEqual({
         values: [2, 4, 6],
         isFunction: true,
-        hasBind: true,
+        hasCall: true,
       });
 
       const p = new Pipeline<number>();
       expect(p).toBeInstanceOf(Function);
-      expect(typeof p.bind).toBe("function");
       expect(typeof p.call).toBe("function");
     },
     FIXTURE_TIMEOUT,
@@ -381,5 +351,87 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
     // The wrapper the docstring recommends works everywhere.
     const wrapped = (input: number[]): number[] => doubled(input).toArray();
     expect(wrapped.apply(null, [[1, 2, 3]])).toEqual([2, 4, 6]);
+  });
+});
+
+describe("L8 review findings, each reproduced before it was fixed", () => {
+  it("keeps a trailing .buffer() from re-cutting the source", () => {
+    // Before: the deferred arm set `chunkSize` unconditionally, and `fromSource` reads it for the
+    // SOURCE cut - so a `.buffer()` written after a stage re-cut the source retroactively.
+    // Measured: `.transform(t => t.reduce(sum, 0)).buffer(3)` over `[1..6]` gave `[6, 15]` where
+    // the same chain without the trailing `.buffer(3)` gave `[21]`.
+    const folded = new Pipeline<number>().transform((t) =>
+      t.reduce((a: number, x: number) => a + x, 0),
+    );
+    expect(folded([1, 2, 3, 4, 5, 6]).toArray()).toEqual([21]);
+    expect(folded.buffer(3)([1, 2, 3, 4, 5, 6]).toArray()).toEqual([21]);
+
+    // A `.buffer()` ahead of every stage still cuts the source, which is the case that needs it.
+    const cut = new Pipeline<number>()
+      .buffer(3)
+      .transform((t) => t.reduce((a: number, x: number) => a + x, 0));
+    expect(cut([1, 2, 3, 4, 5, 6]).toArray()).toEqual([6, 15]);
+  });
+
+  it("gives .branch()'s runner its input on an async chain too", async () => {
+    // Before: `BranchRunner` keyed on Mode while the runtime keyed on boundness. With `.from()`
+    // gone every pipeline is deferred, so an async chain typed the runner `() => Promise<R>` -
+    // `TS2554` on the call that works, and `no input:` thrown by the call that compiled.
+    const asyncChain = new Pipeline<number>().transform((t) => t.map(async (x) => x * 2));
+    const split = asyncChain.branch({ big: { predicate: (x: number) => x > 2 } });
+    expect(await split([1, 2, 3])).toEqual({ big: [4, 6] });
+
+    const runner = new Pipeline<number>().branch({ all: { predicate: () => true } });
+    await expect((runner as unknown as () => Promise<unknown>)()).rejects.toThrow(/no input/);
+  });
+
+  it("runs a .local() region once per terminal, not twice", async () => {
+    // Before: each async terminal bound the chain twice - once to test for a sync chunk stream,
+    // once inside its own async arm - so a user's `build` callback ran twice per call.
+    let builds = 0;
+    const chain = new Pipeline<number>().local((p) => {
+      builds++;
+      return p.transform((t) => t.map(async (x) => x * 2));
+    });
+    await chain([1, 2, 3]).toArray();
+    expect(builds).toBe(1);
+  });
+
+  it("closes a sync source that a terminal stopped reading early", () => {
+    // Before: `drainSync`'s early exit abandoned the iterator, so a generator's `finally` never
+    // ran - a file handle or cursor held by a sync source leaked on `.first()` alone.
+    let closed = false;
+    function* source(): Generator<number> {
+      try {
+        yield 1;
+        yield 2;
+        yield 3;
+      } finally {
+        closed = true;
+      }
+    }
+    expect(new Pipeline<number>().buffer(1)(source()).first(1)).toEqual([1]);
+    expect(closed).toBe(true);
+  });
+
+  it("shows the same chunks whichever engine folded them", async () => {
+    // Before: the sync fold's deferred arms yielded unguarded, where the async engine guards on
+    // length - `[[],[],[],[15]]` against `[[15]]` for the identical chain.
+    const folded = new Pipeline<number>()
+      .buffer(2)
+      .transform((t) => t.map(async (x) => x))
+      .reduce((a: number, x: number) => a + x, 0);
+
+    const viaSync: number[][] = [];
+    for await (const chunk of folded([1, 2, 3, 4, 5]).chunks()) viaSync.push(chunk);
+
+    async function* stream(): AsyncGenerator<number> {
+      for (const x of [1, 2, 3, 4, 5]) yield x;
+    }
+    const viaAsync: number[][] = [];
+    for await (const chunk of folded(stream()).chunks()) viaAsync.push(chunk);
+
+    expect(viaSync).toEqual(viaAsync);
+    expect(viaSync).toEqual([[15]]);
   });
 });

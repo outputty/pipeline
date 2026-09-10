@@ -43,8 +43,6 @@ import {
   buildChunkGenerator,
   buildSyncChunkGenerator,
   flattenChunks,
-  drainSync,
-  drainSyncSettled,
   recutSyncChunks,
 } from "./utils/chunk";
 import { chain, isThenable, dropOrRethrow } from "./utils/helpers";
@@ -86,26 +84,6 @@ export type ChunkTransform = (
   chunk: unknown[],
   ctx: IContextManager,
 ) => unknown[] | Promise<unknown[]>;
-
-/**
- * The item type a `Pipeline<T>` carries, extracted from `P` itself rather than referenced as
- * `Pipeline<U>[number]` inline. A conditional type distributes only over a NAKED type parameter —
- * `Ps[number] extends Pipeline<infer U> ? U : never` (`Ps` a rest-param array) is an indexed
- * access, not naked, so it compiles but silently evaluates to `never`; extracting it into its own
- * `P extends Pipeline<infer U> ? U : never` and applying that to `Ps[number]` at the call site
- * keeps `P` naked, so it distributes across a union of differently-typed `Pipeline`s correctly.
- */
-type ElementOf<Q> = Q extends Pipeline<infer U, infer _M, infer _P> ? U : never;
-
-/** A `Pipeline`'s own Mode, extracted the same way `ElementOf` extracts its item type (#90) - kept
- * as its own alias so the conditional distributes over a UNION of differently-moded pipelines, the
- * `.claude/rules/typescript.md` rule a naked type parameter needs. */
-type ModeOf<Q> = Q extends Pipeline<infer _U, infer M2, infer _P> ? M2 : never;
-
-/** The Mode a merge produces: `"sync"` only when EVERY input is sync, `"async"` the moment one is
- * not (#90) - a merged stream is only consumable synchronously if all of its sources are. */
-type MergedMode<Ps extends readonly Pipeline<any, "sync" | "async", SourcePolicy>[]> =
-  ModeOf<Ps[number]> extends "sync" ? "sync" : "async";
 
 /**
  * What a `Pipeline<T>` may be built from - a stream/collection of items. Terminal ops
@@ -163,12 +141,10 @@ export type PendingStage = (pipeline: AnyPipeline<any>) => AnyPipeline<any>;
  *
  * `split(orders)` → `{ big: ["BIG:2", "BIG:4"], eu: ["EU:1", "EU:3"], rest: [] }`.
  */
-export type BranchRunner<In, R, M extends PipelineMode> = M extends "unset"
-  ? {
-      (input: AsyncIterable<In>): Promise<R>;
-      (input: Iterable<In>): Promise<R>;
-    }
-  : () => Promise<R>;
+export interface BranchRunner<In, R> {
+  (input: AsyncIterable<In>): Promise<R>;
+  (input: Iterable<In>): Promise<R>;
+}
 
 /** The branch map `.branch()` accepts - a name per branch, each pairing a predicate with an
  * optional transformer (#87). Inferred from the caller's own object literal rather than declared,
@@ -281,6 +257,13 @@ export interface PipelineOptions {
    * otherwise look caller-supplied. Not intended for direct external use.
    */
   contextIsDefault?: boolean;
+  /**
+   * Internal: whether an input has been bound to this chain (#90). A RUNTIME fact, kept apart from
+   * `mode`, which is a TYPE fact about what the chain produces. `"unset"` used to answer both, and
+   * the two are independent: a callable chain is `"unset"` for its whole life and becomes bound
+   * only for the duration of one call. Not intended for direct external use.
+   */
+  bound?: boolean;
 }
 
 /** A registered reduce stage's own definition - `pushReduceStage()` (below) is the one place that
@@ -333,27 +316,6 @@ function runStageChunk<In, Out>(
     return isThenable(result) ? Promise.resolve(result).catch(dropped) : result;
   } catch (error) {
     return dropped(error as Error);
-  }
-}
-
-/** Merges each `source` context's values onto `target`, later sources winning on a shared key -
- * the ONE place the static `Pipeline.merge()` and the instance `.merge()` (#41) both copy source
- * pipelines' contexts onto a receiving manager, so a future change to context-merge semantics has
- * one home, not two independent copies. */
-function mergeContextsInto(target: IContextManager, sources: IContextManager[]): void {
-  for (const source of sources) {
-    for (const [key, value] of Object.entries(source.toDict())) {
-      target.set(key, value);
-    }
-  }
-}
-
-/** Concatenates several chunk streams into one, in order - no new chunking decision (#39): each
- * stream's own boundary is kept as-is. The ONE place the static `Pipeline.merge()` and the
- * instance `.merge()` (#41) both build a merged chunk stream. */
-async function* concatChunks<U>(streams: AsyncIterable<U[]>[]): AsyncGenerator<U[]> {
-  for (const stream of streams) {
-    yield* stream;
   }
 }
 
@@ -431,6 +393,8 @@ export class Pipeline<
   /** Whether `_context` was invented here rather than named by the caller - see
    * `PipelineOptions.contextIsDefault`. */
   protected _contextIsDefault!: boolean;
+  /** Whether an input has been bound to this chain - see `PipelineOptions.bound`. */
+  protected _bound!: boolean;
   /** `registries()`'s memo - built on first serve, never carried through copy-on-write, since the
    * next instance's own stage list is different. */
   protected _registries?: {
@@ -475,7 +439,7 @@ export class Pipeline<
       // x * 2)` drained in place to `[2,4,6]`, then the same object called with `[10,20]` returned
       // `[10,20]`. Refused rather than half-honoured; the state disappears entirely once `.from()`
       // does, at which point every pipeline is callable and none is bound.
-      if (self._mode !== "unset") {
+      if (self._bound) {
         throw new Error(
           "cannot call a pipeline that already named a source with .from() - build the chain without .from() and call it with the input instead",
         );
@@ -510,6 +474,7 @@ export class Pipeline<
     self._syncPreBufferItems = (options?.syncPreBufferItems ?? null) as Iterable<T> | null;
     self._chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
     self._pendingStages = options?.pendingStages ?? [];
+    self._bound = options?.bound ?? false;
     return self;
   }
 
@@ -528,14 +493,16 @@ export class Pipeline<
    * `new Pipeline().from([1, 2, 3]).toArray()` → `[1, 2, 3]`, typed `number[]`, no `await`.
    * `new Pipeline().from(asyncSource).toArray()` → typed `Promise<number[]>`.
    */
-  from<U>(data: AsyncIterable<U>): Pipeline<U, "async", P, In>;
+  protected bind<U>(data: AsyncIterable<U>): Pipeline<U, "async", P, In>;
   // A receiver already widened to `"async"` stays async whatever the source's own shape (#90):
   // `.onError()` and `.context()` are both callable BEFORE `.from()`, so an async run handler
   // registered there had its widening discarded here - the chain typed `number[]` while
   // `dropOrRethrow` deferred on that handler the moment a chunk failed. `"unset"` is the ordinary
   // case and still takes the source's own shape, which is what keeps `.from([1,2,3])` synchronous.
-  from<U>(data: Iterable<U>): Pipeline<U, M extends "async" ? "async" : AssignMode<P, "sync">, P>;
-  from<U>(data: PipelineSource<U>): Pipeline<U, "sync" | "async", P> {
+  protected bind<U>(
+    data: Iterable<U>,
+  ): Pipeline<U, M extends "async" ? "async" : AssignMode<P, "sync">, P>;
+  protected bind<U>(data: PipelineSource<U>): Pipeline<U, "sync" | "async", P> {
     return this.fromSource<U>(data, this.sourcePolicy()) as Pipeline<U, "sync" | "async", P>;
   }
 
@@ -566,6 +533,7 @@ export class Pipeline<
           mode,
           pendingStages: [],
           context: this.contextForRun(),
+          bound: true,
           syncChunks: buildSyncChunkGenerator<U>(this._chunkSize)(items),
           syncPreBufferItems: items,
           preBufferItems: null,
@@ -580,6 +548,7 @@ export class Pipeline<
         mode,
         pendingStages: [],
         context: this.contextForRun(),
+        bound: true,
         preBufferItems: items,
         syncChunks: null,
         syncPreBufferItems: null,
@@ -661,6 +630,7 @@ export class Pipeline<
       syncChunks: this._syncChunks,
       pendingStages: this._pendingStages,
       contextIsDefault: this._contextIsDefault,
+      bound: this._bound,
     };
   }
 
@@ -668,8 +638,12 @@ export class Pipeline<
    * the instance they own across every call; a default-built manager is per-run, so two calls of
    * one reusable chain never see each other's writes (#90). */
   protected contextForRun(): IContextManager {
-    if (!this._contextIsDefault) return this._context;
-    return this.isDeferred() ? new SimpleContextManager() : this._context;
+    if (!this._contextIsDefault || !this.isDeferred()) return this._context;
+    // A fresh manager per run, SEEDED from the chain's own values - `.context({ multiplier: 10 })`
+    // declares a default every run starts from, and an empty manager here dropped it, so a stage
+    // reading `ctx.getOrDefault("multiplier", 1)` fell back to `1`. Seeded and separate is what
+    // keeps `.context()` working while two calls still never see each other's writes.
+    return new SimpleContextManager(this._context.toDict());
   }
 
   /**
@@ -694,7 +668,7 @@ export class Pipeline<
   /** Whether this pipeline records its stages rather than running them - true until an input
    * arrives, which is every pipeline built the callable way (#90). */
   protected isDeferred(): boolean {
-    return this._mode === "unset";
+    return !this._bound;
   }
 
   /**
@@ -720,7 +694,7 @@ export class Pipeline<
       return { chunkTransforms: this._chunkTransforms, reduceStages: this._reduceStages };
     }
     this._registries ??= (() => {
-      const materialised = this.from([] as T[]) as unknown as AnyPipeline<T>;
+      const materialised = this.bind([] as T[]) as unknown as AnyPipeline<T>;
       return {
         chunkTransforms: materialised._chunkTransforms,
         reduceStages: materialised._reduceStages,
@@ -743,8 +717,8 @@ export class Pipeline<
    * `new HttpPipeline(scored, { url })` runs `scored`'s stages over HTTP, where `scored([1,2,3])`
    * runs the identical stages in this process.
    */
-  static adopt(pipeline: AnyPipeline<any>): PipelineOptions {
-    if (pipeline._mode !== "unset") {
+  protected static adopt(pipeline: AnyPipeline<any>): PipelineOptions {
+    if (pipeline._bound) {
       throw new Error(
         "cannot wrap a pipeline that already named a source with .from() - build the chain without .from() and wrap that",
       );
@@ -800,25 +774,23 @@ export class Pipeline<
    * a plausible-looking answer for a caller who simply has no data.
    */
   protected requireSource(): void {
-    if (this._mode === "unset") {
-      throw new Error("no source: call .from(data) before composing a stage");
+    if (!this._bound) {
+      throw new Error("no input: call the pipeline with the items to process");
     }
   }
 
-  /** Whether this pipeline runs on the synchronous engine (#90) - what a merge asks each input
-   * before deciding which engine the merged pipeline itself runs on. */
+  /** Whether this pipeline runs on the synchronous engine (#90) - what `reduce()` asks before
+   * choosing between the sync and the async fold. */
   protected isSync(): boolean {
     return this._mode === "sync" && this._syncChunks !== null;
   }
 
-  /** This pipeline's chunks as a SYNC stream, for a sync merge. A pipeline that is not `"sync"`
-   * has none, so this raises rather than inventing one - the `.merge()` signature already makes
-   * that combination a compile error, and a runtime that disagreed with it would be worse. */
+  /** This pipeline's chunks as a SYNC stream, for the synchronous fold. A pipeline that is not
+   * `"sync"` has none, so this raises rather than inventing one; `isSync()` above is the guard
+   * every caller checks first. */
   protected syncChunkStream(): MaybeAsyncChunks<T> {
     if (this._mode !== "sync" || this._syncChunks === null) {
-      throw new Error(
-        "cannot merge an async pipeline into a sync one - call .from() on an async source, or merge the other way round",
-      );
+      throw new Error("no sync chunk stream: this pipeline runs on the asynchronous engine");
     }
     return this._syncChunks;
   }
@@ -843,138 +815,7 @@ export class Pipeline<
     };
   }
 
-  /**
-   * Async-iterate the pipeline yielding TRANSFORMED CHUNKS - the exact same persisted `_chunks`
-   * stream every terminal op reads (#39). Whichever transforms were accumulated via `.apply()`/
-   * `.transform()` already ran when `_chunks` was built (each `.apply()` call runs
-   * `Transformer.process()` immediately, lazily, over the prior `_chunks`); this loop simply
-   * drains that result, so hooks/`.onError()` fire identically here as through `.toArray()` - no
-   * separate replay, no knob this path can't honor.
-   *
-   * Runs whenever the pipeline is consumed with `for await...of` instead of a terminal operation
-   * like `.toArray()` — this is also the path a bare `Pipeline` handed to laygo's `m.from()`
-   * (`@outputty/laygo`) drains as a source.
-   *
-   * @example
-   * ```typescript
-   * const pipeline = new Pipeline(source).transform((t) => t.map((r) => r.id * 2));
-   * for await (const chunk of pipeline) {
-   *   console.log(chunk); // e.g. [2], [4, 6]
-   * }
-   * ```
-   */
-  async *[Symbol.asyncIterator](): AsyncGenerator<T[]> {
-    yield* this.chunkStream();
-  }
-
   // ===== Static Factory Methods =====
-
-  /**
-   * Merge multiple pipelines into a single pipeline (fan-in pattern), always a FRESH, plain
-   * `Pipeline` - for a caller who holds no pipeline of its own to continue. See the instance
-   * `.merge(...others)` (#41, below `.context()`) to merge onto a pipeline already held instead,
-   * keeping its own class, knobs and stage numbering.
-   *
-   * All items from all input pipelines are yielded in sequence, each source pipeline's OWN
-   * already-cut `_chunks` boundary preserved rather than re-derived - merging never re-chunks
-   * (#39). `options.context`, when given, is the SAME instance returned as `.contextManager` on
-   * the merged pipeline - mutated in place with every source pipeline's own context values, later
-   * pipelines taking precedence on a shared key (#31; one of the TWO seams where values flow
-   * BACKWARD across pipelines - the instance `.merge()` is the other - which is why both take or
-   * already hold a manager explicitly rather than only ever receiving one at construction). With
-   * no `options`, a fresh `SimpleContextManager` is built and populated the same way - today's
-   * behaviour, unchanged.
-   *
-   * Python equivalent:
-   * ```python
-   * @classmethod
-   * def merge(cls, pipelines: list["Pipeline[T]"], *, context: IContextManager | None = None) -> "Pipeline[T]":
-   *   if not pipelines:
-   *     return cls([])
-   *   merged_context = context or SimpleContextManager()
-   *   for p in pipelines:
-   *     for key, value in p.context_manager.to_dict().items():
-   *       merged_context[key] = value
-   *   async def merged_chunks():
-   *     for pipeline in pipelines:
-   *       async for chunk in pipeline.chunks:
-   *         yield chunk
-   *   return cls([], chunks=merged_chunks(), context=merged_context)
-   * ```
-   *
-   * @param pipelines - Pipelines to merge, as an array - not a rest param (#31, BREAKING): an array
-   *   literal keeps `ElementOf<Ps[number]>` distributing over a UNION of differently-typed
-   *   pipelines, exactly as the old rest-param form did, while leaving a second parameter free for
-   *   `options`.
-   * @param options - `{ context }` to carry a caller's own manager through the merge, or
-   *   `{ contextFactory }` to build one (review: `options` is typed as the full `PipelineOptions` -
-   *   the same type `contextFactory` lives on - so both are honored the same way the constructor
-   *   does, `context ?? contextFactory() ?? a fresh SimpleContextManager`; omitted, or `{}`, keeps
-   *   today's `SimpleContextManager` behaviour.
-   * @returns A new pipeline that yields all items from all input pipelines. `Pipeline.merge([])` →
-   *   an empty pipeline.
-   *
-   * @example
-   * `Pipeline.merge([p1, p2], { context: mine })` then `.contextManager === mine` → `true` (#31,
-   * Done-when 3) - verified live via `__tests__/fixtures/context-managers.ts`'s own `LoggingContext`.
-   */
-  static merge<Ps extends readonly Pipeline<any, "sync" | "async", SourcePolicy>[]>(
-    pipelines: Ps,
-    options?: PipelineOptions,
-  ): Pipeline<ElementOf<Ps[number]>, MergedMode<Ps>> {
-    type U = ElementOf<Ps[number]>;
-
-    // `options?.context`/`contextFactory` both honored on the zero-pipeline path too (review: the
-    // fast return used to drop context entirely, and contextFactory was never read at all - a
-    // caller passing either got a fresh SimpleContextManager instead, breaking the same-instance
-    // contract every other path here keeps).
-    if (pipelines.length === 0) {
-      // `ModeOf<never>` resolves `"sync"`, so an empty merge is a sync empty pipeline - not an
-      // `"unset"` one whose `.toArray()` would return a `Promise` against a `T[]` annotation.
-      return new Pipeline<U, MergedMode<Ps>>({
-        context: options?.context ?? options?.contextFactory?.(),
-        mode: "sync",
-        syncChunks: [],
-      });
-    }
-
-    // Merge contexts from all pipelines into the caller's own manager when given (#31) - never a
-    // fresh copy that would discard it, the same reason .context() (above) mutates in place.
-    const mergedContext =
-      options?.context ?? options?.contextFactory?.() ?? new SimpleContextManager();
-    mergeContextsInto(
-      mergedContext,
-      pipelines.map((pipeline) => pipeline._context),
-    );
-
-    // Concatenates each source pipeline's OWN chunk stream in sequence - no new chunking decision
-    // at merge time (#39): a pipeline cut at 2 and one cut at 4 both keep their own boundary.
-    // The runtime engine has to match the Mode the return type promises (#90). Typing the result
-    // `"sync"` while leaving `_mode` at its `"unset"` default made `.toArray()` hand back a
-    // `Promise` where the caller's own annotation said `number[]` - the exact divergence this
-    // ticket removes, reintroduced at the one seam that builds a stranger rather than copying self.
-    if (pipelines.every((pipeline) => pipeline.isSync())) {
-      const streams = pipelines.map(
-        (pipeline) => pipeline.syncChunkStream() as MaybeAsyncChunks<U>,
-      );
-      function* concatSync(): Generator<U[] | Promise<U[]>> {
-        for (const stream of streams) yield* stream;
-      }
-      return new Pipeline<U, MergedMode<Ps>>({
-        context: mergedContext,
-        mode: "sync",
-        syncChunks: concatSync(),
-      });
-    }
-
-    return new Pipeline<U, MergedMode<Ps>>({
-      context: mergedContext,
-      mode: "async",
-      chunks: concatChunks(
-        pipelines.map((pipeline) => pipeline.chunkStream() as AsyncIterable<U[]>),
-      ),
-    });
-  }
 
   /**
    * Get the current context manager (read-only access).
@@ -1064,96 +905,16 @@ export class Pipeline<
     // array is a no-op, so the pessimism is safe there; `.then(…)` on it is a `TypeError`. The
     // handler cannot be inspected for asynchrony without guessing (a plain function returning a
     // promise is indistinguishable from a sync one), so the type stays pessimistic by decision.
+    // Defers like a stage (#90), because it IS positional: `.onError()` covers only stages applied
+    // AFTER it, and setting `runHandler` on the deferred pipeline instead made it cover the whole
+    // chain - a handler written after `.transform()` silently started catching that transform.
+    if (this.isDeferred()) {
+      return this.defer<T>((p) => p.onError(handler)) as this;
+    }
     return this.createPipeline<T>(this._chunks, {
       ...this.carriedOptions(),
       runHandler: handler,
     }) as this;
-  }
-
-  /**
-   * Concatenate OTHER pipelines' items onto THIS one - the instance-method sibling of the static
-   * `Pipeline.merge()`, for a caller who already holds a pipeline to continue rather than a fresh
-   * one to build. Copy-on-write through `createPipeline()` (#41), so the result carries THIS
-   * pipeline's class, knobs, address AND `_chunkTransforms` - a stage applied after the merge runs
-   * WHERE this pipeline runs, at the next index rather than restarting at 0. The static's own
-   * `new Pipeline(...)` always builds a plain `Pipeline` and always starts stage numbering over,
-   * which collides once a merged dispatching pipeline gains one more stage (#41's own ticket); this
-   * method has no such problem, because there is no stranger - it continues an instance that
-   * already has its own address and its own stage table.
-   *
-   * `others`' own chunk transforms are NOT carried forward - each has already run, producing that
-   * pipeline's own `_chunks`, which is all this method reads from it. Only `_preBufferItems` resets
-   * to `null` (`.apply()`'s own reason: several chunk streams are now concatenated, so there is no
-   * single raw item view left for a later `.buffer()` to recut from).
-   *
-   * Each other pipeline's context merges into THIS one's manager, mutating it in place -
-   * `.context()`'s own reason: a caller's own manager class is never silently swapped for a copy -
-   * later pipelines winning on a shared key, through the same `mergeContextsInto()` the static
-   * `Pipeline.merge()` (above) shares with this method rather than a second copy of the loop.
-   *
-   * Typed `this` (#17/#31's own reason on `.context()`): `T` never changes here, so `.fetch` and
-   * `.local(build)` still typecheck off the result on a dispatching subclass.
-   *
-   * @param others - Pipelines to concatenate onto this one, in order. None: returns an equivalent
-   *   pipeline of the same class with nothing appended.
-   *
-   * @example
-   * The ticket's own planning spike (`#41`'s `## Interface`), reproduced live in
-   * `__tests__/merge-instance.e2e.test.ts`: `new HttpPipeline([1,2,3,4], { url })
-   * .transform((t) => t.map((x) => x + 1))` (stage 0, dispatched) `.merge(new
-   * ConcurrentPipeline([10, 20]).transform((t) => t.map((x) => x + 5)))` (the
-   * `ConcurrentPipeline`'s own items, through its own in-process fan-out) `.transform((t) =>
-   * t.map((x) => x * 100))` (stage 1, continuing THIS pipeline's own index, never restarting at
-   * 0) → `.toArray()` → `[200,300,400,500,1500,2500]`.
-   */
-  merge(
-    ...others: Pipeline<T, M extends "async" ? "sync" | "async" : "sync", SourcePolicy>[]
-  ): this;
-  merge(
-    ...others: Pipeline<T, "sync" | "async", SourcePolicy>[]
-  ): M extends "async" ? this : Pipeline<T, "async", P, In>;
-  merge(
-    ...others: Pipeline<T, "sync" | "async", SourcePolicy>[]
-  ): this | Pipeline<T, "async", P, In> {
-    mergeContextsInto(
-      this._context,
-      others.map((other) => other._context),
-    );
-
-    // Every pipeline is read through `chunkStream()`, never `_chunks` directly: a `"sync"` one
-    // carries its chunks in `_syncChunks` and leaves `_chunks` empty, so reading the field would
-    // silently merge nothing (#90).
-    //
-    // ONE async pipeline anywhere in `others` sends the whole merge down the async arm (#90), which
-    // is what makes merging widen rather than refuse - the same rule every other stage follows, and
-    // the reason the second overload above exists. `chunkStream()` converts a sync pipeline's own
-    // chunks on the way in, so that arm already handles the mixed case unchanged.
-    if (this._mode === "sync" && this._syncChunks !== null && others.every((o) => o.isSync())) {
-      const streams = [this._syncChunks, ...others.map((other) => other.syncChunkStream())];
-      function* concatSync(): Generator<T[] | Promise<T[]>> {
-        for (const stream of streams) yield* stream;
-      }
-      return this.createPipeline<T>(EMPTY_CHUNKS as AsyncIterable<T[]>, {
-        ...this.carriedOptions(),
-        syncChunks: concatSync(),
-        preBufferItems: null,
-        syncPreBufferItems: null,
-      }) as this;
-    }
-
-    return this.createPipeline<T>(
-      concatChunks([this.chunkStream(), ...others.map((other) => other.chunkStream())]),
-      {
-        ...this.carriedOptions(),
-        // Several chunk streams are concatenated now, so there is no single raw item view left for
-        // a later `.buffer()` to recut from, and the merged stream is async whatever the inputs
-        // were - the signature already refuses merging async INTO sync.
-        preBufferItems: null,
-        syncPreBufferItems: null,
-        mode: "async",
-        syncChunks: null,
-      },
-    ) as this;
   }
 
   /**
@@ -1290,7 +1051,8 @@ export class Pipeline<
     // written BEFORE any stage must also cut the source itself, which is what it now does by
     // replaying against a pipeline whose source is already cut at that size.
     if (this.isDeferred()) {
-      return this.defer<T>((p) => p.buffer(size), { chunkSize: size }) as this;
+      const cutsTheSource = this._pendingStages.length === 0;
+      return this.defer<T>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {}) as this;
     }
 
     // The `"sync"` arm recuts with the sync chunker (#90) - going through the async one here would
@@ -1366,13 +1128,15 @@ export class Pipeline<
       );
     }
     const { chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
+    // Spread, never field by field (#90): every hand-built option object here has eventually
+    // dropped a knob nobody remembered to add - `mode` once, then `bound`, each silently. The
+    // overrides below are the fields this stage genuinely changes.
     const carried = {
-      context: this._context,
+      ...this.carriedOptions(),
       chunkTransforms,
       reduceStages,
       preBufferItems: null,
       syncPreBufferItems: null,
-      runHandler: this._runHandler,
     };
 
     // `foldSyncChunkStream` folds the same reducer over the sync chunk stream, deferring only at the
@@ -1429,27 +1193,17 @@ export class Pipeline<
         In
       >;
     }
+    // Both option objects SPREAD their source pipeline's own carried knobs (#90) - see `reduce()`
+    // for why: a hand-built list here dropped `bound`, so the region deferred instead of running
+    // and `.local((p) => p.reduce(sum, 0))` over `[1..6]` returned the six items rather than `[21]`.
     const region = new Pipeline<T, "sync" | "async", SourcePolicy>({
-      context: this._context,
-      chunkTransforms: this._chunkTransforms,
-      reduceStages: this._reduceStages,
+      ...this.carriedOptions(),
       chunks: this._chunks,
-      preBufferItems: this._preBufferItems,
-      syncPreBufferItems: this._syncPreBufferItems,
-      runHandler: this._runHandler,
-      mode: this._mode,
-      syncChunks: this._syncChunks,
+      pendingStages: [],
     });
     const built = build(region as unknown as Pipeline<T, M, "shape">);
     return this.createPipeline<U>(built._chunks, {
-      context: built._context,
-      chunkTransforms: built._chunkTransforms,
-      reduceStages: built._reduceStages,
-      preBufferItems: built._preBufferItems,
-      syncPreBufferItems: built._syncPreBufferItems,
-      runHandler: built._runHandler,
-      mode: built._mode,
-      syncChunks: built._syncChunks,
+      ...built.carriedOptions(),
     }) as Pipeline<U, AssignMode<P, JoinMode<M, M2>>, P, In>;
   }
 
@@ -1542,119 +1296,29 @@ export class Pipeline<
   // ===== Terminal Operations =====
 
   /**
-   * Collect all results to an array. Read context via `.contextManager` afterward if needed - a
-   * terminal op's return no longer carries a context snapshot (#744).
+   * What a `PipelineResult` needs to drain this pipeline (#90) - the ONE seam the terminal ops read.
    *
-   * Python equivalent:
-   * ```python
-   * def to_list(self) -> list[T]:
-   *   return list(self.processed_data)
-   * ```
-   */
-  toArray(): M extends "sync" ? T[] : Promise<T[]> {
-    const results: T[] = [];
-    if (this._mode === "sync" && this._syncChunks !== null) {
-      return chain(
-        drainSync(this._syncChunks, (item) => void results.push(item)),
-        () => results,
-      ) as M extends "sync" ? T[] : Promise<T[]>;
-    }
-    return this.collectAsync(results, undefined) as M extends "sync" ? T[] : Promise<T[]>;
-  }
-
-  /** The async engine's own collect loop, shared by `toArray` and `first` (#90) - `limit` is
-   * `first`'s early exit, `undefined` for the whole stream. */
-  private async collectAsync(results: T[], limit: number | undefined): Promise<T[]> {
-    for await (const item of this.asyncItems()) {
-      results.push(item);
-      if (limit !== undefined && results.length >= limit) break;
-    }
-    return results;
-  }
-
-  /**
-   * Get the first N elements. Read context via `.contextManager` afterward if needed (#744).
+   * `toArray`/`first`/`consume`/`forEach` used to live here, which meant a chain could be drained
+   * with no input at all: `new Pipeline().toArray()` compiled and resolved to `[]`. They belong to
+   * a result, and a result exists only once an input has been given. This exposes the two views
+   * they need - the sync chunk stream where there is one, and the item stream otherwise - so
+   * neither class has to reach into the other's fields.
    *
-   * Python equivalent:
-   * ```python
-   * def first(self, n: int = 1) -> list[T]:
-   *   assert n >= 1, "n must be at least 1"
-   *   return list(itertools.islice(self.processed_data, n))
-   * ```
+   * @example
+   * A bound sync pipeline over `[1, 2, 3]` returns `{ syncChunks: <generator>, … }`; an async one
+   * returns `{ syncChunks: null, … }` and the caller reads `items()` instead.
    */
-  first(n = 1): M extends "sync" ? T[] : Promise<T[]> {
-    if (n < 1) {
-      throw new Error("n must be at least 1");
-    }
-
-    const results: T[] = [];
-    if (this._mode === "sync" && this._syncChunks !== null) {
-      return chain(
-        drainSync(this._syncChunks, (item) => {
-          results.push(item);
-          return results.length >= n;
-        }),
-        () => results,
-      ) as M extends "sync" ? T[] : Promise<T[]>;
-    }
-    return this.collectAsync(results, n) as M extends "sync" ? T[] : Promise<T[]>;
-  }
-
-  /**
-   * Consume all items without collecting them. Read context via `.contextManager` afterward if
-   * needed (#744).
-   *
-   * Python equivalent:
-   * ```python
-   * def consume(self) -> None:
-   *   for _ in self.processed_data:
-   *     pass
-   * ```
-   */
-  consume(): M extends "sync" ? void : Promise<void> {
-    if (this._mode === "sync" && this._syncChunks !== null) {
-      return drainSync(this._syncChunks, () => {}) as M extends "sync" ? void : Promise<void>;
-    }
-    return this.consumeAsync() as M extends "sync" ? void : Promise<void>;
-  }
-
-  /** `consume`'s async arm, split out so the method above stays a single expression per engine. */
-  private async consumeAsync(): Promise<void> {
-    for await (const _ of this.asyncItems()) {
-      // Just consume, don't collect
-    }
-  }
-
-  /**
-   * Apply a side-effect function to each item. Read context via `.contextManager` afterward if
-   * needed (#744).
-   *
-   * Python equivalent:
-   * ```python
-   * def each(self, function: PipelineFunction[T]) -> None:
-   *   for item in self.processed_data:
-   *     function(item)
-   * ```
-   */
-  forEach(fn: (item: T) => Promise<void>): Promise<void>;
-  forEach(fn: (item: T) => void): M extends "sync" ? void : Promise<void>;
-  forEach(fn: (item: T) => void | Promise<void>): void | Promise<void> {
-    if (this.isSync() && this._syncChunks !== null) {
-      // Each callback's own return is settled before the next item, so a `forEach` that turns out
-      // to be async still runs strictly in order and still reports its own failures. The overload
-      // above is why the ASYNC arm is declared first: TypeScript's void-return rule makes an
-      // `async` callback assignable to `(item: T) => void`, so a `void`-returning arm listed first
-      // would swallow it, type the call `void`, and leave every callback fired and dropped.
-      return drainSyncSettled(this._syncChunks, fn);
-    }
-    return this.forEachAsync(fn);
-  }
-
-  /** `forEach`'s async arm, which awaits each callback in turn. */
-  private async forEachAsync(fn: (item: T) => void | Promise<void>): Promise<void> {
-    for await (const item of this.asyncItems()) {
-      await fn(item);
-    }
+  drainable(input: PipelineSource<In>): {
+    syncChunks: MaybeAsyncChunks<T> | null;
+    items: () => AsyncIterable<T>;
+    chunks: () => AsyncIterable<T[]>;
+  } {
+    const bound = this.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
+    return {
+      syncChunks: bound.isSync() ? bound._syncChunks : null,
+      items: () => bound.asyncItems(),
+      chunks: () => bound.chunkStream(),
+    };
   }
 
   /**
@@ -1697,28 +1361,17 @@ export class Pipeline<
     // awaits every branch's own result regardless, so accepting both is the behaviour it always had.
     branches: B,
     options?: BranchOptions,
-  ): BranchRunner<In, BranchResults<T, B>, M> {
+  ): BranchRunner<In, BranchResults<T, B>> {
     const firstMatch = options?.firstMatch !== false; // Default to true (router mode)
     const owner = this;
 
     const run = async (input?: PipelineSource<In>): Promise<BranchResults<T, B>> => {
-      // One binding per call, and each side refuses what it cannot honour. A bound pipeline handed
-      // an input silently DISCARDED it before: `.from([1,2,3]).branch(…)([9,9,9])` returned
-      // `{ all: [1,2,3] }`, then `{ all: [] }` on the second call as the bound stream ran dry.
-      if (!owner.isDeferred() && input !== undefined) {
+      if (input === undefined) {
         throw new Error(
-          "this pipeline already named a source with .from(), so .branch()'s runner takes no input - call it with no arguments, or build the chain without .from()",
+          "no input: a pipeline holds no data, so .branch()'s runner needs one - call it with the items to route",
         );
       }
-      if (owner.isDeferred() && input === undefined) {
-        throw new Error(
-          "no input: this pipeline holds no data, so .branch()'s runner needs one - call it with the items to route",
-        );
-      }
-      const source =
-        input === undefined
-          ? (owner as unknown as AnyPipeline<T>)
-          : (owner.from(input as Iterable<In>) as unknown as AnyPipeline<T>);
+      const source = owner.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
 
       const results: Record<string, unknown[]> = {};
       for (const key of Object.keys(branches)) {
@@ -1734,7 +1387,7 @@ export class Pipeline<
       return results as BranchResults<T, B>;
     };
 
-    return run as BranchRunner<In, BranchResults<T, B>, M>;
+    return run as BranchRunner<In, BranchResults<T, B>>;
   }
 
   /**

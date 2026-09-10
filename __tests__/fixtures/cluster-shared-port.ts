@@ -3,14 +3,20 @@
  */
 import { ClusterPipeline } from "../../src";
 
-const p1 = new ClusterPipeline().from([1]);
-const p2 = new ClusterPipeline().from([2]);
-const p3 = new ClusterPipeline().from([3]);
+const p1 = new ClusterPipeline<number>();
+const p2 = new ClusterPipeline<number>();
+const p3 = new ClusterPipeline<number>();
 
 const [r1, r2, r3] = await Promise.all([
-  p1.transform((t) => t.map((x: number) => x)).toArray(),
-  p2.transform((t) => t.map((x: number) => x)).toArray(),
-  p3.transform((t) => t.map((x: number) => x)).toArray(),
+  p1
+    .transform((t) => t.map((x: number) => x))([1])
+    .toArray(),
+  p2
+    .transform((t) => t.map((x: number) => x))([2])
+    .toArray(),
+  p3
+    .transform((t) => t.map((x: number) => x))([3])
+    .toArray(),
 ]);
 
 console.log(JSON.stringify({ ports: [p1.url, p2.url, p3.url], results: [r1, r2, r3] }));

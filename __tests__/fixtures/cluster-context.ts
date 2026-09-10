@@ -8,9 +8,11 @@
  */
 import { ClusterPipeline } from "../../src";
 
-const afterContext = new ClusterPipeline().from([1, 2, 3, 4, 5]).context({ multiplier: 10 });
+const afterContext = new ClusterPipeline<number>().context({ multiplier: 10 });
 const out = await afterContext
-  .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))
+  .transform((t) => t.map((x: number, ctx) => x * (ctx.get("multiplier") as number)))([
+    1, 2, 3, 4, 5,
+  ])
   .toArray();
 
 console.log(JSON.stringify({ out, ctorNameAfterContext: afterContext.constructor.name }));

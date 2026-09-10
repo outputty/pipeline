@@ -253,7 +253,7 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    *
    * `new HttpPipeline({}).from([1, 2, 3])` → `HttpPipeline<number, "async">`.
    */
-  override from<U>(data: PipelineSource<U>): HttpPipeline<U, M> {
+  protected override bind<U>(data: PipelineSource<U>): HttpPipeline<U, M> {
     // `In` becomes `U` here - see `ConcurrentPipeline.from()`: binding an input spends whatever the
     // chain accepted before.
     return this.fromSource<U>(data, "async") as unknown as HttpPipeline<U, M>;

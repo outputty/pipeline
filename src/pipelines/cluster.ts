@@ -249,7 +249,7 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
    *
    * `new ClusterPipeline().from([1, 2, 3])` → `ClusterPipeline<number, "async">`.
    */
-  override from<U>(data: PipelineSource<U>): ClusterPipeline<U, M> {
+  protected override bind<U>(data: PipelineSource<U>): ClusterPipeline<U, M> {
     // `In` becomes `U` here - see `ConcurrentPipeline.from()`.
     return this.fromSource<U>(data, "async") as unknown as ClusterPipeline<U, M>;
   }

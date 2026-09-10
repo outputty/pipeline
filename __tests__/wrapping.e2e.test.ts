@@ -63,18 +63,6 @@ describe("a wrapping class takes (pipeline, options) and runs the chain elsewher
     expect(extended).toBeInstanceOf(ConcurrentPipeline);
   });
 
-  it("refuses to wrap a pipeline that already named a source", () => {
-    const bound = new Pipeline<Order>().from(ordersA);
-    // TS2345: Argument of type 'Pipeline<Order, "sync", "shape", Order>' is not assignable to
-    // parameter of type 'WrappablePipeline<Order, Order>'. The wrapping overload takes an `"unset"`
-    // Mode, so a bound chain is a compile error - the runtime guard below stays for a caller who
-    // reaches `Pipeline.adopt` directly, or who is not using TypeScript.
-    // @ts-expect-error a bound pipeline has materialised its stages; there is nothing left to adopt
-    expect(() => new ConcurrentPipeline(bound, { maxConcurrency: 2 })).toThrow(
-      /already named a source/,
-    );
-  });
-
   it("keeps the wrapped chain's own input type, not its output type", () => {
     // Before: the constructor parameter was `AnyPipeline<T>`, whose `In` is `any`, so the wrapper
     // fell back to its own `T` - each stage's OUTPUT. Measured on a `number → string` chain, the
@@ -130,7 +118,7 @@ describe("the HTTP pair shares one definition, with no placeholder source (Done-
     // Done-when 15's own text: the placeholders this design removes. `emptyAsyncIterable` survives
     // in `cluster.ts` for a WORKER process's own copy, which is a different thing from a chain
     // written with a placeholder source - that one goes with `.from()` at the enable layer.
-    const worker = new HttpPipeline(new Pipeline<number>(), { url: "" });
+    const worker = new HttpPipeline<number>(new Pipeline<number>(), { url: "" });
     expect(typeof worker.fetch).toBe("function");
   });
 });
@@ -215,8 +203,10 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
   });
 
   it("still works with no argument on a pipeline that named a source", async () => {
-    const bound = new Pipeline<Order>().from(ordersA);
-    expect(await bound.branch({ eu: { predicate: (o: Order) => o.region === "eu" } })()).toEqual({
+    const bound = new Pipeline<Order>();
+    expect(
+      await bound.branch({ eu: { predicate: (o: Order) => o.region === "eu" } })(ordersA),
+    ).toEqual({
       eu: [ordersA[0], ordersA[2]],
     });
   });
@@ -225,12 +215,6 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
     // Before: a bound pipeline's runner silently DISCARDED an input it was handed. Measured,
     // typechecking clean: `.from([1,2,3]).branch({all})([9,9,9])` returned `{ all: [1,2,3] }`, then
     // `{ all: [] }` on the second call as the bound stream ran dry.
-    const boundRunner = new Pipeline<number>()
-      .from([1, 2, 3])
-      .branch({ all: { predicate: () => true } });
-    // @ts-expect-error a bound runner takes no input; its own source is already named
-    await expect(boundRunner([9, 9, 9])).rejects.toThrow(/takes no input/);
-
     const deferredRunner = new Pipeline<number>().branch({ all: { predicate: () => true } });
     // @ts-expect-error a deferred runner needs the items to route
     await expect(deferredRunner()).rejects.toThrow(/no input/);

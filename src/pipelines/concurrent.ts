@@ -407,7 +407,7 @@ export class ConcurrentPipeline<T, M extends "async" = "async", In = T> extends 
    *
    * `new ConcurrentPipeline().from([1, 2, 3])` → `ConcurrentPipeline<number, "async">`.
    */
-  override from<U>(data: PipelineSource<U>): ConcurrentPipeline<U, M> {
+  protected override bind<U>(data: PipelineSource<U>): ConcurrentPipeline<U, M> {
     // `In` becomes `U` here, not the receiver's own: `.from()` BINDS an input, so whatever the
     // chain accepted before is spent. Every other override carries `In` through unchanged.
     return this.fromSource<U>(data, "async") as unknown as ConcurrentPipeline<U, M>;

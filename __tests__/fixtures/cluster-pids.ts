@@ -9,10 +9,10 @@ import { ClusterPipeline } from "../../src";
 const workers = 3;
 const items = Array.from({ length: 30 }, (_, i) => i);
 
-const pids = await new ClusterPipeline({ workers, maxConcurrency: workers })
-  .from(items)
+const pids = await new ClusterPipeline<number>({ workers, maxConcurrency: workers })
+
   .buffer(1)
-  .transform((t) => t.map((_x: number) => process.pid))
+  .transform((t) => t.map((_x: number) => process.pid))(items)
   .toArray();
 
 console.log(JSON.stringify({ distinctPids: [...new Set(pids)].length, workers }));
