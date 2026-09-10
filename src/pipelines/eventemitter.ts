@@ -124,22 +124,22 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   /**
    * Narrows the static return type, same as `transform()` above, AND wraps the dispatched stage's
    * own output chunk stream so `stage:<n>:end` fires once, after every chunk that stage's fan-out
-   * produced has been yielded (Done-when 9, 10). `stageIndex` is computed identically to how
-   * `ConcurrentPipeline.apply()` computes it internally (`this._chunkTransforms.length`, read
-   * before `super.apply()` runs), so the event name here always matches the one `stageWork()`
-   * dispatches under.
+   * produced has been yielded (Done-when 9, 10). `stageIndex` is read OFF THE RESULT
+   * (`dispatched._chunkTransforms.length - 1`, the slot `super.apply()` just appended), never
+   * re-derived by independently repeating `ConcurrentPipeline.apply()`'s own internal computation -
+   * so this stays correct even if that computation ever changes, with nothing to keep in sync by
+   * hand.
    *
    * A still-deferred result (no source bound yet) is returned unwrapped: `super.apply()` itself
    * only RECORDED this call, to replay later against a bound instance - where this method runs
    * again, and wraps for real.
    */
   override apply<U>(transformer: Transformer<T, U, "sync" | "async">): EventEmitterPipeline<U, In> {
-    const stageIndex = this._chunkTransforms.length;
     const dispatched = super.apply(transformer) as EventEmitterPipeline<U, In>;
     if (dispatched.isDeferred()) return dispatched;
 
     const emitter = this.emitter;
-    const eventName = `stage:${stageIndex}`;
+    const eventName = `stage:${dispatched._chunkTransforms.length - 1}`;
     const source = dispatched._chunks;
     dispatched._chunks = withEndSignal(source, () => emitter.emit(`${eventName}:end`));
     return dispatched;
@@ -172,12 +172,14 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * `_registeredStages` (a `Set`, carried BY REFERENCE through `createPipeline()`) is what makes
    * this a once-EVER registration rather than once per bound call, since `stageWork()` itself
    * replays on every call (Done-when 3). Dispatch reads `emitter.listeners(eventName)` itself and
-   * calls each directly, wrapped in `Promise.resolve(...).catch(...)`, never `emitter.emit()` -
-   * `emit()` cannot catch a Worker's throw after its own `await` (Done-when 6). Every registered
-   * Worker runs on every chunk; the first to SETTLE, `respond()` or `reject()`, decides it
-   * (Done-when 4) - a native `Promise`'s own idempotence makes every later settle on the same
-   * dispatch a no-op, guarded again here (`settled`) so the LIFECYCLE events stay exactly-once too.
-   * No listener at all rejects immediately, naming the stage (Done-when 7).
+   * calls each directly INSIDE a `try`, wrapped in `Promise.resolve(...).catch(...)`, never
+   * `emitter.emit()` - `emit()` cannot catch a Worker's throw after its own `await` (Done-when 6),
+   * and the `try` is what stops a Worker's SYNCHRONOUS throw aborting the loop before every later
+   * Worker has had its turn. Every registered Worker runs on every chunk; the first to SETTLE,
+   * `respond()` or `reject()`, decides it (Done-when 4) - a native `Promise`'s own idempotence makes
+   * every later settle on the same dispatch a no-op, guarded again here (`settled`) so the LIFECYCLE
+   * events stay exactly-once too. No listener at all rejects immediately, naming the stage
+   * (Done-when 7).
    *
    * `stageWork(transformer, 0)` returns a function that, called with `([1,2], ctx)`, emits
    * `stage:0:dispatched`, runs every registered Worker, and settles with whichever responds or
@@ -190,16 +192,11 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const eventName = `stage:${stageIndex}`;
     if (!this._registeredStages.has(eventName)) {
       const runnable = transformer.runnable();
+      // A synchronous throw here (no Transformer.onError() row handler registered) is caught by
+      // the dispatch loop's own try/catch below, the same as any external Worker's - this listener
+      // needs no guard of its own.
       this.emitter.on(eventName, (event: WorkEvent<T, U>) => {
-        try {
-          Promise.resolve(runnable(event.chunk, event.ctx)).then(event.respond, event.reject);
-        } catch (error) {
-          // A row's own SYNCHRONOUS throw (no Transformer.onError() row handler registered)
-          // reaches here before Promise.resolve ever wraps it - converted to a normal reject()
-          // call so it still emits stage:<n>:error and goes through the same settle-once guard as
-          // every other failure, rather than only the Promise executor's own automatic catch.
-          event.reject(error);
-        }
+        Promise.resolve(runnable(event.chunk, event.ctx)).then(event.respond, event.reject);
       });
       this._registeredStages.add(eventName);
     }
@@ -209,18 +206,21 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       new Promise<U[]>((resolve, reject) => {
         emitter.emit(`${eventName}:dispatched`, { chunk, ctx });
 
+        // Settles the REAL dispatch first, unconditionally - a `:done`/`:error` lifecycle listener
+        // that itself throws (emitSafely, below) can then never leave this Promise hanging, only
+        // ever surface as its OWN separate, later failure.
         let settled = false;
         const respond = (value: U[]): void => {
           if (settled) return;
           settled = true;
-          emitter.emit(`${eventName}:done`, { chunk: value, ctx });
           resolve(value);
+          emitSafely(emitter, `${eventName}:done`, { chunk: value, ctx });
         };
         const doReject = (error: unknown): void => {
           if (settled) return;
           settled = true;
-          emitter.emit(`${eventName}:error`, { error, ctx });
           reject(error instanceof Error ? error : new Error(String(error)));
+          emitSafely(emitter, `${eventName}:error`, { error, ctx });
         };
 
         const listeners = emitter.listeners(eventName);
@@ -229,9 +229,21 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           return;
         }
         for (const fn of listeners) {
-          Promise.resolve(
-            (fn as (event: WorkEvent<T, U>) => unknown)({ chunk, ctx, respond, reject: doReject }),
-          ).catch(doReject);
+          try {
+            Promise.resolve(
+              (fn as (event: WorkEvent<T, U>) => unknown)({
+                chunk,
+                ctx,
+                respond,
+                reject: doReject,
+              }),
+            ).catch(doReject);
+          } catch (error) {
+            // The Worker threw SYNCHRONOUSLY, before Promise.resolve ever wrapped it - caught here
+            // so it settles like any other failure instead of aborting the loop and skipping every
+            // Worker registered after this one.
+            doReject(error);
+          }
         }
       });
   }
@@ -285,5 +297,22 @@ async function* withEndSignal<V>(source: AsyncIterable<V>, onEnd: () => void): A
     yield* source;
   } finally {
     onEnd();
+  }
+}
+
+/**
+ * Emits a lifecycle event, and if a caller's own listener on it throws, surfaces that as its own
+ * separate uncaught exception on the next microtask rather than letting it escape the `.then()`
+ * callback `respond()`/`doReject()` run inside (`stageWork()`, above) - that path has no downstream
+ * `.catch()`, so an unguarded throw there becomes a silent `unhandledRejection` instead of a loud
+ * failure naming the listener that caused it.
+ */
+function emitSafely(emitter: PipelineEmitter, event: string, payload?: unknown): void {
+  try {
+    emitter.emit(event, payload);
+  } catch (error) {
+    queueMicrotask(() => {
+      throw error;
+    });
   }
 }
