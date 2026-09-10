@@ -12,10 +12,24 @@
  * iteration.
  */
 
-import type { AnyPipeline } from "./pipeline";
+import type { AnyPipeline, Pipeline } from "./pipeline";
+import type { PipelineMode, SourcePolicy } from "./types";
 
 /** The record a builder's arms produce, read off the builder the caller's callback returned. */
-export type ResultsOf<B> = B extends BranchBuilder<any, infer R> ? { [K in keyof R]: R[K] } : never;
+export type ResultsOf<B> =
+  B extends BranchBuilder<any, infer R, any> ? { [K in keyof R]: R[K] } : never;
+
+/** The Mode a builder's arms join to: `"async"` the moment ONE arm is, because the runtime widens
+ * the whole record rather than one key. Read off the builder alongside `ResultsOf`. */
+export type ModeOfArms<B> = B extends BranchBuilder<any, any, infer AM> ? AM : never;
+
+/** The Mode two arms join to: `"async"` the moment either is, since the runtime widens the whole
+ * record rather than one key. `"unset"` is an arm that names no pipeline, or one still undecided. */
+export type JoinArmMode<A extends PipelineMode, B extends PipelineMode> = A extends "async"
+  ? "async"
+  : B extends "async"
+    ? "async"
+    : "unset";
 
 /** One arm, as the builder collects it. `build` absent means the arm routes only and its items pass
  * through unchanged - the friction `.transform()` never had, since it takes a builder (#87). */
@@ -34,7 +48,7 @@ export interface BranchArm<T> {
  * `b.when("big", (o) => o.total > 200, (p) => p.transform(...)).otherwise("rest")` gives two arms,
  * routed in that order, with `rest` taking whatever `big` did not.
  */
-export class BranchBuilder<T, R = Record<never, never>> {
+export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode = "unset"> {
   private readonly _arms: BranchArm<T>[] = [];
   private _broadcast = false;
 
@@ -48,29 +62,33 @@ export class BranchBuilder<T, R = Record<never, never>> {
    * `.when("big", (o) => o.total > 200, (p) => p.transform((t) => t.map((o) => o.id)))` sends the
    * big orders through their own stage and yields their ids.
    */
-  when<K extends string, U = T>(
+  when<K extends string, U = T, M2 extends PipelineMode = "unset">(
     name: K,
     predicate: (item: T) => boolean,
-    build?: (pipeline: AnyPipeline<T>) => AnyPipeline<U>,
-  ): BranchBuilder<T, R & Record<K, U[]>> {
+    build?: (pipeline: Pipeline<T, "unset", "shape", T>) => Pipeline<U, M2, SourcePolicy, any>,
+  ): BranchBuilder<T, R & Record<K, U[]>, JoinArmMode<AM, M2>> {
     this.claim(name);
     this._arms.push({ name, predicate, build: build as BranchArm<T>["build"] });
-    return this as unknown as BranchBuilder<T, R & Record<K, U[]>>;
+    return this as unknown as BranchBuilder<T, R & Record<K, U[]>, JoinArmMode<AM, M2>>;
   }
 
   /**
-   * The catch-all: every item no earlier arm claimed. Always routed last, whatever order it was
-   * written in, so a catch-all written first cannot silently swallow the arms below it - which is
-   * exactly what `predicate: () => true` declared first used to do.
+   * The catch-all, routed last whatever order it was written in - so one written first cannot
+   * silently swallow the arms below it, which is exactly what `predicate: () => true` declared
+   * first used to do.
+   *
+   * Under router mode (the default) it takes every item no earlier arm claimed. Under
+   * `.broadcast()` it takes EVERY item, because broadcast means every matching arm and its
+   * predicate accepts all of them.
    *
    * @example
    * `.otherwise("rest", (p) => p.transform((t) => t.map((o) => o.id)))` collects the unmatched
    * orders and yields their ids.
    */
-  otherwise<K extends string, U = T>(
+  otherwise<K extends string, U = T, M2 extends PipelineMode = "unset">(
     name: K,
-    build?: (pipeline: AnyPipeline<T>) => AnyPipeline<U>,
-  ): BranchBuilder<T, R & Record<K, U[]>> {
+    build?: (pipeline: Pipeline<T, "unset", "shape", T>) => Pipeline<U, M2, SourcePolicy, any>,
+  ): BranchBuilder<T, R & Record<K, U[]>, JoinArmMode<AM, M2>> {
     this.claim(name);
     if (this._arms.some((arm) => arm.isCatchAll)) {
       throw new Error(`.otherwise() is already declared as "${this.catchAllName()}"`);
@@ -81,7 +99,7 @@ export class BranchBuilder<T, R = Record<never, never>> {
       build: build as BranchArm<T>["build"],
       isCatchAll: true,
     });
-    return this as unknown as BranchBuilder<T, R & Record<K, U[]>>;
+    return this as unknown as BranchBuilder<T, R & Record<K, U[]>, JoinArmMode<AM, M2>>;
   }
 
   /**
@@ -91,7 +109,7 @@ export class BranchBuilder<T, R = Record<never, never>> {
    * @example
    * `.when("eu", isEu).when("big", isBig).broadcast()` puts a big EU order in both arms.
    */
-  broadcast(): BranchBuilder<T, R> {
+  broadcast(): BranchBuilder<T, R, AM> {
     this._broadcast = true;
     return this;
   }
@@ -99,6 +117,9 @@ export class BranchBuilder<T, R = Record<never, never>> {
   /** The record this builder's arms produce - each key typed by its OWN arm, accumulated as
    * `.when()`/`.otherwise()` are called. Never inhabited; `.branch()` reads it with `infer`. */
   declare readonly results: R;
+
+  /** The joined Mode of every arm. Never inhabited; `.branch()` reads it with `infer`. */
+  declare readonly armMode: AM;
 
   /** The arms in routing order - declaration order, with the catch-all moved last. Read once by
    * `.branch()` after the caller's builder returns. */
@@ -119,6 +140,14 @@ export class BranchBuilder<T, R = Record<never, never>> {
   private claim(name: string): void {
     if (this._arms.some((arm) => arm.name === name)) {
       throw new Error(`branch "${name}" is already declared in this .branch() call`);
+    }
+    // The name goes straight into a route - `/branch/<i>/<name>/transform/<n>` - and `.fetch()`
+    // matches against an ENCODED pathname, so anything needing encoding never resolves. Measured:
+    // `.when("big orders", …)` dispatched `/branch/0/big%20orders/transform/0` and 404'd.
+    if (!/^[A-Za-z0-9_.~-]+$/.test(name)) {
+      throw new Error(
+        `branch "${name}" is not usable in a route - use letters, digits, and any of _ . ~ -`,
+      );
     }
   }
 

@@ -309,7 +309,7 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
     const requested = match ? Number(match[2]) : NaN;
 
     if (verb === "reduce") {
-      return this.serveReduceRequest(requested, request);
+      return this.serveReduceRequest(requested, request, trail ? `/${trail[1]}` : null);
     }
 
     // A path that is not a stage route is answered before anything else runs. `registries()` below
@@ -369,10 +369,20 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    * The response streams (`TransformStream`) so an emit reaches the caller as it happens - the
    * whole point of `toNodeHandler` actually delivering bytes before the handler returns.
    */
-  private async serveReduceRequest(index: number, request: Request): Promise<Response> {
+  private async serveReduceRequest(
+    index: number,
+    request: Request,
+    trail: string | null,
+  ): Promise<Response> {
     // `registries()` for the same reason `fetch` above uses it (#90): a worker's reduce stages are
-    // recorded calls until something replays them.
-    const { reduceStages } = this.registries();
+    // recorded calls until something replays them. A `/branch/<i>/<name>/` trail resolves into the
+    // ARM's own registry - reading the parent's instead 404s when the parent has no reduce, and
+    // silently serves the parent's own fold when it does.
+    const resolved = trail !== null ? this.registriesFor(trail) : this.registries();
+    if (resolved === null) {
+      return Response.json({ error: `unknown branch route ${trail}` }, { status: 404 });
+    }
+    const { reduceStages } = resolved;
     const stage = reduceStages.get(index);
     if (!stage) {
       const known = [...reduceStages.keys()].join(",") || "none";

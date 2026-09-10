@@ -15,7 +15,14 @@ import { Pipeline } from "@src/pipeline";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
 import { ClusterPipeline } from "@src/pipelines/cluster";
-import { withServer, HTTP_TIMEOUT } from "./helpers/fixtures";
+import {
+  withServer,
+  HTTP_TIMEOUT,
+  FIXTURE_TIMEOUT,
+  runFixture,
+  expectFixtureOk,
+  lastJsonLine,
+} from "./helpers/fixtures";
 import { createHook } from "node:async_hooks";
 
 /** Every `Promise` created while `fn` runs - the same instrument the sync-mode suite uses. */
@@ -588,5 +595,101 @@ describe(".branch() is a stage whose arms run where the chain runs (#90 L11)", (
     expect(() => withVat.branch((b) => b.otherwise("x").otherwise("y"))).toThrow(
       /already declared as "x"/,
     );
+  });
+});
+
+describe("L11 review findings, each reproduced before it was fixed", () => {
+  type Order = { id: number; total: number; region: string };
+
+  const orders: Order[] = [
+    { id: 1, total: 50, region: "eu" },
+    { id: 2, total: 300, region: "us" },
+    { id: 3, total: 120, region: "eu" },
+    { id: 4, total: 900, region: "us" },
+  ];
+
+  const withVat = new Pipeline<Order>().transform((t) =>
+    t.map((o) => ({ ...o, total: Math.round(o.total * 1.2) })),
+  );
+
+  it(
+    "branches on a ClusterPipeline without an arm clobbering its own parent",
+    async () => {
+      // An arm's pipeline carried the parent's `pipelineIndex`, and every ClusterPipeline
+      // constructor claims that registry slot - so a worker's own `.branch()` call overwrote
+      // `registry.get(0)` with a stage-less arm clone at module load, and the primary's
+      // `/pipeline/0/transform/0` was then served the arm's stage table. Measured before the fix:
+      // `{"rest":["REST:undefined","REST:undefined"]}`.
+      const fixture = await runFixture("__tests__/fixtures/cluster-branch.ts");
+      expectFixtureOk(fixture);
+      expect(lastJsonLine(fixture)).toEqual({ big: ["BIG:2", "BIG:3"], rest: ["REST:1"] });
+    },
+    FIXTURE_TIMEOUT,
+  );
+
+  it(
+    "resolves a .reduce() inside an arm against that arm's own registry",
+    async () => {
+      // `serveReduceRequest` read the PARENT's `_reduceStages`, ignoring the branch trail: a 404
+      // when the parent has no reduce, and silently the parent's own fold when it does.
+      const declare = (p: HttpPipeline<Order, "async", Order>) =>
+        p.branch((b) =>
+          b.when(
+            "big",
+            (o) => o.total > 200,
+            (q) => q.reduce((acc: number, o: Order) => acc + o.total, 0),
+          ),
+        );
+
+      const worker = new HttpPipeline(withVat, { url: "" });
+      declare(worker);
+
+      const value = await withServer(worker.fetch, async (url) =>
+        declare(new HttpPipeline(withVat, { url }))(orders),
+      );
+      // 360 + 1080, folded on the worker under the arm's own reduce route.
+      expect(value).toEqual({ big: [1440] });
+    },
+    HTTP_TIMEOUT,
+  );
+
+  it("types the record on the ARMS' Mode, not the chain's alone", async () => {
+    // The runtime widens the whole record when any arm is pending, which Done-when 23 asserts. The
+    // type denied it, so `split(x).big` compiled clean and was `undefined` at runtime.
+    const split = withVat.branch((b) =>
+      b.when(
+        "big",
+        (o) => o.total > 200,
+        (q) => q.transform((t) => t.map(async (o) => o.id)),
+      ),
+    );
+    const out = split(orders);
+    expect(typeof (out as unknown as { then?: unknown }).then).toBe("function");
+    expect(await out).toEqual({ big: [2, 4] });
+  });
+
+  it("refuses an arm name that could not survive a route", () => {
+    // The name goes straight into `/branch/<i>/<name>/transform/<n>`, and `.fetch()` matches an
+    // ENCODED pathname - so `.when("big orders", …)` dispatched `/branch/0/big%20orders/…` and 404'd.
+    expect(() => withVat.branch((b) => b.when("big orders", () => true))).toThrow(
+      /not usable in a route/,
+    );
+    expect(() => withVat.branch((b) => b.when("a/b", () => true))).toThrow(/not usable in a route/);
+    expect(() => withVat.branch((b) => b.when("big-orders_2.v~1", () => true))).not.toThrow();
+  });
+
+  it("gives the catch-all every item under broadcast, not only the unclaimed ones", () => {
+    // The docstring claimed "every item no earlier arm claimed", which holds only in router mode:
+    // broadcast means every MATCHING arm, and a catch-all's predicate accepts all of them.
+    const routerMode = withVat.branch((b) => b.when("big", (o) => o.total > 200).otherwise("rest"));
+    expect(routerMode(orders).rest.map((o) => o.id)).toEqual([1, 3]);
+
+    const broadcastMode = withVat.branch((b) =>
+      b
+        .when("big", (o) => o.total > 200)
+        .otherwise("rest")
+        .broadcast(),
+    );
+    expect(broadcastMode(orders).rest.map((o) => o.id)).toEqual([1, 2, 3, 4]);
   });
 });

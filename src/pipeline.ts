@@ -46,7 +46,7 @@ import {
 } from "./utils/chunk";
 import { chain, isThenable, dropOrRethrow, settleMaybe } from "./utils/helpers";
 import { PipelineResult } from "./result";
-import { BranchBuilder, type ResultsOf, type BranchArm } from "./branch";
+import { BranchBuilder, type ResultsOf, type ModeOfArms, type BranchArm } from "./branch";
 import { foldChunkStream, foldSyncChunkStream } from "./utils/reduce";
 
 /** The chunk stream a `Pipeline` that has no source yet carries - `.from()` is what replaces it.
@@ -427,6 +427,12 @@ export class Pipeline<
   protected _routeTrail!: string;
   /** Every `.branch()` stage's arms, by branch index - see `PipelineOptions.branchStages`. */
   protected _branchStages!: Map<number, BranchArm<unknown>[]>;
+  /** `registriesFor`'s memo, by trail - built on first serve, the same way `registries()` memoises
+   * its own. Never carried through copy-on-write; the next instance's arms are its own. */
+  protected _armRegistries?: Map<
+    string,
+    { chunkTransforms: ChunkTransform[]; reduceStages: Map<number, ReduceStage> }
+  >;
   /** Whether an input has been bound to this chain - see `PipelineOptions.bound`. */
   protected _bound!: boolean;
   /** `registries()`'s memo - built on first serve, never carried through copy-on-write, since the
@@ -742,10 +748,15 @@ export class Pipeline<
     const arms = this._branchStages.get(Number(match[1]));
     const arm = arms?.find((candidate) => candidate.name === match[2]);
     if (!arm?.build) return null;
+    const memo = (this._armRegistries ??= new Map());
+    const cached = memo.get(trail);
+    if (cached !== undefined) return cached;
     const armPipeline = arm.build(
       this.emptyOfOwnClass<unknown>(this._context, trail) as AnyPipeline<unknown>,
     ) as AnyPipeline<unknown>;
-    return armPipeline.registries();
+    const built = armPipeline.registries();
+    memo.set(trail, built);
+    return built;
   }
 
   protected registries(): {
@@ -1418,9 +1429,9 @@ export class Pipeline<
    *   becomes `await p.branch({…})()`; awaiting the runner alone yields the function.
    *   Read context via `.contextManager` afterward if needed (#744).
    */
-  branch<B extends BranchBuilder<T, any>>(
+  branch<B extends BranchBuilder<T, any, any>>(
     build: (builder: BranchBuilder<T>) => B,
-  ): BranchRunner<In, ResultsOf<B>, M> {
+  ): BranchRunner<In, ResultsOf<B>, JoinMode<M, ModeOfArms<B>>> {
     const builder = build(new BranchBuilder<T>());
     const arms = builder.arms();
     const broadcast = builder.isBroadcast();
@@ -1467,8 +1478,11 @@ export class Pipeline<
           const armPipeline = owner.emptyOfOwnClass<T>(
             context,
             `/branch/${branchIndex}/${arm.name}`,
-          );
-          return arm.build(armPipeline)(armItems).toArray() as unknown[] | Promise<unknown[]>;
+          ) as unknown as Pipeline<T, "unset", "shape", T>;
+          const builtArm = arm.build(armPipeline) as unknown as (i: T[]) => {
+            toArray(): unknown[] | Promise<unknown[]>;
+          };
+          return builtArm(armItems).toArray();
         });
 
         // JOIN - a plain record unless at least one arm is pending, and then only those are
@@ -1480,7 +1494,7 @@ export class Pipeline<
       }) as BranchResults | Promise<BranchResults>;
     };
 
-    return run as BranchRunner<In, ResultsOf<B>, M>;
+    return run as BranchRunner<In, ResultsOf<B>, JoinMode<M, ModeOfArms<B>>>;
   }
 
   /**

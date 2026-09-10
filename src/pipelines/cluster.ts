@@ -179,7 +179,13 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
     super({ ...options, url: "" });
     this.workers = options?.workers ?? availableParallelism();
     this.pipelineIndex = options?.pipelineIndex ?? nextPipelineIndex++;
-    registry.set(this.pipelineIndex, this as ClusterPipeline<unknown>);
+    // Only a chain's OWN pipeline claims a registry slot. A `.branch()` arm carries a route trail
+    // and is reached THROUGH its parent's route, so registering it would overwrite the parent at
+    // the same `pipelineIndex` - measured, the primary's `/pipeline/0/transform/0` was then served
+    // by the arm's stage table, and the run returned `REST:undefined` rather than failing.
+    if (this._routeTrail === "") {
+      registry.set(this.pipelineIndex, this as ClusterPipeline<unknown>);
+    }
 
     // architecture.md's own constraint: a WORKER process's terminal op must resolve immediately
     // with an EMPTY result - the worker exists to hold the transforms (registered by the
