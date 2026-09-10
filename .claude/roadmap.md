@@ -9,15 +9,20 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **A synchronous fast path for an all-sync `Pipeline` chain** (#90) - `.map()`/`.filter()` always
-  run `Promise.all`, and a plain in-memory array is always converted to an `AsyncIterable` at item
-  granularity before any stage runs - measured at ~430 ns/row against a plain `Array.prototype`
-  chain's ~20 ns/row, most of the gap paid before any stage even runs. Now, because a hand-written
-  engine of plain generators over the identical chain measured ~35-46 ns/row - about 90% of the gap
-  recoverable. `new Pipeline(options?)` drops the `data` argument (BREAKING); `.from(source)`
-  attaches it and infers whether the chain runs synchronously (a plain `Iterable`) or asynchronously
-  (an `AsyncIterable`), widening automatically the first time an async function or async source
-  appears. `.branch()` is out of scope, blocked conceptually by #87's own signature redesign.
+- **Simplify `@outputty/pipeline`: reused patterns, smaller units, simpler types** (#133) - `src/`
+  reached 5626 lines and `__tests__/` 5200 through nine tickets landing one behind another, each
+  adding its own seam with no pass back over the whole tree - the same shape written more than once
+  in several places (the sync/async engine fork in `pipeline.ts` spelled out four times, four
+  `Pipeline` subclasses - including `EventEmitterPipeline`, shipped mid-planning by #124 with the
+  identical pattern - each hand-copying their own knobs into a fresh `createPipeline()` override),
+  exactly the duplication shape that produced #113's own `pipelineIndex` collision bug. Now, because
+  #90 already answered this for `Pipeline` itself (split into `pipeline.ts`/`result.ts`/`branch.ts`)
+  and this applies the same treatment to what #90 left behind: `chunk.ts` splits into three files
+  along its own real seams, `ClusterPipeline`'s module-level bootstrap state becomes a `WorkerSet`
+  class, and ~40 anchored duplication findings collapse behind shared types (`Drainable<T>`,
+  `StageRegistries`, `ReduceWork<T,U>`) and helpers. No numeric complexity/line-count gate - the
+  stopping criterion is `/code-review medium`'s own reuse/simplification/efficiency dimension
+  returning zero findings per module, `.oxlintrc.json:34-36` having already rejected a numeric one.
 - **The node: import boundary as an oxlint rule** (#117) - `architecture.md`'s own stack diagram draws
   `node:cluster`/`node:http` as scoped to `ClusterPipeline`/`HttpPipeline` only, and nothing has ever
   checked it - the same shape `outputty/laygo` already mechanizes as six `no-restricted-imports`
@@ -315,6 +320,12 @@ The two older candidates, still not filed:
 
 ## Killed
 
+- **A numeric complexity/line-count lint gate** (predates any ticket, `.oxlintrc.json`) -
+  `max-lines-per-function`/`complexity`/`max-params` are deliberately not enabled, per the config's
+  own comment: "unit size is an architectural question, not a numeric cap." Planning #133 (the
+  codebase-wide simplification sweep) considered reviving one as a mechanized stopping criterion and
+  rejected it for the same reason - a review-judgment gate (`/code-review`'s own
+  reuse/simplification/efficiency dimension, run to zero findings) is the stopping criterion instead.
 - **A `Runner` class that takes a built pipeline** (#90, PR #99, closed) - `ConcurrentRunner`,
   `HttpRunner` and `ClusterRunner`, each running a pipeline through `run(pipeline)`. It forced
   `new HttpRunner({ url }, pipeline).run(pipeline)` for the one class that must mount a server
