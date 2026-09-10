@@ -264,6 +264,9 @@ export interface TransformerOptions<In, Out> {
  * before this. `ChunkTransform`/`ReduceStage` live here rather than in `pipeline.ts` because this
  * type, like `ReduceWork` below, is shared across `pipeline.ts` and every `pipelines/*.ts` dispatch
  * override.
+ *
+ * `{ chunkTransforms: [mapStage, filterStage], reduceStages: new Map() }` → the table a two-stage
+ * `.transform((t) => t.map(f).filter(g))` chain carries between copy-on-write calls.
  */
 export interface StageRegistries {
   chunkTransforms: ChunkTransform[];
@@ -274,6 +277,8 @@ export interface StageRegistries {
  * A chunk-wise transform function: takes one chunk (array) and produces the next chunk (array),
  * optionally reading/writing the shared context (#17, relocated from `pipeline.ts` by #133 so
  * `StageRegistries` above can reference it with no import cycle).
+ *
+ * `(chunk, ctx) => chunk.map((x) => x * 2)` over `[1, 2, 3]` → `[2, 4, 6]`.
  */
 export type ChunkTransform = (
   chunk: unknown[],
@@ -298,6 +303,9 @@ export interface ReduceStage<U = unknown, T = unknown> {
  * (`pipelines/concurrent.ts`, `http.ts`, `cluster.ts`): the per-class override of WHERE a reduce
  * stage's fold actually runs, called once and returning a closure `ConcurrentPipeline.reduce()`
  * calls `maxConcurrency` times, each its own partition.
+ *
+ * `(chunks, ctx) => foldEachPartition(chunks, ctx)` - the closure `reduceWork()` returns, called
+ * once per partition, each folding its own `share()` view of the one shared chunk stream.
  */
 export type ReduceWork<T, U> = (
   chunks: AsyncIterable<T[]>,
@@ -306,11 +314,16 @@ export type ReduceWork<T, U> = (
 
 /** The two verbs a dispatched stage's route names (#133) - spelled inline 4x across `pipelines/
  * http.ts` and `cluster.ts` before this: `/transform/<n>` for a per-chunk stage, `/reduce/<n>` for a
- * fold. */
+ * fold.
+ *
+ * `"transform"` → the verb in `/transform/0`; `"reduce"` → the verb in `/reduce/0`. */
 export type RouteVerb = "transform" | "reduce";
 
 /** A parsed dispatch route - what `HttpPipeline.fetch()`'s own path-matching produces, and
- * `routePath()` builds the string form of (#133). */
+ * `routePath()` builds the string form of (#133).
+ *
+ * `routePath("transform", 0)` → `"/transform/0"`; parsing it back →
+ * `{ trail: null, verb: "transform", index: 0 }`. */
 export interface StageRoute {
   trail: string | null;
   verb: RouteVerb;
@@ -319,7 +332,10 @@ export interface StageRoute {
 
 /** A value tagged with the id of the partition or source that produced it (#133) - unifies
  * `pipelines/concurrent.ts`'s own `TaggedResult<U>` (`= Tagged<U[]>`) with the inline
- * `{ id: number; result: IteratorResult<U[]> }` shape `share()`'s racer already matched. */
+ * `{ id: number; result: IteratorResult<U[]> }` shape `share()`'s racer already matched.
+ *
+ * `{ id: 2, result: [4, 5, 6] }` → partition 2's own chunk, tagged so `Promise.race` over every
+ * in-flight partition can tell which one just settled. */
 export interface Tagged<R> {
   id: number;
   result: R;
@@ -332,6 +348,9 @@ export interface Tagged<R> {
  * structural subset (`branch.ts`). `items`/`chunks` are THUNKS, not the streams themselves - each
  * terminal calls `Pipeline.drainable()` exactly once and threads the thunk into its own sync/async
  * arm, so building the stream is deferred to whichever arm actually runs.
+ *
+ * `pipeline.drainable([1, 2, 3])` → `{ syncChunks: [[1, 2, 3]], items: () => …, chunks: () => …,
+ * context: <this run's manager> }` for a synchronous chain over an array.
  */
 export interface Drainable<T> {
   syncChunks: MaybeAsyncChunks<T> | null;
