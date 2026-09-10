@@ -12,9 +12,9 @@
  */
 import { SimpleContextManager } from "@src/context/simple";
 
-/** Records every key written, in order - proves a manager handed to `Pipeline`/`Pipeline.merge`
- * survives as the SAME instance and keeps receiving writes, rather than being copied into a fresh
- * `SimpleContextManager` and discarded. */
+/** Records every key written, in order - proves a manager handed to `Pipeline` (via `options.context`
+ * or `.context()`) survives as the SAME instance and keeps receiving writes, rather than being
+ * copied into a fresh `SimpleContextManager` and discarded. */
 export class LoggingContext extends SimpleContextManager {
   readonly writes: string[] = [];
 

@@ -66,7 +66,10 @@ export function closingSource(state: { closed: boolean }, count = 100): Generato
   })();
 }
 
-/** The async twin of `closingSource` - same contract, over `for await`'s own `.return()` path. */
+/** The async twin of `closingSource` - same contract, over `for await`'s own `.return()` path.
+ *
+ * `const state = { closed: false }; await pipeline(closingAsyncSource(state, 3)).first(1)` →
+ * `[0]`, `state.closed` → `true`. */
 export function closingAsyncSource(
   state: { closed: boolean },
   count = 100,

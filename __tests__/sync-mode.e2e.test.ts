@@ -14,7 +14,6 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { createHook } from "node:async_hooks";
 import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { SimpleContextManager } from "@src/context/simple";
@@ -23,33 +22,7 @@ import { buildSyncChunkGenerator } from "@src/utils/chunk";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
 import { ClusterPipeline } from "@src/pipelines/cluster";
-
-/**
- * Counts every `Promise` created while `fn` runs, via `node:async_hooks`'s `PROMISE` resource type.
- *
- * Done-when 3 suggested instrumenting `queueMicrotask`/`process.nextTick` instead. Measured: that
- * patch reports `0` for `Promise.resolve().then(() => {})` and for an `async` function call - V8
- * schedules a promise job without routing it through either global, so the assertion would pass
- * vacuously whatever the engine did. This hook reports `2` and `1` for those same two controls and
- * `0` for plain synchronous array work, which is what the first test below pins.
- *
- * `countPromises(() => [1, 2].map((x) => x * 2))` → `0`.
- */
-function countPromises(fn: () => unknown): number {
-  let created = 0;
-  const hook = createHook({
-    init(_id, type) {
-      if (type === "PROMISE") created++;
-    },
-  });
-  hook.enable();
-  try {
-    fn();
-  } finally {
-    hook.disable();
-  }
-  return created;
-}
+import { countPromises } from "./helpers/sequences";
 
 describe("#90 - a synchronous chain never creates a Promise", () => {
   it("countPromises itself counts real async work and ignores sync work", () => {

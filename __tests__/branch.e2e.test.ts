@@ -3,9 +3,11 @@
  * record (#90). It returns a callable too, and a routing-only arm needs no `Transformer` (#87).
  *
  * Covers #90's Done-when 13, 14 and 18-24, plus the L11 review findings each case below reproduces
- * before its own fix. Moved here verbatim from `wrapping.e2e.test.ts` (#133) - every `describe`/`it`
- * and every `expect` is unchanged; only the file boundary and the shared `Order`/`orders`/`withVat`
- * import (replacing two in-file shadowed re-declarations of the identical values) are new.
+ * before its own fix. Moved here from `wrapping.e2e.test.ts` (#133), every `describe`/`it` and every
+ * `expect` unchanged; later #133 passes then folded this file's own `servedBy`/inline path-recording
+ * onto the shared `withTrackedServer`, and its `runFixture`/`expectFixtureOk` pairs onto
+ * `runFixtureJson`, on top of the shared `Order`/`orders`/`withVat`/`countPromises` imports
+ * (replacing in-file shadowed re-declarations of the identical values).
  */
 
 import { describe, it, expect } from "vitest";
