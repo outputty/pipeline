@@ -13,7 +13,7 @@
  * the SLOWER, losing composed-function promise never leaks as unhandled once it resolves later.
  */
 import { EventEmitterPipeline } from "../../src";
-import { drainUnhandledRejections } from "./unhandled-rejection";
+import { drainUnhandledRejections, errorMessage, runFixtureMain } from "./unhandled-rejection";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -37,14 +37,11 @@ async function main(): Promise<void> {
   try {
     await pipeline([1, 2, 3]).toArray();
   } catch (error) {
-    rejection = error instanceof Error ? error.message : String(error);
+    rejection = errorMessage(error);
   }
 
   const unhandled = await drainUnhandledRejections(60);
   console.log(JSON.stringify({ rejection, unhandled }));
 }
 
-main().catch((error: unknown) => {
-  console.log(`FATAL ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
-});
+runFixtureMain(main);

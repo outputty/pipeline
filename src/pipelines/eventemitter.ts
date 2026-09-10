@@ -202,12 +202,21 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     }
 
     const emitter = this.emitter;
+    // Computed once per stage (not once per chunk) - stageWork() itself already replays on every
+    // bound call, but the string never varies across a single such call's own dispatches.
+    const dispatchedEvent = `${eventName}:dispatched`;
+    const doneEvent = `${eventName}:done`;
+    const errorEvent = `${eventName}:error`;
     return (chunk, ctx) =>
       new Promise<U[]>((resolve, reject) => {
         // Every lifecycle emit, `:dispatched` included, goes through `emitSafely` - a throwing
         // observer on ANY of them surfaces as its own separate uncaught exception, never silently
-        // absorbed as if it were a Worker's own failure and never masking a real one.
-        emitSafely(emitter, `${eventName}:dispatched`, { chunk, ctx });
+        // absorbed as if it were a Worker's own failure and never masking a real one. Guarded by
+        // `listenerCount()` - the payload is only built, and `emit()` only called, when something
+        // is actually registered to observe it.
+        if (emitter.listenerCount(dispatchedEvent) > 0) {
+          emitSafely(emitter, dispatchedEvent, { chunk, ctx });
+        }
 
         // ONE settle path for both outcomes - settles the REAL dispatch first, unconditionally,
         // THEN emits the matching lifecycle event, so a throwing `:done`/`:error` listener can
@@ -220,12 +229,16 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           settled = true;
           if (outcome.ok) {
             resolve(outcome.value);
-            emitSafely(emitter, `${eventName}:done`, { chunk: outcome.value, ctx });
+            if (emitter.listenerCount(doneEvent) > 0) {
+              emitSafely(emitter, doneEvent, { chunk: outcome.value, ctx });
+            }
           } else {
             reject(
               outcome.error instanceof Error ? outcome.error : new Error(String(outcome.error)),
             );
-            emitSafely(emitter, `${eventName}:error`, { error: outcome.error, ctx });
+            if (emitter.listenerCount(errorEvent) > 0) {
+              emitSafely(emitter, errorEvent, { error: outcome.error, ctx });
+            }
           }
         };
         const respond = (value: U[]): void => settle({ ok: true, value });
@@ -236,16 +249,12 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           doReject(new Error(`no worker registered on stage ${stageIndex} (${eventName})`));
           return;
         }
+        // One event object for every listener on this dispatch - none of its fields vary per
+        // listener, so building it once outside the loop saves a redundant allocation per Worker.
+        const event: WorkEvent<T, U> = { chunk, ctx, respond, reject: doReject };
         for (const fn of listeners) {
           try {
-            Promise.resolve(
-              (fn as (event: WorkEvent<T, U>) => unknown)({
-                chunk,
-                ctx,
-                respond,
-                reject: doReject,
-              }),
-            ).catch(doReject);
+            Promise.resolve((fn as (event: WorkEvent<T, U>) => unknown)(event)).catch(doReject);
           } catch (error) {
             // The Worker threw SYNCHRONOUSLY, before Promise.resolve ever wrapped it - caught here
             // so it settles like any other failure instead of aborting the loop and skipping every

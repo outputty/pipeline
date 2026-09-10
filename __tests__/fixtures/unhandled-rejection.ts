@@ -1,14 +1,20 @@
 /**
- * Captures every `unhandledRejection` this process sees, for a subprocess fixture proving a chunk
- * failure never leaks one - `concurrent-unhandled.ts` (#17) and `eventemitter-async-throw.ts` (#124)
- * both need it, extracted here rather than duplicated a second time. Never imports Vitest: a
- * fixture script runs as its OWN process specifically to escape Vitest's own `unhandledRejection`
- * handler, so this module must stay free of that import too.
+ * Captures every `unhandledRejection`/`uncaughtException` this process sees, for a subprocess
+ * fixture proving a chunk failure never leaks one - `concurrent-unhandled.ts` (#17) and
+ * `eventemitter-async-throw.ts`/`eventemitter-throwing-observers.ts` (#124) all need it, extracted
+ * here rather than duplicated a second time. Never imports Vitest: a fixture script runs as its OWN
+ * process specifically to escape Vitest's own handlers, so this module must stay free of that
+ * import too.
  */
 
 const unhandled: string[] = [];
 process.on("unhandledRejection", (reason) => {
   unhandled.push(String((reason as Error)?.message ?? reason));
+});
+
+const uncaughtExceptions: string[] = [];
+process.on("uncaughtException", (error) => {
+  uncaughtExceptions.push(errorMessage(error));
 });
 
 /**
@@ -23,4 +29,33 @@ export async function drainUnhandledRejections(settleMs = 20): Promise<string[]>
   const seen = [...unhandled];
   unhandled.length = 0;
   return seen;
+}
+
+/** The `uncaughtException` sibling of `drainUnhandledRejections()` -
+ * `eventemitter-throwing-observers.ts` (#124) needs it for a throwing lifecycle observer's own
+ * `emitSafely()`-scheduled rethrow, which surfaces as an uncaught exception, not a rejection. */
+export async function drainUncaughtExceptions(settleMs = 20): Promise<string[]> {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setTimeout(resolve, settleMs));
+  const seen = [...uncaughtExceptions];
+  uncaughtExceptions.length = 0;
+  return seen;
+}
+
+/** `error instanceof Error ? error.message : String(error)` - every fixture script that captures a
+ * caught error's own message needs this. */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Runs a fixture script's own `main()`, reporting an uncaught rejection from it as `FATAL <message>`
+ * on stdout with a non-zero exit code - every subprocess fixture under `__tests__/fixtures/` ends
+ * with this same call. Printing `FATAL ...` (rather than leaving stdout empty) means the calling
+ * test's own exit-code check catches a real fault FIRST, before `JSON.parse` on that line obscures
+ * the real message with a generic `SyntaxError`. */
+export function runFixtureMain(main: () => Promise<void>): void {
+  main().catch((error: unknown) => {
+    console.log(`FATAL ${errorMessage(error)}`);
+    process.exitCode = 1;
+  });
 }

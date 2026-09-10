@@ -7,24 +7,25 @@
  * handler would report as a test-runner error rather than a value this script can observe.
  */
 import { EventEmitterPipeline } from "../../src";
-import { drainUnhandledRejections } from "./unhandled-rejection";
+import {
+  drainUncaughtExceptions,
+  drainUnhandledRejections,
+  errorMessage,
+  runFixtureMain,
+} from "./unhandled-rejection";
 
-const uncaught: string[] = [];
-process.on("uncaughtException", (error) => {
-  uncaught.push(error instanceof Error ? error.message : String(error));
-});
-
-/** A throwing `stage:0:dispatched` listener used to synchronously reject the whole dispatch as if
- * it were a Worker failure - `.onError()` silently absorbed it and `out` came back `[]`. */
-async function dispatchedListenerThrows(): Promise<{
-  out: number[] | null;
-  rejection: string | null;
-}> {
+/** A throwing lifecycle listener on `event` must never corrupt a normal chunk's own result -
+ * `stage:0:dispatched` (F3) and `stage:0:done` (F4) share this identical shape: register a throwing
+ * listener, run the pipeline, confirm the real dispatch settled fine regardless. */
+async function listenerThrows(
+  event: string,
+  throwMessage: string,
+): Promise<{ out: number[] | null; rejection: string | null }> {
   const pipeline = new EventEmitterPipeline<number>()
     .buffer(1)
     .transform((t) => t.map((x: number) => x * 2));
-  pipeline.emitter.on("stage:0:dispatched", () => {
-    throw new Error("observer-boom-on-dispatched");
+  pipeline.emitter.on(event, () => {
+    throw new Error(throwMessage);
   });
 
   let out: number[] | null = null;
@@ -32,28 +33,7 @@ async function dispatchedListenerThrows(): Promise<{
   try {
     out = await pipeline([1, 2, 3]).toArray();
   } catch (error) {
-    rejection = error instanceof Error ? error.message : String(error);
-  }
-  return { out, rejection };
-}
-
-/** A throwing `stage:0:done` listener fired inside the `.then()` callback that settles the real
- * dispatch `Promise` - with no downstream `.catch()`, a raw `emitter.emit()` there would escape as
- * an unhandled rejection instead of settling the chunk and surfacing separately. */
-async function doneListenerThrows(): Promise<{ out: number[] | null; rejection: string | null }> {
-  const pipeline = new EventEmitterPipeline<number>()
-    .buffer(1)
-    .transform((t) => t.map((x: number) => x * 2));
-  pipeline.emitter.on("stage:0:done", () => {
-    throw new Error("observer-boom-on-done");
-  });
-
-  let out: number[] | null = null;
-  let rejection: string | null = null;
-  try {
-    out = await pipeline([1, 2, 3]).toArray();
-  } catch (error) {
-    rejection = error instanceof Error ? error.message : String(error);
+    rejection = errorMessage(error);
   }
   return { out, rejection };
 }
@@ -80,20 +60,18 @@ async function endListenerThrowsOverRealFailure(): Promise<{ rejection: string |
   try {
     await pipeline([1, 2]).toArray();
   } catch (error) {
-    rejection = error instanceof Error ? error.message : String(error);
+    rejection = errorMessage(error);
   }
   return { rejection };
 }
 
 async function main(): Promise<void> {
-  const dispatched = await dispatchedListenerThrows();
-  const done = await doneListenerThrows();
+  const dispatched = await listenerThrows("stage:0:dispatched", "observer-boom-on-dispatched");
+  const done = await listenerThrows("stage:0:done", "observer-boom-on-done");
   const ended = await endListenerThrowsOverRealFailure();
   const unhandled = await drainUnhandledRejections(60);
+  const uncaught = await drainUncaughtExceptions(60);
   console.log(JSON.stringify({ dispatched, done, ended, unhandled, uncaught }));
 }
 
-main().catch((error: unknown) => {
-  console.log(`FATAL ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
-});
+runFixtureMain(main);

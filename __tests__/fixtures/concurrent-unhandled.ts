@@ -9,7 +9,7 @@
  * handler and would report a leak as a test-runner error, not a value this script can observe.
  */
 import { ConcurrentPipeline } from "../../src";
-import { drainUnhandledRejections } from "./unhandled-rejection";
+import { drainUnhandledRejections, runFixtureMain } from "./unhandled-rejection";
 
 function failFrom2(x: number): number {
   if (x >= 2) throw new Error(`chunk-${x}-failed`);
@@ -42,10 +42,4 @@ async function main(): Promise<void> {
   console.log(JSON.stringify({ ordered, unordered: unorderedResult }));
 }
 
-main().catch((error: unknown) => {
-  // A real fault (not the expected chunk failure) - print it plainly instead of leaving stdout
-  // empty, and exit non-zero so the calling test's own exit-code check catches it FIRST, before
-  // JSON.parse on a "FATAL ..." line obscures the real message with a generic SyntaxError.
-  console.log(`FATAL ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
-});
+runFixtureMain(main);
