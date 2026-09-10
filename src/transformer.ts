@@ -718,23 +718,6 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Convert sync iterable to async iterable.
-   */
-  private toAsyncIterable<T>(data: AsyncIterable<T> | Iterable<T>): AsyncIterable<T> {
-    if (Symbol.asyncIterator in data) {
-      return data as AsyncIterable<T>;
-    }
-    const syncData = data as Iterable<T>;
-    return {
-      [Symbol.asyncIterator]: async function* () {
-        for (const item of syncData) {
-          yield item;
-        }
-      },
-    };
-  }
-
-  /**
    * Stop processing when a condition is met.
    *
    * When the condition function returns true, throws an error to halt

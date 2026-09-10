@@ -547,3 +547,17 @@ describe("Pipeline", () => {
   // favor of .tap() - it proves .tap() fires identically on .toArray(), on async iteration and on a
   // .local() stage.
 });
+
+describe("#113 - a stored `undefined` is a value, not an absent key", () => {
+  it("agrees with .get() about whether the key exists", () => {
+    // `getOrDefault` tested `value !== undefined`, so a deliberately stored `undefined` read back
+    // as the default while `.get()` returned `undefined` - the two accessors disagreeing about
+    // presence. It is the same distinction `DROP` exists for on the row-handler side.
+    const ctx = new SimpleContextManager();
+    ctx.set("lastError", undefined);
+
+    expect(ctx.get("lastError")).toBeUndefined();
+    expect(ctx.getOrDefault("lastError", "never ran")).toBeUndefined();
+    expect(ctx.getOrDefault("neverSet", "never ran")).toBe("never ran");
+  });
+});
