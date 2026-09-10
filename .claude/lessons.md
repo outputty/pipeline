@@ -7,6 +7,26 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-10 Built `.branch()`'s demux against the opposite of #90's own invariant
+
+#90 exists so a synchronous chain creates zero promises, and the same ticket had already shipped
+`chain`/`settleMaybe`/`mapSettle` to keep that. The `.branch()` demux prototype was written `async`
+throughout with `Promise.all` on every arm anyway. It ran and returned correct values, which is why
+nothing in the build caught it; the user did - "if all of them are synchronous, we should not be
+awaiting anything… even then, we should not await what should not be awaited." Rebuilt on those
+helpers, the branch measures 0 promises all-sync and `["Promise","array"]` with one async arm.
+Recorded by sharpening `~/.claude/rules/code.md`'s **Reuse, before writing** ladder: a spike or
+prototype climbs the same ladder, and its nearest rung is what THIS ticket already shipped.
+
+## 2026-09-10 An ordering probe that proved nothing, because four items are one chunk
+
+Asked whether order survives `.branch()`'s rejoin, the probe ran four items through and printed them
+in order. `DEFAULT_CHUNK_SIZE` is 1000, so all four were ONE chunk and nothing could reorder - the
+probe would have passed against a mechanism with no ordering at all. Re-run with `.buffer(1)` before
+the stage, the same four came back `["item-2","item-3","item-4","item-1"]`. The repo already held a
+line about this default hiding CONCURRENCY; it now covers every chunk-granular observable, in
+`.claude/rules/typescript.md`.
+
 ## 2026-09-09 A typecheck-only spike was narrated in the scratch file as an executed run
 
 Planning #90, `tmp/level3b-seam-spike.ts` was passed through `tsc --strict` alone, then the scratch
