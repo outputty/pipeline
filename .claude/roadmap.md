@@ -43,6 +43,16 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   day this was planned is exactly the kind of large, fast-moving change this gap lets through
   silently; `typedoc --validation.notDocumented` is proven this session to catch it for real
   (`Pipeline.local has an @param with name "wrongName", which was not used`).
+- **A benchmark harness for the package's own internal overhead, and closing the gap it finds**
+  (#120) - `#90`'s own ~430 ns/row figure predates its `L13` fix and nothing replaced it; nothing at
+  all measures `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` against a hand-rolled
+  equivalent, or `.local()`'s own cost. A fresh planning-time run found the base sync chain now at
+  ~50 ns/row (not ~430), and a real, un-explained third pass in `Transformer.filter()`'s sync branch
+  worth ~19 of those - `.map()`'s sync branch costs ~1 ns/row over baseline, `.filter()`'s costs ~19.
+  Now, because a committed regression gate is missing entirely and the one concrete, low-risk
+  permutation (`filter()` as one loop, no `pipe()`/`.onError()` contract change) is sitting there
+  unclaimed. Layout and rationale in `.claude/architecture.md`'s new Internal overhead benchmarks
+  section.
 
 ### Later - not yet filed
 
