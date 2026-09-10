@@ -18,6 +18,8 @@ import type {
   SourcePolicy,
   PipelineMode,
   ChunkTransform,
+  Tagged,
+  ReduceWork,
 } from "@src/types";
 import { Pipeline, type PipelineConstructorOptions, type WrappablePipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
@@ -38,14 +40,6 @@ export interface ConcurrentPipelineOptions {
  * to pass through on every copy-on-write call. Not exported - a caller only ever sees
  * `ConcurrentPipelineOptions`; the intersection is this file's own plumbing. */
 type ConcurrentPipelineConstructorOptions = ConcurrentPipelineOptions & PipelineConstructorOptions;
-
-/** One in-flight chunk's promise, tagged with an id so `fanOutUnordered` can tell which slot in
- * `inFlight` finished once `Promise.race` settles - `Promise.race` alone only returns the winning
- * VALUE, not which input promise produced it. */
-interface TaggedResult<U> {
-  id: number;
-  result: U[];
-}
 
 /**
  * `ordered: true`'s fan-out: a sliding window of `maxConcurrency` chunks, yielded in ARRIVAL
@@ -110,7 +104,11 @@ async function* fanOutUnordered<T, U>(
   maxConcurrency: number,
 ): AsyncGenerator<U[]> {
   const iterator = chunks[Symbol.asyncIterator]();
-  const inFlight = new Map<number, Promise<TaggedResult<U>>>();
+  // `Tagged<U[]>` (`@src/types`), not a local `TaggedResult` (#133) - each in-flight chunk's own
+  // promise, tagged with an id so this function can tell which slot in `inFlight` finished once
+  // `Promise.race` settles: `Promise.race` alone only returns the winning VALUE, not which input
+  // promise produced it.
+  const inFlight = new Map<number, Promise<Tagged<U[]>>>();
   let nextId = 0;
   let exhausted = false;
 
@@ -206,7 +204,7 @@ const SEED_REFUSAL =
  * it arrives - completion order, never partition order.
  */
 async function* mergeUnordered<U>(sources: AsyncGenerator<U[]>[]): AsyncGenerator<U[]> {
-  const inFlight = new Map<number, Promise<{ id: number; result: IteratorResult<U[]> }>>();
+  const inFlight = new Map<number, Promise<Tagged<IteratorResult<U[]>>>>();
 
   function pull(id: number): void {
     const tagged = sources[id]!.next().then((result) => ({ id, result }));
@@ -455,7 +453,7 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     fn: ReduceFunction<U, T>,
     initial: U,
     _stageIndex: number,
-  ): (chunks: AsyncIterable<T[]>, ctx: IContextManager) => AsyncGenerator<U[]> {
+  ): ReduceWork<T, U> {
     // A SEED PER PARTITION, not the caller's one value handed to all of them (#113). This closure
     // is called `maxConcurrency` times, so a mutable `initial` was one accumulator shared by every
     // partition: measured, `.buffer(1).reduce((acc, x) => (acc.push(x), acc), [])` over `[1,2,3,4]`

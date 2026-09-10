@@ -24,10 +24,11 @@ import { emptyChunks, Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
-  IContextManager,
   InternalTransformer,
   ReduceFunction,
   PipelineMode,
+  ReduceWork,
+  RouteVerb,
 } from "@src/types";
 
 /** Construction-time knobs for `ClusterPipeline`. */
@@ -277,7 +278,7 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain
    * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`http.ts`) exists for, so several
    * `ClusterPipeline`s can share one worker server without colliding on stage 0. */
-  protected override routePath(verb: "transform" | "reduce", index: number): string {
+  protected override routePath(verb: RouteVerb, index: number): string {
     return `/pipeline/${this.pipelineIndex}${super.routePath(verb, index)}`;
   }
 
@@ -315,7 +316,7 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
     fn: ReduceFunction<U, T>,
     initial: U,
     stageIndex: number,
-  ): (chunks: AsyncIterable<T[]>, ctx: IContextManager) => AsyncGenerator<U[]> {
+  ): ReduceWork<T, U> {
     const dispatch = super.reduceWork(fn, initial, stageIndex);
     const self = this;
     return async function* dispatchOnWorker(chunks, ctx) {

@@ -24,6 +24,9 @@ import type {
   PipelineMode,
   ChunkTransform,
   ReduceStage,
+  ReduceWork,
+  RouteVerb,
+  StageRoute,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
 import { ndjsonFrame, readNdjsonLines } from "@src/utils/ndjson";
@@ -175,14 +178,12 @@ async function flushTrailing(
  * `parseRoute("/pipeline/0/branch/1/big/transform/2")` →
  * `{ trail: "/branch/1/big", verb: "transform", index: 2 }`.
  */
-function parseRoute(
-  pathname: string,
-): { trail: string | null; verb: "transform" | "reduce"; index: number } | null {
+function parseRoute(pathname: string): StageRoute | null {
   const match = /(\/branch\/\d+\/[^/]+)?\/(transform|reduce)\/(\d+)$/.exec(pathname);
   if (match === null) return null;
   return {
     trail: match[1] ?? null,
-    verb: match[2] as "transform" | "reduce",
+    verb: match[2] as RouteVerb,
     index: Number(match[3]),
   };
 }
@@ -408,7 +409,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * overrides this alone to route several pipeline definitions through one shared worker server
    * (`/pipeline/<i>/<verb>/<n>`) without touching `stageWork()`/`reduceWork()`'s own dispatch logic
    * or `.fetch()`'s parsing at all. */
-  protected routePath(verb: "transform" | "reduce", index: number): string {
+  protected routePath(verb: RouteVerb, index: number): string {
     return `${this._routeTrail}/${verb}/${index}`;
   }
 
@@ -465,7 +466,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     _fn: ReduceFunction<U, T>,
     _initial: U,
     stageIndex: number,
-  ): (chunks: AsyncIterable<T[]>, ctx: IContextManager) => AsyncGenerator<U[]> {
+  ): ReduceWork<T, U> {
     const self = this;
 
     return async function* dispatchReduce(chunks, ctx) {
