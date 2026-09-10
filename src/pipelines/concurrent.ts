@@ -20,7 +20,7 @@ import type {
 } from "@src/types";
 import {
   Pipeline,
-  type PipelineOptions,
+  type PipelineConstructorOptions,
   type PipelineSource,
   type WrappablePipeline,
 } from "@src/pipeline";
@@ -42,7 +42,7 @@ export interface ConcurrentPipelineOptions {
  * `Pipeline` internals (`context`, `chunks`, …) that `createPipeline()` (below) must be able
  * to pass through on every copy-on-write call. Not exported - a caller only ever sees
  * `ConcurrentPipelineOptions`; the intersection is this file's own plumbing. */
-type ConcurrentPipelineConstructorOptions = ConcurrentPipelineOptions & PipelineOptions;
+type ConcurrentPipelineConstructorOptions = ConcurrentPipelineOptions & PipelineConstructorOptions;
 
 /** One in-flight chunk's promise, tagged with an id so `fanOutUnordered` can tell which slot in
  * `inFlight` finished once `Promise.race` settles - `Promise.race` alone only returns the winning
@@ -230,12 +230,12 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
    * @example
    * `new ConcurrentPipeline([1], { maxConcurrency: 8 }).context({ k: 1 }).maxConcurrency` → `8`,
    * not the constructor default `4` - without this override, `Pipeline.createPipeline()`'s base
-   * implementation reconstructs via `this.constructor` but only forwards `PipelineOptions` fields,
+   * implementation reconstructs via `this.constructor` but only forwards `PipelineConstructorOptions` fields,
    * which do not include `maxConcurrency`.
    */
   protected override createPipeline<U>(
     chunks: AsyncIterable<U[]>,
-    options: PipelineOptions,
+    options: PipelineConstructorOptions,
   ): ConcurrentPipeline<U, In> {
     const Ctor = this.constructor as new (
       options?: ConcurrentPipelineConstructorOptions,

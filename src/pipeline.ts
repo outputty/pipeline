@@ -41,11 +41,18 @@ import {
   buildSyncChunkGenerator,
   flattenChunks,
   recutSyncChunks,
-  collectItems,
 } from "./utils/chunk";
-import { chain, runStageChunk, settleMaybe } from "./utils/helpers";
+import { chain, runStageChunk } from "./utils/helpers";
 import { PipelineResult } from "./result";
-import { BranchBuilder, type ResultsOf, type ModeOfArms, type BranchArm } from "./branch";
+import { BranchBuilder, runBranch } from "./branch";
+import type {
+  ArmPipeline,
+  BranchArm,
+  BranchOwner,
+  BranchRunner,
+  ModeOfArms,
+  ResultsOf,
+} from "./branch";
 import { foldChunkStream, foldSyncChunkStream } from "./utils/reduce";
 
 /** The chunk stream a `Pipeline` that has no input yet carries, and the one a WORKER process's own
@@ -130,61 +137,13 @@ export type WrappablePipeline<T, In> = Pipeline<T, "unset", In>;
 export type PendingStage = (pipeline: AnyPipeline<any>) => AnyPipeline<any>;
 
 /**
- * Groups one run's items by the arm each belongs to (#90) - `.branch()`'s demux.
+ * The knobs a CALLER writes when constructing a `Pipeline` - both optional, and both about the
+ * context manager, which is the only construction-time decision a caller actually makes.
  *
- * Runs in the ORCHESTRATING process by decision, never dispatched: a predicate decides WHICH arm an
- * item enters, so sending it out would cost every item two trips (one to be classified, one to be
- * worked on) and would stop a predicate closing over anything the caller holds.
- *
- * @example
- * `demux(orders, [big, rest], false)` → `Map { "big" => [order 2, order 4], "rest" => [order 1] }`.
+ * Everything else a pipeline carries is `PipelineState` below. The two were ONE exported interface
+ * of seventeen fields, fifteen of which repeated "Not intended for direct external use" in their
+ * own docstrings - a public surface saying fifteen times over that it was not public.
  */
-function demux<T>(items: T[], arms: readonly BranchArm<T>[], broadcast: boolean): Map<string, T[]> {
-  const grouped = new Map<string, T[]>(arms.map((arm) => [arm.name, []]));
-  for (const item of items) {
-    claimItem(item, arms, grouped, broadcast);
-  }
-  return grouped;
-}
-
-/** One item's own routing pass, split out so `demux` stays within this repo's nesting limit. */
-function claimItem<T>(
-  item: T,
-  arms: readonly BranchArm<T>[],
-  grouped: Map<string, T[]>,
-  broadcast: boolean,
-): void {
-  for (const arm of arms) {
-    if (!arm.predicate(item)) continue;
-    grouped.get(arm.name)!.push(item);
-    if (!broadcast) return;
-  }
-}
-
-/**
- * What `.branch()` returns (#90): the arms bound once, callable with any input.
- *
- * `.branch()` is a STAGE, not a terminal - it hands back a runner rather than the results, so the
- * definitions are written once and the caller picks what to do with each call's record. The Mode
- * follows the same rule every other terminal does: every arm synchronous returns the record plainly,
- * and one asynchronous arm widens the whole record to a single `Promise`.
- *
- * `split(orders)` → `{ big: ["BIG:2"], eu: [1, 3], rest: [] }`.
- */
-export interface BranchRunner<In, R, M extends PipelineMode> {
-  (input: AsyncIterable<In>): Promise<R>;
-  // Keyed on `"async"`, not on `"sync"`: `"unset"` is the ordinary state of a composed chain and is
-  // synchronous over a synchronous input, so testing for `"sync"` would type every undecided chain's
-  // record a `Promise` while the runtime handed back the record plainly.
-  (input: Iterable<In>): M extends "async" ? Promise<R> : R;
-}
-
-/** What `.branch()` produces: one record, keyed by arm name, joined on the orchestrator - the only
- * process that sees every arm, since arms can be remote. Typed loosely on the arms' own outputs,
- * because a builder's arms are collected at runtime rather than inferred from an object literal. */
-export type BranchResults = Record<string, unknown[]>;
-
-/** Construction-time knobs for a `Pipeline` — every field optional. */
 export interface PipelineOptions {
   /**
    * An already-built context manager, for THIS process. Takes precedence over `contextFactory`
@@ -205,29 +164,41 @@ export interface PipelineOptions {
    * serves every other one.
    */
   contextFactory?: () => IContextManager;
+}
+
+/**
+ * Everything a copy-on-write call carries from one instance to the next (#90) - internal, and
+ * declared apart from `PipelineOptions` so the exported surface is the two knobs above.
+ *
+ * `carriedOptions()` returns this whole shape rather than naming fields at each call site, which is
+ * what stops a knob being dropped: a hand-built object here lost `mode` once and then `bound`, and
+ * the second one made `.local((p) => p.reduce(sum, 0))` over `[1..6]` return the six items instead
+ * of `[21]`. `adopt()` and `emptyOfOwnClass()` still name their fields, deliberately - one excludes
+ * what a wrapped chain must not inherit, the other resets an arm to blank.
+ */
+export interface PipelineState {
   /**
-   * Internal: an already-cut chunk stream to seed `_chunks` with directly, bypassing the
+   * an already-cut chunk stream to seed `_chunks` with directly, bypassing the
    * constructor's own default cut - the copy-on-write path every method below (`.apply()`,
-   * `.buffer()`, `.context()`) uses via `createPipeline()`. Not intended for direct external use.
+   * `.buffer()`, `.context()`) uses via `createPipeline()`.
    */
   chunks?: AsyncIterable<unknown[]>;
   /**
-   * Internal: the pre-buffer ITEM view `.buffer()` recuts from on a second, back-to-back call -
+   * the pre-buffer ITEM view `.buffer()` recuts from on a second, back-to-back call -
    * `null` once a real stage has consumed `chunks` (`.apply()` sets it), so a LATER `.buffer()`
-   * falls back to flattening whatever that stage actually produced instead. Not intended for
-   * direct external use.
+   * falls back to flattening whatever that stage actually produced instead.
    */
   preBufferItems?: AsyncIterable<unknown> | null;
   /**
-   * Internal: the chain of chunk-wise transforms accumulated via `.apply()`/`.transform()` -
+   * the chain of chunk-wise transforms accumulated via `.apply()`/`.transform()` -
    * `HttpPipeline`'s own `.fetch()` looks a stage up by index here to serve a dispatched request.
-   * Not intended for direct external use.
+   *
    */
   chunkTransforms?: ChunkTransform[];
   /**
-   * Internal: every reduce stage registered via `.reduce()`, keyed by its index in the SAME shared
+   * every reduce stage registered via `.reduce()`, keyed by its index in the SAME shared
    * space `chunkTransforms` uses - `HttpPipeline`'s own `.fetch()` (#45 L5) looks a stage up here to
-   * serve a `/reduce/<n>` request. Not intended for direct external use.
+   * serve a `/reduce/<n>` request.
    */
   reduceStages?: Map<number, ReduceStage>;
   /**
@@ -238,63 +209,65 @@ export interface PipelineOptions {
    */
   runHandler?: PipelineErrorHandler;
   /**
-   * Internal: the RUNTIME half of `PipelineMode` (#90) - which engine this pipeline's own terminal
+   * the RUNTIME half of `PipelineMode` (#90) - which engine this pipeline's own terminal
    * ops read. Set by `.from()` from the source's shape and the class's own `SourcePolicy`, and
-   * carried forward by every copy-on-write call. Not intended for direct external use.
+   * carried forward by every copy-on-write call.
    */
   mode?: PipelineMode;
   /**
-   * Internal: the SYNC chunk stream a `"sync"`-Mode pipeline reads (#90), whose individual chunks
+   * the SYNC chunk stream a `"sync"`-Mode pipeline reads (#90), whose individual chunks
    * may still be pending once a stage's callback returned a thenable. `null` on an `"async"` chain,
-   * where `chunks` carries the stream instead. Not intended for direct external use.
+   * where `chunks` carries the stream instead.
    */
   syncChunks?: MaybeAsyncChunks<unknown> | null;
   /**
-   * Internal: `preBufferItems`' sync counterpart (#90) - the raw item view a back-to-back
-   * `.buffer()` recuts from on a `"sync"` chain. Not intended for direct external use.
+   * `preBufferItems`' sync counterpart (#90) - the raw item view a back-to-back
+   * `.buffer()` recuts from on a `"sync"` chain.
    */
   syncPreBufferItems?: Iterable<unknown> | null;
   /**
-   * Internal: the chunk boundary `.buffer(size)` last declared, carried so a `.buffer()` called
+   * the chunk boundary `.buffer(size)` last declared, carried so a `.buffer()` called
    * BEFORE `.from()` still decides the source's own cut (#90). `.from()` read `DEFAULT_CHUNK_SIZE`
-   * unconditionally before this existed, so that call was silently discarded. Not intended for
-   * direct external use.
+   * unconditionally before this existed, so that call was silently discarded.
    */
   chunkSize?: number;
   /**
-   * Internal: every stage composed while the pipeline had no source, in order, replayed by
-   * `.from()` once an input arrives (#90). Not intended for direct external use.
+   * every stage composed while the pipeline had no source, in order, replayed by
+   * `.from()` once an input arrives (#90).
    */
   pendingStages?: PendingStage[];
   /**
-   * Internal: the route prefix an arm's own stages address themselves under, `/branch/<i>/<name>`
+   * the route prefix an arm's own stages address themselves under, `/branch/<i>/<name>`
    * (#90). Empty on a chain's own stages. Without it an arm's stage 0 collided with the parent's
-   * stage 0 on the worker, which served the parent's transform for both. Not intended for direct
-   * external use.
+   * stage 0 on the worker, which served the parent's transform for both.
    */
   routeTrail?: string;
   /**
-   * Internal: every `.branch()` stage's own arms, keyed by the branch's index in the shared stage
+   * every `.branch()` stage's own arms, keyed by the branch's index in the shared stage
    * space (#90) - the registry a serving side walks to resolve a `/branch/<i>/<name>/` trail. Not
    * intended for direct external use.
    */
   branchStages?: Map<number, BranchArm<unknown>[]>;
   /**
-   * Internal: whether `context` was invented by a `Pipeline` rather than named by the caller (#90).
+   * whether `context` was invented by a `Pipeline` rather than named by the caller (#90).
    * A default-built manager belongs to one run, so a reusable chain gets a fresh one per call; a
    * `context` or `contextFactory` the caller named is theirs and is kept. Carried explicitly
    * through copy-on-write, since every such call passes an already-resolved `context` and would
-   * otherwise look caller-supplied. Not intended for direct external use.
+   * otherwise look caller-supplied.
    */
   contextIsDefault?: boolean;
   /**
-   * Internal: whether an input has been bound to this chain (#90). A RUNTIME fact, kept apart from
+   * whether an input has been bound to this chain (#90). A RUNTIME fact, kept apart from
    * `mode`, which is a TYPE fact about what the chain produces. `"unset"` used to answer both, and
    * the two are independent: a callable chain is `"unset"` for its whole life and becomes bound
-   * only for the duration of one call. Not intended for direct external use.
+   * only for the duration of one call.
    */
   bound?: boolean;
 }
+
+/** What the constructor and `createPipeline()` take: a caller's own knobs plus the carried state.
+ * Every internal call site passes both, which is why they were one interface to begin with. */
+export type PipelineConstructorOptions = PipelineOptions & PipelineState;
 
 /** A registered reduce stage's own definition - `pushReduceStage()` (below) is the one place that
  * builds one, `HttpPipeline.fetch()` (#45 L5) the one place that reads one back to serve
@@ -413,7 +386,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * @param data - Sync or async iterable data source
    * @param options - Optional pipeline configuration
    */
-  constructor(options?: PipelineOptions) {
+  constructor(options?: PipelineConstructorOptions) {
     // A constructor that RETURNS a function is what makes an instance callable (#90). Two halves,
     // both load-bearing:
     //
@@ -615,16 +588,16 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    */
   protected createPipeline<U>(
     chunks: AsyncIterable<U[]>,
-    options: PipelineOptions,
+    options: PipelineConstructorOptions,
   ): AnyPipeline<U> {
-    const Ctor = this.constructor as new (options?: PipelineOptions) => AnyPipeline<U>;
+    const Ctor = this.constructor as new (options?: PipelineConstructorOptions) => AnyPipeline<U>;
     return new Ctor({ ...options, chunks });
   }
 
   /** Every knob a copy-on-write call carries into the next instance (#90) - named once here rather
    * than repeated field by field at each of the eight call sites, so a knob added later reaches all
    * of them. `chunks` is passed separately, since each caller supplies its own. */
-  protected carriedOptions(): PipelineOptions {
+  protected carriedOptions(): PipelineConstructorOptions {
     return {
       context: this._context,
       chunkTransforms: this._chunkTransforms,
@@ -666,7 +639,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `new Pipeline<number>().transform((t) => t.map((x) => x * 2))` records one stage; calling that
    * pipeline with `[1, 2, 3]` replays it and yields `[2, 4, 6]`.
    */
-  protected defer<U>(run: PendingStage, extra?: PipelineOptions): AnyPipeline<U> {
+  protected defer<U>(run: PendingStage, extra?: PipelineState): AnyPipeline<U> {
     return this.createPipeline<U>(EMPTY_CHUNKS as AsyncIterable<U[]>, {
       ...this.carriedOptions(),
       ...extra,
@@ -681,7 +654,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   }
 
   /**
-   * This pipeline's stage registries - the two maps a SERVING side reads to answer `/stage/<n>` and
+   * This pipeline's stage registries - the two maps a SERVING side reads to answer `/transform/<n>` and
    * `/reduce/<n>` (#90).
    *
    * A deferred pipeline has recorded its stages but not run them, so both registries are empty
@@ -755,7 +728,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `new HttpPipeline(scored, { url })` runs `scored`'s stages over HTTP, where `scored([1,2,3])`
    * runs the identical stages in this process.
    */
-  protected static adopt(pipeline: AnyPipeline<any>): PipelineOptions {
+  protected static adopt(pipeline: AnyPipeline<any>): PipelineConstructorOptions {
     if (pipeline._bound) {
       throw new Error(
         "cannot wrap a pipeline that is already bound to a source - wrap the unbound chain instead",
@@ -781,7 +754,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * @example
    * `Pipeline.wrapping(scored, { url })` → `scored`'s stages plus `{ url }`, ready for `super()`.
    */
-  protected static wrapping<O extends PipelineOptions>(
+  protected static wrapping<O extends PipelineConstructorOptions>(
     first: AnyPipeline<any> | O | undefined,
     second: O | undefined,
   ): O {
@@ -1059,6 +1032,13 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // written BEFORE any stage must also cut the source itself, which is what it now does by
     // replaying against a pipeline whose source is already cut at that size.
     if (this.isDeferred()) {
+      // Validated HERE as well as in the chunkers, because a deferred `.buffer()` only records the
+      // call: `new Pipeline<number>().buffer(0)` used to return a pipeline and throw
+      // `chunkSize must be at least 1` later, at the drain, in a message that never names
+      // `.buffer()`. Every chain is source-less by default now, so that is the ordinary path.
+      if (size < 1) {
+        throw new Error("buffer size must be at least 1");
+      }
       const cutsTheSource = this._pendingStages.length === 0;
       return this.defer<T>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {}) as this;
     }
@@ -1203,7 +1183,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // Both option objects SPREAD their source pipeline's own carried knobs (#90) - see `reduce()`
     // for why: a hand-built list here dropped `bound`, so the region deferred instead of running
     // and `.local((p) => p.reduce(sum, 0))` over `[1..6]` returned the six items rather than `[21]`.
-    const region = new Pipeline<T, "sync" | "async", SourcePolicy>({
+    const region = new Pipeline<T, "sync" | "async">({
       ...this.carriedOptions(),
       chunks: this._chunks,
       pendingStages: [],
@@ -1358,56 +1338,22 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   ): BranchRunner<In, ResultsOf<B>, JoinMode<M, ModeOfArms<B>>> {
     const builder = build(new BranchBuilder<T>());
     const arms = builder.arms();
-    const broadcast = builder.isBroadcast();
-    const owner = this;
     // The branch's own index in the shared stage space. Both sides walk the same entry module in
     // the same order, so an orchestrator and a worker agree on it without exchanging anything.
     const branchIndex = this._branchStages.size;
     this._branchStages.set(branchIndex, arms as BranchArm<unknown>[]);
 
-    const run = (input?: PipelineSource<In>): BranchResults | Promise<BranchResults> => {
-      if (input === undefined) {
-        throw new Error(
-          "no input: a pipeline holds no data, so .branch()'s runner needs one - call it with the items to route",
-        );
-      }
-
-      // ONE bind for the whole branch: the parent chain runs, and the arms below share the
-      // context that run created rather than the chain's own.
-      const { syncChunks, items: itemsOf, context } = owner.drainable(input);
-      const items = collectItems(syncChunks, itemsOf) as T[] | Promise<T[]>;
-
-      // `chain` defers only at a real thenable, so a synchronous parent stays synchronous here.
-      return chain(items, (settled: T[]) => {
-        const grouped = demux(settled, arms, broadcast);
-
-        // ROUTER - each arm's own pipeline over its own items, of THIS pipeline's class, so an
-        // arm's stages dispatch wherever the parent's do and `.local()` inside pins one. A
-        // synchronous arm returns an array right here; only an asynchronous one hands back a
-        // promise.
-        const outputs = arms.map((arm) => {
-          const armItems = grouped.get(arm.name)!;
-          if (arm.build === undefined) return armItems as unknown[];
-          const armPipeline = owner.emptyOfOwnClass<T>(
-            context,
-            `/branch/${branchIndex}/${arm.name}`,
-          ) as unknown as Pipeline<T, "unset", T>;
-          const builtArm = arm.build(armPipeline) as unknown as (i: T[]) => {
-            toArray(): unknown[] | Promise<unknown[]>;
-          };
-          return builtArm(armItems).toArray();
-        });
-
-        // JOIN - a plain record unless at least one arm is pending, and then only those are
-        // awaited. On the orchestrator by necessity: arms can be remote, so it is the only process
-        // that sees all of them.
-        return chain(settleMaybe(outputs), (armResults: unknown[][]) =>
-          Object.fromEntries(arms.map((arm, i) => [arm.name, armResults[i]])),
-        ) as BranchResults | Promise<BranchResults>;
-      }) as BranchResults | Promise<BranchResults>;
-    };
-
-    return run as BranchRunner<In, ResultsOf<B>, JoinMode<M, ModeOfArms<B>>>;
+    // The run loop lives in `branch.ts`, beside the builder and the arms it collects. `makeArm` is
+    // passed rather than reached for: `emptyOfOwnClass` is protected and only in scope here, which
+    // is what keeps `branch.ts`'s edge to this file type-only.
+    return runBranch<T, In>({
+      owner: this as unknown as BranchOwner<T, In>,
+      arms,
+      broadcast: builder.isBroadcast(),
+      branchIndex,
+      makeArm: (context, routeTrail) =>
+        this.emptyOfOwnClass<T>(context, routeTrail) as unknown as ArmPipeline<T>,
+    }) as BranchRunner<In, ResultsOf<B>, JoinMode<M, ModeOfArms<B>>>;
   }
 
   /**

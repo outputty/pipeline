@@ -668,6 +668,38 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
     expect(await out).toEqual({ big: [2, 4] });
   });
 
+  it("disarms a pending arm when a later arm throws synchronously", async () => {
+    // Review finding: `joinArms` ran a bare `arms.map(...)`, which abandons the array on a
+    // synchronous throw - so `evens`' already-pending `toArray()` never reached `settleMaybe` and
+    // never got a rejection handler. Measured before the fix: the caller saw `odds arm failed`, and
+    // the process then died on `evens arm failed` under Node's default unhandled-rejection policy.
+    // `mapSettle` is the helper that owes those siblings a `.catch`, and its own docstring says so.
+    const split = new Pipeline<number>().branch((b) =>
+      b
+        .when(
+          "evens",
+          (x) => x % 2 === 0,
+          (q) =>
+            q.transform((t) =>
+              t.map((_x: number): Promise<number> => Promise.reject(new Error("evens arm failed"))),
+            ),
+        )
+        .otherwise("odds", (q) =>
+          q.transform((t) =>
+            t.map((_x: number): number => {
+              throw new Error("odds arm failed");
+            }),
+          ),
+        ),
+    );
+
+    // Thrown, not rejected: the parent chain and the demux are synchronous here, so the failure
+    // leaves the runner the way every other sync failure leaves a terminal (#90).
+    expect(() => split([1, 2, 3, 4])).toThrow("odds arm failed");
+    // A macrotask later: `evens`' abandoned rejection would have taken the process down by now.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
   it("refuses an arm name that could not survive a route", () => {
     // The name goes straight into `/branch/<i>/<name>/transform/<n>`, and `.fetch()` matches an
     // ENCODED pathname - so `.when("big orders", …)` dispatched `/branch/0/big%20orders/…` and 404'd.
