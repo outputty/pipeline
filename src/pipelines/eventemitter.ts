@@ -141,7 +141,7 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const emitter = this.emitter;
     const eventName = `stage:${dispatched._chunkTransforms.length - 1}`;
     const source = dispatched._chunks;
-    dispatched._chunks = withEndSignal(source, () => emitter.emit(`${eventName}:end`));
+    dispatched._chunks = withEndSignal(source, () => emitSafely(emitter, `${eventName}:end`));
     return dispatched;
   }
 
@@ -204,24 +204,32 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const emitter = this.emitter;
     return (chunk, ctx) =>
       new Promise<U[]>((resolve, reject) => {
-        emitter.emit(`${eventName}:dispatched`, { chunk, ctx });
+        // Every lifecycle emit, `:dispatched` included, goes through `emitSafely` - a throwing
+        // observer on ANY of them surfaces as its own separate uncaught exception, never silently
+        // absorbed as if it were a Worker's own failure and never masking a real one.
+        emitSafely(emitter, `${eventName}:dispatched`, { chunk, ctx });
 
-        // Settles the REAL dispatch first, unconditionally - a `:done`/`:error` lifecycle listener
-        // that itself throws (emitSafely, below) can then never leave this Promise hanging, only
-        // ever surface as its OWN separate, later failure.
+        // ONE settle path for both outcomes - settles the REAL dispatch first, unconditionally,
+        // THEN emits the matching lifecycle event, so a throwing `:done`/`:error` listener can
+        // never leave this Promise hanging, only ever surface as its own separate, later failure.
         let settled = false;
-        const respond = (value: U[]): void => {
+        const settle = (
+          outcome: { ok: true; value: U[] } | { ok: false; error: unknown },
+        ): void => {
           if (settled) return;
           settled = true;
-          resolve(value);
-          emitSafely(emitter, `${eventName}:done`, { chunk: value, ctx });
+          if (outcome.ok) {
+            resolve(outcome.value);
+            emitSafely(emitter, `${eventName}:done`, { chunk: outcome.value, ctx });
+          } else {
+            reject(
+              outcome.error instanceof Error ? outcome.error : new Error(String(outcome.error)),
+            );
+            emitSafely(emitter, `${eventName}:error`, { error: outcome.error, ctx });
+          }
         };
-        const doReject = (error: unknown): void => {
-          if (settled) return;
-          settled = true;
-          reject(error instanceof Error ? error : new Error(String(error)));
-          emitSafely(emitter, `${eventName}:error`, { error, ctx });
-        };
+        const respond = (value: U[]): void => settle({ ok: true, value });
+        const doReject = (error: unknown): void => settle({ ok: false, error });
 
         const listeners = emitter.listeners(eventName);
         if (listeners.length === 0) {
@@ -267,7 +275,7 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const fireOnce = (): void => {
       if (fired) return;
       fired = true;
-      emitter.emit("pipeline:end");
+      emitSafely(emitter, "pipeline:end");
     };
     return {
       ...base,
