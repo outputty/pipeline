@@ -173,7 +173,8 @@ new Pipeline<T>(options?: PipelineOptions)
 ```
 
 A pipeline holds its input TYPE, not its data: `T` is what it will be called with. Calling one
-returns a `PipelineResult`, which is where the terminal operations live.
+returns a `PipelineResult`, which is where the terminal operations live. `PipelineOptions` is these
+two knobs and nothing else - everything a chain carries between calls is internal.
 
 - **`options.context`** - an already-built `IContextManager`, for THIS process. Optional; survives
   every `.context()`/`.transform()`/`.buffer()` call as the SAME instance.

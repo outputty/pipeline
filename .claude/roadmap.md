@@ -65,7 +65,13 @@ The two older candidates, still not filed:
   the orchestrator, and a routing-only arm needs no `Transformer` (#87, folded in). A route reads as
   the chain was built: `/transform/<n>`, `/reduce/<n>`, `/branch/<i>/<name>/transform/<n>`.
   BREAKING: `.from()`, both `merge` forms, and every terminal op leave `Pipeline`; the two-argument
-  constructor is gone. PRs #92, #93, #95, #97, #102, #103, #104, #105, #106, #107, #108.
+  constructor is gone. A `/simplify` pass over the whole stack closed two regressions it had
+  introduced - the sync fold allocated two closures per ITEM (372.5 -> 25.6 ns/item, where the async
+  fold it replaced ran at 94.5) and the re-cut was quadratic in its chunk (1418 ms -> 7.1 ms over
+  80 000 items) - and deleted two type parameters: `JoinMode` testing `M` first collapses on a
+  dispatching class's own pinned `"async"`, which is what `SourcePolicy` and `AssignMode` had been
+  carried through thirty signatures to do. PRs #92, #93, #95, #97, #102, #103, #104, #105, #106,
+  #107, #108, #109, #110, #111, #112.
 - **Error handling moves onto the function that failed** (#78, `feat!`) - `Transformer.onError(fn)`
   is now the ROW handler: returning a value replaces the row, the exported `DROP` sentinel removes
   it, throwing escalates. It reaches every element-wise call - `.map()`, `.filter()`, `.flatMap()`,

@@ -4,6 +4,13 @@ paths: ["**/*.ts", "**/*.tsx"]
 
 # TypeScript
 
+- Order a multi-arm conditional type so the parameter a CALLER pins is tested first. (2026-09-10)
+  - A subclass that pins `M` to a literal on its own `extends` clause can only benefit from that if
+    the conditional reads `M` before the still-abstract one: `JoinMode` testing `S` first stayed
+    deferred inside every generic scope and made the three dispatching classes carry a whole extra
+    type parameter, plus its own operator, to collapse what one reordering collapses. The two orders
+    are identical at every concrete instantiation, so no test catches the difference - only a
+    subclass override failing `TS2416` does.
 - A conditional type gating a constructor or function's own parameter never resolves inside any generic
   scope that still holds its type parameters abstract, even where both sides of `extends` are the
   literally same parameter. Put a plain, non-conditional overload for the fully-supplied argument shape
