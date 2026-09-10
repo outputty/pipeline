@@ -325,33 +325,23 @@ async function* withEndSignal<V>(source: AsyncIterable<V>, onEnd: () => void): A
 }
 
 /**
- * Emits a lifecycle event to every listener registered on it, synchronous or async - a throw from
- * ANY of them, before or after their own `await`, surfaces as its own separate uncaught exception on
- * a later microtask instead of escaping the `.then()` callback `respond()`/`doReject()` run inside
- * (`stageWork()`, above), which has no downstream `.catch()` of its own, or blocking a sibling
- * listener registered on the same event from running at all.
+ * Emits a lifecycle event through the ORDINARY `emitter.emit()` call - the simplest shape available,
+ * deliberately: a caller-supplied emitter's own `.emit()` override and Node's own `.once()` unwrap
+ * machinery both keep working exactly as documented. A SYNCHRONOUS listener throw is caught here and
+ * surfaced as its own separate uncaught exception on a later microtask, rather than escaping the
+ * `.then()` callback `respond()`/`doReject()` run inside (`stageWork()`, above), which has no
+ * downstream `.catch()` of its own. Two limitations this simplicity accepts, by decision, not fixed:
+ * a synchronous throw still stops `.emit()`'s own internal loop before a listener registered AFTER
+ * the throwing one on the SAME event ever runs - ordinary `EventEmitter` behavior, not a guarantee
+ * this class makes about listener isolation; an ASYNC listener throwing AFTER its own `await` leaks
+ * as a real `unhandledRejection` instead, since `.emit()` never awaits a listener's return value.
  */
 function emitSafely(emitter: PipelineEmitter, event: string, payload?: unknown): void {
-  // Iterates `emitter.listeners()` directly, one call per listener - the same reason `stageWork()`'s
-  // own dispatch loop never calls `emitter.emit()`: Node's EventEmitter does not catch a listener's
-  // own throw, so a single throwing listener stops `.emit()`'s internal loop before it reaches any
-  // listener registered after it. One `try` per listener means a throw on ANY of them surfaces as
-  // its own separate uncaught exception without silencing its siblings (code-review xhigh, F5).
-  for (const fn of emitter.listeners(event)) {
-    try {
-      // Wrapped in `Promise.resolve(...).catch(...)` too - an ASYNC listener that throws AFTER its
-      // own `await` throws on a later microtask, past this function's own synchronous `try`, and
-      // would otherwise leak as a real `unhandledRejection` instead of surfacing here (code-review
-      // xhigh, F4).
-      Promise.resolve((fn as (payload?: unknown) => unknown)(payload)).catch((error: unknown) => {
-        queueMicrotask(() => {
-          throw error;
-        });
-      });
-    } catch (error) {
-      queueMicrotask(() => {
-        throw error;
-      });
-    }
+  try {
+    emitter.emit(event, payload);
+  } catch (error) {
+    queueMicrotask(() => {
+      throw error;
+    });
   }
 }

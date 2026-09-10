@@ -255,17 +255,15 @@ describe("#124 review round 1 - a synchronously-throwing Worker never aborts the
   });
 });
 
-describe("#124 review round 1/2 + code-review xhigh - a throwing lifecycle observer never absorbs, masks or blocks a real outcome", () => {
+describe("#124 review round 1/2 - a throwing lifecycle observer never absorbs or masks a real outcome", () => {
   it(
-    ":dispatched, :done (sync and async), a sibling :done listener, and :end/pipeline:end each surface as their own separate failure, never the dispatch's own",
+    "F3 (:dispatched), F4 (:done) and F5 (:end/pipeline:end) each surface as their own separate failure, never the dispatch's own",
     async () => {
       const fixture = await runFixture("__tests__/fixtures/eventemitter-throwing-observers.ts");
       expectFixtureOk(fixture);
       const result = JSON.parse(fixture.stdout.trim()) as {
         dispatched: { out: number[] | null; rejection: string | null };
         done: { out: number[] | null; rejection: string | null };
-        asyncDone: { out: number[] | null; rejection: string | null };
-        sibling: { out: number[] | null; siblingRan: boolean };
         ended: { rejection: string | null };
         unhandled: string[];
         uncaught: string[];
@@ -282,23 +280,17 @@ describe("#124 review round 1/2 + code-review xhigh - a throwing lifecycle obser
       expect(result.done.rejection).toBeNull();
       expect(result.done.out).toEqual([2, 4, 6]);
 
-      // code-review xhigh's own F4: an ASYNC :done listener throwing AFTER its own `await` used to
-      // leak as a real unhandledRejection instead of surfacing through emitSafely at all.
-      expect(result.asyncDone.rejection).toBeNull();
-      expect(result.asyncDone.out).toEqual([2, 4, 6]);
-
-      // code-review xhigh's own F5: a synchronously-throwing :done listener used to stop Node's own
-      // EventEmitter.emit() from ever reaching a SIBLING listener on the same event.
-      expect(result.sibling.out).toEqual([2, 4, 6]);
-      expect(result.sibling.siblingRan).toBe(true);
-
-      // F5 (build's own numbering): a throwing :end/pipeline:end listener used to REPLACE a real,
-      // already-propagating chunk error with its own unrelated one - both apply()'s and
-      // drainable()'s own wrap are covered.
+      // F5: a throwing :end/pipeline:end listener used to REPLACE a real, already-propagating chunk
+      // error with its own unrelated one - both apply()'s and drainable()'s own wrap are covered.
       expect(result.ended.rejection).toBe("real-chunk-failure");
 
       // Every observer's own throw still surfaces - as its own separate uncaughtException, never
-      // as a silent unhandledRejection.
+      // as a silent unhandledRejection. code-review xhigh's own F4/F5 (an ASYNC :done listener
+      // throwing after its own await, and a SYNC :done throw blocking a sibling listener on the
+      // same event) are NOT covered here by decision - fixing both would mean bypassing the
+      // caller's own emitter.emit() entirely, breaking .once() and a custom emitter's own .emit()
+      // override for every event this class emits, not only the Worker channel that already
+      // accepts that cost. Left as ordinary EventEmitter behavior a caller is expected to know.
       expect(result.unhandled).toEqual([]);
       expect(result.uncaught.length).toBeGreaterThan(0);
     },
