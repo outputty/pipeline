@@ -277,3 +277,76 @@ describe(".branch() is built once and called with any data (Done-when 13, 14)", 
     expect(seen).toEqual([1, 2, 3]);
   });
 });
+
+describe("the wire format reads as the chain was built (#90 L10)", () => {
+  /** Every path a mounted `.fetch` was asked for during `use`. */
+  async function pathsFor(
+    chain: Pipeline<number, "unset", "shape", number>,
+    input: number[],
+  ): Promise<{ out: number[]; paths: string[] }> {
+    const paths: string[] = [];
+    const worker = new HttpPipeline(chain, { url: "" });
+    return withServer(
+      async (request) => {
+        paths.push(new URL(request.url).pathname);
+        return worker.fetch(request);
+      },
+      async (url) => {
+        const out = await new HttpPipeline(chain, { url })(input).toArray();
+        return { out, paths };
+      },
+    );
+  }
+
+  it(
+    "addresses a dispatched stage as /transform/<n>, not /stage/<n>",
+    async () => {
+      // The verb names what BUILT the stage, so a reader walks `/transform/1` back to the second
+      // `.transform()` call rather than counting dispatched stages. `.branch()` extends the same
+      // scheme with a `/branch/<i>/<name>/` trail.
+      const chain = new Pipeline<number>()
+        .transform((t) => t.map((x) => x + 1))
+        .transform((t) => t.map((x) => x * 10));
+
+      const { out, paths } = await pathsFor(chain, [1, 2, 3]);
+      expect(out).toEqual([20, 30, 40]);
+      expect(paths).toEqual(["/transform/0", "/transform/1"]);
+    },
+    HTTP_TIMEOUT,
+  );
+
+  it(
+    "keeps a later stage's own address when an earlier one is pinned by .local()",
+    async () => {
+      // Skipping a pinned stage's id would renumber every stage after it - on both sides, silently,
+      // so a rolling deploy could serve the wrong transform under a number that exists in both
+      // versions. Measured: the pinned id is simply never requested.
+      const chain = new Pipeline<number>()
+        .transform((t) => t.map((x) => x + 1))
+        .local((p) => p.transform((t) => t.map((x) => x * 10)))
+        .transform((t) => t.map((x) => x - 2));
+
+      const { out, paths } = await pathsFor(chain, [1, 2, 3]);
+      expect(out).toEqual([18, 28, 38]);
+      expect(paths).toEqual(["/transform/0", "/transform/2"]);
+    },
+    HTTP_TIMEOUT,
+  );
+
+  it("404s a path that addresses nothing, naming what it was given", async () => {
+    const worker = new HttpPipeline(
+      new Pipeline<number>().transform((t) => t.map((x) => x)),
+      {
+        url: "",
+      },
+    );
+    const response = await worker.fetch(
+      new Request("http://x/stage/0", {
+        method: "POST",
+        body: JSON.stringify({ chunk: [1], context: {} }),
+      }),
+    );
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "unknown stage /stage/0" });
+  });
+});

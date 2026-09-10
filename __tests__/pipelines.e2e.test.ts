@@ -465,7 +465,7 @@ describe("#17 an unknown stage index 404s (Done-when 13)", () => {
         t.transform((tr) => tr.map((x: number) => x)).transform((tr) => tr.map((x: number) => x)),
       );
       const res = await worker.fetch(
-        new Request("http://x/stage/99", {
+        new Request("http://x/transform/99", {
           method: "POST",
           body: JSON.stringify({ chunk: [1], context: {} }),
         }),
@@ -484,14 +484,14 @@ describe("#17 .fetch() fails loud on a malformed request, never hangs the client
   const worker = makeWorker((t) => t.transform((tr) => tr.map((x: number) => x * 2)));
 
   it("400s on a missing body", async () => {
-    const res = await worker.fetch(new Request("http://x/stage/0", { method: "POST" }));
+    const res = await worker.fetch(new Request("http://x/transform/0", { method: "POST" }));
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "request body is not valid JSON" });
   });
 
   it("400s on malformed JSON", async () => {
     const res = await worker.fetch(
-      new Request("http://x/stage/0", { method: "POST", body: "not json" }),
+      new Request("http://x/transform/0", { method: "POST", body: "not json" }),
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "request body is not valid JSON" });
@@ -499,7 +499,7 @@ describe("#17 .fetch() fails loud on a malformed request, never hangs the client
 
   it("400s when the 'context' field is missing", async () => {
     const res = await worker.fetch(
-      new Request("http://x/stage/0", { method: "POST", body: JSON.stringify({ chunk: [1] }) }),
+      new Request("http://x/transform/0", { method: "POST", body: JSON.stringify({ chunk: [1] }) }),
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "request body is missing a 'context' object" });
@@ -510,7 +510,7 @@ describe("#17 .fetch() fails loud on a malformed request, never hangs the client
     // object" check, silently becoming a string-indexed context ({"0":1,"1":2}) instead of
     // failing loud, inconsistent with the stricter Array.isArray check already used for 'chunk'.
     const res = await worker.fetch(
-      new Request("http://x/stage/0", {
+      new Request("http://x/transform/0", {
         method: "POST",
         body: JSON.stringify({ chunk: [1], context: [1, 2, 3] }),
       }),

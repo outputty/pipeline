@@ -110,7 +110,7 @@ function bootstrapCluster(workerCount: number): Promise<BootstrapResult> {
   return bootstrapPromise;
 }
 
-/** The one HTTP server every worker runs, routing `/pipeline/<i>/stage/<n>` to pipeline `i`'s own
+/** The one HTTP server every worker runs, routing `/pipeline/<i>/transform/<n>` to pipeline `i`'s own
  * `.fetch()` - which then parses `/stage/<n>` itself, prefix-agnostic, exactly as `HttpPipeline`
  * already does for two plain instances. `registry` is read at REQUEST time, always after the
  * worker's own copy of the entry module has finished its synchronous top-level construction (Node
@@ -267,7 +267,7 @@ export class ClusterPipeline<T, M extends "async" = "async", In = T> extends Htt
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain
    * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`http.ts`) exists for, so several
    * `ClusterPipeline`s can share one worker server without colliding on stage 0. */
-  protected override routePath(verb: "stage" | "reduce", index: number): string {
+  protected override routePath(verb: "transform" | "reduce", index: number): string {
     return `/pipeline/${this.pipelineIndex}/${verb}/${index}`;
   }
 
