@@ -353,10 +353,11 @@ actually supplies. `createPipeline()` itself is declared ONCE, on the base, and 
 again (#133, replacing a `createPipeline()` override at every level): it merges its `options`
 argument with `this.carriedKnobs()`, and each subclass overrides ONLY `carriedKnobs()` to add its
 own extra fields - `protected carriedKnobs(): object { return {}; }` on the base,
-`{ ...super.carriedKnobs(), maxConcurrency: this.maxConcurrency, ordered: this.ordered }` on
-`ConcurrentPipeline`, each further subclass adding its own field the same way
-(`HttpPipeline`'s `url`, `ClusterPipeline`'s `workers`/`pipelineIndex`,
-`EventEmitterPipeline`'s `emitter`/`registeredStages`) - `chunkSize` never appears here at all
+`{ maxConcurrency: this.maxConcurrency, ordered: this.ordered }` on `ConcurrentPipeline` (its
+`super` is the base's empty object, so nothing to spread), each subclass BELOW that one adding its
+own field on top of `{ ...super.carriedKnobs(), ... }` (`HttpPipeline`'s `url`, `ClusterPipeline`'s
+`workers`/`pipelineIndex`, `EventEmitterPipeline`'s `emitter`/`registeredStages`) - `chunkSize`
+never appears here at all
 (#39), since `.buffer()` is `Pipeline`'s own knob now, not a constructor option. The `options`
 argument `createPipeline()` merges `carriedKnobs()` on top of is `this.carriedOptions()` (pre-#133,
 unchanged) - the FULL `PipelineState`, declared apart from the exported `PipelineOptions` (#90): a

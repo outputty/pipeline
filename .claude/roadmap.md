@@ -125,8 +125,11 @@ The two older candidates, still not filed:
   (`utils/helpers.ts`) unifies the try/catch-if-thenable/recover skeleton two sites shared, except
   `Reducer.fold`'s own hot per-item path, which keeps its measured-faster inlined form by decision.
   The four dispatching classes' `createPipeline()` overrides collapse behind one `carriedKnobs()`
-  hook, never overridden past the base's `createPipeline()` itself; 3 `bind()`/`sourcePolicy()`
-  overrides that narrowed a return type nothing read are deleted; `ClusterPipeline`'s 5 mutable
+  hook, never overridden past the base's `createPipeline()` itself; 5 overrides that narrowed a
+  return type nothing read are deleted - `bind()` on `ConcurrentPipeline`/`HttpPipeline`/
+  `ClusterPipeline` (3) and `sourcePolicy()` on `HttpPipeline`/`ClusterPipeline` (2), leaving
+  `ConcurrentPipeline`'s own real `sourcePolicy()` override as the one both now inherit.
+  `ClusterPipeline`'s 5 mutable
   module bindings and 4 free functions become one `WorkerSet` class (`register`/`claimIndex`/
   `lookup`/`bootstrap`/`enter`/`kill`/`startWorkerServer`); `http.ts`'s `fetch()`/`reduceWork()`/
   `handleOverBridge` each split their own mixed concerns into named helpers
@@ -144,7 +147,7 @@ The two older candidates, still not filed:
   `__tests__/helpers/` gains `countPromises`/`Order`+`ordersA`+`ordersB`+`withVat`/`parseStrict`/
   `chunksOf`/`closingSource`+`closingAsyncSource`/`runFixtureJson`/`withTrackedServer`, each
   replacing 3-5 copies; the 4 hand-rolled `IContextManager` test doubles now extend
-  `SimpleContextManager`, fixing a pre-#113 `value !== undefined` bug one of them still carried.
+  `SimpleContextManager`, fixing a pre-#113 `value !== undefined` bug all 4 of them still carried.
   Every layer's diff went through `/code-review medium` at least once, several through 2-3 rounds
   until zero findings remained - one round caught a real bug the tooling's own mechanical rename
   introduced (a test string literal silently corrupted from `"big orders"` to `"big ordersA"`),

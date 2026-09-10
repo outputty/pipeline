@@ -16,6 +16,6 @@ the PACKAGE's own public barrel (`src/index.ts`), not that internal path.
 - Every other public export is unaffected: `buildChunkGenerator` and `isContextAware` (the only
   other two `utils/` exports this package ever publicly shipped) are untouched.
 
-Migration: delete the import. `normalize`'s own 10-line body (`src/utils/cut.ts`) depends on
-nothing in this package's internals; a caller who genuinely needs to normalize a loose/pre-chunked
-mix of its own writes the same generator directly.
+Migration: delete the import. `normalize`'s own body (`src/utils/cut.ts`) depends on nothing in
+this package's internals; a caller who genuinely needs to normalize a loose/pre-chunked mix of its
+own writes the same generator directly.
