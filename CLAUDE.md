@@ -367,11 +367,23 @@ none of it survived the hand-trim (#745).
   events (`stage:<n>:dispatched`/`:done`/`:error`/`:end`, `pipeline:end`) fire on channels separate
   from the bare `stage:<n>` worker channel, so an observer registered on `:done` alone is never
   handed a chunk to process - registering on the bare channel instead makes that listener a Worker.
-  The real dispatch settles (`resolve`/`reject`) BEFORE its own lifecycle event emits, through
-  `emitSafely()` - a `:done`/`:error` listener that itself throws would otherwise fire from inside a
-  `.then()` callback with no downstream `.catch()`, and since that throw happened before the real
-  settle, the dispatch could hang forever rather than merely leak an unhandled rejection;
-  `emitSafely()` instead surfaces it as its own uncaught exception on the next microtask. ⚠ "Worker"
+  The real dispatch settles (`resolve`/`reject`) BEFORE its own lifecycle event emits, through ONE
+  shared `settle()` (`respond()`/`doReject()` both narrow to it) calling `emitSafely()` - EVERY
+  lifecycle emit in this class goes through it, `:dispatched` included, not only `:done`/`:error`
+  (a raw `:dispatched` emit synchronously rejected the whole dispatch as a Worker failure otherwise,
+  silently absorbed by `.onError()`). A `:done`/`:error` listener that itself throws would otherwise
+  fire from inside a `.then()` callback with no downstream `.catch()`, and since that throw happened
+  before the real settle, the dispatch could hang forever rather than merely leak an unhandled
+  rejection; `emitSafely()` instead surfaces it as its own uncaught exception on the next microtask -
+  the SAME reason `apply()`'s `stage:<n>:end`/`drainable()`'s `pipeline:end` emit through it too, not
+  a raw `emitter.emit()`: both run inside a stream's own `finally`, where an unguarded throw would
+  REPLACE a real, already-propagating stream error with the observer's own (JS's
+  finally-overrides-exception semantics). ⚠ Under `maxConcurrency > 1`, an early `.first(n)` can make
+  `stage:<n>:end` fire BEFORE some of that stage's own in-flight `:done`/`:error` events - `:end`
+  means "no more chunks will be yielded here", never "every Worker for this stage has finished." ⚠
+  `.once(event, fn)` is not "handle exactly one chunk": dispatch calls `emitter.listeners()` and
+  invokes each directly, so Node's own once-unwrap machinery (inside `.emit()`) never runs - a
+  `.once()` Worker fires on every chunk exactly like `.on()`. ⚠ "Worker"
   here is unrelated to a `ClusterPipeline` worker (an OS process, below) - the two terms collide by
   name only; write "EventEmitterPipeline Worker" near any `ClusterPipeline` discussion to keep them
   apart. `ConcurrentPipeline`'s own fan-out (`maxConcurrency`, `ordered`) is inherited UNCHANGED -
