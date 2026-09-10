@@ -42,6 +42,11 @@ export { PipelineResult } from "./result";
 export { ConcurrentPipeline, type ConcurrentPipelineOptions } from "./pipelines/concurrent";
 export { HttpPipeline, toNodeHandler } from "./pipelines/http";
 export { ClusterPipeline, type ClusterPipelineOptions } from "./pipelines/cluster";
+export {
+  EventEmitterPipeline,
+  type EventEmitterPipelineOptions,
+  type PipelineEmitter,
+} from "./pipelines/eventemitter";
 
 // Factory functions
 export { createTransformer } from "./factories";
