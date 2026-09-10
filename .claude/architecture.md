@@ -41,10 +41,13 @@ src/
                           Drainable<T> (the 4-field drain view PipelineResult/BranchOwner share),
                           ReduceWork<T,U>, RouteVerb/StageRoute, Tagged<R> (#133)
   pipeline.ts            Pipeline: the chain, context, stages, Pipeline.drainable, createPipeline<U,
-                          R>() + defer<U,R>() (each takes its own return type, no caller-side cast,
-                          #133) + onError() (#78); isSync()/emptyChunks<U>()/freshPreBuffer()/
-                          asyncIterableFrom()/isAsyncSource() are its own private helpers unifying
-                          what was 4-9 raw-spelled copies each (#133)
+                          R>() + defer<U,R>() (each takes its own return type, letting a
+                          DISPATCHING SUBCLASS's own two-argument call - `ConcurrentPipeline.apply()`
+                          - skip the `as X` cast its base-class caller still needs, #133) + onError()
+                          (#78); isSync()/freshPreBuffer()/asyncIterableFrom()/isAsyncSource() are
+                          its own private helpers unifying what was 4-9 raw-spelled copies each
+                          (#133); emptyChunks<U>() is EXPORTED (`cluster.ts` calls it too, to empty
+                          a worker's own chunk stream)
   transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError()
                           (the row handler, #78) and runnable() (the seam that carries it in); every
                           element-wise link (map/filter/flatMap/tap(fn)) shares one pipe() body (#133)
@@ -337,23 +340,31 @@ level, needing no per-level code - the base implementation is already correct ev
 bare `Pipeline`'s own `.transform()`/`.reduce()` never fan out or POST.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
-createPipeline<U, R = AnyPipeline<U>>()` calling `this.constructor` rather than a hard-coded `new
-Pipeline<U>`, so a subclass survives a `.transform()`/`.context()`/`.buffer()` chain - its own `R`
-type parameter is what lets a subclass's own `.apply()`/`.reduce()` get back its OWN narrower type
-(`this.createPipeline<U, ConcurrentPipeline<U, In>>(...)`) with no trailing `as X` cast anywhere
-(#133; `defer<U, R = AnyPipeline<U>>()` carries the identical pattern for the source-less path).
-`createPipeline()` itself is declared ONCE, on the base, and is never overridden again (#133,
-replacing a `createPipeline()` override at every level): it calls `this.carriedKnobs()`, and each
-subclass overrides ONLY that - `protected carriedKnobs(): object { return {}; }` on the base,
+createPipeline<U, R = AnyPipeline<U>>(chunks, options)` calling `this.constructor` rather than a
+hard-coded `new Pipeline<U>`, so a subclass survives a `.transform()`/`.context()`/`.buffer()`
+chain - its own `R` type parameter is what lets a DISPATCHING SUBCLASS's own two-argument call get
+back its OWN narrower type with no trailing `as X` cast
+(`this.createPipeline<U, ConcurrentPipeline<U, In>>(...)` in `ConcurrentPipeline.apply()`/
+`.reduce()`, #133; `defer<U, R = AnyPipeline<U>>()` carries the identical pattern for the
+source-less path) - the base `Pipeline`'s OWN copy-on-write methods still call the one-argument
+form and still cast `as this` (`.context()`/`.onError()`/`.buffer()`'s three branches), since `R`'s
+default (`AnyPipeline<U>`) cannot narrow to `this` without a second argument only a subclass site
+actually supplies. `createPipeline()` itself is declared ONCE, on the base, and is never overridden
+again (#133, replacing a `createPipeline()` override at every level): it merges its `options`
+argument with `this.carriedKnobs()`, and each subclass overrides ONLY `carriedKnobs()` to add its
+own extra fields - `protected carriedKnobs(): object { return {}; }` on the base,
 `{ ...super.carriedKnobs(), maxConcurrency: this.maxConcurrency, ordered: this.ordered }` on
 `ConcurrentPipeline`, each further subclass adding its own field the same way
 (`HttpPipeline`'s `url`, `ClusterPipeline`'s `workers`/`pipelineIndex`,
 `EventEmitterPipeline`'s `emitter`/`registeredStages`) - `chunkSize` never appears here at all
-(#39), since `.buffer()` is `Pipeline`'s own knob now, not a constructor option. What
-`createPipeline()` carries is `PipelineState`, declared apart from the exported `PipelineOptions`
-(#90): a caller writes `context`/`contextFactory`, and every carried knob is named once in
-`carriedKnobs()` rather than field by field at each call site - which is what stops one being
-dropped, as `mode` and then `bound` each silently were. And a
+(#39), since `.buffer()` is `Pipeline`'s own knob now, not a constructor option. The `options`
+argument `createPipeline()` merges `carriedKnobs()` on top of is `this.carriedOptions()` (pre-#133,
+unchanged) - the FULL `PipelineState`, declared apart from the exported `PipelineOptions` (#90): a
+caller writes `context`/`contextFactory`, and every carried knob is named once in `carriedOptions()`
+rather than field by field at each call site, which is what stops one being dropped, as `mode` and
+then `bound` each silently were. `carriedKnobs()` is the narrower, #133-introduced sibling: only the
+handful of fields a DISPATCHING subclass alone adds (never `mode`/`bound`/`context`, which
+`carriedOptions()` already owns). And a
 stage's identity is its INDEX in `_chunkTransforms` - the table `apply()` already maintains - so a
 dispatching class sends a chunk plus an index, never a function. Every instance runs the same code,
 so index N means the same transform on both sides; a mixed-version fleet breaks that assumption
