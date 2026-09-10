@@ -52,16 +52,24 @@ export type AssignMode<P extends SourcePolicy, S extends PipelineMode> = P exten
  * composed before its input exists, so a sync stage leaves the decision open for the input to make,
  * while ONE async stage decides it whatever the input turns out to be.
  *
+ * `S` may itself be `"unset"`, for a `.local()` region composed before any input. The two arms that
+ * produces are deliberately asymmetric: an undecided stage leaves a `"sync"` chain undecided, since
+ * the input can still make it either; it leaves an `"async"` chain async, since one asynchronous
+ * half has already deferred everything after it whatever the region turns out to be.
+ *
  * `JoinMode<"sync", "sync">` → `"sync"`. `JoinMode<"async", "sync">` → `"async"`.
  * `JoinMode<"unset", "sync">` → `"unset"`. `JoinMode<"unset", "async">` → `"async"`.
+ * `JoinMode<"sync", "unset">` → `"unset"`. `JoinMode<"async", "unset">` → `"async"`.
  */
-export type JoinMode<M extends PipelineMode, S extends "sync" | "async"> = M extends "sync"
-  ? S
-  : M extends "unset"
-    ? S extends "async"
-      ? "async"
-      : "unset"
-    : "async";
+export type JoinMode<M extends PipelineMode, S extends PipelineMode> = S extends "async"
+  ? "async"
+  : M extends "sync"
+    ? S extends "unset"
+      ? "unset"
+      : S
+    : M extends "unset"
+      ? "unset"
+      : "async";
 
 /**
  * The Mode the seed `Transformer` inside `.transform()` starts at, for a chain whose own Mode is
@@ -252,9 +260,12 @@ export interface BranchDefinition<T, _U, TTransformer = unknown> {
   predicate: (item: T) => boolean | Promise<boolean>;
 
   /**
-   * Transformer to apply to items that match the predicate.
+   * Transformer to apply to items that match the predicate. Optional (#87, folded into #90): a
+   * routing-only branch - a predicate and nothing else - used to force the caller to hand-build
+   * `new Transformer<T, T>()` per branch purely to satisfy this field. Omitted, matching items pass
+   * through unchanged, which makes `U` the item type `T`.
    */
-  transformer: TTransformer;
+  transformer?: TTransformer;
 }
 
 /**

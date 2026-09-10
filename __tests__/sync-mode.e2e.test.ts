@@ -399,22 +399,20 @@ describe("#90 - the Mode a chain reports and the engine it runs on never disagre
     expect(seen).toEqual([1, 2, 3]);
   });
 
-  it("a dispatching class refuses .transform() before .from() at runtime", () => {
-    // The base's `"unset"` guard lives on `transform`'s `this`, and a dispatching class has no
-    // `"unset"` state to test - its own Mode is fixed at `"async"`, which is what makes its
-    // narrowing overrides compile at all. `.apply()`'s runtime check is what covers those three:
-    // without it a source-less chain compiled AND silently resolved to `[]`.
-    const message = "no source: call .from(data) before composing a stage";
+  it("a dispatching class composes before an input, like the base", async () => {
+    // These three used to throw `no source: call .from(data) before composing a stage` here - the
+    // runtime guard that stood in for the base's compile-time `"unset"` refusal. Both are replaced
+    // by deferral: a dispatching class records its stages too, and replays them through its OWN
+    // `apply()`, so a replayed stage still dispatches. What still refuses is draining with no
+    // input, and wrapping a pipeline that already named a source.
+    const doubled = (p: { transform: (b: (t: any) => any) => any }): any =>
+      p.transform((t: any) => t.map((x: number) => x * 2));
 
-    expect(() => new ConcurrentPipeline<number>().transform((t) => t.map((x) => x * 2))).toThrow(
-      message,
+    expect(await doubled(new ConcurrentPipeline<number>())([1, 2, 3]).toArray()).toEqual([2, 4, 6]);
+    expect(typeof doubled(new HttpPipeline<number>({ url: "http://127.0.0.1:1" })).fetch).toBe(
+      "function",
     );
-    expect(() =>
-      new HttpPipeline<number>({ url: "http://127.0.0.1:1" }).transform((t) => t.map((x) => x * 2)),
-    ).toThrow(message);
-    expect(() => new ClusterPipeline<number>().transform((t) => t.map((x) => x * 2))).toThrow(
-      message,
-    );
+    expect(doubled(new ClusterPipeline<number>()).constructor.name).toBe("ClusterPipeline");
   });
 
   it("Transformer.loop takes a synchronous body inside an async chain", async () => {
@@ -558,7 +556,7 @@ describe("#90 L4 - a fold keeps the chain's Mode instead of always widening it",
         predicate: (x: number) => x % 2 !== 0,
         transformer: new Transformer<number, number>(),
       },
-    });
+    })();
 
     expect(data.doubled).toEqual([4, 8]);
     expect(data.plain).toEqual([1, 3, 5]);
@@ -781,7 +779,7 @@ describe("#90 L4 - review findings, each reproduced before it was fixed", () => 
     expect(typeof withTap.fetch).toBe("function");
   });
 
-  it("a reduce stage defers on the base and refuses on a dispatching class", () => {
+  it("a reduce stage defers on the base and on a dispatching class", async () => {
     // The base's own guard is replaced by deferral (#90): a source-less `.reduce()` records the
     // fold and replays it on the input the pipeline is called with, the same as `.transform()`.
     // What the guard originally caught still holds - `new Pipeline().reduce(f, 0)` never resolves
@@ -790,11 +788,12 @@ describe("#90 L4 - review findings, each reproduced before it was fixed", () => 
     expect(summed([1, 2, 3, 4, 5]).toArray()).toEqual([15]);
     expect(summed([10, 20]).toArray()).toEqual([30]);
 
-    // A dispatching class does not defer yet: it still needs `.from()` until the wrapper layer
-    // gives it a `(pipeline, options)` constructor of its own.
-    expect(() =>
-      new ConcurrentPipeline<number>().reduce((acc: number, x: number) => acc + x, 0),
-    ).toThrow("no source: call .from(data) before composing");
+    // A dispatching class defers too, and its replayed fold still partitions (#62): at
+    // `maxConcurrency: 3` over three chunks the result is three partial sums, not one total.
+    const partitioned = new ConcurrentPipeline<number>({ maxConcurrency: 3 })
+      .buffer(2)
+      .reduce((acc: number, x: number) => acc + x, 0);
+    expect(await partitioned([1, 2, 3, 4, 5, 6]).toArray()).toEqual([3, 7, 11]);
   });
 
   it("a drain with no source fails instead of resolving to an empty array", async () => {

@@ -14,13 +14,20 @@
 
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
-import type { Pipeline, PipelineOptions, PipelineSource, ReduceStage } from "@src/pipeline";
+import { Pipeline } from "@src/pipeline";
+import type {
+  PipelineOptions,
+  PipelineSource,
+  ReduceStage,
+  WrappablePipeline,
+} from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
   IContextManager,
   InternalTransformer,
   ReduceFunction,
   SourcePolicy,
+  PipelineMode,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
 import { ndjsonFrame, readNdjsonLines } from "@src/utils/ndjson";
@@ -171,7 +178,20 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
 > {
   protected _url: string;
 
-  constructor(options: HttpPipelineConstructorOptions) {
+  /** Wraps a chain built elsewhere, dispatching its stages over HTTP (#90). This is what lets the
+   * WORKER and the TRIGGER share one definition: the worker constructs the wrapper and mounts
+   * `.fetch` without ever naming data, and the trigger constructs it and calls it with different
+   * data each time. Neither writes the `.from([])` placeholder the worker used to need. */
+  constructor(
+    pipeline: WrappablePipeline<T, In>,
+    options: { url: string } & ConcurrentPipelineOptions,
+  );
+  constructor(options: HttpPipelineConstructorOptions);
+  constructor(
+    first: WrappablePipeline<T, In> | HttpPipelineConstructorOptions,
+    second?: { url: string } & ConcurrentPipelineOptions,
+  ) {
+    const options = Pipeline.wrapping<HttpPipelineConstructorOptions>(first, second);
     super(options);
     this._url = options.url;
   }
@@ -243,7 +263,7 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
     return "async";
   }
 
-  override local<U, M2 extends "sync" | "async">(
+  override local<U, M2 extends PipelineMode>(
     build: (p: Pipeline<T, "async", "shape", any>) => Pipeline<U, M2, "shape", any>,
   ): HttpPipeline<U, M, In> {
     return super.local(build) as unknown as HttpPipeline<U, M, In>;
@@ -288,12 +308,23 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
       return this.serveReduceRequest(requested, request);
     }
 
-    const maxIndex = this._chunkTransforms.length - 1;
-    if (!match || requested > maxIndex) {
+    // A path that is not a stage route is answered before anything else runs. `registries()` below
+    // can replay a whole deferred chain, and it sat ahead of this guard - so an unrelated request
+    // paid that replay for a `maxIndex` it then ignored, and a replay that threw turned a 404 into
+    // a rejected `fetch` promise instead of an error response.
+    if (!match) {
+      return Response.json({ error: `unknown stage ${pathname}` }, { status: 404 });
+    }
+
+    // `registries()`, not `_chunkTransforms` directly (#90): a worker holds a chain and never
+    // binds an input, so its stages are still recorded calls until something replays them. Reading
+    // the raw field reported `unknown stage 0; this deployment serves 0..-1` for a chain that had
+    // one stage.
+    const { chunkTransforms } = this.registries();
+    const maxIndex = chunkTransforms.length - 1;
+    if (requested > maxIndex) {
       return Response.json(
-        {
-          error: `unknown stage ${match ? requested : pathname}; this deployment serves 0..${maxIndex}`,
-        },
+        { error: `unknown stage ${requested}; this deployment serves 0..${maxIndex}` },
         { status: 404 },
       );
     }
@@ -314,7 +345,7 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
       for (const [key, value] of Object.entries(body.value.context)) {
         ctx.set(key, value);
       }
-      const result = await this._chunkTransforms[requested](body.value.chunk, ctx);
+      const result = await chunkTransforms[requested](body.value.chunk, ctx);
       return Response.json({ chunk: result } satisfies StageResponseBody<unknown>);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -331,9 +362,12 @@ export class HttpPipeline<T, M extends "async" = "async", In = T> extends Concur
    * whole point of `toNodeHandler` actually delivering bytes before the handler returns.
    */
   private async serveReduceRequest(index: number, request: Request): Promise<Response> {
-    const stage = this._reduceStages.get(index);
+    // `registries()` for the same reason `fetch` above uses it (#90): a worker's reduce stages are
+    // recorded calls until something replays them.
+    const { reduceStages } = this.registries();
+    const stage = reduceStages.get(index);
     if (!stage) {
-      const known = [...this._reduceStages.keys()].join(",") || "none";
+      const known = [...reduceStages.keys()].join(",") || "none";
       return Response.json(
         { error: `unknown reduce stage ${index}; this deployment serves ${known}` },
         { status: 404 },
