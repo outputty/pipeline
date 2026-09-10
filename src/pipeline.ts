@@ -572,17 +572,23 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * already carries. This base implementation is correct for `Pipeline` itself and for any subclass
    * whose constructor takes nothing beyond `(source, options)`.
    *
+   * `R` is the caller's own return type (#133, the same seam `defer()` above uses and for the same
+   * reason): a subclass method declaring a precise return type - `ConcurrentPipeline.apply()`
+   * returning `ConcurrentPipeline<U, In>` - names it as `this.createPipeline<U,
+   * ConcurrentPipeline<U, In>>(...)` and gets it back with no trailing `as X` cast of its own,
+   * since this method's own default `AnyPipeline<U>` would otherwise be all a caller sees.
+   *
    * @example
    * A `Sub extends Pipeline` with no extra constructor params: `new Sub([1]).transform(f)
    * .constructor.name` → `"Sub"`, because `apply()` (below) calls this method rather than `new
    * Pipeline(...)` directly.
    */
-  protected createPipeline<U>(
+  protected createPipeline<U, R = AnyPipeline<U>>(
     chunks: AsyncIterable<U[]>,
     options: PipelineConstructorOptions,
-  ): AnyPipeline<U> {
+  ): R {
     const Ctor = this.constructor as new (options?: PipelineConstructorOptions) => AnyPipeline<U>;
-    return new Ctor({ ...options, ...this.carriedKnobs(), chunks });
+    return new Ctor({ ...options, ...this.carriedKnobs(), chunks }) as unknown as R;
   }
 
   /** A dispatching subclass's own EXTRA constructor knobs, beyond what `PipelineOptions` itself

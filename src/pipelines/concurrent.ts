@@ -332,11 +332,9 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     // dispatched, chunk for chunk.
     const newChunks = fanOut(this._chunks, work, this._context, this.maxConcurrency);
 
-    // `createPipeline()`'s own declared return type is the loose `AnyPipeline<U>` (#133: this class
-    // no longer overrides it to narrow the return type - only `carriedKnobs()`, below). The cast is
-    // honest because `this.carriedKnobs()` is what `createPipeline()` spreads in, and it is THIS
-    // class's own override.
-    return this.createPipeline<U>(newChunks, {
+    // The explicit 2nd type argument is `createPipeline()`'s own `R` (#133, `pipeline.ts`) - it
+    // hands back `ConcurrentPipeline<U, In>` directly, no trailing `as X` cast of this method's own.
+    return this.createPipeline<U, ConcurrentPipeline<U, In>>(newChunks, {
       // Spread first (#90): a dispatched stage that rebuilt its options field by field silently
       // dropped `mode`, so the pipeline reverted to `"unset"` after its first `.transform()` and
       // `.local()`'s own region then refused to compose a stage at all.
@@ -353,7 +351,7 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
       // (`freshPreBuffer()` also nulls `syncPreBufferItems`, a no-op here - this class is always
       // `"async"` and has no sync chunk stream of its own to reset).
       ...this.freshPreBuffer(),
-    }) as ConcurrentPipeline<U, In>;
+    });
   }
 
   /**
@@ -398,13 +396,13 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     );
     const newChunks = mergeUnordered(partitions);
 
-    // See `apply()`'s own identical cast above for why one is needed here.
-    return this.createPipeline<U>(newChunks, {
+    // See `apply()`'s own identical `createPipeline<U, R>()` call above.
+    return this.createPipeline<U, ConcurrentPipeline<U, In>>(newChunks, {
       ...this.carriedOptions(),
       chunkTransforms,
       reduceStages,
       ...this.freshPreBuffer(),
-    }) as ConcurrentPipeline<U, In>;
+    });
   }
 
   /**

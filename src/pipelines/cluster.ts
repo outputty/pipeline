@@ -18,7 +18,7 @@ import { createServer } from "node:http";
 import { availableParallelism } from "node:os";
 import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
-import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
+import { HttpPipeline, toNodeHandler, errorResponse } from "@src/pipelines/http";
 import type { HttpPipelineOptions } from "@src/pipelines/http";
 import { emptyChunks, Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
@@ -133,20 +133,24 @@ class WorkerSet {
     return this.bootstrapPromise;
   }
 
-  /** Bootstraps if needed, marks one dispatch in flight, and returns its release - `stageWork()`
-   * and `reduceWork()` each `await workerSet.enter(this.workers)`, dispatch, then call the
-   * returned function exactly once (its own `released` guard makes a second call a no-op, so a
-   * caller's own `finally` never double-decrements). */
-  async enter(workerCount: number): Promise<() => void> {
-    await this.bootstrap(workerCount);
+  /** Bootstraps if needed, marks one dispatch in flight, and returns the port plus its release -
+   * `stageWork()` and `reduceWork()` each `await workerSet.enter(this.workers)`, read `port` for
+   * `this._url`, dispatch, then call `release` exactly once (its own `released` guard makes a
+   * second call a no-op, so a caller's own `finally` never double-decrements). `port` is returned
+   * here rather than re-read via a second `bootstrap()` call (#133 review: `bootstrap()` is
+   * memoized so a second call is not a race, but it is a needless microtask hop on every
+   * dispatch for a value this method already has). */
+  async enter(workerCount: number): Promise<{ port: number; release: () => void }> {
+    const { port } = await this.bootstrap(workerCount);
     this.inFlight++;
     let released = false;
-    return () => {
+    const release = (): void => {
       if (released) return;
       released = true;
       this.inFlight--;
       this.scheduleIdleCheck();
     };
+    return { port, release };
   }
 
   /** Reschedules the idle-kill check, `unref()`'d so the timer itself never keeps the process
@@ -186,7 +190,7 @@ class WorkerSet {
       const match = /^\/pipeline\/(\d+)\//.exec(pathname);
       const pipeline = match ? this.lookup(Number(match[1])) : undefined;
       if (!pipeline) {
-        return Response.json({ error: `unknown pipeline route ${pathname}` }, { status: 404 });
+        return errorResponse(404, `unknown pipeline route ${pathname}`);
       }
       return pipeline.fetch(request);
     };
@@ -335,10 +339,7 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
    * `reduceWork()` (once per whole stream) each call this once instead of inlining the identical
    * bootstrap/`inFlight` bracket. */
   protected async bootstrapAndSetUrl(): Promise<() => void> {
-    const release = await workerSet.enter(this.workers);
-    // Already bootstrapped by `enter()` above (or awaited whoever else's in-flight bootstrap) -
-    // `bootstrap()` is memoized, so this resolves instantly, just to read the port back.
-    const { port } = await workerSet.bootstrap(this.workers);
+    const { port, release } = await workerSet.enter(this.workers);
     this._url = `http://localhost:${port}`;
     return release;
   }

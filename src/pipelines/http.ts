@@ -54,8 +54,11 @@ interface StageResponseBody<U> {
 }
 
 /** The one JSON error-body shape every failure response in this file uses (#133: was spelled
- * `Response.json({ error: … }, { status: … })` inline 6x across `.fetch()`/`serveReduceRequest()`). */
-function errorResponse(status: number, message: string): Response {
+ * `Response.json({ error: … }, { status: … })` inline 6x across `.fetch()`/`serveReduceRequest()`).
+ * Exported so `cluster.ts`'s own `WorkerSet.startWorkerServer()` - routing to a `.fetch()` this
+ * same file builds - answers an unknown route with the identical shape rather than a 7th inline
+ * spelling. */
+export function errorResponse(status: number, message: string): Response {
   return Response.json({ error: message }, { status });
 }
 
