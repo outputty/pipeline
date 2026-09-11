@@ -1,22 +1,15 @@
-/**
- * Draining a `MaybeAsyncChunks` stream (#90, #133) - the synchronous engine's own terminal-op
- * drivers, split out of `chunk.ts` along with `cut.ts` (cutting/flattening/sharing) and `recut.ts`
- * (re-cutting an already-staged stream), re-exported from `chunk.ts` so nothing importing that
- * barrel has to change.
- */
-
 import { chain, isThenable } from "@src/utils/helpers";
 
 /**
- * A sync chunk stream whose individual chunks may still be pending (#90) - what a `"sync"`-Mode
+ * A sync chunk stream whose individual chunks may still be pending - what a `"sync"`-Mode
  * `Pipeline` carries. A stage whose callbacks were all synchronous puts a plain array in; one that
  * returned a thenable puts a `Promise` in, and that is where the run widens to async.
  */
 export type MaybeAsyncChunks<T> = Iterable<T[] | Promise<T[]>>;
 
 /**
- * The one sync/async decision every consumer of a `MaybeAsyncChunks | null` view shares (#133
- * review): `syncChunks !== null` picks `onSync` over `onAsync`. `cut.ts`'s own `collectItems` and
+ * The one sync/async decision every consumer of a `MaybeAsyncChunks | null` view shares:
+ * `syncChunks !== null` picks `onSync` over `onAsync`. `cut.ts`'s own `collectItems` and
  * `result.ts`'s `PipelineResult.forEach()`/`[Symbol.iterator]()` all call this now, rather than
  * three independent `if (syncChunks !== null) { … } else { … }` spellings of the identical check.
  *
@@ -32,9 +25,9 @@ export function dispatchSync<T, S, A>(
 
 /**
  * Drains a `MaybeAsyncChunks` stream item by item into `onItem`, staying synchronous until the first
- * pending chunk (#90) - the ONE drain every synchronous terminal op goes through (`toArray`,
- * `first`, `consume`, `forEach`), so the "did this stay synchronous?" decision and the early-exit
- * decision each live in one place rather than four.
+ * pending chunk - the ONE drain every synchronous terminal op goes through (`toArray`, `first`,
+ * `consume`, `forEach`), so the "did this stay synchronous?" decision and the early-exit decision
+ * each live in one place rather than four.
  *
  * `onItem` returning `true` stops the drain, which is what `.first(n)` needs; returning anything
  * else continues. A pending chunk hands the rest of the stream to a `.then` continuation running on
@@ -69,7 +62,7 @@ export function drainSync<T>(
 }
 
 /**
- * Runs `drain`, closing `iterator` on ANY failure - a synchronous throw or a rejection (#90).
+ * Runs `drain`, closing `iterator` on ANY failure - a synchronous throw or a rejection.
  *
  * The async engine gets this for free: `runSequentially`'s `for await` calls `.return()` on its
  * source when the loop body throws. A MANUAL iterator has to do it itself, and without this the two
@@ -92,9 +85,9 @@ function closingOnFailure<R>(iterator: Iterator<unknown>, drain: () => R): R {
 }
 
 /**
- * `drainSync`'s sibling for a callback whose OWN return has to settle before the next item (#90) -
- * what `Pipeline.forEach` needs, since a `forEach` callback is allowed to be async and its failures
- * must still reach the caller.
+ * `drainSync`'s sibling for a callback whose OWN return has to settle before the next item - what
+ * `Pipeline.forEach` needs, since a `forEach` callback is allowed to be async and its failures must
+ * still reach the caller.
  *
  * Stays synchronous while both the chunks and the callback do, and widens at the first thenable
  * either produces. Items are settled strictly in order, so an async `forEach` behaves like the
@@ -150,7 +143,7 @@ export function drainSyncSettled<T>(
 
 /** Closes a source iterator that a consumer stopped reading early, so a generator's own `finally`
  * runs and whatever it holds - a file handle, a cursor - is released. `for await`/`break` does this
- * for the async engine; the sync drains have to do it themselves. Exported (#133) - `recut.ts`'s own
+ * for the async engine; the sync drains have to do it themselves. Exported - `recut.ts`'s own
  * `recutSyncChunks` calls this too, rather than hand-inlining the identical `iterator.return?.()`.
  *
  * `close([1, 2, 3][Symbol.iterator]())` → `undefined`, the iterator's own `.return()` called. */

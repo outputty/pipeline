@@ -1,27 +1,19 @@
-/**
- * Re-cutting an already-staged sync chunk stream at a new boundary (#90, #133) - split out of
- * `chunk.ts` along with `cut.ts` (cutting/flattening/sharing) and `drain.ts` (draining a
- * `MaybeAsyncChunks` stream), re-exported from `chunk.ts` so nothing importing that barrel has to
- * change.
- */
-
 import { isThenable } from "@src/utils/helpers";
 import { close, type MaybeAsyncChunks } from "@src/utils/drain";
 import { assertPositiveChunkSize } from "@src/utils/cut";
 
 /** The pair every function in this file threads together - the source iterator and the boundary
- * it's being re-cut to (#133: was two separate positional parameters carried through
- * `recutFrom`/`recutPending`, one small object instead). `cutChunk` (below) needs only `size`, so
- * it keeps `size` as its own parameter rather than taking this whole state. */
+ * it's being re-cut to. `cutChunk` (below) needs only `size`, so it keeps `size` as its own
+ * parameter rather than taking this whole state. */
 interface RecutState<T> {
   iterator: Iterator<T[] | Promise<T[]>>;
   size: number;
 }
 
 /**
- * Re-cuts an already-staged sync chunk stream at a new boundary (#90) - `.buffer()`'s own fallback
- * once a real stage has consumed the pre-buffer item view, so the re-cut runs over that stage's
- * OUTPUT rather than the original source.
+ * Re-cuts an already-staged sync chunk stream at a new boundary - `.buffer()`'s own fallback once a
+ * real stage has consumed the pre-buffer item view, so the re-cut runs over that stage's OUTPUT
+ * rather than the original source.
  *
  * Settled chunks re-cut exactly, synchronously, at `size`. A PENDING chunk cannot: its items are not
  * known yet, and a sync generator has to decide it is done before that promise could resolve. From
@@ -48,8 +40,8 @@ export function* recutSyncChunks<T>(
     // runs. Measured before this: a 100-item generator behind `.buffer(10).transform(f).buffer(2)`,
     // drained with `.first(1)`, left the source open where the identical chain over an
     // `AsyncIterable` closed it - two engines disagreeing on user code that differed only in its
-    // source, which is exactly what #90 exists to remove. Closing an already-exhausted iterator is
-    // a no-op, so this needs no "did it finish?" flag.
+    // source. Closing an already-exhausted iterator is a no-op, so this needs no "did it finish?"
+    // flag.
     close(state.iterator);
   }
 }
@@ -108,7 +100,7 @@ function* cutChunk<T>(carry: T[], chunk: T[], size: number): Generator<T[], T[]>
 
 /**
  * Keeps re-cutting at `size` once a pending chunk is met, yielding one promise per cut instead of
- * one promise for the whole remaining stream (#90).
+ * one promise for the whole remaining stream.
  *
  * The earlier shape collapsed here: it returned the carry, the pending chunk and every chunk after
  * it as ONE settled array, so `.buffer(2)` after an async stage stopped cutting entirely. Measured,

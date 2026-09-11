@@ -1,26 +1,3 @@
-/**
- * Simple context manager implementation.
- *
- * Python equivalent:
- * ```python
- * class SimpleContextManager:
- *   def __init__(self, initial: dict[str, Any] | None = None):
- *     self._data = initial.copy() if initial else {}
- *
- *   def __getitem__(self, key: str) -> Any:
- *     return self._data[key]
- *
- *   def __setitem__(self, key: str, value: Any) -> None:
- *     self._data[key] = value
- *
- *   def get(self, key: str, default: Any = None) -> Any:
- *     return self._data.get(key, default)
- *
- *   def to_dict(self) -> dict[str, Any]:
- *     return self._data.copy()
- * ```
- */
-
 import type { IContextManager } from "@src/types";
 
 /**
@@ -30,7 +7,7 @@ import type { IContextManager } from "@src/types";
  * For multi-process scenarios, use a more sophisticated implementation.
  *
  * @example
- * ```typescript
+ * ```ts
  * const ctx = new SimpleContextManager({ count: 0 });
  *
  * ctx.set('count', 1);
@@ -78,11 +55,11 @@ export class SimpleContextManager implements IContextManager {
   /**
    * Get a value by key with a default fallback.
    *
-   * Tests key PRESENCE, not `value !== undefined` (#113): a deliberately stored `undefined` is a
-   * real value here, the same distinction `DROP` exists for on the row-handler side, where
-   * `types.ts` records that "`undefined` stays an ordinary value a handler may legitimately
-   * return". Comparing the value instead made `.set("k", undefined)` read back as the default while
-   * `.get("k")` returned `undefined` - two accessors disagreeing about whether the key exists.
+   * Tests key PRESENCE, not `value !== undefined`: a deliberately stored `undefined` is a real value
+   * here, the same distinction `DROP` exists for on the row-handler side, where `types.ts` records
+   * that "`undefined` stays an ordinary value a handler may legitimately return". Comparing the
+   * value instead made `.set("k", undefined)` read back as the default while `.get("k")` returned
+   * `undefined` - two accessors disagreeing about whether the key exists.
    *
    * @param key - The key to look up
    * @param defaultValue - Value to return if the key is absent
