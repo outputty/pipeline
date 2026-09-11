@@ -341,19 +341,21 @@ level, needing no per-level code - the base implementation is already correct ev
 bare `Pipeline`'s own `.transform()`/`.reduce()` never fan out or POST.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
-createPipeline<U, R = AnyPipeline<U>>(chunks, options)` calling `this.constructor` rather than a
+createPipeline<U, R = AnyPipeline<U>>(chunks, options)` that calls `this.constructor` rather than a
 hard-coded `new Pipeline<U>`, so a subclass survives a `.transform()`/`.context()`/`.buffer()`
-chain - its own `R` type parameter is what lets a DISPATCHING SUBCLASS's own two-argument call get
-back its OWN narrower type with no trailing `as X` cast
-(`this.createPipeline<U, ConcurrentPipeline<U, In>>(...)` in `ConcurrentPipeline.apply()`/
-`.reduce()`, #133; `defer<U, R = AnyPipeline<U>>()` carries the identical pattern for the
-source-less path) - the base `Pipeline`'s OWN copy-on-write methods still call the one-argument
-form and still cast `as this` (`.context()`/`.onError()`/`.buffer()`'s three branches), since `R`'s
-default (`AnyPipeline<U>`) cannot narrow to `this` without a second argument only a subclass site
-actually supplies. `createPipeline()` itself is declared ONCE, on the base, and is never overridden
-again (#133, replacing a `createPipeline()` override at every level): it merges its `options`
-argument with `this.carriedKnobs()`, and each subclass overrides ONLY `carriedKnobs()` to add its
-own extra fields:
+chain. Its own `R` type parameter is what lets a DISPATCHING SUBCLASS's own two-argument call get
+back its OWN narrower type with no trailing `as X` cast -
+`this.createPipeline<U, ConcurrentPipeline<U, In>>(...)` in `ConcurrentPipeline.apply()`/`.reduce()`
+(#133); `defer<U, R = AnyPipeline<U>>()` carries the identical pattern for the source-less path. The
+base `Pipeline`'s OWN copy-on-write methods still call the one-argument form and still cast
+`as this` (`.context()`/`.onError()`/`.buffer()`'s three branches), since `R`'s default
+(`AnyPipeline<U>`) cannot narrow to `this` without a second argument only a subclass site actually
+supplies.
+
+`createPipeline()` itself is declared ONCE, on the base, and is never overridden again (#133,
+replacing a `createPipeline()` override at every level). It merges its `options` argument with
+`this.carriedKnobs()`, and each subclass overrides ONLY `carriedKnobs()` to add its own extra
+fields:
 
 ```ts
 // pipeline.ts (base) - no super to spread

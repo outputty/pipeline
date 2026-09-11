@@ -102,44 +102,32 @@ The two older candidates, still not filed:
   `new Pipeline<number>().transform((t) => t.map((x) => x * 2).filter((x) => x > 4))` example
   returns `[6, 8, 10]` before this stack and after every layer of it. `types.ts` gains
   `StageRegistries`/`Drainable<T>`/`ReduceWork<T,U>`/`RouteVerb`+`StageRoute`/`Tagged<R>`, each
-  replacing a shape spelled inline 3-6 times with no shared name. `pipeline.ts`'s sync/async engine
+  replacing a shape spelled inline 3-6 times with no shared name; `pipeline.ts`'s sync/async engine
   fork, `EMPTY_CHUNKS` cast, pre-buffer reset and `defer` cast each collapse to one call
-  (`isSync()`/`emptyChunks<U>()`/`freshPreBuffer()`/`defer<U,R>()`, the last gaining its own return
-  type so a caller gets back its real class with no trailing cast - `createPipeline<U,R>()` gets the
-  same treatment). `transformer.ts`'s element-wise `pipe()` body, written twice per method across
-  `map`/`filter`/`flatMap`/`tap(fn)`, is one call per method; `tryRecover()`
-  (`utils/helpers.ts`) unifies the try/catch-if-thenable/recover skeleton two sites shared, except
-  `Reducer.fold`'s own hot per-item path, which keeps its measured-faster inlined form by decision.
+  (`.claude/architecture.md`'s own Module layout names them), `createPipeline<U,R>()` gaining its
+  own return type so a caller gets back its real class with no trailing cast; `transformer.ts`'s
+  element-wise `pipe()` body, written twice per method, is one call per method, and `tryRecover()`
+  unifies the try/catch-if-thenable/recover skeleton two other sites shared (`Reducer.fold`'s own
+  hot per-item path keeps its measured-faster inlined form by decision).
   The four dispatching classes' `createPipeline()` overrides collapse behind one `carriedKnobs()`
-  hook, never overridden past the base's `createPipeline()` itself; 5 overrides that narrowed a
-  return type nothing read are deleted - `bind()` on `ConcurrentPipeline`/`HttpPipeline`/
-  `ClusterPipeline` (3) and `sourcePolicy()` on `HttpPipeline`/`ClusterPipeline` (2), leaving
-  `ConcurrentPipeline`'s own real `sourcePolicy()` override as the one both now inherit.
-  `ClusterPipeline`'s 5 mutable
-  module bindings and 4 free functions become one `WorkerSet` class (`register`/`claimIndex`/
-  `lookup`/`bootstrap`/`enter`/`kill`/`startWorkerServer`); `http.ts`'s `fetch()`/`reduceWork()`/
-  `handleOverBridge` each split their own mixed concerns into named helpers
-  (`errorResponse`/`unknownBranchRoute`/`buildReduceRequestBody`/`parseReduceFrames`/
-  `nodeRequestToFetchRequest`). `utils/chunk.ts` (503 lines) splits into `cut.ts`/`drain.ts`/
-  `recut.ts` along its own real seams, re-exported from `chunk.ts` so no existing import changes;
-  `normalize` drops out of `utils/index.ts`/`src/index.ts`'s own PUBLIC barrels; `chunk.ts`'s
-  internal re-export of it is untouched (BREAKING on the public surface only, no deprecation
-  period - never a documented capability). `branch.ts`/`result.ts` adopt `Drainable<T>`, collapsing
+  hook; 5 overrides that narrowed a return type nothing read are deleted; `ClusterPipeline`'s 5
+  mutable module bindings and 4 free functions become one `WorkerSet` class; `http.ts`'s
+  `fetch()`/`reduceWork()`/`handleOverBridge` each split their own mixed concerns into named
+  helpers. `utils/chunk.ts` splits into `cut.ts`/`drain.ts`/`recut.ts` along its own real seams,
+  re-exported from `chunk.ts` so no existing import changes; `normalize` drops out of the PUBLIC
+  barrels only (`chunk.ts`'s own internal re-export is untouched - BREAKING, no deprecation
+  period, never a documented capability). `branch.ts`/`result.ts` adopt `Drainable<T>`, collapsing
   3 independent re-spellings of the same 4-field drain view; `PipelineResult`'s three different
-  sync/async terminal-dispatch styles share one `dispatchSync()`; `BranchBuilder` gains
-  `pushArm()`/`findCatchAll()`, replacing a repeated cast-and-push and a repeated
-  `find(isCatchAll)`. `context/types.ts` (a dead re-export nothing outside `context/simple.ts`'s own
-  relative import used) is deleted whole. The test suite gets the same treatment:
-  `__tests__/helpers/` gains `countPromises`/`Order`+`ordersA`+`ordersB`+`orders`+`withVat`/
-  `parseStrict`/`chunksOf`/`closingSource`+`closingAsyncSource`/`runFixtureJson`/`withTrackedServer`,
-  each replacing 3-5 copies; the 4 hand-rolled `IContextManager` test doubles now extend
-  `SimpleContextManager`, fixing a pre-#113 `value !== undefined` bug all 4 of them still carried.
-  Every layer's diff shows zero `/code-review medium` findings; the closing-generator pair covers 3
-  of the ticket's own named 5 sites, the other 2 keeping their original inline generator - the same
-  shape as `cluster-basic.ts`'s own carve-out from `runFixtureJson`. `orders` (not `ordersA`) is
-  `branch.e2e.test.ts`'s own shared declaration, per the ticket's own Interface. PRs #135 (types),
-  #136 (pipeline.ts), #138 (transformer/reduce/helpers), #139 (dispatching classes), #140 (chunk.ts
-  split), #141 (branch.ts + result.ts), #142 (test helpers), #143 (docs).
+  sync/async terminal-dispatch styles share one `dispatchSync()`. `context/types.ts` (a dead
+  re-export) is deleted whole.
+  The test suite gets the same treatment: `__tests__/helpers/` gains the small utilities copied
+  3-5x each (`countPromises`, the `Order`/`orders`/`withVat` trio, `parseStrict`, `chunksOf`, a
+  closing-generator source pair, `runFixtureJson`, `withTrackedServer`); the 4 hand-rolled
+  `IContextManager` test doubles now extend `SimpleContextManager`, fixing a pre-#113
+  `value !== undefined` bug all 4 of them still carried. Every layer's diff shows zero
+  `/code-review medium` findings. PRs #135 (types), #136 (pipeline.ts), #138
+  (transformer/reduce/helpers), #139 (dispatching classes), #140 (chunk.ts split), #141
+  (branch.ts + result.ts), #142 (test helpers), #143 (docs).
 - **`EventEmitterPipeline`, a fourth dispatch mode** (#124, `feat`) - no mode lets another module
   attach a worker to a named stage after the chain already exists, or observe a stage's chunks
   without composing an observer into the chain. `.transform()`'s own composed function
