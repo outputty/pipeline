@@ -121,7 +121,7 @@ for await (const chunk of new Pipeline(events).buffer(fiveMinuteWindow)(events).
 only when a downstream consumer asks for it, up to `capacity` chunks sit ready ahead of time,
 produced as fast as the source allows. A slow producer's latency then overlaps with a slower
 consumer's own processing instead of adding to it - measured, a 100ms/item source feeding a
-30ms/item stage ran 671ms with no queue and 539ms with one, from overlap alone, same output. Order
+30ms/item stage ran 674ms with no queue and 542ms with one, from overlap alone, same output. Order
 is preserved: `.queue()` never reorders items, only changes WHEN they are pulled.
 
 > **`.queue(capacity)`** - prefetches up to `capacity` chunks `.buffer()` already cut, ready ahead of

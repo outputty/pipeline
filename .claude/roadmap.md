@@ -45,19 +45,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   unclaimed. Layout and rationale in `.claude/architecture.md`'s new Internal overhead benchmarks
   section.
 
-- **`.queue(n)` prefetches chunks ahead of the consumer** (#123) - `.buffer()` pulls a chunk exactly
-  when the consumer asks for it, so a slow producer or a slow consumer always pays the other's
-  latency in full; `ConcurrentPipeline`'s own `fanOutUnordered` already overlaps pulling with WORK
-  via a `Promise.race` pool, but only on that class, and only as a side effect of running
-  `maxConcurrency` chunks concurrently. Now, because `share()` (checked first, per the reuse rule)
-  turned out not to serve this - it is competitive pull for many consumers with zero storage, not a
-  producer allowed to race ahead of one consumer. An array-of-promises queue, restated from the
-  user's own design and measured for real: 671ms serial vs 539ms queued over a 100ms/item source and
-  a 30ms/item stage, from overlap alone. `Promise.race` was priced and killed twice (proven to buy
-  nothing over a single async generator source, which always serializes its own internal work); a
-  `ReadableStream`/`CountQueuingStrategy` candidate was priced and killed (eager pull at
-  construction, an off-by-one capacity bound).
-
 ### Later - not yet filed
 
 - **A distributed event emitter solution layer for `EventEmitterPipeline`** (#124's own planning) -
@@ -115,6 +102,31 @@ The two older candidates, still not filed:
   verifying the first fix with a real run rather than a hand-derived expected value.
   `.claude/architecture.md`'s own "buffer(fn) - a callback-driven chunk boundary" section has the
   full engine. PRs #144 (L1, pinned cases), #145 (L2, the engine + wiring), #147 (docs).
+- **`.queue(n)` prefetches chunks ahead of the consumer** (#123, `feat`) - `.buffer()` pulls a chunk
+  exactly when the consumer asks for it, so a slow producer or a slow consumer always pays the
+  other's latency in full; `ConcurrentPipeline`'s own `fanOutUnordered` already overlaps pulling with
+  WORK via a `Promise.race` pool, but only on that class, and only as a side effect of running
+  `maxConcurrency` chunks concurrently. `share()` (checked first, per the reuse rule) turned out not
+  to serve this - it is competitive pull for many consumers with zero storage, not a producer allowed
+  to race ahead of one consumer. `prefetch()` (`src/utils/cut.ts`, beside `share()`) is a plain
+  `async function*` mirroring `ConcurrentPipeline`'s own `fanOutOrdered`: an array of exactly
+  `capacity` pending `upstream.next()` promises, refilled the instant the consumer takes the front
+  one. Written as a generator rather than a hand-rolled `AsyncIterable` object, laziness and
+  concurrent-caller safety (`share()`-based partitioning) come from the language's own generator
+  semantics, not code this package had to write and verify itself - real, measured: 674ms serial vs
+  542ms queued over a 100ms/item source and a 30ms/item stage, from overlap alone; two `.reduce()`
+  partitions over 8 items summing to 36, no deadlock, no starvation. `Promise.race` was priced and
+  killed twice during planning (proven to buy nothing over a single async generator source, which
+  always serializes its own internal work); a `ReadableStream`/`CountQueuingStrategy` candidate was
+  priced and killed (eager pull at construction, an off-by-one capacity bound). Code review found and
+  fixed two real defects before merge: `.queue()` wasn't narrowed on the four dispatching subclasses
+  (`ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline`) - the identical gap
+  `.buffer(fn)`'s async overload shipped unfixed in #88, closed here instead since a single signature
+  made the four one-liner overrides cheap; and a test asserting an exact pull count depended on how
+  many microtask ticks had run rather than on `capacity`, replaced with a poll-until-stable helper
+  (`untilStable`, `__tests__/helpers/sequences.ts`). `.claude/architecture.md`'s own "Prefetching"
+  section has the full engine. PRs #148 (L1, pinned cases), #149 (L2, the engine + wiring), plus this
+  docs layer.
 - **A repo-wide reuse and simplification pass** (#133, `refactor`) - 15 named duplications, each
   unified in its own layer, no observable output change anywhere: the canonical
   `new Pipeline<number>().transform((t) => t.map((x) => x * 2).filter((x) => x > 4))` example
