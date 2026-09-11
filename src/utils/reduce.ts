@@ -6,10 +6,11 @@
  * `(acc, x, ctx, emit) => …` both just work.
  */
 
-import type { IContextManager, ReduceFunction, RowErrorHandler } from "@src/types";
+import type { IContextManager, ReduceFunction, RowErrorHandler, BufferFunction } from "@src/types";
 import { DROP } from "@src/types";
 import type { MaybeAsyncChunks } from "@src/utils/chunk";
 import { chain, isThenable } from "@src/utils/helpers";
+import { assertPositiveChunkSize } from "@src/utils/cut";
 
 /**
  * Folds items one at a time into `U`, buffering values `emit()` pushes and tracking whether the
@@ -115,6 +116,20 @@ export class Reducer<U, T> {
   /** The final accumulator, only if items were folded since the last `emit()` - `[]` otherwise. */
   final(): U[] {
     return this.itemsSinceEmit > 0 ? [this.acc] : [];
+  }
+
+  /** The RAW current accumulator, with no `itemsSinceEmit` gating (#88) - `.buffer()`'s own
+   * trailing-chunk logic needs "is there a non-empty pending array right now", a different
+   * question than `.final()`'s "was anything folded since the last `emit()`": a fold that flushes
+   * AND appends the SAME item in one call (`bufferReduceFunction`'s own flush-then-append shape)
+   * resets `itemsSinceEmit` to `0` by `.final()`'s own design - correct for `.reduce()`'s contract,
+   * where a post-emit return value may be an unrelated fresh seed - but WRONG for `.buffer(fn)`,
+   * where the returned array always IS the real pending state. Measured: without this, the very
+   * last item of a stream that both flushed and appended (`.buffer(10).transform((t) =>
+   * t.map(async (x) => x * 2)).buffer(sizeTwo)` over `[0..9]`, `sizeTwo` flushing every 2 items)
+   * silently dropped its own trailing chunk - `.final()` read `0` where `.current()` reads `1`. */
+  current(): U {
+    return this.acc;
   }
 }
 
@@ -234,4 +249,216 @@ export function* foldSyncChunkStream<U, T>(
   }
   const trailing = reducer.final();
   if (trailing.length > 0) yield trailing;
+}
+
+/**
+ * Adapts `.buffer(size)`'s own numeric form onto the SAME `ReduceFunction<T[], T>` shape
+ * `bufferReduceFunction` (below) builds from a caller's `BufferFunction` (#88) - "one engine, not
+ * two": both feed `buildBufferGenerator`/`buildSyncBufferGenerator`. `acc` is MUTATED and returned
+ * by reference, never copied per item (`buildChunkGenerator`'s own `chunk.push(item)` cost, not an
+ * `[...acc, item]` one) - `Reducer.fold()` was itself measured at 8.9 ns/item against 372.5 ns/item
+ * for a copying shape (`src/utils/reduce.ts`'s own `Reducer.fold` docstring), and an extra
+ * per-item array copy here would spend that budget straight back.
+ *
+ * `assertPositiveChunkSize` runs HERE, eagerly, at generator-construction time - the same moment
+ * `buildChunkGenerator`/`buildSyncChunkGenerator` already validate, so `.buffer(0)` on an already-
+ * bound `Pipeline` still throws before any item is pulled, not at the first drain.
+ *
+ * `sizeReduceFunction<number>(3)([], 1, ctx, () => {})` → `[1]`, the same array reference, until a
+ * third item pushes it to `.length >= 3` and it is emitted and reset.
+ */
+export function sizeReduceFunction<T>(size: number): ReduceFunction<T[], T> {
+  assertPositiveChunkSize(size);
+  return (acc, item, _ctx, emit) => {
+    acc.push(item);
+    if (acc.length >= size) {
+      emit(acc);
+      return [];
+    }
+    return acc;
+  };
+}
+
+/**
+ * Adapts a caller's `BufferFunction<T>` onto `ReduceFunction<T[], T>` (#88) - `pending` is the SAME
+ * mutable array `Reducer` folds as `acc`, never exposed to `fn` directly: `flush` (the zero-arg
+ * `emit` a `BufferFunction` receives) pushes the current `pending` onto the underlying reducer's own
+ * `emit` and rebinds `pending` to a fresh `[]`, so a value `fn` returns AFTER calling `flush` appends
+ * to the just-reset array, never the one already handed off. `chain` (not `await`) is what keeps a
+ * fully synchronous `BufferFunction` from creating a `Promise` per item, the same reason `Reducer.fold`
+ * itself avoids one.
+ *
+ * `bufferReduceFunction<number>((item, _ctx, emit) => (item % 2 === 0 ? (emit(), item) : item))`
+ * folding `[1, 2, 3]` from `[]`: item `1` → `[1]`; item `2` flushes `[1]` (emitted) then appends `2`
+ * to the reset array → `[2]`; item `3` → `[2, 3]`.
+ */
+export function bufferReduceFunction<T>(fn: BufferFunction<T>): ReduceFunction<T[], T> {
+  return (acc, item, ctx, emit) => {
+    let pending = acc;
+    const flush = () => {
+      emit(pending);
+      pending = [];
+    };
+    return chain(fn(item, ctx, flush), (value) => {
+      if (value !== DROP) pending.push(value);
+      return pending;
+    });
+  };
+}
+
+/** Yields every non-empty `T[]` in `values`, in order (#88) - the guard every engine function below
+ * needs on its settled yields, split out so a caller nesting it inside its own `for` loop stays at
+ * this repo's `max-depth: 2` (`yield*` is not a block, so `for (const item of data) yield*
+ * nonEmpty(...)` costs one level of nesting, not two).
+ *
+ * `[...nonEmpty([[1], [], [2, 3]])]` → `[[1], [2, 3]]`. */
+function* nonEmpty<T>(values: T[][]): Generator<T[]> {
+  for (const value of values) {
+    if (value.length > 0) yield value;
+  }
+}
+
+/** `.buffer()`'s own trailing-chunk check (#88, code-review) - `reducer.current()`, not
+ * `reducer.final()`: the pending array `sizeReduceFunction`/`bufferReduceFunction` return always
+ * IS the real state to flush, where `.final()`'s own `itemsSinceEmit` gate answers a DIFFERENT
+ * question (`Reducer`'s own docstring) that reads `0` for a fold that both flushed and appended
+ * the SAME item, silently dropping it when that item was also the stream's last.
+ *
+ * `trailingOf(reducer)` → `[[...pending]]` if `pending.length > 0`, else `[]`. */
+function trailingOf<T>(reducer: Reducer<T[], T>): T[][] {
+  const pending = reducer.current();
+  return pending.length > 0 ? [pending] : [];
+}
+
+/**
+ * `.buffer()`'s own item-level engine (#88), async arm - folds `data` through a fresh
+ * `Reducer<T[], T>` one item at a time and yields each emitted pending array as its OWN chunk, never
+ * grouping more than one emit together the way `foldChunkStream`'s chunk-granular fold does (there,
+ * one INPUT chunk's worth of emits collapses into one downstream value by design; here, each `emit()`
+ * - whether `sizeReduceFunction`'s own auto-flush or a caller's explicit `flush()` - IS a chunk
+ * boundary and must stay its own chunk). `reduceFn` is `sizeReduceFunction(size)` or
+ * `bufferReduceFunction(fn)` - this generator itself never knows which. Every yield is guarded on
+ * `length > 0`: `sizeReduceFunction` can never emit an empty pending array (a positive `size` only
+ * flushes once `acc.length >= size`), but a caller's own `BufferFunction` can call `flush()` on an
+ * already-empty pending array (two `DROP`s in a row after a flush) - `.toArray()` would hide it (an
+ * empty chunk flattens to nothing), but `.apply()`/a `ConcurrentPipeline` dispatch would not, the
+ * same reason `buildChunkGenerator`/`foldSyncChunkStream`'s own settled arm already guard theirs.
+ *
+ * `buildBufferGenerator(sizeReduceFunction(2), ctx)(asyncFrom([1, 2, 3]))` → yields `[1, 2]` then
+ * `[3]`, the same output `buildChunkGenerator(2)` already produces for `.buffer(2)`.
+ */
+export function buildBufferGenerator<T>(
+  reduceFn: ReduceFunction<T[], T>,
+  ctx: IContextManager,
+): (data: AsyncIterable<T>) => AsyncGenerator<T[]> {
+  return async function* bufferGenerator(data: AsyncIterable<T>): AsyncGenerator<T[]> {
+    const reducer = new Reducer<T[], T>(reduceFn, []);
+    for await (const item of data) {
+      yield* nonEmpty(await reducer.fold(item, ctx));
+    }
+    yield* nonEmpty(trailingOf(reducer));
+  };
+}
+
+/**
+ * The shared item-by-item / slot-by-slot fold-and-yield engine `buildSyncBufferGenerator` and
+ * `recutSyncChunksWith` (below) both drive (#88, code-review) - the SAME tail-chaining
+ * `foldSyncChunkStream` uses, generalised over "a unit of input" (one raw item, or one existing
+ * chunk's worth of items) instead of assuming which. `work(unit)` folds ONE unit and may emit any
+ * number of chunks; every one of them must reach the caller as its OWN separate `MaybeAsyncChunks`
+ * slot, never grouped, since each `emit()` IS a chunk boundary - `.flat()`-ing them together (the
+ * bug this replaced) silently merged a real re-cut's own multiple windows into one oversized chunk
+ * whenever a single unit produced more than one.
+ *
+ * A `MaybeAsyncChunks` slot carries exactly one `T[]` (or a `Promise` of one), so once a unit's
+ * fold goes async, only its FIRST emitted chunk can be the yielded promise's own resolved value;
+ * `remaining` queues whatever else that unit produced, drained (still in order) the moment this
+ * generator is resumed - which only happens after the caller has awaited that promise, by which
+ * point `remaining` is already populated. The pending arm's OWN first-value yield stays UNGUARDED
+ * against emptiness, like `foldSyncChunkStream`'s: not knowable until settled, and a generator
+ * cannot un-yield.
+ *
+ * `[...driveFold([1, 2, 3, 4], (n) => (n % 2 === 0 ? [[n]] : [[]]), () => [])]` → `[[2], [4]]`. */
+function* driveFold<T, Unit>(
+  units: Iterable<Unit>,
+  work: (unit: Unit) => T[][] | Promise<T[][]>,
+  final: () => T[][],
+): MaybeAsyncChunks<T> {
+  let tail: Promise<T[][]> | null = null;
+  let remaining: T[][] = [];
+
+  for (const unit of units) {
+    yield* nonEmpty(remaining);
+    remaining = [];
+
+    const out: T[][] | Promise<T[][]> = tail === null ? work(unit) : tail.then(() => work(unit));
+
+    if (isThenable(out)) {
+      tail = out as Promise<T[][]>;
+      yield tail.then((values) => {
+        remaining = values.slice(1).filter((value) => value.length > 0);
+        return values[0] ?? [];
+      });
+      continue;
+    }
+    yield* nonEmpty(out as T[][]);
+  }
+
+  yield* nonEmpty(remaining);
+  if (tail !== null) {
+    yield tail.then(() => final().flat());
+    return;
+  }
+  yield* nonEmpty(final());
+}
+
+/**
+ * `buildBufferGenerator`'s synchronous counterpart (#88) - a plain `function*` over `Iterable<T>`
+ * that stays synchronous, creating no `Promise`, for as long as every fold settles synchronously;
+ * the first thenable widens `driveFold`'s own `tail` and every later item chains off it, matching
+ * `.buffer(size)`'s own sync-to-async widening rule.
+ *
+ * `[...buildSyncBufferGenerator(sizeReduceFunction(2), ctx)([1, 2, 3])]` → `[[1, 2], [3]]`, no
+ * `Promise` created.
+ */
+export function buildSyncBufferGenerator<T>(
+  reduceFn: ReduceFunction<T[], T>,
+  ctx: IContextManager,
+): (data: Iterable<T>) => MaybeAsyncChunks<T> {
+  return function* bufferGenerator(data: Iterable<T>): MaybeAsyncChunks<T> {
+    const reducer = new Reducer<T[], T>(reduceFn, []);
+    yield* driveFold(
+      data,
+      (item) => reducer.fold(item, ctx),
+      () => trailingOf(reducer),
+    );
+  };
+}
+
+/**
+ * `.buffer(fn)`'s own "re-cut already-produced chunks" sub-path (#88) - the sibling
+ * `recutSyncChunks` takes for the numeric case, once a real stage has run and only `_syncChunks`
+ * (not raw items) survives. Folds each existing chunk SLOT through `foldChunk` via `driveFold`,
+ * never flattening to items first - because a `MaybeAsyncChunks` slot can carry a genuinely pending
+ * `Promise<T[]>` even while the CHAIN's own Mode still reads `"sync"`: a stage between two
+ * `.buffer()` calls widens only THAT stage's own output, not the chain's Mode, so `isSync()` being
+ * `true` does not mean every slot already settled - measured, `.buffer(10).transform((t) =>
+ * t.map(async (x) => x * 2)).buffer(fn)` carries a `Promise<T[]>` slot straight into this function,
+ * and that ONE slot's own fold (over every item the map stage produced) can still emit several
+ * separate chunks - exactly the multi-emit-per-unit case `driveFold` exists to keep separate.
+ *
+ * `[...recutSyncChunksWith([[1, 2], [3]], sizeReduceFunction(2), ctx)]` → `[[1, 2], [3]]`, no
+ * `Promise` created.
+ */
+export function recutSyncChunksWith<T>(
+  chunks: MaybeAsyncChunks<T>,
+  reduceFn: ReduceFunction<T[], T>,
+  ctx: IContextManager,
+): MaybeAsyncChunks<T> {
+  const reducer = new Reducer<T[], T>(reduceFn, []);
+  return driveFold(
+    chunks,
+    (slot) => chain(slot, (items) => foldChunk(reducer, items, ctx)),
+    () => trailingOf(reducer),
+  );
 }

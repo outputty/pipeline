@@ -24,8 +24,9 @@ import type {
   ReduceStage,
   StageRegistries,
   Drainable,
+  BufferFunction,
 } from "./types";
-import { DEFAULT_CHUNK_SIZE } from "./types";
+import { DEFAULT_CHUNK_SIZE, DROP } from "./types";
 import { SimpleContextManager } from "./context/simple";
 import { Transformer } from "./transformer";
 import type { MaybeAsyncChunks } from "./utils/chunk";
@@ -46,7 +47,15 @@ import type {
   ModeOfArms,
   ResultsOf,
 } from "./branch";
-import { foldChunkStream, foldSyncChunkStream } from "./utils/reduce";
+import {
+  foldChunkStream,
+  foldSyncChunkStream,
+  sizeReduceFunction,
+  bufferReduceFunction,
+  buildBufferGenerator,
+  buildSyncBufferGenerator,
+  recutSyncChunksWith,
+} from "./utils/reduce";
 
 /** Builds a plain async-iterable from an async generator function (#133) - the
  * `{ [Symbol.asyncIterator]: gen }` wrapper every hand-rolled adapter below repeats. */
@@ -1016,7 +1025,13 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
 
   /**
    * The chunk boundary - explicit, opt-in (#39). Every later `.transform()`/`.apply()` sees these
-   * chunks unchanged until another `.buffer()` call declares a new one.
+   * chunks unchanged until another `.buffer()` call declares a new one. `size` cuts by count;
+   * `fn: BufferFunction<T>` (#88) decides the boundary per item instead - a `T[]` pending array the
+   * framework owns, folded through it item by item. `fn`'s own `emit()` takes no value: it flushes
+   * whatever is pending and resets it to `[]`; returning a value appends it to the (possibly
+   * just-reset) pending array, returning `DROP` skips the item entirely. `.buffer(size)` is this
+   * same engine configured with an identity `fn` and a framework-side auto-flush at
+   * `pending.length >= size` - one engine, not two.
    *
    * Recuts from `_preBufferItems` (the raw item stream) when it is still set - nothing has
    * consumed `_chunks` since the last cut, so a run of `.buffer()` calls with nothing between them
@@ -1026,7 +1041,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * a genuine re-chunk of that stage's own output.
    *
    * Typed `this` (#17) - `T` never changes here either, so this stays chainable on a dispatching
-   * subclass without losing its own `.local(build)` overload.
+   * subclass without losing its own `.local(build)` overload. `.buffer(fn)` widens Mode to
+   * `"async"` when `fn` returns a `Promise`, the same rule `.transform()`/`.reduce()` already
+   * follow: two overloads, ordered Promise-first, mirroring `Pipeline.reduce()`'s own split
+   * (`ReduceFunction<U, T>`'s two overloads) rather than `.tap()`'s conditional-collapse form,
+   * since neither `.reduce()` nor `.buffer()` needs the "already async, stay `this`" special case
+   * `.tap()`'s own `M extends "async" ? this : …` exists for.
    *
    * Python equivalent:
    * ```python
@@ -1039,8 +1059,17 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `new Pipeline([1, 2, 3, 4, 5, 6, 7, 8, 9]).buffer(2).buffer(3).buffer(4)` yields the same
    * chunks as `.buffer(4)` alone: `[[1, 2, 3, 4], [5, 6, 7, 8], [9]]` - no trace of an
    * intermediate 2- or 3-cut.
+   *
+   * @example
+   * `new Pipeline(events).buffer((item, ctx, emit) => (item.invalid ? DROP : item)).toArray()`
+   * drops an invalid item entirely, from the chunk it would otherwise have joined.
    */
-  buffer(size: number): this {
+  buffer(size: number): this;
+  buffer(
+    fn: (item: T, ctx: IContextManager, emit: () => void) => Promise<T | typeof DROP>,
+  ): Pipeline<T, "async", In>;
+  buffer(fn: (item: T, ctx: IContextManager, emit: () => void) => T | typeof DROP): this;
+  buffer(sizeOrFn: number | BufferFunction<T>): this | Pipeline<T, "async", In> {
     // Before an input there is no stream to cut, so the call is recorded and replayed in PLACE
     // (#90) - the same deferral `.apply()`/`.reduce()`/`.local()` use, for the same reason.
     //
@@ -1048,24 +1077,44 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // applied it to the SOURCE cut, so a `.buffer()` written after a stage took effect before it.
     // Measured on `.transform(t => t.flatMap(x => [x, x])).buffer(2)` over `[1,2,3,4]` - chunks
     // came out `[[1,1,2,2],[3,3,4,4]]` where the same chain after `.from()` gives
-    // `[[1,1],[2,2],[3,3],[4,4]]`. `chunkSize` is still carried alongside, because a `.buffer()`
-    // written BEFORE any stage must also cut the source itself, which is what it now does by
-    // replaying against a pipeline whose source is already cut at that size.
+    // `[[1,1],[2,2],[3,3],[4,4]]`. `chunkSize` is still carried alongside a NUMERIC `.buffer()`,
+    // because a `.buffer()` written BEFORE any stage must also cut the source itself, which is what
+    // it now does by replaying against a pipeline whose source is already cut at that size.
+    // `BufferFunction` has no equivalent knob (`_chunkSize` is a plain `number`), so a deferred
+    // `.buffer(fn)` leaves the SOURCE's own first cut at the default and relies entirely on its own
+    // replay's re-cut from `_preBufferItems` - the same final chunking either way, since that
+    // re-cut always runs regardless of what the first cut used.
     if (this.isDeferred()) {
-      // Validated HERE as well as in the chunkers, because a deferred `.buffer()` only records the
-      // call: `new Pipeline<number>().buffer(0)` used to return a pipeline and throw
-      // `chunkSize must be at least 1` later, at the drain, in a message that never names
+      // Validated HERE as well as in `sizeReduceFunction` (below), because a deferred `.buffer()`
+      // only records the call: `new Pipeline<number>().buffer(0)` used to return a pipeline and
+      // throw `chunkSize must be at least 1` later, at the drain, in a message that never names
       // `.buffer()`. Every chain is source-less by default now, so that is the ordinary path.
       // Non-integer refused as well as `< 1`: the two cutting paths round it differently.
       // `.buffer(2.5)` accumulated until `length >= 2.5`, so the SOURCE cut at 3, while
       // `cutChunk`'s re-cut sliced `index + 2.5` and cut at 2 - one call, two boundaries over the
-      // same data, no error.
-      if (!Number.isInteger(size) || size < 1) {
+      // same data, no error. `BufferFunction` takes no such validation - any function is accepted.
+      if (typeof sizeOrFn === "number" && (!Number.isInteger(sizeOrFn) || sizeOrFn < 1)) {
         throw new Error("buffer size must be a whole number of at least 1");
       }
       const cutsTheSource = this._pendingStages.length === 0;
-      return this.defer<T, this>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {});
+      if (typeof sizeOrFn === "number") {
+        const size = sizeOrFn;
+        return this.defer<T, this>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {});
+      }
+      const fn = sizeOrFn;
+      return this.defer<T, this>((p) => p.buffer(fn));
     }
+
+    // "One engine, not two" (#88): both overloads fold items through the SAME `Reducer<T[], T>`-
+    // based engine (`src/utils/reduce.ts`) - `sizeReduceFunction` configures it with an identity fn
+    // and a framework-side auto-flush at `pending.length >= size`, `bufferReduceFunction` adapts a
+    // caller's own `BufferFunction`. Built once here so every branch below shares the identical
+    // `reduceFn`; `sizeReduceFunction` validates `sizeOrFn` eagerly, the same moment
+    // `buildChunkGenerator`/`buildSyncChunkGenerator` already did for an already-bound `.buffer(0)`.
+    const reduceFn: ReduceFunction<T[], T> =
+      typeof sizeOrFn === "number"
+        ? sizeReduceFunction<T>(sizeOrFn)
+        : bufferReduceFunction<T>(sizeOrFn);
 
     // The `"sync"` arm recuts with the sync chunker (#90) - going through the async one here would
     // make `.buffer()` alone widen a chain whose every callback is synchronous, which is exactly
@@ -1077,19 +1126,29 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       if (items !== null) {
         return this.createPipeline<T>(emptyChunks<T>(), {
           ...this.carriedOptions(),
-          syncChunks: buildSyncChunkGenerator<T>(size)(items),
+          syncChunks: buildSyncBufferGenerator<T>(reduceFn, this._context)(items),
           syncPreBufferItems: items,
         }) as this;
       }
+      // A real stage already ran, so only `_syncChunks` survives. The numeric case keeps
+      // `recutSyncChunks`'s own index-based re-slice untouched here - no Done-when case exercises
+      // this sub-path, and it predates this ticket. A `BufferFunction` folds each existing chunk
+      // SLOT through the same engine via `recutSyncChunksWith` - never flattened to items first,
+      // because a slot can still carry a genuinely pending `Promise<T[]>` even while `isSync()`
+      // reads `true` (a stage between two `.buffer()` calls widens only THAT stage's own output,
+      // not the chain's Mode).
       return this.createPipeline<T>(emptyChunks<T>(), {
         ...this.carriedOptions(),
-        syncChunks: recutSyncChunks(this._syncChunks!, size),
+        syncChunks:
+          typeof sizeOrFn === "number"
+            ? recutSyncChunks(this._syncChunks!, sizeOrFn)
+            : recutSyncChunksWith<T>(this._syncChunks!, reduceFn, this._context),
         syncPreBufferItems: null,
       }) as this;
     }
 
     const items = this._preBufferItems ?? flattenChunks(this._chunks);
-    return this.createPipeline<T>(buildChunkGenerator<T>(size)(items), {
+    return this.createPipeline<T>(buildBufferGenerator<T>(reduceFn, this._context)(items), {
       ...this.carriedOptions(),
       preBufferItems: items,
     }) as this;
