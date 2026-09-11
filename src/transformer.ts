@@ -1,20 +1,3 @@
-/**
- * Transformer class - chainable chunk transformation operations.
- *
- * Python equivalent:
- * ```python
- * class Transformer[In, Out](BaseTransformer[In, Out]):
- *   def __init__(
- *     self,
- *     transformer: InternalTransformer[In, Out] | None = None,
- *   ) -> None:
- *     ...
- *
- *   def __call__(self, chunks: Iterable[list[In]], context: IContextManager | None = None) -> Iterator[list[Out]]:
- *     ...
- * ```
- */
-
 import type {
   InternalTransformer,
   IContextManager,
@@ -39,14 +22,13 @@ import { Reducer, foldChunk } from "./utils/reduce";
 
 /**
  * The one chunk-draining order a standalone `Transformer.process()` runs, one chunk at a time, in
- * order (#17: replaces the deleted `sequential` execution strategy, which had the identical body -
- * a `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` is the replacement for concurrency,
- * wrapping the chain rather than configuring the `Transformer` that drives it).
+ * order - a `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` is what adds concurrency,
+ * wrapping the chain rather than configuring the `Transformer` that drives it.
  *
- * `runHandler` is `Pipeline.onError()`'s own RUN handler (#78), threaded in by `process()` below -
- * this loop, not `process()`'s own (deleted) outer catch, is where a chunk failure is still caught
- * while an async generator can still yield again afterward (an async generator that already threw
- * is finished, so the recovery has to live INSIDE the loop that produces chunks, not around it).
+ * `runHandler` is `Pipeline.onError()`'s own RUN handler, threaded in by `process()` below - this
+ * loop, not a wrapping try/catch outside it, is where a chunk failure is still caught while an
+ * async generator can still yield again afterward (an async generator that already threw is
+ * finished, so the recovery has to live INSIDE the loop that produces chunks, not around it).
  * `dropOrRethrow` (`utils/helpers.ts`) is the same "call the handler, or propagate" decision
  * `ConcurrentPipeline.apply()`'s wrapped `work` makes for a dispatched stage - one home, not two.
  *
@@ -69,17 +51,16 @@ async function* runSequentially<In, Out>(
 }
 
 /**
- * The row-level recovery `.map()`/`.filter()`/`.tap(fn)` share (#78): try `attempt`, and on a throw
- * (or a rejected `Promise`) call `rowHandler` for a replacement value or `DROP`. Results keep their
+ * The row-level recovery `.map()`/`.filter()`/`.tap(fn)` share: try `attempt`, and on a throw (or a
+ * rejected `Promise`) call `rowHandler` for a replacement value or `DROP`. Results keep their
  * ORIGINAL index regardless of completion order, and `.filter()` afterward removes only `DROP`s,
  * leaving every recovered or successful row at its own position.
  *
- * A `rowHandler` that itself throws (or rejects) propagates from here (#78 Done-when 10), by one of
- * two routes now (#90): it fails that item's promise, which `mapSettle`'s own `Promise.all` turns
- * into a rejected chunk, OR - when both `attempt` and the handler are synchronous - it throws
- * straight out of this call, which `mapSettle` catches long enough to disarm every sibling promise
- * already created before rethrowing. Either way the chunk fails and the pipeline's run handler sees
- * it.
+ * A `rowHandler` that itself throws (or rejects) propagates from here, by one of two routes: it
+ * fails that item's promise, which `mapSettle`'s own `Promise.all` turns into a rejected chunk, OR
+ * - when both `attempt` and the handler are synchronous - it throws straight out of this call,
+ * which `mapSettle` catches long enough to disarm every sibling promise already created before
+ * rethrowing. Either way the chunk fails and the pipeline's run handler sees it.
  *
  * `settleRows(["a", "3"], (s) => { const n = parseInt(s); if (isNaN(n)) throw new Error("bad"); return n; }, () => DROP, ctx)`
  * → `[3]`.
@@ -101,12 +82,12 @@ function settleRows<T, U>(
 }
 
 /**
- * One row's try/recover step (#78), staying synchronous when `attempt` does (#90) - shared by
- * `settleRows` and `settleRowsFlat` below rather than written once per helper, since both need the
- * identical "run it, and on a throw OR a rejection hand the row to `rowHandler`" decision and only
- * differ in what they do with the SUCCESS value. A synchronous `attempt` that throws recovers
- * synchronously too; an async one recovers through `.catch`, which is where a REJECTION (as opposed
- * to a throw) is caught at all.
+ * One row's try/recover step, staying synchronous when `attempt` does - shared by `settleRows` and
+ * `settleRowsFlat` below rather than written once per helper, since both need the identical "run
+ * it, and on a throw OR a rejection hand the row to `rowHandler`" decision and only differ in what
+ * they do with the SUCCESS value. A synchronous `attempt` that throws recovers synchronously too;
+ * an async one recovers through `.catch`, which is where a REJECTION (as opposed to a throw) is
+ * caught at all.
  *
  * `attemptRow("a", parseStrict, () => DROP, ctx)` → `DROP`, no `Promise` created.
  */
@@ -129,7 +110,7 @@ function attemptRow<T, R>(
 }
 
 /**
- * `.flatMap()`'s own row-level recovery (#78) - the same try/attempt/recover shape as `settleRows`
+ * `.flatMap()`'s own row-level recovery - the same try/attempt/recover shape as `settleRows`
  * above, but each item's SUCCESS is already an array to flatten, so a recovered value (not itself
  * required to be an array) is wrapped as its own one-element array in the row's place; `DROP`
  * contributes nothing for that row. `.flat()` afterward is the same post-processing the no-handler
@@ -158,37 +139,29 @@ function settleRowsFlat<T, U>(
 
 /**
  * A reusable, composable stage: `In` chunks in, `Out` chunks out, applied chunk by chunk - it never
- * decides how its own input was cut (#39: chunking lives on `Pipeline`'s `.buffer()` alone, never
- * here). Built by chaining (`.map()`, `.filter()`, `.reduce()`, …), each call returning a NEW
- * `Transformer` so one can be shared across pipelines without aliasing. It carries its own error
- * handling, which is what lets `pipeline.apply(t)` stay a one-liner. Every configuration method
- * (`.onError()`) is copy-on-write like `.map()`/`.filter()`: it returns a NEW `Transformer`
- * carrying every other knob forward, never mutates `this` — the shape
- * `@outputty/laygo`'s own `Model#named` follows.
+ * decides how its own input was cut (chunking lives on `Pipeline`'s `.buffer()` alone, never here).
+ * Built by chaining (`.map()`, `.filter()`, `.reduce()`, …), each call returning a NEW `Transformer`
+ * so one can be shared across pipelines without aliasing. It carries its own error handling, which
+ * is what lets `pipeline.apply(t)` stay a one-liner. Every configuration method (`.onError()`) is
+ * copy-on-write like `.map()`/`.filter()`: it returns a NEW `Transformer` carrying every other knob
+ * forward, never mutates `this`.
  *
  * `new Transformer<number, number>().map((n) => n * 2)` → a transformer a pipeline can `.apply()`.
  */
 export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
-  /**
-   * Type-only (#90), never assigned and never read at runtime: `M` appears in no member's parameter
-   * or return type on its own, so without this field TypeScript treats two `Transformer`s differing
-   * only in `M` as the same type and the Mode never reaches `Pipeline.transform()`'s inference.
-   */
   declare readonly __mode: M;
 
   /** The internal transform function */
   readonly transform: InternalTransformer<In, Out>;
 
   /**
-   * The ROW handler (#78; replaces #40's chunk-level notification chain entirely) - one plain
-   * function, position-independent: `pipe()` (below) carries it forward onto every new `Transformer`
-   * a link returns, so `t.onError(h).map(f)` and `t.map(f).onError(h)` read it identically. `undefined`
-   * means no row-level recovery is registered - the seam every element-wise link checks before
-   * paying for a per-row try/catch.
+   * The ROW handler - one plain function, position-independent: `pipe()` (below) carries it forward
+   * onto every new `Transformer` a link returns, so `t.onError(h).map(f)` and `t.map(f).onError(h)`
+   * read it identically. `undefined` means no row-level recovery is registered - the seam every
+   * element-wise link checks before paying for a per-row try/catch.
    */
   readonly rowHandler?: RowErrorHandler;
 
-  /** Default context to use when none provided */
   private defaultContext: IContextManager;
 
   /**
@@ -218,7 +191,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * The seam that carries the row handler into a runnable chunk-transform function (#78) - reads
+   * The seam that carries the row handler into a runnable chunk-transform function - reads
    * `this.rowHandler` off the FINAL transformer (position-independent, since `pipe()` already
    * carried it forward from wherever `.onError()` was actually called) and builds the `RunScope`
    * every composed link underneath (`pipe()`'s own closure) reads to decide whether to try/catch
@@ -237,25 +210,17 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
 
   /**
    * Run this transformer over chunks the CALLER already cut - chunk in, chunk out, no chunking
-   * knowledge of its own (#39). The one seam every `Pipeline` class drives it through:
-   * `Pipeline.apply()` hands it `this._chunks` directly, and a caller running a `Transformer`
-   * standalone supplies its own already-cut `AsyncIterable<In[]>`.
+   * knowledge of its own. The one seam every `Pipeline` class drives it through: `Pipeline.apply()`
+   * hands it `this._chunks` directly, and a caller running a `Transformer` standalone supplies its
+   * own already-cut `AsyncIterable<In[]>`.
    *
-   * Python equivalent:
-   * ```python
-   * def __call__(self, chunks: Iterable[list[In]], context: IContextManager | None = None) -> Iterator[list[Out]]:
-   *   run_context = context if context is not None else self._default_context
-   *   for chunk in chunks:
-   *     yield self.transformer(chunk, run_context)
-   * ```
-   *
-   * `runHandler` is `Pipeline.onError()`'s own RUN handler (#78) - `Pipeline.apply()` passes its
+   * `runHandler` is `Pipeline.onError()`'s own RUN handler - `Pipeline.apply()` passes its
    * `_runHandler` through here, and it reaches `runSequentially`'s per-chunk try/catch (above): no
-   * handler means a chunk failure still propagates and ends the run, same as before #78; a handler
-   * that returns drops the failing chunk and lets the run continue to the next one, and one that
-   * throws stops the run with whatever it threw. Row-level recovery (`.onError()` on this
-   * `Transformer`) is separate and always active regardless of `runHandler` - `this.runnable()`
-   * (above) is what wires it into `transformerLogic` before the loop ever sees a chunk.
+   * handler means a chunk failure still propagates and ends the run; a handler that returns drops
+   * the failing chunk and lets the run continue to the next one, and one that throws stops the run
+   * with whatever it threw. Row-level recovery (`.onError()` on this `Transformer`) is separate and
+   * always active regardless of `runHandler` - `this.runnable()` (above) is what wires it into
+   * `transformerLogic` before the loop ever sees a chunk.
    *
    * @param chunks - Async iterable of already-cut input chunks
    * @param context - Optional context manager for sharing state
@@ -263,15 +228,14 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    * @returns Async generator of output chunks
    *
    * @example
-   * ```typescript
+   * ```ts
    * const t = new Transformer<number, number>().map((x) => x * 2);
-   * for await (const chunk of t.process(chunksOf([1, 2, 3]))) console.log(chunk); // [2, 4, 6]
+   * for await (const chunk of t.process(chunksOf([1, 2, 3]))) console.log(chunk); // → [2, 4, 6]
    *
-   * // row recovery: a throwing row is dropped, its siblings survive (#78).
    * const recovered = new Transformer<string, number>()
    *   .onError(() => DROP)
    *   .map((s) => { const n = parseInt(s); if (isNaN(n)) throw new Error(`bad: ${s}`); return n; });
-   * for await (const chunk of recovered.process(chunksOf(["a", "3"]))) console.log(chunk); // [3]
+   * for await (const chunk of recovered.process(chunksOf(["a", "3"]))) console.log(chunk); // → [3]
    * ```
    */
   async *process(
@@ -284,40 +248,21 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Chain a new operation onto this transformer.
-   *
-   * This is the core internal method for building transformation chains.
-   * Each operation creates a NEW transformer that composes the current
-   * transform with the new operation.
-   *
-   * Python equivalent:
-   * ```python
-   * def _pipe[U](self, operation: Callable[[list[Out], IContextManager], list[U]]) -> "Transformer[In, U]":
-   *   current_transformer = self.transformer
-   *
-   *   def new_transformer(chunk: list[In], ctx: IContextManager) -> list[U]:
-   *     intermediate = current_transformer(chunk, ctx)
-   *     return operation(intermediate, ctx)
-   *
-   *   return Transformer[In, U](
-   *     chunk_size=self.chunk_size,
-   *     transformer=new_transformer,
-   *   )
-   * ```
-   *
-   * @param operation - Function that transforms the output of the current transform
-   * @returns A new Transformer with the composed operation
+   * Chains a new chunk-wise operation onto this transformer's own output, returning a NEW
+   * `Transformer` that runs the current transform first and feeds its result into `operation` - the
+   * one seam every configuration method (`.map()`, `.filter()`, `.onError()`, …) below composes
+   * through.
    */
   protected pipe<U>(
     operation: (chunk: Out[], ctx: IContextManager, run?: RunScope) => U[] | Promise<U[]>,
   ): Transformer<In, U, M> {
     const currentTransform = this.transform;
 
-    // `chain`, not `await` (#90): a link whose own operation returns a plain array composes with
-    // the one before it WITHOUT creating a `Promise`, so a chain of purely synchronous callbacks
-    // runs from source to terminal op with no microtask at all. The moment any link returns a
-    // thenable, `chain` defers through `.then` and every link after it composes asynchronously -
-    // that deferral IS the run widening to async, at exactly the link that made it async.
+    // `chain`, not `await`: a link whose own operation returns a plain array composes with the one
+    // before it WITHOUT creating a `Promise`, so a chain of purely synchronous callbacks runs from
+    // source to terminal op with no microtask at all. The moment any link returns a thenable,
+    // `chain` defers through `.then` and every link after it composes asynchronously - that
+    // deferral IS the run widening to async, at exactly the link that made it async.
     const newTransform: InternalTransformer<In, U> = (chunk, ctx, run) =>
       chain(currentTransform(chunk, ctx, run), (intermediate) => operation(intermediate, ctx, run));
 
@@ -331,21 +276,13 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Transform each element using a mapping function.
+   * Maps each element through `fn`, an optional per-row error handler applied per item.
    *
-   * Python equivalent:
-   * ```python
-   * def map[U](self, function: PipelineFunction[Out, U]) -> "Transformer[In, U]":
-   *   if is_context_aware(function):
-   *     context_aware_func: Callable[[Out, IContextManager], U] = function
-   *     return self._pipe(lambda chunk, ctx: [context_aware_func(x, ctx) for x in chunk])
-   *
-   *   non_context_func: Callable[[Out], U] = function
-   *   return self._pipe(lambda chunk, _ctx: [non_context_func(x) for x in chunk])
-   * ```
-   *
-   * @param fn - Mapping function (can be context-aware)
+   * @param fn - Mapping function (context-aware if it declares a second parameter).
    * @returns New Transformer with map operation applied
+   *
+   * @example
+   * `new Transformer<number, number>().map((x) => x * 2)` over `[1, 2, 3]` → `[2, 4, 6]`.
    */
   map<U>(fn: (item: Out, ctx: IContextManager) => Promise<U>): Transformer<In, U, "async">;
   map<U>(
@@ -353,15 +290,15 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   ): Transformer<In, U, M>;
   map<U>(fn: (item: Out, ctx: IContextManager) => U): Transformer<In, U, "async">;
   map<U>(fn: PipelineFunction<Out, U>): Transformer<In, U, "sync" | "async"> {
-    // ONE `call` closure picked once (#133), context-aware or not, rather than the whole `pipe()`
-    // body written twice per arm - `filter`/`flatMap`/`tap(fn)` below share this exact shape.
+    // ONE `call` closure picked once, context-aware or not, rather than the whole `pipe()` body
+    // written twice per arm - `filter`/`flatMap`/`tap(fn)` below share this exact shape.
     const call = isContextAware(fn)
       ? (x: Out, ctx: IContextManager) => fn(x, ctx)
       : (x: Out, _ctx: IContextManager) => (fn as (item: Out) => U | Promise<U>)(x);
     return this.pipe((chunk, ctx, run) => {
-      // No handler registered: the plain path (#78 Done-when 11 - the seam costs nothing until
-      // `.onError()` is actually called). `mapSettle`, not `Promise.all` (#90): a chunk whose
-      // items all came back as plain values is returned as-is, creating no `Promise` at all.
+      // No handler registered: the plain path - the seam costs nothing until `.onError()` is
+      // actually called. `mapSettle`, not `Promise.all`: a chunk whose items all came back as
+      // plain values is returned as-is, creating no `Promise` at all.
       if (!run?.rowHandler) {
         return mapSettle(chunk, (x) => call(x, ctx));
       }
@@ -370,21 +307,13 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Filter elements using a predicate function.
+   * Keeps only the elements `predicate` accepts.
    *
-   * Python equivalent:
-   * ```python
-   * def filter(self, predicate: PipelineFunction[Out, bool]) -> "Transformer[In, Out]":
-   *   if is_context_aware(predicate):
-   *     context_aware_predicate: Callable[[Out, IContextManager], bool] = predicate
-   *     return self._pipe(lambda chunk, ctx: [x for x in chunk if context_aware_predicate(x, ctx)])
-   *
-   *   non_context_predicate: Callable[[Out], bool] = predicate
-   *   return self._pipe(lambda chunk, _ctx: [x for x in chunk if non_context_predicate(x)])
-   * ```
-   *
-   * @param predicate - Filter function (can be context-aware)
+   * @param predicate - Filter function (context-aware if it declares a second parameter).
    * @returns New Transformer with filter operation applied
+   *
+   * @example
+   * `new Transformer<number, number>().filter((x) => x > 1)` over `[1, 2, 3]` → `[2, 3]`.
    */
   filter(
     predicate: (item: Out, ctx: IContextManager) => Promise<boolean>,
@@ -412,30 +341,29 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Flatten nested arrays in the output.
-   *
-   * Python equivalent:
-   * ```python
-   * def flatten[T](
-   *   self: Union["Transformer[In, list[T]]", "Transformer[In, tuple[T, ...]]", "Transformer[In, set[T]]"],
-   * ) -> "Transformer[In, T]":
-   *   return self._pipe(lambda chunk, ctx: [item for sublist in chunk for item in sublist])
-   * ```
+   * Flattens one level of nested array/tuple/set output - `.map(fn).flatten()`'s own second half,
+   * split out so a caller who already has array-shaped output need not repeat the map.
    *
    * @returns New Transformer with flattened output
+   *
+   * @example
+   * `new Transformer<number, number[]>().map((x) => [x, x]).flatten()` over `[1, 2]` →
+   * `[1, 1, 2, 2]`.
    */
   flatten<U>(this: Transformer<In, U[], M>): Transformer<In, U, M> {
     return this.pipe((chunk, _ctx) => chunk.flat());
   }
 
   /**
-   * Map each element and flatten the results.
-   *
-   * Equivalent to `.map(fn).flatten()` but handles async functions properly.
-   * Useful when the mapping function returns an array and you want to flatten the results.
+   * Maps each element through `fn`, then flattens the result by one level - equivalent to
+   * `.map(fn).flatten()` in one link, so a row-level error handler applies to the whole map+flatten
+   * step rather than the map alone.
    *
    * @param fn - Mapping function that returns an array (can be async)
    * @returns New Transformer with flatMap operation applied
+   *
+   * @example
+   * `new Transformer<number, number>().flatMap((x) => [x, x])` over `[1, 2]` → `[1, 1, 2, 2]`.
    */
   flatMap<U>(fn: (item: Out, ctx: IContextManager) => Promise<U[]>): Transformer<In, U, "async">;
   flatMap<U>(fn: (item: Out, ctx: IContextManager) => U[]): Transformer<In, U, M>;
@@ -453,29 +381,17 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Execute side effects for each element without modifying the data.
+   * Observes each element (or, given a `Transformer`, the whole chunk) without changing the data -
+   * the chain continues with the SAME values that went in.
    *
-   * Can be called with either:
-   * - A function that receives each element (and optionally context)
-   * - A Transformer whose transform function will be executed for side effects
+   * A `Transformer` argument runs chunk-aware, for side effects only, and stays chunk-aware
+   * regardless of any row handler registered - a chunk-aware link cannot take per-row semantics. A
+   * plain function argument runs per item, and DOES take the registered row handler like `.map()`.
    *
-   * Python equivalent:
-   * ```python
-   * def tap(self, arg: Union["Transformer[Out, Any]", PipelineFunction[Out, Any]]) -> "Transformer[In, Out]":
-   *   match arg:
-   *     case Transformer() as transformer:
-   *       tapped_func = transformer.transformer
-   *       return self._pipe(lambda chunk, ctx: chunk if tapped_func(chunk, ctx) or True else chunk)
-   *     case function if callable(function):
-   *       if is_context_aware(function):
-   *         context_aware_func: Callable[[Out, IContextManager], Any] = function
-   *         return self._pipe(lambda chunk, ctx: [x for x in chunk if context_aware_func(x, ctx) or True])
-   *       non_context_func: Callable[[Out], Any] = function
-   *       return self._pipe(lambda chunk, _ctx: [x for x in chunk if non_context_func(x) or True])
-   * ```
+   * @example
+   * `new Transformer<number, number>().tap((x) => console.log(x))` over `[1, 2]` passes `[1, 2]`
+   * through unchanged, having logged both.
    */
-
-  // Overload signatures
   tap<R>(fn: (item: Out, ctx: IContextManager) => Promise<R>): Transformer<In, Out, "async">;
   tap(fn: (item: Out, ctx: IContextManager) => void): Transformer<In, Out, M>;
   tap(transformer: Transformer<Out, unknown, "async">): Transformer<In, Out, "async">;
@@ -483,19 +399,15 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   tap(
     arg: PipelineFunction<Out, unknown> | Transformer<Out, unknown, "sync" | "async">,
   ): Transformer<In, Out, "sync" | "async"> {
-    // Check if arg is a Transformer instance - chunk-aware, keeps chunk semantics (row handling
-    // does not reach it, per the ticket's own Constraints: a chunk-aware link cannot take per-row
-    // semantics).
     if (arg instanceof Transformer) {
       const tappedTransform = arg.transform;
       return this.pipe((chunk, ctx) =>
         // The tapped transformer runs for side effects only, and settles before the chunk moves on.
-        // A tapped chain that is itself synchronous settles without a `Promise` (#90).
+        // A tapped chain that is itself synchronous settles without a `Promise`.
         chain(tappedTransform(chunk, ctx), () => chunk),
       );
     }
 
-    // Handle function case
     const fn = arg;
     const call = isContextAware(fn)
       ? (x: Out, ctx: IContextManager) => fn(x, ctx)
@@ -512,20 +424,15 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Apply a transformation function to this transformer.
-   *
-   * This is a composition helper that allows applying a function that takes
-   * this transformer and returns a new one. Useful for extracting reusable
-   * transformation chains.
-   *
-   * Python equivalent:
-   * ```python
-   * def apply[T](self, t: Callable[[Self], "Transformer[In, T]"]) -> "Transformer[In, T]":
-   *   return t(self)
-   * ```
+   * Applies `fn` to this transformer and returns its result - a composition helper for extracting a
+   * reusable chain of calls into a named function rather than inlining it.
    *
    * @param fn - Function that receives this transformer and returns a new one
    * @returns Result of applying the function to this transformer
+   *
+   * @example
+   * `const double = (t) => t.map((x: number) => x * 2); new Transformer<number, number>().apply(double)`
+   * behaves exactly like writing `.map((x) => x * 2)` directly.
    */
   apply<U, M2 extends "sync" | "async">(
     fn: (t: this) => Transformer<In, U, M2>,
@@ -534,9 +441,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Register the ROW handler, returning a NEW transformer that carries it forward (#78; reshaped,
-   * BREAKING - replaces #40's chunk-level notification contract entirely, and `.catch()` is
-   * deleted alongside it).
+   * Registers the ROW handler, returning a NEW transformer that carries it forward.
    *
    * Copy-on-write, like every other configuration method here: `this` is never mutated, and
    * `pipe()` carries the returned transformer's `rowHandler` forward onto every later
@@ -550,8 +455,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    * returning a rejected `Promise`) escalates past the row to the CHUNK, reaching
    * `Pipeline.onError()` instead. Reaches every element-wise call - `.map()`, `.filter()`,
    * `.flatMap()`, `.tap(fn)` - plus `Transformer.reduce()`'s fold step; never `.tap(transformer)` or
-   * `.loop()`, which stay chunk-aware (the ticket's own Constraints: a chunk-aware link cannot take
-   * per-row semantics).
+   * `.loop()`, which stay chunk-aware.
    *
    * @param handler - The row handler; may be async.
    * @returns A new Transformer carrying the handler forward.
@@ -567,10 +471,8 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Repeatedly apply a transformer while a condition is true.
-   *
-   * The loop continues until the condition returns false or maxIterations is reached.
-   * Useful for iterative refinement operations where data needs multiple passes.
+   * Repeatedly applies `loopTransformer` to this transformer's own output while `condition` is
+   * true, stopping early once `maxIterations` is reached.
    *
    * `condition` is ONE signature, `(chunk, ctx) => boolean` — the same reason `PipelineFunction`
    * (`types.ts`) is one signature rather than a union of arities: a union blocks contextual
@@ -598,17 +500,16 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
     maxIterations?: number,
   ): Transformer<In, Out, "sync" | "async"> {
     const loopedTransform = loopTransformer.transform;
-    // Reuses the same arity check every element-wise link already does (#133), rather than
-    // re-inlining `condition.length >= 2` - `condition` operates on a whole chunk, not one item, but
+    // Reuses the same arity check every element-wise link already does, rather than re-inlining
+    // `condition.length >= 2` - `condition` operates on a whole chunk, not one item, but
     // `isContextAware`'s own arity test is generic over the callback's first parameter's type.
     const conditionIsContextAware = isContextAware<Out[], boolean>(condition);
 
-    // A real `while` loop carries the synchronous case (#90), and `drain` re-enters itself ONLY
-    // across an async boundary, where the continuation runs on a fresh stack in its own microtask.
-    // Recursing per ITERATION instead overflows the stack on a synchronous looped transformer:
-    // measured, 4000 iterations over a one-link body threw `RangeError: Maximum call stack size
-    // exceeded`, where the pre-#90 loop completed 20 000, and the ceiling fell further as the
-    // looped body gained links.
+    // A real `while` loop carries the synchronous case, and `drain` re-enters itself ONLY across an
+    // async boundary, where the continuation runs on a fresh stack in its own microtask. Recursing
+    // per ITERATION instead overflows the stack on a synchronous looped transformer: measured, 4000
+    // iterations over a one-link body threw `RangeError: Maximum call stack size exceeded` under a
+    // per-iteration recursive form, and the ceiling falls further as the looped body gains links.
     const drain = (
       startChunk: Out[],
       ctx: IContextManager,
@@ -639,17 +540,15 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Folds this ONE chunk into one or more values via `emit` - no state survives to the next chunk,
-   * `Pipeline.reduce()`'s the only place cross-chunk state lives (#45; replaces the deleted
-   * whole-dataset terminal form entirely - `Pipeline.reduce()`, run over an actual `Pipeline`, is
-   * its replacement).
+   * Folds this ONE chunk into one or more values via `emit` - no state survives to the next chunk;
+   * `Pipeline.reduce()` is the only place cross-chunk state lives.
    *
-   * The registered row handler (`.onError()`) reaches this fold's own per-item step too (#78) - a
-   * `fn` that throws for one item hands that item to the handler; a returned value REPLACES the
+   * The registered row handler (`.onError()`) reaches this fold's own per-item step too - a `fn`
+   * that throws for one item hands that item to the handler; a returned value REPLACES the
    * accumulator directly (never re-runs `fn`, so a handler cannot cause a second throw), `DROP`
    * skips the item entirely (the accumulator is unchanged, and it does not count toward whether
    * `.final()` still owes a trailing value). `Pipeline.reduce()` never reaches this - it folds with
-   * no `Transformer` in scope at all (the ticket's own Constraints).
+   * no `Transformer` in scope at all.
    *
    * @param fn - `(acc, item, ctx, emit) => acc` - called with all four arguments regardless of its
    *   own declared arity (JS ignores extras), so `(acc, item) => acc` and `(acc, item, ctx, emit) =>
@@ -682,23 +581,15 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   }
 
   /**
-   * Stop processing when a condition is met.
-   *
-   * When the condition function returns true, throws an error to halt
-   * the pipeline execution. Useful for implementing early exit conditions.
-   *
-   * Python equivalent:
-   * ```python
-   * def short_circuit(self, function: Callable[[IContextManager], bool | None]) -> "Transformer[In, Out]":
-   *   def operation(chunk: list[Out], ctx: IContextManager) -> list[Out]:
-   *     if function(ctx):
-   *       raise RuntimeError("Short-circuit condition met, stopping execution.")
-   *     return chunk
-   *   return self._pipe(operation)
-   * ```
+   * Throws once `fn` returns true, halting the run rather than producing a chunk - the earliest
+   * point a chain can stop itself mid-transform based on the shared context.
    *
    * @param fn - Function that returns true to stop execution
    * @returns New transformer with short-circuit condition applied
+   *
+   * @example
+   * `new Transformer<number, number>().shortCircuit((ctx) => ctx.get("stop") === true)` throws the
+   * moment a chunk arrives with `stop` set in the context, instead of processing it.
    */
   shortCircuit(fn: (ctx: IContextManager) => boolean): Transformer<In, Out, M> {
     return this.pipe((chunk, ctx) => {
