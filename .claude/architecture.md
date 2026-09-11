@@ -45,8 +45,8 @@ src/
                           DISPATCHING SUBCLASS's own two-argument call - `ConcurrentPipeline.apply()`
                           - skip the `as X` cast its base-class caller still needs, #133) + onError()
                           (#78); isSync()/freshPreBuffer()/asyncIterableFrom()/isAsyncSource() are
-                          its own private helpers unifying what was 4-9 raw-spelled copies each
-                          (#133); emptyChunks<U>() is EXPORTED (`cluster.ts` calls it too, to empty
+                          its own private helpers unifying 2-4 raw-spelled copies each within this
+                          file (#133); emptyChunks<U>() is EXPORTED (`cluster.ts` calls it too, to empty
                           a worker's own chunk stream)
   transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError()
                           (the row handler, #78) and runnable() (the seam that carries it in); every
