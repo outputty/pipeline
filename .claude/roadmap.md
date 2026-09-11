@@ -9,20 +9,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **Simplify `@outputty/pipeline`: reused patterns, smaller units, simpler types** (#133) - `src/`
-  reached 5626 lines and `__tests__/` 5200 through nine tickets landing one behind another, each
-  adding its own seam with no pass back over the whole tree - the same shape written more than once
-  in several places (the sync/async engine fork in `pipeline.ts` spelled out four times, four
-  `Pipeline` subclasses - including `EventEmitterPipeline`, shipped mid-planning by #124 with the
-  identical pattern - each hand-copying their own knobs into a fresh `createPipeline()` override),
-  exactly the duplication shape that produced #113's own `pipelineIndex` collision bug. Now, because
-  #90 already answered this for `Pipeline` itself (split into `pipeline.ts`/`result.ts`/`branch.ts`)
-  and this applies the same treatment to what #90 left behind: `chunk.ts` splits into three files
-  along its own real seams, `ClusterPipeline`'s module-level bootstrap state becomes a `WorkerSet`
-  class, and ~40 anchored duplication findings collapse behind shared types (`Drainable<T>`,
-  `StageRegistries`, `ReduceWork<T,U>`) and helpers. No numeric complexity/line-count gate - the
-  stopping criterion is `/code-review medium`'s own reuse/simplification/efficiency dimension
-  returning zero findings per module, `.oxlintrc.json:34-36` having already rejected a numeric one.
 - **The node: import boundary as an oxlint rule** (#117) - `architecture.md`'s own stack diagram draws
   `node:cluster`/`node:http` as scoped to `ClusterPipeline`/`HttpPipeline` only, and nothing has ever
   checked it - the same shape `outputty/laygo` already mechanizes as six `no-restricted-imports`
