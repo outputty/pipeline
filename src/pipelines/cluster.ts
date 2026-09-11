@@ -65,6 +65,27 @@ const IDLE_KILL_MS = 500;
  * then calls the release it returns; `stageWork()`'s own `finally { inFlight--; scheduleIdleCheck();
  * }` and `reduceWork()`'s identical copy collapse to that one call.
  */
+/** Validates a worker's own IPC "ready" message before `bootstrap()` trusts its `port` - real
+ * validation in place of a blind `as` cast, since a worker's `message` event is genuinely
+ * arbitrary (Node's own `@types/node` types it `any`, this file already narrows to `unknown`).
+ *
+ * `isReadyMessage({ type: "outputty-pipeline-ready", port: 4000 })` → `true`.
+ * `isReadyMessage({})` → `false`.
+ */
+function isReadyMessage(
+  // oxlint-disable-next-line anti-slop/no-unknown-parameters -- this IS the I/O boundary parser the rule's own message asks for; message is genuinely unparsed until this function runs
+  message: unknown,
+): message is { type: "outputty-pipeline-ready"; port: number } {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    "type" in message &&
+    message.type === "outputty-pipeline-ready" &&
+    "port" in message &&
+    typeof message.port === "number"
+  );
+}
+
 class WorkerSet {
   private nextPipelineIndex = 0;
   private readonly registry = new Map<number, ClusterPipeline<unknown>>();
@@ -105,10 +126,9 @@ class WorkerSet {
       let settled = false;
       for (let i = 0; i < count; i++) {
         const worker = cluster.fork();
-        worker.on("message", (message: unknown) => {
-          const { type, port } = (message ?? {}) as { type?: string; port?: number };
-          if (type !== "outputty-pipeline-ready" || typeof port !== "number") return;
-          sharedPort ??= port;
+        worker.on("message", (message) => {
+          if (!isReadyMessage(message)) return;
+          sharedPort ??= message.port;
           readyCount++;
           if (readyCount === count && !settled) {
             settled = true;

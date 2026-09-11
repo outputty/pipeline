@@ -23,7 +23,7 @@ export async function* readNdjsonLines(stream: ReadableStream<Uint8Array>): Asyn
 /** Splits `buffer` on newlines - every complete line found, and the incomplete remainder still
  * owed a terminator. Its own function so `readNdjsonLines`'s own loop body stays one statement,
  * within this repo's own `max-depth: 2` rule. */
-function splitLines(buffer: string): { lines: string[]; rest: string } {
+function splitLines(buffer: string) {
   const lines: string[] = [];
   let rest = buffer;
   let newlineIndex: number;
@@ -36,6 +36,6 @@ function splitLines(buffer: string): { lines: string[]; rest: string } {
 }
 
 /** Encodes one NDJSON frame - `JSON.stringify(value)` plus the trailing newline every frame needs. */
-export function ndjsonFrame(value: unknown): Uint8Array {
+export function ndjsonFrame<T>(value: T): Uint8Array {
   return new TextEncoder().encode(`${JSON.stringify(value)}\n`);
 }

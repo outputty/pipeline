@@ -373,9 +373,11 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     // Defers with no input yet, the same as `apply()` above (#90). Replaying it through this same
     // method is what keeps the partitioning (#62) identical either way.
     if (this.isDeferred()) {
+      // `p`'s own item type is `any` here (PendingStage's `AnyPipeline<any>`, not `T`), so the
+      // cast matches that, not `unknown` - `p` genuinely holds `any`, this isn't a placeholder.
       return this.defer<U, ConcurrentPipeline<U, In>>((p) =>
         p.reduce(
-          fn as (acc: U, item: unknown, ctx: IContextManager, emit: (v: U) => void) => U,
+          fn as (acc: U, item: any, ctx: IContextManager, emit: (v: U) => void) => U,
           initial,
         ),
       );

@@ -45,6 +45,7 @@ type HttpPipelineConstructorOptions = HttpPipelineOptions & PipelineConstructorO
 /** The body `stageWork()` POSTs, and `.fetch()` (below) expects on the way in. */
 interface StageRequestBody {
   chunk: unknown[];
+  // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- Context is a generic bag by design, unknown until a caller parses it at its own boundary (see .oxlintrc.json)
   context: Record<string, unknown>;
 }
 
@@ -145,6 +146,7 @@ function applyContextFrame(first: IteratorResult<string>, ctx: IContextManager):
   if (typeof frame.context !== "object" || frame.context === null || Array.isArray(frame.context)) {
     throw new Error("first reduce frame is missing a 'context' object");
   }
+  // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- Context is a generic bag by design, unknown until a caller parses it at its own boundary (see .oxlintrc.json)
   for (const [key, value] of Object.entries(frame.context as Record<string, unknown>)) {
     ctx.set(key, value);
   }
@@ -607,6 +609,7 @@ export function toNodeHandler(
   handler: (request: Request) => Promise<Response>,
 ): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
+    // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a rejection can carry anything JS can throw; genuinely unknown, not a gap
     handleOverBridge(req, res, handler).catch((error: unknown) => {
       // A LAST-RESORT net: `handler` itself is expected to catch its own errors into a Response
       // (`HttpPipeline.fetch` does), but nothing upstream of this bridge can assume that of every

@@ -80,6 +80,7 @@ function closingOnFailure<R>(iterator: Iterator<unknown>, drain: () => R): R {
   try {
     const result = drain();
     if (!isThenable(result)) return result;
+    // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a rejection can carry anything JS can throw; re-thrown untouched, genuinely unknown, not a gap
     return Promise.resolve(result).catch((error: unknown) => {
       close(iterator);
       throw error;

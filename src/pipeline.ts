@@ -614,6 +614,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * it as an override of a `Record<string, unknown>`-returning method even though every field it
    * declares is itself spreadable into one. */
   protected carriedKnobs(): object {
+    // oxlint-disable-next-line anti-slop/no-known-value-widening -- object is the widest safe common supertype every subclass override's own named-field interface satisfies (see the docstring above); Record<string, unknown> refuses those overrides under tsc
     return {};
   }
 
@@ -879,6 +880,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * multiplier: 10 }).transform((t) => t.map((x, ctx) => (ctx.set("k", x), x))).toArray()` then
    * `mine.writes` → `["multiplier", "k", "k"]` - `mine` itself received every write (#31).
    */
+  // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- Context is a generic bag by design, unknown until a caller parses it at its own boundary (see .oxlintrc.json)
   context(ctx: Record<string, unknown>): this {
     for (const [key, value] of Object.entries(ctx)) {
       this._context.set(key, value);
@@ -1239,10 +1241,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     if (this.isDeferred()) {
       // The cast picks `reduce`'s own SYNC overload for the replay. Its two overloads differ only
       // in the Mode they report to the caller, which the receiver above has already recorded; the
-      // runtime body is one, and a union-typed `fn` matches neither overload on its own.
+      // runtime body is one, and a union-typed `fn` matches neither overload on its own. `p`'s own
+      // item type is `any` here (PendingStage's `AnyPipeline<any>`, not `T`), so the cast matches
+      // that, not `unknown` - `p` genuinely holds `any`, this isn't a placeholder.
       return this.defer<U>((p) =>
         p.reduce(
-          fn as (acc: U, item: unknown, ctx: IContextManager, emit: (v: U) => void) => U,
+          fn as (acc: U, item: any, ctx: IContextManager, emit: (v: U) => void) => U,
           initial,
         ),
       );
@@ -1345,9 +1349,9 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * 2)).toArray()` → `[2, 4, 6]`, with `seen` `[1, 2, 3]`.
    */
   tap(
-    fn: (item: T, ctx: IContextManager) => Promise<unknown>,
+    fn: (item: T, ctx: IContextManager) => Promise<void>,
   ): M extends "async" ? this : Pipeline<T, "async", In>;
-  tap(fn: (item: T, ctx: IContextManager) => unknown): this;
+  tap(fn: (item: T, ctx: IContextManager) => void): this;
   tap(
     transformer: Transformer<T, unknown, "async">,
   ): M extends "async" ? this : Pipeline<T, "async", In>;

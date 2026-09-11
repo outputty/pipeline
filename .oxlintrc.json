@@ -24,13 +24,16 @@
     "anti-slop/no-reflect-get": "error",
     "anti-slop/no-shape-in-symbol-names": "error",
 
-    // WARN — real existing violations (count in the comment): `Context`'s dynamic key/value store
-    // (`SimpleContext`) is a generic bag by design, `unknown` until a caller parses it at its own
-    // boundary. A promotion backlog, not fixed here.
-    "anti-slop/no-known-value-widening": "warn", // 1
-    "anti-slop/no-unknown-parameters": "warn", // 2
-    "anti-slop/no-unknown-returns": "warn", // 3
-    "anti-slop/no-unsafe-dictionary-type": "warn", // 6
+    // WARN at this level (governs __tests__/ and everything outside src/) - a test may legitimately
+    // drive a looser shape than shipped code (oxlint-expert skill: never scope this kind of boundary
+    // to the test tree). Promoted to "error" for src/**/*.ts alone, in the override below (#117):
+    // every real src/ site is fixed or, where the type is genuinely load-bearing (Context's own
+    // generic bag, RowErrorHandler's one-handler-many-item-types contract, a JS catch/reject
+    // boundary), disclosed with an `oxlint-disable-next-line` reason at the site itself.
+    "anti-slop/no-known-value-widening": "warn",
+    "anti-slop/no-unknown-parameters": "warn",
+    "anti-slop/no-unknown-returns": "warn",
+    "anti-slop/no-unsafe-dictionary-type": "warn",
 
     // OFF — same fundamental conflict as laygo (CLAUDE.md): no safety-comment convention for the
     // occasional deliberate cast, and no runtime-typeof ban where a shape guard reads clearer than
@@ -51,6 +54,20 @@
       "files": ["src/**/*.ts"],
       "rules": {
         "max-depth": ["error", { "max": 2 }]
+      }
+    },
+    {
+      // Promotes the four anti-slop rules above from warn to error, for src/**/*.ts only - the
+      // promotion backlog the top-level "warn" comment used to name is fixed (#117): every real
+      // site takes a named type or a generic parameter; every genuinely load-bearing `unknown`
+      // (Context's own bag, RowErrorHandler's one-handler-many-item-types contract, a JS
+      // catch/reject boundary) carries its own `oxlint-disable-next-line` reason at the site.
+      "files": ["src/**/*.ts"],
+      "rules": {
+        "anti-slop/no-known-value-widening": "error",
+        "anti-slop/no-unknown-parameters": "error",
+        "anti-slop/no-unknown-returns": "error",
+        "anti-slop/no-unsafe-dictionary-type": "error"
       }
     },
     {
