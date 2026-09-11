@@ -235,7 +235,14 @@ none of it survived the hand-trim (#745).
   to `DEFAULT_CHUNK_SIZE = 1000` when never called; every later stage sees the same chunks unchanged
   until another `.buffer()` call declares a new one. Two `.buffer()` calls back to back, with no
   stage between them, collapse to the last - only it is ever actually applied. An
-  `InternalTransformer<In, Out>` processes one chunk at a time.
+  `InternalTransformer<In, Out>` processes one chunk at a time. `.buffer(fn: BufferFunction<T>)`
+  (#88) decides the boundary per item instead of by count, folding through the SAME `Reducer<T[],
+  T>` class `Pipeline.reduce()` already uses - `.buffer(size)` is this same engine configured with
+  an identity `fn` and a framework-side auto-flush at `pending.length >= size`, one engine not two.
+  `fn`'s own `emit()` takes no value: it flushes whatever is pending and resets it to `[]`; a
+  `Promise`-returning `fn` widens Mode to `"async"`, two overloads ordered Promise-first. The dead
+  `ChunkerFunction` type - unrelated to `.buffer()` since #39, zero consumers - is removed from the
+  public export surface; `BufferFunction` is the type for a `.buffer(fn)` callback.
 - **`.queue(capacity)`** - prefetches up to `capacity` chunks a `Pipeline` already cut, decoupling
   WHEN a chunk is pulled from WHEN the consumer asks for it (pending #123). An array of exactly
   `capacity` pending `upstream.next()` promises; the consumer takes the front one, and the instant it

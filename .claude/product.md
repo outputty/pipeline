@@ -53,11 +53,18 @@ processes a chunk at a time, which is what makes a concurrent execution strategy
 parallel work rather than one promise per row. The boundary is the `Pipeline`'s own decision, not a
 `Transformer`'s: `.buffer(size)` sets it explicitly, and every later stage sees those same chunks
 unchanged until another `.buffer()` call declares a new one - a `Transformer` never knows how its own
-input was cut, and just processes whatever chunk arrives.
+input was cut, and just processes whatever chunk arrives. `.buffer(fn)` decides the boundary per item
+instead of by count - useful when a chunk boundary means something (a time window, a batch of related
+records) that a fixed count cannot express.
 
 > **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. **`.buffer(size)`** - the
 > explicit chunk boundary; defaults to `1000` when never called. Two `.buffer()` calls back to back,
 > with no stage between them, collapse to the last one - only it is ever actually applied.
+> **`.buffer(fn)`** - decides the boundary per item: a `T[]` pending array the framework owns, folded
+> through `fn` item by item. `fn`'s own `emit()` takes no value - it flushes whatever is pending and
+> resets it to `[]`; returning a value appends it to the (possibly just-reset) pending array,
+> returning `DROP` skips the item entirely. A `Promise`-returning `fn` widens the pipeline to run
+> asynchronously.
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
@@ -70,6 +77,42 @@ const data = await new Pipeline<number>()
 
 ```json
 [2, 4, 6, 8, 10]
+```
+
+A caller who needs a boundary decided by something other than count - grouping events into
+five-minute windows by each event's own timestamp - writes it directly:
+
+```ts
+import { Pipeline } from "@outputty/pipeline";
+
+let windowStart = 0;
+const fiveMinuteWindow = (item: { ts: number }, _ctx: unknown, emit: () => void) => {
+  if (item.ts - windowStart >= 300_000) {
+    emit();
+    windowStart = item.ts;
+  }
+  return item;
+};
+
+const events = [
+  { id: 1, ts: 0 },
+  { id: 2, ts: 60_000 },
+  { id: 3, ts: 240_000 },
+  { id: 4, ts: 300_000 },
+  { id: 5, ts: 301_000 },
+];
+
+const chunks: unknown[][] = [];
+for await (const chunk of new Pipeline(events).buffer(fiveMinuteWindow)(events).chunks()) {
+  chunks.push(chunk);
+}
+```
+
+```json
+[
+  [{ "id": 1, "ts": 0 }, { "id": 2, "ts": 60000 }, { "id": 3, "ts": 240000 }],
+  [{ "id": 4, "ts": 300000 }, { "id": 5, "ts": 301000 }]
+]
 ```
 
 ### Prefetching

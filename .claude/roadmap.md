@@ -97,6 +97,24 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`.buffer()` accepts a callback for custom buffering windows** (#88, `feat`) - `.buffer(size)`
+  could only cut a chunk boundary by count, and the closest existing shape (`ChunkerFunction`) was
+  dead code with no way to hand one to `.buffer()` at all. `.buffer(fn: BufferFunction<T>)` folds
+  items through the SAME `Reducer<T[], T>` class `Pipeline.reduce()` already uses -
+  `sizeReduceFunction`/`bufferReduceFunction` (`src/utils/reduce.ts`) adapt a size or a caller's own
+  function onto it, one engine, not two; `.buffer(size)`'s own three branches keep their shape,
+  their innermost cutting call swapped for the shared one. A `Promise`-returning `fn` widens the
+  chain's Mode to `"async"`, two overloads ordered Promise-first, mirroring `.reduce()`'s own split.
+  `ChunkerFunction` drops from the public export surface (dead since #39, zero consumers);
+  `BufferFunction` takes its place. Code review found and fixed two real defects before merge: a
+  recut-from-chunks sub-path collapsed a real, multi-item chunk's several emitted windows into one
+  oversized chunk (`driveFold`, a shared tail-chaining engine, now yields each one separately); and
+  `Reducer`'s own `itemsSinceEmit` gate - correct for `.reduce()`'s contract - silently dropped a
+  stream's trailing chunk whenever its last item both flushed and repopulated the pending array in
+  one call (`Reducer.current()`/`trailingOf` reads the real pending state instead), found while
+  verifying the first fix with a real run rather than a hand-derived expected value.
+  `.claude/architecture.md`'s own "buffer(fn) - a callback-driven chunk boundary" section has the
+  full engine. PRs #144 (L1, pinned cases), #145 (L2, the engine + wiring), #147 (docs).
 - **A repo-wide reuse and simplification pass** (#133, `refactor`) - 15 named duplications, each
   unified in its own layer, no observable output change anywhere: the canonical
   `new Pipeline<number>().transform((t) => t.map((x) => x * 2).filter((x) => x > 4))` example

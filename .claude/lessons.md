@@ -7,6 +7,20 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-11 #88's Done-when file-scope restriction collided with a sibling ticket's own shipped README/changeset precedent
+
+Building #88's docs layer, Done-when 6 named `src/`, `__tests__/`, `.claude/` as the only files any
+layer could touch - but README.md already carries `.buffer(size)`'s own API-reference section, and
+`.changeset/chunking-moves-to-pipeline-buffer.md` already documents the sibling ticket (#39) that
+shipped the identical `.buffer()` surface. Caught before drafting the docs layer by `rg`-ing the
+surface's own name against both files, surfaced to the user with `AskUserQuestion` rather than
+silently included or silently skipped, and both updated on the user's own pick. `~/.claude/rules/issues.md`'s
+existing file-scope-vs-required-doc-edit contradiction line (2026-09-07) already named this exact
+shape in the abstract; this session's own attempt to write a NEW rule for it in `.claude/rules/docs.md`
+was itself caught and reverted once the existing line was found, and the existing line gained a
+second sub-bullet instead - the check now explicitly runs again before the docs layer, checking a
+SIBLING ticket's own shipped precedent, not only the current ticket's own text.
+
 ## 2026-09-10 A regression check after a mechanism's shape changed skipped a previously-settled property
 
 Planning #123 (`.queue(n)`), a hand-rolled pump was rebuilt as a simpler array-of-promises design at

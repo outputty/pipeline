@@ -195,6 +195,10 @@ two knobs and nothing else - everything a chain carries between calls is interna
   `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline`, nothing `build` does
   can dispatch.
 - **`.buffer(size)`** - collect items and re-chunk.
+- **`.buffer(fn)`** - decide the chunk boundary per item instead of by count. `fn`'s own `emit()`
+  flushes whatever is pending and resets it to `[]`; returning a value appends it to the (possibly
+  just-reset) pending array, returning `DROP` skips the item. A `Promise`-returning `fn` widens the
+  pipeline's Mode to `"async"`.
 - **`.tap(fn | transformer)`** - observe items without changing them. Always runs in the
   orchestrating process, on every class; the stages either side of it still dispatch. Use
   `Transformer.tap` inside a `.transform()` to observe beside the work instead.
@@ -494,6 +498,49 @@ const data = await new Pipeline<number>()
 
 console.log(JSON.stringify(data)); // [1,2,3,4,5] - buffer(2) would have printed [3,7,5]
 ```
+
+`.buffer(fn)` decides the boundary per item instead of by count - a `T[]` pending array the
+framework owns, folded through it item by item. `fn`'s own `emit()` takes no value: it flushes
+whatever is currently pending and resets it to `[]`; returning a value appends it to the (possibly
+just-reset) pending array, and returning `DROP` skips the item entirely. `.buffer(size)` is this
+same mechanism configured with an identity `fn` and a framework-side auto-flush at
+`pending.length >= size`:
+
+<!-- compiles -->
+
+```typescript
+import { Pipeline } from "@outputty/pipeline";
+
+type Event = { id: number; ts: number };
+
+const events: Event[] = [
+  { id: 1, ts: 0 },
+  { id: 2, ts: 60_000 },
+  { id: 3, ts: 240_000 },
+  { id: 4, ts: 300_000 },
+  { id: 5, ts: 301_000 },
+];
+
+let windowStart = 0;
+const fiveMinuteWindow = (item: Event, _ctx: unknown, emit: () => void): Event => {
+  if (item.ts - windowStart >= 300_000) {
+    emit();
+    windowStart = item.ts;
+  }
+  return item;
+};
+
+const chunks: Event[][] = [];
+for await (const chunk of new Pipeline<Event>().buffer(fiveMinuteWindow)(events).chunks()) {
+  chunks.push(chunk);
+}
+
+console.log(JSON.stringify(chunks));
+// [[{"id":1,"ts":0},{"id":2,"ts":60000},{"id":3,"ts":240000}],[{"id":4,"ts":300000},{"id":5,"ts":301000}]]
+```
+
+A `Promise`-returning `fn` widens the pipeline's Mode to `"async"`, the same rule `.reduce()`'s own
+two-overload split already follows.
 
 ## How a Transformer runs a chunk
 
