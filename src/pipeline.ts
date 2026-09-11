@@ -1348,8 +1348,8 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `new Pipeline([1, 2, 3]).tap((x) => seen.push(x)).transform((t) => t.map((x) => x *
    * 2)).toArray()` → `[2, 4, 6]`, with `seen` `[1, 2, 3]`.
    */
-  tap(
-    fn: (item: T, ctx: IContextManager) => Promise<void>,
+  tap<R>(
+    fn: (item: T, ctx: IContextManager) => Promise<R>,
   ): M extends "async" ? this : Pipeline<T, "async", In>;
   tap(fn: (item: T, ctx: IContextManager) => void): this;
   tap(

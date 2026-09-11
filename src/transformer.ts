@@ -476,7 +476,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    */
 
   // Overload signatures
-  tap(fn: (item: Out, ctx: IContextManager) => Promise<void>): Transformer<In, Out, "async">;
+  tap<R>(fn: (item: Out, ctx: IContextManager) => Promise<R>): Transformer<In, Out, "async">;
   tap(fn: (item: Out, ctx: IContextManager) => void): Transformer<In, Out, M>;
   tap(transformer: Transformer<Out, unknown, "async">): Transformer<In, Out, "async">;
   tap(transformer: Transformer<Out, unknown, "sync">): Transformer<In, Out, M>;

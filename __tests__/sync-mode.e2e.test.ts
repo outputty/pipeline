@@ -339,6 +339,22 @@ describe("#90 - the Mode a chain reports and the engine it runs on never disagre
     expect(seen).toEqual([1, 2, 3]);
   });
 
+  it("Pipeline.tap accepts an async callback resolving to a non-void value, and still widens Mode (#117)", async () => {
+    // The async overload's own callback return type must stay `Promise<R>` (a generic parameter),
+    // never `Promise<void>`. Not just a compile-error risk: `Promise<void>` doesn't reject a
+    // `Promise<number>`-returning callback outright either - TypeScript silently falls through to
+    // the SYNC `void` overload instead (void's own bivariant leniency accepts an async callback's
+    // return too), so the call still "compiles" but Mode never widens to "async". The explicit
+    // `Promise<number[]>` annotation below - matching the sibling "widens the chain" test above -
+    // is what actually catches the wrong-overload fallthrough; a plain `expect()` on the awaited
+    // value cannot, since the runtime output is identical either way.
+    const out: Promise<number[]> = new Pipeline<number>()
+      .tap(async (x: number) => x * 2)([1, 2, 3])
+      .toArray();
+
+    expect(await out).toEqual([1, 2, 3]);
+  });
+
   it("a dispatching class composes before an input, like the base", async () => {
     // These three used to throw `no source: call .from(data) before composing a stage` here - the
     // runtime guard that stood in for the base's compile-time `"unset"` refusal. Both are replaced

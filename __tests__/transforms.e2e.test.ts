@@ -15,9 +15,9 @@ import { parseStrict } from "./helpers/sequences";
  * `Pipeline.toArray()` itself carries no context slot (#744) - this LOCAL helper builds its own
  * tuple from `.contextManager` afterward, so every call site below keeps reading `[results, ctx]`.
  * `bufferSize`, when given, calls `.buffer()` before `.apply()` (#39). */
-async function run<I, O>(
+async function run<I, O, M extends "sync" | "async" = "sync">(
   input: I[],
-  transformer: Transformer<I, O>,
+  transformer: Transformer<I, O, M>,
   context?: SimpleContextManager,
   bufferSize?: number,
 ): Promise<[O[], Record<string, unknown>]> {
@@ -148,6 +148,17 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
     expect(viaToArray).toBe(3);
     expect(viaAsyncIteration).toBe(3);
     expect(viaLocalStage).toBe(3);
+  });
+
+  it("Transformer.tap accepts an async callback resolving to a non-void value, and still widens Mode (#117)", async () => {
+    // Same shape as the Pipeline.tap sibling test (sync-mode.e2e.test.ts): `Promise<void>` doesn't
+    // reject a `Promise<number>`-returning callback outright - TypeScript silently falls through to
+    // the SYNC `void` overload instead (void's own bivariant leniency), so `run()` alone (which
+    // doesn't care about Mode) cannot catch the wrong-overload fallthrough. The explicit
+    // `Transformer<number, number, "async">` annotation is what actually pins the correct overload.
+    const tapped: Transformer<number, number, "async"> = T<number>().tap(async (x) => x * 2);
+    const [out] = await run([1, 2, 3], tapped);
+    expect(out).toEqual([1, 2, 3]);
   });
 
   it("apply composes a sub-transformer into the chain", async () => {
