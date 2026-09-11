@@ -92,7 +92,10 @@ src/
     cut.ts                  buildChunkGenerator/buildSyncChunkGenerator (cut) / flattenChunks
                              (undo) / normalize / share / collectItems (`collectAsyncItems()` is
                              `collectItems()`'s own unexported async half); assertPositiveChunkSize()
-                             is the one `chunkSize < 1` guard 3 sites shared inline before (#133)
+                             is the one `chunkSize < 1` guard 3 sites shared inline before (#133);
+                             assertWholeNumberAtLeastOne(label, value) is `.buffer(size)`/`.queue()`'s
+                             own shared, labelled validator (#123); prefetch(upstream, capacity) is
+                             `.queue()`'s own engine, beside `share()` (#123)
     drain.ts                 MaybeAsyncChunks<T>, drainSync/drainSyncSettled/close/dispatchSync -
                              dispatchSync(syncChunks, onSync, onAsync) is the sync/async branch
                              result.ts's forEach/[Symbol.iterator] and cut.ts's collectItems all
@@ -214,25 +217,41 @@ async-ness) - and this is safe for the same reason `.reduce()`'s is: `buildSyncB
 tail-chaining discovers a genuine `Promise` from the DATA, never from `_mode`, so a terminal op still
 returns the right value; only `isSync()`'s own bookkeeping reads stale until the next real cut.
 
-## Prefetching - pending #123
+## Prefetching - #123
 
-`.queue(capacity)` is `.buffer()`'s sibling, not its replacement: it operates on `this._chunks`
-directly, never `_chunkTransforms`, and never cuts a chunk itself - it prefetches up to `capacity`
-chunks that whatever chunking is already in effect (`.buffer()`'s own cut, or the `1000`-item
-default) already produced. `.buffer()` staying pull-driven is what makes it free when unused;
-`.queue()` is the opt-in cost for a caller who wants the source running ahead of the consumer.
+`.queue(capacity)` (`Pipeline.queue`, `src/pipeline.ts`) is `.buffer()`'s sibling, not its
+replacement: it never cuts a chunk itself, it reads `this.chunkStream()` (never `_chunks` directly -
+that skips a genuinely synchronous chain's own `_syncChunks`) and wraps whatever chunking is already
+in effect (`.buffer()`'s own cut, or the `1000`-item default) with `prefetch()`
+(`src/utils/cut.ts`, beside `share()`). `.buffer()` staying pull-driven is what makes it free when
+unused; `.queue()` is the opt-in cost for a caller who wants the source running ahead of the
+consumer.
 
-The mechanism is an array of exactly `capacity` pending `upstream.next()` promises, not a value
-buffer with a separate backpressure signal: the consumer takes the front promise in order, and the
-instant it does, a fresh `upstream.next()` is pushed onto the back. The array's length is invariant
-at `capacity` (until the source exhausts), so there is no separate "full" state to signal - only
-"temporarily empty, not yet exhausted," which a momentarily-starved caller waits out via a FIFO
-waiter list, woken one at a time as each new promise is queued.
+`prefetch()` is a plain `async function*`, written to mirror `ConcurrentPipeline`'s own
+`fanOutOrdered` shape (a sliding window of promises, `.catch(() => {})` attached at push time so a
+promise queued deep but never reached first is still a HANDLED rejection - see `code.md`) rather
+than a hand-rolled `AsyncIterable` object. That choice buys three of the ticket's own Constraints for
+free, from the language's own generator semantics rather than code this package has to write and
+verify itself:
 
-Two failure shapes were found and fixed during planning, both from treating this as a single-
-consumer mechanism when it must also serve `share()`'s concurrent pullers
-(`ConcurrentPipeline.reduce()`'s own partitioning reads a queue-backed `.buffer()` output through
-`share()` exactly like any other chunk stream):
+- **Laziness.** An async generator's body does not run at all until its own first `.next()` call, so
+  "the pump starts on the first consumer pull, not at construction" needs no `started` flag of its
+  own - the generator function itself IS that flag.
+- **Concurrent-caller safety, with no waiter list.** Two callers invoking `.next()` on the SAME
+  generator instance "concurrently" (no `await` between the calls) does not run two overlapping
+  activations of the body: the engine queues the calls and resumes the body once per call, strictly
+  in order. `share()`-based fan-out (`ConcurrentPipeline.reduce()`'s own partitioning) wraps
+  `prefetch()`'s own returned iterator exactly the way it wraps `_chunks`' - no extra locking, no
+  planning-time FIFO waiter list, because the language already serializes the resumptions `share()`'s
+  own docstring describes ("whichever consumer calls `.next()` next gets the next item").
+- **Early-exit cleanup for free.** `prefetch()`'s own `try { ... } finally { await
+  iterator.return?.(); }` is standard async-generator `.return()` injection - a consumer's `for
+  await`/`break` (or `.first(n)`'s own early stop) propagates a `.return()` call down to `prefetch()`,
+  which runs its `finally` and closes `upstream` in turn, with no manual `.return()` override needed.
+
+Two failure shapes were found and fixed during planning, before the shipped design settled on a
+plain generator - both still real constraints the generator-based design satisfies, just without the
+mechanism planning assumed it would need:
 
 - **`Promise.race` over concurrent `upstream.next()` calls buys nothing.** Proven twice, with real
   instrumented runs: issuing several `.next()` calls on ONE async generator without awaiting between
@@ -243,38 +262,36 @@ consumer mechanism when it must also serve `share()`'s concurrent pullers
   300ms item's body returns (`item 1 STARTS its own 10ms delay at 301 ms`), despite being called at
   the same instant. `fanOutUnordered` (below) races real independent WORK on already-pulled chunks,
   never repeated pulls on one shared generator - that distinction is why the same shape pays off
-  there and not here.
-- **"The array is empty" is not "the stream is exhausted."** Under two concurrent consumers at a
-  capacity smaller than consumer count, the array empties on every handoff, momentarily, as part of
-  ordinary operation. A version that read the array's length to decide `done` starved one partition
-  of an entire stream (10 items to one partition, 0 to the other, no error, no crash) the instant a
-  second consumer raced the first for capacity-1 worth of promises. Fixed: exhaustion is its own
-  flag, set only when the SOURCE itself reports done. Re-verified after the fix, capacity 1 and
-  capacity 3, two partitions, 10 items: `[0,2,4,6,8]`/`[1,3,5,7,9]` both times, zero duplicates.
-- **Filling the array is itself a pull, and must be gated the same way `pump()` is.** An array of
-  promises invariant at `capacity` is naturally simplest when the fill runs in the wrapper's own
-  constructor - but that runs the moment the wrapper is built, which is BEFORE any consumer has
-  asked for anything, reproducing the `ReadableStream` candidate's own disqualifying defect on a
-  design that otherwise looks nothing like it. Measured: constructing the queue and waiting 100ms
-  with zero reads pulled 3 items from the source at capacity 3, on a version regression-tested for
-  speed and fairness alone. Fixed by gating the fill behind a `started` flag read inside the
-  returned iterator's own `next()`, the same shape `.buffer()`'s own lazy replay already uses -
-  re-verified lazy (0 pulls at 100ms idle), with the speed win (664ms -> 538ms) and the fairness
-  split (5/5 at capacity 1 and 3) both unchanged by the fix.
+  there and not here, and why `prefetch()` contains no `Promise.race` anywhere.
+- **"The array is empty" is not "the stream is exhausted."** `prefetch()`'s own `pending` array is
+  refilled synchronously, in the same tick as the shift that emptied one slot (`pull()` runs
+  immediately after `pending.shift()`, before the next `yield`) - so two consumers sharing one
+  `prefetch()` iterator via `share()` never observe a momentarily-empty array as a false "done."
+  Verified: capacity 1 and capacity 3, two partitions, 8 items via `ConcurrentPipeline({
+  maxConcurrency: 2 }).buffer(2).queue(3).reduce(...)`, both correct sums totaling 36, no deadlock, no
+  starvation.
 
-A `ReadableStream`+`CountQueuingStrategy` candidate was priced and killed: Node's `pull()` fires
-immediately at construction to fill `highWaterMark` rather than on first consumer pull (5 pulls
-measured at 100ms idle with zero reads), and its own capacity accounting let `capacity + 1` items
-through rather than an exact bound - both regressions against the settled requirement that nothing
-touches the source until a terminal drains, which `.queue()` must preserve like every other
-`Pipeline` mechanism.
+A `ReadableStream`+`CountQueuingStrategy` candidate was priced and killed during planning: Node's
+`pull()` fires immediately at construction to fill `highWaterMark` rather than on first consumer pull
+(5 pulls measured at 100ms idle with zero reads), and its own capacity accounting let `capacity + 1`
+items through rather than an exact bound - both regressions against the settled requirement that
+nothing touches the source until a terminal drains, which `.queue()` preserves like every other
+`Pipeline` mechanism (`prefetch()`'s own laziness above).
 
-`.queue()` unconditionally widens Mode to `"async"`, the same way a dispatching class's `.from()`
-override already forces it - a queue's own next value may not be ready yet, so there is no
-conditional "stays sync" arm the way `.tap()`/`.onError()` keep one. No new `JoinMode`/`SeedMode`
-plumbing was needed: `.queue()` is not stage-shaped (it never joins with a stage's own Mode), it
-unconditionally overwrites the chain's Mode, so a flat `Pipeline<T, "async", In>` return type
-sufficed against the real generic machinery.
+`.queue()` unconditionally widens Mode to `"async"`, the same way `sourcePolicy()` forces every
+dispatching class's own chain async regardless of the source's shape - a queue's own next value may
+not be ready yet, so there is no conditional "stays sync" arm the way `.tap()`/`.onError()` keep one.
+No new `JoinMode`/`SeedMode` plumbing was needed: `.queue()` is not stage-shaped (it never joins with
+a stage's own Mode), it unconditionally overwrites the chain's Mode, so a flat `Pipeline<T, "async",
+In>` return type sufficed against the real generic machinery. Re-declared on all four dispatching
+classes (`ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline`) to narrow that
+return type to each one's own class, mirroring `.local()`'s own established pattern - `.buffer(fn)`'s
+identical Promise-widening overload shipped this same gap unfixed in #88 (disclosed, not narrowed);
+`.queue()`'s own review round closed it instead, since a SINGLE signature (not three overloads) made
+the four one-liner overrides cheap.
+
+Measured end to end: a 100ms/item source through a 30ms/item transform, `.queue(3)`, 5 items - 674ms
+fully serial, 542ms queued, same 5 outputs in order.
 
 ## Synchronous execution - pending #90
 

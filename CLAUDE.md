@@ -243,21 +243,32 @@ none of it survived the hand-trim (#745).
   `Promise`-returning `fn` widens Mode to `"async"`, two overloads ordered Promise-first. The dead
   `ChunkerFunction` type - unrelated to `.buffer()` since #39, zero consumers - is removed from the
   public export surface; `BufferFunction` is the type for a `.buffer(fn)` callback.
-- **`.queue(capacity)`** - prefetches up to `capacity` chunks a `Pipeline` already cut, decoupling
-  WHEN a chunk is pulled from WHEN the consumer asks for it (pending #123). An array of exactly
-  `capacity` pending `upstream.next()` promises; the consumer takes the front one, and the instant it
-  does, a fresh promise is pushed onto the back - order preserved, never a race. Widens Mode to
-  `"async"` unconditionally, the same way a dispatching class's `.from()` override already does.
-  Measured: a 100ms/item source feeding a 30ms/item stage ran 671ms with no queue, 539ms queued, same
-  output - overlap, not concurrent production, since a single async generator source still serializes
-  its own internal work regardless of how many pulls are issued (no `Promise.race` anywhere - proven
-  twice to buy nothing here). Composes with `share()`-based partitioning
-  (`ConcurrentPipeline.reduce()`) only because exhaustion is tracked as its own flag, never inferred
-  from the array being momentarily empty - a version that inferred it starved one partition of an
-  entire 10-item stream under two concurrent consumers before this fix. ⚠ The initial fill is itself
-  a pull: a version that filled the array in its own constructor pulled ahead of any consumer
-  request, reproducing the `ReadableStream` candidate's own disqualifying defect - gated behind a
-  flag read inside the returned iterator's `next()` instead, never at construction.
+- **`.queue(capacity)`** (#123) - prefetches up to `capacity` chunks a `Pipeline` already cut,
+  decoupling WHEN a chunk is pulled from WHEN the consumer asks for it. `prefetch()`
+  (`src/utils/cut.ts`, beside `share()`) is the engine: a plain `async function*`, mirroring
+  `ConcurrentPipeline`'s own `fanOutOrdered` - an array of exactly `capacity` pending
+  `upstream.next()` promises; the consumer takes the front one, and the instant it does, a fresh
+  promise is pushed onto the back - order preserved, never a race, never `Promise.race` (proven
+  twice during planning to buy nothing over a single async generator source, which always serializes
+  its own internal work regardless of how many pulls are issued). Written as a generator
+  DELIBERATELY rather than a hand-rolled `AsyncIterable` object: a generator's body does not run
+  until its own first `.next()` call, which is what makes "the pump starts on the first consumer
+  pull, not at construction" free rather than a flag this function tracks itself - a version that
+  filled the array in its own constructor pulled ahead of any consumer request, reproducing the
+  `ReadableStream` candidate's own disqualifying defect. The SAME generator semantics make concurrent
+  callers safe with no manual locking: the language serializes concurrent `.next()` calls on one
+  generator instance into one resumption at a time, so `share()`-based partitioning
+  (`ConcurrentPipeline.reduce()`) wraps this generator's own iterator exactly like it wraps `_chunks`'
+  - no exhaustion flag, no waiter list, needed to keep "the array is momentarily empty" from reading
+  as "the stream is exhausted" the way a hand-rolled version would need one. `.queue(capacity)` reads
+  `this.chunkStream()`, never `this._chunks` directly, so a genuinely synchronous chain
+  (`_syncChunks`) still widens correctly, and widens Mode to `"async"` unconditionally, the same way
+  `sourcePolicy()` forces every dispatching class's own chain async regardless of the source's shape.
+  Re-declared on all four dispatching classes to narrow the return type, mirroring `.local()`'s own
+  pattern - `.buffer(fn)`'s identical Promise-widening gap shipped unfixed in #88 (disclosed, not
+  narrowed); `.queue()`'s own single signature made the four one-liner overrides cheap enough to
+  close instead. Measured: a 100ms/item source feeding a 30ms/item stage ran 674ms with no queue,
+  542ms queued, same output.
 - **Pipeline family** - WHERE a chain's chunks run is chosen by CONSTRUCTING A CLASS, not by
   configuring a `Transformer` (#17 - replaced `ExecutionStrategy`, `.withExecutor()`, `sequential`,
   `concurrent()` and `ConcurrentStrategyOptions` entirely, deleted with `src/strategies/`).

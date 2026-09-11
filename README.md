@@ -199,6 +199,9 @@ two knobs and nothing else - everything a chain carries between calls is interna
   flushes whatever is pending and resets it to `[]`; returning a value appends it to the (possibly
   just-reset) pending array, returning `DROP` skips the item. A `Promise`-returning `fn` widens the
   pipeline's Mode to `"async"`.
+- **`.queue(capacity)`** - prefetch up to `capacity` chunks ahead of the consumer, decoupling when a
+  chunk is pulled from when a downstream terminal asks for it. Always widens the pipeline's Mode to
+  `"async"`.
 - **`.tap(fn | transformer)`** - observe items without changing them. Always runs in the
   orchestrating process, on every class; the stages either side of it still dispatch. Use
   `Transformer.tap` inside a `.transform()` to observe beside the work instead.
@@ -541,6 +544,31 @@ console.log(JSON.stringify(chunks));
 
 A `Promise`-returning `fn` widens the pipeline's Mode to `"async"`, the same rule `.reduce()`'s own
 two-overload split already follows.
+
+`.buffer()` still owns the cut; `.queue(capacity)` only changes WHEN each already-cut chunk is
+fetched. Every downstream chunk pull runs against an array of exactly `capacity` pending
+`upstream.next()` promises - the consumer takes the front one, and the instant it does, a fresh
+promise is pushed onto the back, so production and consumption overlap instead of running in
+lockstep. A 100ms/item source through a 30ms/item transform, 5 items, ran 674ms fully serial and
+542ms queued at capacity 3 - overlap, never concurrent production, since a single async generator
+source still serializes its own internal work regardless of how many pulls are in flight:
+
+<!-- compiles -->
+
+```typescript
+import { Pipeline } from "@outputty/pipeline";
+
+const data = await new Pipeline<number>()
+  .buffer(2)
+  .queue(3)
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))([1, 2, 3, 4, 5])
+  .toArray();
+
+console.log(JSON.stringify(data)); // [6,8,10]
+```
+
+`.queue()` always widens the pipeline's Mode to `"async"`, even over an entirely synchronous chain -
+a queued chunk may not be ready yet.
 
 ## How a Transformer runs a chunk
 
