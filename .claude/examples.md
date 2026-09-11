@@ -558,3 +558,45 @@ const data = await new Pipeline<number>()
 ```json
 [6, 8, 10]
 ```
+
+## Case 15 - a callback-driven chunk boundary
+
+`.buffer(fn)` decides the chunk boundary per item instead of by count, reused verbatim in
+`README.md` and `product.md`'s own Chunking section.
+
+<!-- compiles -->
+
+```ts
+import { Pipeline } from "@outputty/pipeline";
+
+type Event = { id: number; ts: number };
+
+const events: Event[] = [
+  { id: 1, ts: 0 },
+  { id: 2, ts: 60_000 },
+  { id: 3, ts: 240_000 },
+  { id: 4, ts: 300_000 },
+  { id: 5, ts: 301_000 },
+];
+
+let windowStart = 0;
+const fiveMinuteWindow = (item: Event, _ctx: unknown, emit: () => void): Event => {
+  if (item.ts - windowStart >= 300_000) {
+    emit();
+    windowStart = item.ts;
+  }
+  return item;
+};
+
+const chunks: Event[][] = [];
+for await (const chunk of new Pipeline<Event>().buffer(fiveMinuteWindow)(events).chunks()) {
+  chunks.push(chunk);
+}
+```
+
+```json
+[
+  [{ "id": 1, "ts": 0 }, { "id": 2, "ts": 60000 }, { "id": 3, "ts": 240000 }],
+  [{ "id": 4, "ts": 300000 }, { "id": 5, "ts": 301000 }]
+]
+```
