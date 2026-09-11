@@ -2,16 +2,17 @@
  * queue.e2e.test.ts — ticket #123's own Done-when cases. Pinned during L1 as expected-fail (every
  * `.queue(n)` call carried `@ts-expect-error`, since the method did not exist on `main` yet); flipped
  * live here in L2, `@ts-expect-error`-free, now that `Pipeline.queue(capacity)` is real. Done-when 8
- * (no file outside `src/pipeline.ts`, `src/utils/cut.ts`, `src/utils/chunk.ts` (barrel export only),
- * `src/types.ts`, and their tests changed) is a structural check, run via `git diff --stat` in the
- * L2/docs PR bodies rather than a runtime case here - see the ticket's own plan comment for the
- * file-scope resolution.
+ * is a structural check, run via `git diff --stat` in the L2/docs PR bodies rather than a runtime
+ * case here - see the ticket's own plan comment for the original file-scope resolution, and this
+ * layer's own PR body for the code-review-driven widening (`src/pipelines/*.ts`'s own `.queue()`
+ * narrowing overrides, confirmed with the user rather than silently resolved either way).
  */
 import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
+import { HttpPipeline } from "@src/pipelines/http";
 import type { Transformer } from "@src/transformer";
-import { closingSource, closingAsyncSource } from "./helpers/sequences";
+import { closingSource, closingAsyncSource, untilStable } from "./helpers/sequences";
 
 describe("#123 queue(n) prefetches ahead of the consumer (Done-when 1)", () => {
   it("prints [6, 8, 10], unchanged from buffer(2).transform(...) alone", async () => {
@@ -86,19 +87,20 @@ describe("#123 queue(n) starts pulling only on the first consumer pull (Done-whe
 
     const iterator = result.chunks()[Symbol.asyncIterator]();
     await iterator.next();
-    await new Promise((resolve) => setImmediate(resolve));
     // The array fills to `capacity` (3) on this first pull, not at construction (the ticket's own
     // Constraint) - and the ticket's own refill rule ("the instant [the consumer] does [take the
     // front], a fresh promise is pushed onto the back") fires INSIDE this same first `.next()`, so
-    // the cumulative pull count after taking one item is capacity + 1 = 4, not 3: 3 initial pulls to
-    // fill the array, plus the one immediate refill for the item just taken. `pending.length` itself
-    // (not observable from outside) stays at exactly `capacity` throughout.
-    expect(pulls).toBe(4);
+    // the cumulative pull count after taking one item settles at capacity + 1 = 4, not 3: 3 initial
+    // pulls to fill the array, plus the one immediate refill for the item just taken.
+    // `pending.length` itself (not observable from outside) stays at exactly `capacity` throughout.
+    // `untilStable` polls rather than counting a fixed number of microtask flushes - HOW MANY hops
+    // separate a pull from its own `pulls++` is `.buffer(1)`'s own chunking generator's business,
+    // not this test's.
+    expect(await untilStable(() => pulls)).toBe(4);
 
     await iterator.next();
-    await new Promise((resolve) => setImmediate(resolve));
     // Steady state: each further item taken issues exactly one more pull.
-    expect(pulls).toBe(5);
+    expect(await untilStable(() => pulls)).toBe(5);
   });
 });
 
@@ -181,5 +183,21 @@ describe("#123 queue(n) refuses an invalid capacity, matching buffer()'s own wor
     expect(() => new Pipeline<number>().queue(0)).toThrow("must be a whole number of at least 1");
     expect(() => new Pipeline<number>().queue(2.5)).toThrow("must be a whole number of at least 1");
     expect(() => new Pipeline<number>().queue(-3)).toThrow("must be a whole number of at least 1");
+  });
+});
+
+describe("#123 queue(n) stays narrowed to its own dispatching subclass (code-review)", () => {
+  it("keeps HttpPipeline's own .fetch reachable after .queue(), no cast", () => {
+    // Before this fix, `.queue()` returned the base `Pipeline<T, "async", In>` unconditionally, so
+    // `.fetch` (an `HttpPipeline`-only member) failed `tsc` with TS2339 even though the runtime
+    // object `createPipeline()` builds really is an `HttpPipeline` - this binding itself fails
+    // `pnpm typecheck` if that narrowing ever regresses.
+    const handler: (request: Request) => Promise<Response> = new HttpPipeline<number>({
+      url: "http://127.0.0.1:1",
+    })
+      .transform((t) => t)
+      .queue(3).fetch;
+
+    expect(typeof handler).toBe("function");
   });
 });

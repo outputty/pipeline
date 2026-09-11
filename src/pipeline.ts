@@ -1160,9 +1160,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * Prefetches up to `capacity` chunks ahead of the consumer, decoupling WHEN a chunk is pulled
    * from `.buffer()`'s own already-cut stream from WHEN a downstream terminal asks for it (#123).
    * `.buffer()` still owns the cut itself; `.queue()` only changes the timing of each fetch.
-   * Unconditionally widens Mode to `"async"`, the same way a dispatching class's `.from()` override
-   * already does - a queued chunk may not be ready yet even on an otherwise fully synchronous
-   * chain, so there is no "stays sync" case the way `.buffer(fn)`'s non-Promise overload has.
+   * Unconditionally widens Mode to `"async"`, the same way `sourcePolicy()` forces every
+   * dispatching class's own chain async regardless of the source's shape - a queued chunk may not
+   * be ready yet even on an otherwise fully synchronous chain, so there is no "stays sync" case the
+   * way `.buffer(fn)`'s non-Promise overload has.
    *
    * `prefetch()` (`src/utils/cut.ts`) is the engine: an array of exactly `capacity` pending
    * `upstream.next()` promises, refilled one-for-one the instant the consumer takes the front one -

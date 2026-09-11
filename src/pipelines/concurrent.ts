@@ -436,6 +436,14 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     return super.local(build) as unknown as ConcurrentPipeline<U, In>;
   }
 
+  /** Re-declared ONLY to narrow `Pipeline.queue()`'s return type (#123,
+   * `~/.claude/rules/typescript.md`) - same reason as `.local()` above. The body is an unchanged
+   * `super.queue()` call: `.queue()`'s own prefetch engine reads `this.chunkStream()`, which already
+   * dispatches through this class's own chunk stream regardless of the class calling it. */
+  override queue(capacity: number): ConcurrentPipeline<T, In> {
+    return super.queue(capacity) as unknown as ConcurrentPipeline<T, In>;
+  }
+
   /**
    * The one method a subclass overrides to change WHERE a reducer runs (#45). `stageWork()`'s
    * sibling: a reducer streams in and out (it emits fewer or more values than it consumes), so this

@@ -159,6 +159,13 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     return super.local(build) as unknown as EventEmitterPipeline<U, In>;
   }
 
+  /** Re-declared ONLY to narrow `Pipeline.queue()`'s return type (#123,
+   * `~/.claude/rules/typescript.md`) - the body is an unchanged `super()` call: a queued chunk still
+   * dispatches through whatever `stageWork()` override this class already runs. */
+  override queue(capacity: number): EventEmitterPipeline<T, In> {
+    return super.queue(capacity) as unknown as EventEmitterPipeline<T, In>;
+  }
+
   /**
    * Re-declared ONLY to narrow the static return type, the same reason as `transform()`/`local()`
    * above - `.reduce()` dispatch is INHERITED UNCHANGED from `ConcurrentPipeline` (#124's own Settle
