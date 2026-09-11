@@ -35,7 +35,9 @@ import {
   buildSyncChunkGenerator,
   flattenChunks,
   recutSyncChunks,
+  prefetch,
 } from "./utils/chunk";
+import { assertWholeNumberAtLeastOne } from "./utils/cut";
 import { chain, runStageChunk } from "./utils/helpers";
 import { PipelineResult } from "./result";
 import { BranchBuilder, runBranch } from "./branch";
@@ -1093,8 +1095,8 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       // `.buffer(2.5)` accumulated until `length >= 2.5`, so the SOURCE cut at 3, while
       // `cutChunk`'s re-cut sliced `index + 2.5` and cut at 2 - one call, two boundaries over the
       // same data, no error. `BufferFunction` takes no such validation - any function is accepted.
-      if (typeof sizeOrFn === "number" && (!Number.isInteger(sizeOrFn) || sizeOrFn < 1)) {
-        throw new Error("buffer size must be a whole number of at least 1");
+      if (typeof sizeOrFn === "number") {
+        assertWholeNumberAtLeastOne("buffer size", sizeOrFn);
       }
       const cutsTheSource = this._pendingStages.length === 0;
       if (typeof sizeOrFn === "number") {
@@ -1152,6 +1154,52 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       ...this.carriedOptions(),
       preBufferItems: items,
     }) as this;
+  }
+
+  /**
+   * Prefetches up to `capacity` chunks ahead of the consumer, decoupling WHEN a chunk is pulled
+   * from `.buffer()`'s own already-cut stream from WHEN a downstream terminal asks for it (#123).
+   * `.buffer()` still owns the cut itself; `.queue()` only changes the timing of each fetch.
+   * Unconditionally widens Mode to `"async"`, the same way a dispatching class's `.from()` override
+   * already does - a queued chunk may not be ready yet even on an otherwise fully synchronous
+   * chain, so there is no "stays sync" case the way `.buffer(fn)`'s non-Promise overload has.
+   *
+   * `prefetch()` (`src/utils/cut.ts`) is the engine: an array of exactly `capacity` pending
+   * `upstream.next()` promises, refilled one-for-one the instant the consumer takes the front one -
+   * order preserved, never a race, never `Promise.race`. Reads `this.chunkStream()`, never
+   * `this._chunks` directly, so a genuinely synchronous chain (`_syncChunks`, not `_chunks`) still
+   * widens correctly - `chunkStream()` is the one seam that resolves either engine to an
+   * `AsyncIterable<T[]>`, the same seam `.reduce()`'s own async arm reads.
+   *
+   * Python equivalent:
+   * ```python
+   * def queue(self, capacity: int) -> "Pipeline[T]":
+   *   return Pipeline(prefetch(self.chunk_stream(), capacity))
+   * ```
+   *
+   * @example
+   * `new Pipeline<number>().buffer(1).queue(3)([1, 2, 3, 4, 5]).toArray()` → `Promise<number[]>`
+   * resolving to `[1, 2, 3, 4, 5]` - every item synchronous, the chain still widened to async.
+   */
+  queue(capacity: number): Pipeline<T, "async", In> {
+    // Validated once, above `isDeferred()` (unlike `.buffer()`'s two-site check): `.queue()` has no
+    // reduceFn-style lazy construction to also guard, so `new Pipeline<number>().queue(0)` - never
+    // bound to a source - throws HERE rather than waiting for a drain that never happens.
+    assertWholeNumberAtLeastOne("queue capacity", capacity);
+
+    if (this.isDeferred()) {
+      return this.defer<T, Pipeline<T, "async", In>>((p) => p.queue(capacity));
+    }
+
+    return this.createPipeline<T, Pipeline<T, "async", In>>(
+      prefetch<T>(this.chunkStream(), capacity),
+      {
+        ...this.carriedOptions(),
+        ...this.freshPreBuffer(),
+        mode: "async",
+        syncChunks: null,
+      },
+    );
   }
 
   /**
