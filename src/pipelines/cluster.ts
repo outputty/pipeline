@@ -18,16 +18,17 @@ import { createServer } from "node:http";
 import { availableParallelism } from "node:os";
 import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
-import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
+import { HttpPipeline, toNodeHandler, errorResponse } from "@src/pipelines/http";
+import type { HttpPipelineOptions } from "@src/pipelines/http";
 import { emptyChunks, Pipeline } from "@src/pipeline";
-import type { PipelineConstructorOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
+import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
-  IContextManager,
   InternalTransformer,
   ReduceFunction,
-  SourcePolicy,
   PipelineMode,
+  ReduceWork,
+  RouteVerb,
 } from "@src/types";
 
 /** Construction-time knobs for `ClusterPipeline`. */
@@ -39,120 +40,175 @@ export type ClusterPipelineOptions = { workers?: number } & ConcurrentPipelineOp
 type ClusterPipelineConstructorOptions = ClusterPipelineOptions &
   PipelineConstructorOptions & { pipelineIndex?: number };
 
-// ---- module-level, per-PROCESS state - one shared bootstrap and one shared registry for every
-// ClusterPipeline instance, on both the primary and every worker (`cluster.fork()` re-execs the
-// entry module, so this file, and everything in it, runs once per worker too). ----
-
-let nextPipelineIndex = 0;
-/** Every `ClusterPipeline` ever constructed in THIS process, keyed by its `pipelineIndex` - a
- * worker's own copy of this registry ends up identical to the primary's, because both run the
- * exact same entry module, constructing pipelines in the exact same order (product.md's own
- * "index N means the same transform on both sides", one level up). */
-const registry = new Map<number, ClusterPipeline<unknown>>();
-
 interface BootstrapResult {
   port: number;
 }
-let bootstrapPromise: Promise<BootstrapResult> | undefined;
-let inFlight = 0;
-let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
 /** How long with zero in-flight dispatches before workers are killed and the process can exit on
  * its own (Done-when 3). Not a caller-facing option - the ticket names the mechanism (an unref'd
  * idle timer), not a tuned value; a re-fork after a real idle gap costs ~50-60ms (architecture.md's
  * own measurement), which this window is comfortably larger than for back-to-back dispatches. */
 const IDLE_KILL_MS = 500;
 
-/** `worker.kill()` (not `.unref()`) - forked workers hold the event loop open through cluster's
- * shared `TCPServerWrap`, which no public API exposes to release (architecture.md's own
- * constraint), so an idle process only exits once every worker is actually killed. */
-function killWorkers(): void {
-  for (const worker of Object.values(cluster.workers ?? {})) {
-    worker?.kill();
+/**
+ * The per-PROCESS state every `ClusterPipeline` instance shares, on both the primary and every
+ * worker (`cluster.fork()` re-execs the entry module, so this class is instantiated once per
+ * worker too) - one object instead of 5 module-level mutable bindings and 4 free functions closing
+ * over them (#133). `workers` (below the class) is the ONE instance this file ever constructs.
+ *
+ * `register()`/`lookup()` are the pipeline registry: every `ClusterPipeline` ever constructed in
+ * this process, keyed by its own `pipelineIndex` - a worker's own copy ends up identical to the
+ * primary's, because both run the exact same entry module, constructing pipelines in the exact
+ * same order (product.md's own "index N means the same transform on both sides", one level up).
+ * `enter()` is `bootstrap()` plus the `inFlight`/idle-kill bracket `stageWork()` (once per chunk)
+ * and `reduceWork()` (once per whole stream) both need - a caller `await`s it, does its dispatch,
+ * then calls the release it returns; `stageWork()`'s own `finally { inFlight--; scheduleIdleCheck();
+ * }` and `reduceWork()`'s identical copy collapse to that one call.
+ */
+class WorkerSet {
+  private nextPipelineIndex = 0;
+  private readonly registry = new Map<number, ClusterPipeline<unknown>>();
+  private bootstrapPromise: Promise<BootstrapResult> | undefined;
+  private inFlight = 0;
+  private idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Claims the next pipeline index, registering `pipeline` at it so a routed request can find it
+   * later - see `claimIndex()` for the unregistered, index-only case (`registries()`'s own replay,
+   * a `.branch()` arm). */
+  register(pipeline: ClusterPipeline<unknown>): number {
+    const index = this.nextPipelineIndex++;
+    this.registry.set(index, pipeline);
+    return index;
   }
-  bootstrapPromise = undefined; // a later dispatch bootstraps a fresh set
-}
 
-/** Reschedules the idle-kill check, `unref()`'d so the timer itself never keeps the process alive -
- * only the (deliberately NOT unref'd) worker processes do that, until this fires. */
-function scheduleIdleCheck(): void {
-  if (idleTimer) clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    if (inFlight > 0) {
-      scheduleIdleCheck();
-      return;
-    }
-    killWorkers();
-  }, IDLE_KILL_MS);
-  idleTimer.unref();
-}
+  /** Claims the next pipeline index with no registry entry - the case that must NOT be routable:
+   * a bound replay or a `.branch()` arm, per `ClusterPipeline`'s own constructor comment. */
+  claimIndex(): number {
+    return this.nextPipelineIndex++;
+  }
 
-/** Forks `workerCount` workers (default `os.availableParallelism()`, per the ticket's own
- * Constraints), waits for every one to report the port it ended up listening on via `.fork()`'s own
- * IPC channel - `listen(0)` inside `cluster` yields every worker the SAME port (architecture.md's
- * own probe), so the first one to report it IS the shared port. Memoized: every `ClusterPipeline`
- * in this process shares the same in-flight or already-resolved bootstrap (Done-when 4). */
-function bootstrapCluster(workerCount: number): Promise<BootstrapResult> {
-  bootstrapPromise ??= new Promise((resolve, reject) => {
-    const count = workerCount > 0 ? workerCount : availableParallelism();
-    let sharedPort: number | undefined;
-    let readyCount = 0;
-    let settled = false;
-    for (let i = 0; i < count; i++) {
-      const worker = cluster.fork();
-      worker.on("message", (message: unknown) => {
-        const { type, port } = (message ?? {}) as { type?: string; port?: number };
-        if (type !== "outputty-pipeline-ready" || typeof port !== "number") return;
-        sharedPort ??= port;
-        readyCount++;
-        if (readyCount === count && !settled) {
+  lookup(index: number): ClusterPipeline<unknown> | undefined {
+    return this.registry.get(index);
+  }
+
+  /** Forks `workerCount` workers (default `os.availableParallelism()`, per the ticket's own
+   * Constraints), waits for every one to report the port it ended up listening on via `.fork()`'s
+   * own IPC channel - `listen(0)` inside `cluster` yields every worker the SAME port
+   * (architecture.md's own probe), so the first one to report it IS the shared port. Memoized:
+   * every `ClusterPipeline` in this process shares the same in-flight or already-resolved bootstrap
+   * (Done-when 4). */
+  bootstrap(workerCount: number): Promise<BootstrapResult> {
+    this.bootstrapPromise ??= new Promise((resolve, reject) => {
+      const count = workerCount > 0 ? workerCount : availableParallelism();
+      let sharedPort: number | undefined;
+      let readyCount = 0;
+      let settled = false;
+      for (let i = 0; i < count; i++) {
+        const worker = cluster.fork();
+        worker.on("message", (message: unknown) => {
+          const { type, port } = (message ?? {}) as { type?: string; port?: number };
+          if (type !== "outputty-pipeline-ready" || typeof port !== "number") return;
+          sharedPort ??= port;
+          readyCount++;
+          if (readyCount === count && !settled) {
+            settled = true;
+            resolve({ port: sharedPort! });
+          }
+        });
+        // A worker that dies before reporting its port must REJECT (#113). With a resolve-only
+        // promise, `readyCount` simply stalled below `count` and the bootstrap stayed pending
+        // forever: a bad import in the entry module, a port-permission failure or an OOM kill left
+        // every later `stageWork`/`reduceWork` awaiting a promise that never settles, so the
+        // terminal op neither returned nor threw. A silent hang is the one outcome with no
+        // diagnosis in it.
+        const fail = (detail: string): void => {
+          if (settled) return;
           settled = true;
-          resolve({ port: sharedPort! });
-        }
-      });
-      // A worker that dies before reporting its port must REJECT (#113). With a resolve-only
-      // promise, `readyCount` simply stalled below `count` and the bootstrap stayed pending
-      // forever: a bad import in the entry module, a port-permission failure or an OOM kill left
-      // every later `stageWork`/`reduceWork` awaiting a promise that never settles, so the terminal
-      // op neither returned nor threw. A silent hang is the one outcome with no diagnosis in it.
-      const fail = (detail: string): void => {
-        if (settled) return;
-        settled = true;
-        reject(new Error(`a ClusterPipeline worker failed before reporting its port: ${detail}`));
-      };
-      worker.on("error", (error: Error) => fail(error.message));
-      worker.on("exit", (code, signal) => fail(`exited with code ${code}, signal ${signal}`));
+          reject(new Error(`a ClusterPipeline worker failed before reporting its port: ${detail}`));
+        };
+        worker.on("error", (error: Error) => fail(error.message));
+        worker.on("exit", (code, signal) => fail(`exited with code ${code}, signal ${signal}`));
+      }
+    });
+    return this.bootstrapPromise;
+  }
+
+  /** Bootstraps if needed, marks one dispatch in flight, and returns the port plus its release -
+   * `stageWork()` and `reduceWork()` each `await workerSet.enter(this.workers)`, read `port` for
+   * `this._url`, dispatch, then call `release` exactly once (its own `released` guard makes a
+   * second call a no-op, so a caller's own `finally` never double-decrements). `port` is returned
+   * here rather than re-read via a second `bootstrap()` call (#133 review: `bootstrap()` is
+   * memoized so a second call is not a race, but it is a needless microtask hop on every
+   * dispatch for a value this method already has). */
+  async enter(workerCount: number): Promise<{ port: number; release: () => void }> {
+    const { port } = await this.bootstrap(workerCount);
+    this.inFlight++;
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      this.inFlight--;
+      this.scheduleIdleCheck();
+    };
+    return { port, release };
+  }
+
+  /** Reschedules the idle-kill check, `unref()`'d so the timer itself never keeps the process
+   * alive - only the (deliberately NOT unref'd) worker processes do that, until this fires. */
+  private scheduleIdleCheck(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      if (this.inFlight > 0) {
+        this.scheduleIdleCheck();
+        return;
+      }
+      this.kill();
+    }, IDLE_KILL_MS);
+    this.idleTimer.unref();
+  }
+
+  /** `worker.kill()` (not `.unref()`) - forked workers hold the event loop open through cluster's
+   * shared `TCPServerWrap`, which no public API exposes to release (architecture.md's own
+   * constraint), so an idle process only exits once every worker is actually killed. */
+  kill(): void {
+    for (const worker of Object.values(cluster.workers ?? {})) {
+      worker?.kill();
     }
-  });
-  return bootstrapPromise;
+    this.bootstrapPromise = undefined; // a later dispatch bootstraps a fresh set
+  }
+
+  /** The one HTTP server every worker runs, routing `/pipeline/<i>/transform/<n>` to pipeline `i`'s
+   * own `.fetch()` - which then parses `/stage/<n>` itself, prefix-agnostic, exactly as
+   * `HttpPipeline` already does for two plain instances. The registry is read at REQUEST time,
+   * always after the worker's own copy of the entry module has finished its synchronous top-level
+   * construction (Node runs a script's synchronous code to completion before any I/O callback, an
+   * incoming request included) - architecture.md's own "the module must complete so every apply()
+   * call registers its stage" falls out of that ordering, not anything this method does itself. */
+  startWorkerServer(): void {
+    const routeToRegisteredPipeline = async (request: Request): Promise<Response> => {
+      const { pathname } = new URL(request.url);
+      const match = /^\/pipeline\/(\d+)\//.exec(pathname);
+      const pipeline = match ? this.lookup(Number(match[1])) : undefined;
+      if (!pipeline) {
+        return errorResponse(404, `unknown pipeline route ${pathname}`);
+      }
+      return pipeline.fetch(request);
+    };
+
+    const server = createServer(toNodeHandler(routeToRegisteredPipeline));
+    server.listen(0, () => {
+      const { port } = server.address() as AddressInfo;
+      process.send?.({ type: "outputty-pipeline-ready", port });
+    });
+  }
 }
 
-/** The one HTTP server every worker runs, routing `/pipeline/<i>/transform/<n>` to pipeline `i`'s own
- * `.fetch()` - which then parses `/stage/<n>` itself, prefix-agnostic, exactly as `HttpPipeline`
- * already does for two plain instances. `registry` is read at REQUEST time, always after the
- * worker's own copy of the entry module has finished its synchronous top-level construction (Node
- * runs a script's synchronous code to completion before any I/O callback, an incoming request
- * included) - architecture.md's own "the module must complete so every apply() call registers its
- * stage" falls out of that ordering, not anything this function does itself. */
-function startWorkerServer(): void {
-  const routeToRegisteredPipeline = async (request: Request): Promise<Response> => {
-    const { pathname } = new URL(request.url);
-    const match = /^\/pipeline\/(\d+)\//.exec(pathname);
-    const pipeline = match ? registry.get(Number(match[1])) : undefined;
-    if (!pipeline) {
-      return Response.json({ error: `unknown pipeline route ${pathname}` }, { status: 404 });
-    }
-    return pipeline.fetch(request);
-  };
-
-  const server = createServer(toNodeHandler(routeToRegisteredPipeline));
-  server.listen(0, () => {
-    const { port } = server.address() as AddressInfo;
-    process.send?.({ type: "outputty-pipeline-ready", port });
-  });
-}
+/** The one per-process `WorkerSet` every `ClusterPipeline` in this process shares - constructed
+ * once, on both the primary and every worker (`cluster.fork()` re-execs this module). */
+const workerSet = new WorkerSet();
 
 if (cluster.isWorker) {
-  startWorkerServer();
+  workerSet.startWorkerServer();
 }
 
 /**
@@ -182,8 +238,8 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
     second?: ClusterPipelineOptions,
   ) {
     const options = Pipeline.wrapping<ClusterPipelineConstructorOptions>(first, second);
-    // The real url is only known once bootstrapCluster() (below) picks a port; "" is inert until
-    // the first actual dispatch sets it, inside stageWork()'s own returned closure.
+    // The real url is only known once workerSet.bootstrap() (below) picks a port; "" is inert
+    // until the first actual dispatch sets it, inside stageWork()'s own returned closure.
     super({ ...options, url: "" });
     this.workers = options?.workers ?? availableParallelism();
 
@@ -207,11 +263,8 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
     //   `REST:undefined` rather than failing.
     const claimsOwnSlot = options?.bound !== true && (options?.routeTrail ?? "") === "";
     this.pipelineIndex = claimsOwnSlot
-      ? nextPipelineIndex++
-      : (options?.pipelineIndex ?? nextPipelineIndex++);
-    if (claimsOwnSlot) {
-      registry.set(this.pipelineIndex, this as ClusterPipeline<unknown>);
-    }
+      ? workerSet.register(this as ClusterPipeline<unknown>)
+      : (options?.pipelineIndex ?? workerSet.claimIndex());
 
     // architecture.md's own constraint: a WORKER process's terminal op must resolve immediately
     // with an EMPTY result - the worker exists to hold the transforms (registered by the
@@ -226,27 +279,21 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
   }
 
   /**
-   * Carries `workers`/`pipelineIndex` into the NEXT instance a copy-on-write call builds, alongside
-   * `maxConcurrency`/`ordered` (`concurrentOptions()`, inherited) and `url` (kept correct once a
-   * real dispatch has set it, so a `.context()` call after the pipeline is already live does not
-   * reset it back to "").
+   * Carries `workers`/`pipelineIndex` into the NEXT instance a copy-on-write call builds, on top of
+   * `HttpPipeline.carriedKnobs()`'s own `maxConcurrency`/`ordered`/`url` (#133 - `url` needs no
+   * re-spelling here: `super.carriedKnobs()` already reads `this._url`, and `this` is this
+   * instance's own `_url`, kept correct once a real dispatch has set it, so a `.context()` call
+   * after the pipeline is already live does not reset it back to "").
    */
-  protected override createPipeline<U>(
-    chunks: AsyncIterable<U[]>,
-    options: PipelineConstructorOptions,
-  ): ClusterPipeline<U, In> {
-    const Ctor = this.constructor as new (
-      options?: ClusterPipelineConstructorOptions & { url: string },
-    ) => ClusterPipeline<U, In>;
-    const merged = {
-      ...options,
-      ...this.concurrentOptions(),
+  protected override carriedKnobs(): HttpPipelineOptions & {
+    workers: number;
+    pipelineIndex: number;
+  } {
+    return {
+      ...super.carriedKnobs(),
       workers: this.workers,
       pipelineIndex: this.pipelineIndex,
-      url: this._url,
-      chunks,
     };
-    return new Ctor(merged);
   }
 
   override transform<U, M2 extends "sync" | "async">(
@@ -270,26 +317,10 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
   /**
    * Re-declared ONLY to narrow `Pipeline.local()`'s return type (#61,
    * `~/.claude/rules/typescript.md`) - same reason as `.transform()`/`.apply()`/`.reduce()` above.
-   * `HttpPipeline.local()`'s own logic runs unchanged via `super`.
+   * `HttpPipeline.local()`'s own logic runs unchanged via `super`. `bind()`/`sourcePolicy()` need no
+   * such re-declaration (#133) - see `ConcurrentPipeline.sourcePolicy()`'s own docstring for why
+   * this class has neither any more.
    */
-  /**
-   * Forced `"async"` whatever the source's shape (#90) - ClusterPipeline exists for I/O-bound work and
-   * has no synchronous case, so an array source runs on the async engine here exactly as an
-   * `AsyncIterable` one does. `sourcePolicy()` below is the runtime half; the `"async"` third type
-   * argument on the `extends` clause above is the compile-time half, and is what makes this
-   * override a genuine narrowing of the base's own two arms rather than a conflict with them.
-   *
-   * `new ClusterPipeline(chain)([1, 2, 3])` runs on the async engine whatever `chain` was.
-   */
-  protected override bind<U>(data: PipelineSource<U>): ClusterPipeline<U> {
-    // `In` becomes `U` here - see `ConcurrentPipeline.bind()`.
-    return this.fromSource<U>(data, this.sourcePolicy()) as unknown as ClusterPipeline<U>;
-  }
-
-  protected override sourcePolicy(): SourcePolicy {
-    return "async";
-  }
-
   override local<U, M2 extends PipelineMode>(
     build: (p: Pipeline<T, "async", any>) => Pipeline<U, M2, any>,
   ): ClusterPipeline<U, In> {
@@ -299,16 +330,18 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain
    * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`http.ts`) exists for, so several
    * `ClusterPipeline`s can share one worker server without colliding on stage 0. */
-  protected override routePath(verb: "transform" | "reduce", index: number): string {
+  protected override routePath(verb: RouteVerb, index: number): string {
     return `/pipeline/${this.pipelineIndex}${super.routePath(verb, index)}`;
   }
 
-  /** Bootstraps the shared worker set (memoized, `bootstrapCluster()`) and points `this._url` at
-   * it - the one bit `stageWork()` (once per chunk) and `reduceWork()` (once per whole stream)
-   * share, rather than each inlining the same two lines. */
-  protected async bootstrapAndSetUrl(): Promise<void> {
-    const { port } = await bootstrapCluster(this.workers);
+  /** Bootstraps the shared worker set (memoized, `WorkerSet.bootstrap()`), points `this._url` at
+   * it, marks one dispatch in flight, and returns its release - `stageWork()` (once per chunk) and
+   * `reduceWork()` (once per whole stream) each call this once instead of inlining the identical
+   * bootstrap/`inFlight` bracket. */
+  protected async bootstrapAndSetUrl(): Promise<() => void> {
+    const { port, release } = await workerSet.enter(this.workers);
     this._url = `http://localhost:${port}`;
+    return release;
   }
 
   protected override stageWork<U>(
@@ -317,13 +350,11 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
   ): InternalTransformer<T, U> {
     const dispatch = super.stageWork(transformer, stageIndex);
     return async (chunk, ctx) => {
-      await this.bootstrapAndSetUrl();
-      inFlight++;
+      const release = await this.bootstrapAndSetUrl();
       try {
         return await dispatch(chunk, ctx);
       } finally {
-        inFlight--;
-        scheduleIdleCheck();
+        release();
       }
     };
   }
@@ -337,17 +368,15 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
     fn: ReduceFunction<U, T>,
     initial: U,
     stageIndex: number,
-  ): (chunks: AsyncIterable<T[]>, ctx: IContextManager) => AsyncGenerator<U[]> {
+  ): ReduceWork<T, U> {
     const dispatch = super.reduceWork(fn, initial, stageIndex);
     const self = this;
     return async function* dispatchOnWorker(chunks, ctx) {
-      await self.bootstrapAndSetUrl();
-      inFlight++;
+      const release = await self.bootstrapAndSetUrl();
       try {
         yield* dispatch(chunks, ctx);
       } finally {
-        inFlight--;
-        scheduleIdleCheck();
+        release();
       }
     };
   }
