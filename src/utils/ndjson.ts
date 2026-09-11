@@ -1,9 +1,3 @@
-/**
- * NDJSON framing over a raw byte stream (#45) - the wire format a reduce stage's duplex connection
- * uses both ways: `{"context":{…}}` once, then `{"chunk":[…]}` per upstream chunk going out,
- * `{"emit":[…]}` per emit and `{"error":"…"}` on a mid-stream failure coming back.
- */
-
 /** Decodes a byte stream into complete lines as they arrive, buffering an incomplete trailing line
  * across reads. The one place both the client (`HttpPipeline.reduceWork`) and the server
  * (`HttpPipeline.fetch`'s `/reduce/<n>` handling) parse NDJSON frames from. A `ReadableStream` is

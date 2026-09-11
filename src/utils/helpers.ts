@@ -1,15 +1,3 @@
-/**
- * Helper utilities for checking function signatures.
- *
- * Python equivalent:
- * ```python
- * def is_context_aware(func: Callable) -> bool:
- *   sig = inspect.signature(func)
- *   params = list(sig.parameters.values())
- *   return len(params) >= 2
- * ```
- */
-
 import type { IContextManager, PipelineFunction, PipelineErrorHandler } from "@src/types";
 
 /**
@@ -22,12 +10,12 @@ import type { IContextManager, PipelineFunction, PipelineErrorHandler } from "@s
  * @returns True if the function takes a context parameter
  *
  * @example
- * ```typescript
+ * ```ts
  * const simple = (x: number) => x * 2;
  * const withContext = (x: number, ctx: IContextManager) => x * ctx.getOrDefault('multiplier', 1);
  *
- * isContextAware(simple);      // false (fn.length === 1)
- * isContextAware(withContext); // true (fn.length === 2)
+ * isContextAware(simple);      // → false (fn.length === 1)
+ * isContextAware(withContext); // → true (fn.length === 2)
  * ```
  */
 export function isContextAware<Out, T>(
@@ -37,18 +25,17 @@ export function isContextAware<Out, T>(
 }
 
 /**
- * The RUN-handler decision every per-chunk catch site shares (#78): `Transformer.process()`'s own
+ * The RUN-handler decision every per-chunk catch site shares: `Transformer.process()`'s own
  * `runSequentially` loop (a local stage) and `ConcurrentPipeline.apply()`'s wrapped `work` (a
- * dispatched one) - the two sites #40 built and #78 reuses, so "call the handler, or propagate"
- * lives once rather than twice. No handler registered → rethrow (today's behaviour, the run dies).
- * A handler that itself throws (or a caller who writes `(e) => { throw e; }`) still propagates - it
- * is not caught here, so it escalates past this call to whatever awaits the caller. `runHandler` is
- * declared as bare `void` (`.claude/rules/typescript.md`), which still accepts an `async` callback -
- * this function is itself `async` and `await`s the call so a Promise-returning handler's own
- * rejection is caught HERE rather than becoming an unhandled rejection the caller never sees: with
- * no `await`, a handler that decides to rethrow only after an `await` of its own would resolve this
- * function normally (its caller then treats the chunk as dropped) before that rejection ever
- * surfaces.
+ * dispatched one) - so "call the handler, or propagate" lives once rather than twice. No handler
+ * registered → rethrow (the run dies). A handler that itself throws (or a caller who writes `(e) =>
+ * { throw e; }`) still propagates - it is not caught here, so it escalates past this call to
+ * whatever awaits the caller. `runHandler` is declared as bare `void`, which still accepts an
+ * `async` callback - this function is itself `async` and `await`s the call so a Promise-returning
+ * handler's own rejection is caught HERE rather than becoming an unhandled rejection the caller
+ * never sees: with no `await`, a handler that decides to rethrow only after an `await` of its own
+ * would resolve this function normally (its caller then treats the chunk as dropped) before that
+ * rejection ever surfaces.
  *
  * `await dropOrRethrow(undefined, err, ctx)` throws `err`. `await dropOrRethrow((e) => log(e), err,
  * ctx)` calls the handler and returns normally - the caller drops the chunk and continues.
@@ -59,7 +46,7 @@ export function dropOrRethrow(
   ctx: IContextManager,
 ): void | Promise<void> {
   if (!runHandler) throw error;
-  // Dual-mode (#90): a SYNCHRONOUS handler returns here without creating a `Promise`, so a
+  // Dual-mode: a SYNCHRONOUS handler returns here without creating a `Promise`, so a
   // `"sync"`-Mode chain that drops a chunk still returns its array rather than silently widening to
   // a `Promise` its own compile-time type never promised. The async arm keeps the reason above: the
   // rejection is settled HERE, so a handler that decides to rethrow only after an `await` of its own
@@ -69,9 +56,9 @@ export function dropOrRethrow(
 }
 
 /**
- * True when `value` is a thenable - the one place a "did this stay synchronous?" decision is made
- * (#90). Structural, not `instanceof Promise`: a caller's own thenable, a `PromiseLike` from another
- * realm and a native `Promise` all have to widen the chain the same way.
+ * True when `value` is a thenable - the one place a "did this stay synchronous?" decision is made.
+ * Structural, not `instanceof Promise`: a caller's own thenable, a `PromiseLike` from another realm
+ * and a native `Promise` all have to widen the chain the same way.
  *
  * `isThenable(1)` → `false`. `isThenable(Promise.resolve(1))` → `true`.
  */
@@ -84,10 +71,10 @@ export function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T
 }
 
 /**
- * Runs `next` on `value`, creating NO `Promise` when `value` is not already one (#90) - the
- * replacement for every `await` on a composition seam, so a chain whose callbacks all return plain
- * values runs start to finish without a microtask. When `value` IS a thenable the call defers
- * through `.then`, which is the chain widening to async exactly where the first async link sits.
+ * Runs `next` on `value`, creating NO `Promise` when `value` is not already one - the replacement
+ * for every `await` on a composition seam, so a chain whose callbacks all return plain values runs
+ * start to finish without a microtask. When `value` IS a thenable the call defers through `.then`,
+ * which is the chain widening to async exactly where the first async link sits.
  *
  * `chain(2, (x) => x * 2)` → `4`, no `Promise` created. `chain(Promise.resolve(2), (x) => x * 2)` →
  * a `Promise` of `4`.
@@ -102,10 +89,10 @@ export function chain<A, B>(
 }
 
 /**
- * Collects per-item results into one array, staying synchronous when NO item is pending (#90) -
+ * Collects per-item results into one array, staying synchronous when NO item is pending -
  * `Promise.all`'s replacement wherever a chunk's items were mapped one at a time. `Promise.all`
- * always allocates and always defers, even over an array of plain values, which is what made a
- * fully-synchronous `.map()` cost a microtask per chunk before this.
+ * always allocates and always defers, even over an array of plain values, which is what makes a
+ * fully-synchronous `.map()` cost a microtask per chunk without this.
  *
  * `settleMaybe([1, 2])` → `[1, 2]`, no `Promise` created. `settleMaybe([1, Promise.resolve(2)])` →
  * a `Promise` of `[1, 2]`.
@@ -116,16 +103,14 @@ export function settleMaybe<T>(values: (T | PromiseLike<T>)[]): T[] | Promise<T[
 
 /**
  * Runs `run` over every item of `chunk` and settles the results, staying synchronous when none is
- * pending (#90) - the ONE per-item map every element-wise link goes through, rather than a bare
+ * pending - the ONE per-item map every element-wise link goes through, rather than a bare
  * `chunk.map(...)` at each site.
  *
  * The bare form is unsafe here: `run` is a caller's own callback, so it can throw SYNCHRONOUSLY for
  * item `i` after items `0..i-1` already returned pending promises. `Array.prototype.map` abandons
  * the array at that point, leaving those promises with no rejection handler ever attached - one of
- * them rejecting then crashes the process under Node's default unhandled-rejection policy. Before
- * #90 the per-item callback was `async`, so a throw became a rejection `Promise.all` always handled;
- * it cannot be now, because that `async` wrapper is exactly what made a synchronous chain allocate.
- * This loop attaches a throwaway `.catch` to whatever was already created, then rethrows.
+ * them rejecting then crashes the process under Node's default unhandled-rejection policy. This loop
+ * attaches a throwaway `.catch` to whatever was already created, then rethrows.
  *
  * `mapSettle([1, 2], (x) => x * 2)` → `[2, 4]`, no `Promise` created.
  */
@@ -143,10 +128,10 @@ export function mapSettle<T, R>(chunk: T[], run: (item: T) => R | Promise<R>): R
 }
 
 /**
- * Attaches a throwaway rejection handler to every pending value in `created` (#90) - what
- * `mapSettle` above owes the siblings of an item whose callback threw synchronously, since nothing
- * downstream will ever await them. Its own function to keep `mapSettle`'s `catch` at this repo's
- * `max-depth: 2`.
+ * Attaches a throwaway rejection handler to every pending value in `created` - what `mapSettle`
+ * above owes the siblings of an item whose callback threw synchronously, since nothing downstream
+ * will ever await them. Its own function to keep `mapSettle`'s `catch` at this repo's `max-depth:
+ * 2`.
  */
 function disarm<R>(created: (R | Promise<R>)[]): void {
   for (const value of created) {
@@ -155,12 +140,11 @@ function disarm<R>(created: (R | Promise<R>)[]): void {
 }
 
 /**
- * The try/catch-if-thenable/recover skeleton every ROW- or CHUNK-level recovery site shares (#133):
- * try `attempt`; a synchronous throw OR a rejected `Promise` both route to `recover`. Neither path
+ * The try/catch-if-thenable/recover skeleton every ROW- or CHUNK-level recovery site shares: try
+ * `attempt`; a synchronous throw OR a rejected `Promise` both route to `recover`. Neither path
  * builds a closure this function doesn't already need - `recover` is a plain function the CALLER
  * already holds, invoked directly at the failure site, never wrapped or hoisted here. Serves
- * `runStageChunk` below and `transformer.ts`'s own `attemptRow` (was spelled out separately, 2
- * copies, before this).
+ * `runStageChunk` below and `transformer.ts`'s own `attemptRow`.
  *
  * `Reducer.fold` (`utils/reduce.ts`) does NOT use this, by decision: its own docstring records a
  * measured perf note (372.5 ns/item for a hoisted commit/recover pair against 8.9 ns/item inlined)
@@ -184,8 +168,8 @@ export function tryRecover<R>(
 }
 
 /**
- * Runs one chunk through a stage on the `"sync"` engine (#90), applying `Pipeline.onError()`'s own
- * RUN handler exactly as `runSequentially` does for the async engine - the two engines must agree on
+ * Runs one chunk through a stage on the `"sync"` engine, applying `Pipeline.onError()`'s own RUN
+ * handler exactly as `runSequentially` does for the async engine - the two engines must agree on
  * what a chunk failure means, and `dropOrRethrow` is where that decision already lives.
  *
  * A dropped chunk becomes `[]` rather than disappearing: the sync stream is a generator of chunks,

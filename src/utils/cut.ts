@@ -1,22 +1,10 @@
-/**
- * Cutting a stream into chunks, flattening chunks back to items, sharing one iterator across several
- * consumers, collecting a drain to an array, and prefetching a shared iterator's own chunks ahead of
- * the consumer (`prefetch`, #123) - split out of `chunk.ts` along with `drain.ts` (draining a
- * `MaybeAsyncChunks` stream) and `recut.ts` (re-cutting an already-staged one), re-exported from
- * `chunk.ts` so nothing importing that barrel has to change. `prefetch` lands here rather than a
- * dedicated file: the ticket's own file scope named `share()` as its neighbor, and #133's own split
- * groups real seams, not one file per function - a prefetching helper over a shared iterator is the
- * same "sharing" family `share()` itself is.
- */
-
 import type { ChunkerFunction } from "@src/types";
 import { chain } from "@src/utils/helpers";
 import { drainSync, dispatchSync, type MaybeAsyncChunks } from "@src/utils/drain";
 
 /** The `chunkSize`/`size` guard `buildChunkGenerator`, `buildSyncChunkGenerator` and
- * `recut.ts`'s own `recutSyncChunks` each need before doing any real work (#133: was spelled
- * inline 3x, collapsed to this one call). The message stays verbatim -
- * `sync-mode.e2e.test.ts` asserts it.
+ * `recut.ts`'s own `recutSyncChunks` each need before doing any real work. The message stays
+ * verbatim - `sync-mode.e2e.test.ts` asserts it.
  *
  * `assertPositiveChunkSize(0)` throws `Error("chunkSize must be at least 1")`;
  * `assertPositiveChunkSize(3)` returns, no error. */
@@ -27,11 +15,10 @@ export function assertPositiveChunkSize(size: number): void {
 }
 
 /** The `capacity`/`size` guard a NUMERIC knob shares across two call sites - `.buffer(size)`'s own
- * deferred-branch check and `.queue(capacity)` (#123) - labelled so each throws under its own name
- * rather than a generic one. Kept apart from `assertPositiveChunkSize` above: that one's own message
- * is asserted verbatim by `sync-mode.e2e.test.ts` and is never the wording a caller-facing knob like
- * `.buffer(fn)`'s `size` overload or `.queue()` owes its user - see `.buffer()`'s own deferred check
- * for the two-site duplication this replaces.
+ * deferred-branch check and `.queue(capacity)` - labelled so each throws under its own name rather
+ * than a generic one. Kept apart from `assertPositiveChunkSize` above: that one's own message is
+ * asserted verbatim by `sync-mode.e2e.test.ts` and is never the wording a caller-facing knob like
+ * `.buffer(fn)`'s `size` overload or `.queue()` owes its user.
  *
  * `assertWholeNumberAtLeastOne("queue capacity", 0)` throws `Error("queue capacity must be a whole
  * number of at least 1")`; `assertWholeNumberAtLeastOne("queue capacity", 3)` returns. */
@@ -48,14 +35,14 @@ export function assertWholeNumberAtLeastOne(label: string, value: number): void 
  * @returns A function that takes an AsyncIterable and yields chunks
  *
  * @example
- * ```typescript
+ * ```ts
  * const chunker = buildChunkGenerator<number>(3);
  * const data = (async function* () { for (let i = 1; i <= 7; i++) yield i; })();
  *
  * for await (const chunk of chunker(data)) {
  *   console.log(chunk);
  * }
- * // Output: [1, 2, 3], [4, 5, 6], [7]
+ * // → [1, 2, 3], [4, 5, 6], [7]
  * ```
  */
 export function buildChunkGenerator<T>(chunkSize: number): ChunkerFunction<T> {
@@ -93,7 +80,7 @@ export function buildChunkGenerator<T>(chunkSize: number): ChunkerFunction<T> {
  * @returns An async generator of chunks (arrays), in stream order
  *
  * @example
- * ```typescript
+ * ```ts
  * async function* mixed() {
  *   yield { id: 1 };
  *   yield [{ id: 2 }, { id: 3 }];
@@ -102,7 +89,7 @@ export function buildChunkGenerator<T>(chunkSize: number): ChunkerFunction<T> {
  * for await (const chunk of normalize(mixed())) {
  *   console.log(chunk);
  * }
- * // Output: [{id:1}], [{id:2},{id:3}], [{id:4}]
+ * // → [{id:1}], [{id:2},{id:3}], [{id:4}]
  * ```
  */
 export async function* normalize<T>(stream: AsyncIterable<T | T[]>): AsyncGenerator<T[]> {
@@ -126,8 +113,8 @@ export async function* normalize<T>(stream: AsyncIterable<T | T[]>): AsyncGenera
 }
 
 /**
- * Flattens a chunk stream into its items, in order (#39) - the one place a chunk becomes items
- * again, shared by `Pipeline`'s own terminal ops and `.buffer()`'s re-cut fallback.
+ * Flattens a chunk stream into its items, in order - the one place a chunk becomes items again,
+ * shared by `Pipeline`'s own terminal ops and `.buffer()`'s re-cut fallback.
  *
  * @example
  * `[...flattenChunks([[1, 2], [3]])]` → `[1, 2, 3]`.
@@ -139,10 +126,11 @@ export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenera
 }
 
 /**
- * `buildChunkGenerator`'s synchronous counterpart (#90) - identical cutting, over an `Iterable`
- * rather than an `AsyncIterable`, so an in-memory source never becomes an async iterator just to be
- * chunked. That per-item conversion, not the per-chunk `Promise.all`, is where most of the old
- * cost sat: a chain with ZERO transform stages still paid it.
+ * `buildChunkGenerator`'s synchronous counterpart - identical cutting, over an `Iterable` rather
+ * than an `AsyncIterable`, so an in-memory source never becomes an async iterator just to be
+ * chunked. That per-item conversion, not the per-chunk `Promise.all`, is where most of the cost of
+ * a fully synchronous chain would otherwise sit: a chain with ZERO transform stages still pays it
+ * without this.
  *
  * Not a shared implementation with the async one: a `for await` loop and a `for` loop are different
  * statements, and an `async function*` is async even when its input is not - there is no body both
@@ -176,7 +164,7 @@ export function buildSyncChunkGenerator<T>(
 /**
  * Wraps an existing iterator as an `AsyncIterable` that pulls from that SAME iterator on every
  * `.next()` call. Calling `share()` N times over one iterator and handing each result to its own
- * consumer is free-slot dealing (`ConcurrentPipeline.reduce()`, #62, fans one chunk stream out to
+ * consumer is free-slot dealing (`ConcurrentPipeline.reduce()` fans one chunk stream out to
  * `maxConcurrency` independent partitions this way): whichever consumer calls `.next()` next gets
  * the next item, with no dealer, no per-consumer queue and no backpressure mechanism of its own - a
  * slow consumer simply calls `.next()` less often, so the other consumers pick up its slack.
@@ -197,8 +185,8 @@ export function share<T>(iterator: AsyncIterator<T>): AsyncIterable<T> {
 }
 
 /**
- * Prefetches up to `capacity` chunks ahead of the consumer (#123) - an already-cut chunk stream in,
- * the same stream out, only WHEN each chunk is fetched changes. Written as a plain `async function*`
+ * Prefetches up to `capacity` chunks ahead of the consumer - an already-cut chunk stream in, the
+ * same stream out, only WHEN each chunk is fetched changes. Written as a plain `async function*`
  * deliberately, mirroring `ConcurrentPipeline`'s own `fanOutOrdered` (`src/pipelines/concurrent.ts`)
  * rather than a hand-rolled `AsyncIterable` object: a generator's body does not run at all until its
  * OWN first `.next()` call, which is what makes "the pump starts on the first consumer pull, not at
@@ -217,10 +205,10 @@ export function share<T>(iterator: AsyncIterator<T>): AsyncIterable<T> {
  * EARLIER one threw first is an unhandled rejection, not a caught one.
  *
  * No `Promise.race` anywhere: a single async generator source serializes its own internal work
- * regardless of how many `.next()` calls are already in flight, so racing them buys no overlap -
- * proven during #123's own planning. The overlap this function buys comes from PRODUCTION and
- * CONSUMPTION running concurrently (the source keeps working while the consumer processes an
- * earlier chunk), never from concurrent production itself.
+ * regardless of how many `.next()` calls are already in flight, so racing them buys no overlap. The
+ * overlap this function buys comes from PRODUCTION and CONSUMPTION running concurrently (the source
+ * keeps working while the consumer processes an earlier chunk), never from concurrent production
+ * itself.
  *
  * @example
  * `prefetch(upstream, 3)` over a 100ms/item source feeding a 30ms/item consumer, 5 items: the fully
@@ -263,10 +251,10 @@ async function* drainPrefetched<T>(
 }
 
 /**
- * Collects a bound pipeline's items to an array, staying synchronous when the chain is (#90), and
+ * Collects a bound pipeline's items to an array, staying synchronous when the chain is, and
  * stopping early once `limit` items are in hand - the ONE collect every caller shares:
  * `PipelineResult.toArray()`, its `first(n)` (which IS `toArray` with a limit), and `.branch()`,
- * which collects the parent chain before routing. Three copies of the same engine decision before.
+ * which collects the parent chain before routing.
  *
  * `syncChunks` is `Pipeline.drainable()`'s own sync view, `null` on the async engine, where `items`
  * is read instead.

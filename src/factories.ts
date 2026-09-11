@@ -7,14 +7,8 @@
 import { Transformer } from "./transformer";
 
 /**
- * Create a new sequential Transformer. Chunk-agnostic (#39) - it takes no chunk size; the caller's
+ * Create a new sequential Transformer. Chunk-agnostic - it takes no chunk size; the caller's
  * `Pipeline` decides that via `.buffer(size)`.
- *
- * Python equivalent:
- * ```python
- * def create_transformer[T](_type_hint: type[T]) -> Transformer[T, T]:
- *   return Transformer[T, T]()
- * ```
  *
  * @returns A new Transformer with sequential execution
  */
