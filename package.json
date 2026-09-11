@@ -39,7 +39,7 @@
     "format:check": "prettier --check .",
     "lint": "oxlint",
     "release": "changeset publish",
-    "check": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm test:run",
+    "check": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm test:run && pnpm docs:check",
     "docs:check": "pnpm --package=typescript@5.9.3 --package=typedoc@0.28.20 dlx typedoc --emit none --treatWarningsAsErrors"
   },
   "devDependencies": {

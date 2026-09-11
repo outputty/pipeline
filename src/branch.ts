@@ -222,11 +222,8 @@ export type BranchResults = Record<string, unknown[]>;
  * once per RUN, never from this config, which `.branch()` builds once when the arms are declared.
  */
 interface ArmDispatch<T> {
-  /** The branch's arms, in routing order. */
   arms: readonly BranchArm<T>[];
-  /** This `.branch()` call's own position in the chain's shared stage-index space. */
   branchIndex: number;
-  /** Builds one arm's own pipeline, scoped to a context and a route trail. */
   makeArm: (context: IContextManager, routeTrail: string) => ArmPipeline<T>;
 }
 
