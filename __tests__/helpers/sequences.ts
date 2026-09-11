@@ -5,8 +5,13 @@
  * `chunksOf` (`callable.e2e.test.ts`'s own definition, used wherever a case wants the whole chunk
  * stream rather than items), `parseStrict` (3 byte-identical copies: `pipeline`/`transforms`/
  * `pipelines`, plus `sync-mode`'s own non-identical 4th - see its own docstring for the delta),
- * `closingSource`/`closingAsyncSource` (5 near-duplicate inline generators across
- * `buffer`/`pipelines`/`callable`, each proving an early exit ran a source's own `finally`).
+ * `closingSource`/`closingAsyncSource` (3 of the 5 near-duplicate inline generators #133 names,
+ * all inside `buffer.e2e.test.ts`, each proving an early exit ran a source's own `finally`) -
+ * `pipelines.e2e.test.ts`'s ordered/unordered case and `callable.e2e.test.ts`'s own case both kept
+ * their original inline generator: neither's own assertion fits this pair's `0..count-1` /
+ * boolean-`state.closed` contract without changing what it asserts, which the ticket's own "every
+ * caller's own expect unchanged" line forbids - the same kind of named exception
+ * `cluster-basic.ts` already is for `runFixtureJson`.
  */
 
 import { createHook } from "node:async_hooks";

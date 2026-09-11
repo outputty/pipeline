@@ -19,10 +19,9 @@ import {
   runFixture,
   withServer,
   expectFixtureOk,
-  lastJsonLine,
   runFixtureJson,
 } from "./helpers/fixtures";
-import { parseStrict, closingAsyncSource, chunksOf } from "./helpers/sequences";
+import { parseStrict, chunksOf } from "./helpers/sequences";
 
 /** The "another instance" side of an `HttpPipeline` chain: an empty-source pipeline whose only
  * job is to hold the SAME stage definitions `builder` describes, so its `.fetch` can serve them. */
@@ -46,7 +45,8 @@ describe("#17 ClusterPipeline canonical program (Done-when 1, 3)", () => {
       // Done-when 1: the canonical result, the LAST line - every worker also re-executes the
       // entry module and prints ITS OWN empty placeholder first (architecture.md's own documented
       // constraint: "a violation shows as duplicated output, never an error").
-      expect(lastJsonLine<number[]>(result)).toEqual([6, 8, 10]);
+      const lines = result.stdout.trim().split("\n");
+      expect(lines.at(-1)).toBe("[6,8,10]");
     },
     FIXTURE_TIMEOUT,
   );
@@ -699,20 +699,26 @@ describe("#113 - a partitioned reduce owns its accumulator, and every fan-out cl
   });
 
   it("closes the source on an early exit under ordered: false, as ordered: true already does", async () => {
-    const orderedState = { closed: false };
-    const unorderedState = { closed: false };
+    const closed: string[] = [];
+    const source = (label: string) =>
+      (async function* () {
+        try {
+          for (let i = 0; i < 100; i++) yield i;
+        } finally {
+          closed.push(label);
+        }
+      })();
 
     const chain = (ordered: boolean) =>
       new ConcurrentPipeline<number>({ maxConcurrency: 2, ordered })
         .buffer(1)
         .transform((t) => t.map((x: number) => x * 2));
 
-    expect(await chain(true)(closingAsyncSource(orderedState)).first(1)).toEqual([0]);
-    expect(await chain(false)(closingAsyncSource(unorderedState)).first(1)).toEqual([0]);
+    expect(await chain(true)(source("ordered")).first(1)).toEqual([0]);
+    expect(await chain(false)(source("unordered")).first(1)).toEqual([0]);
 
     // A macrotask, so a generator closed by `.return()` has run its `finally`.
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(orderedState.closed).toBe(true);
-    expect(unorderedState.closed).toBe(true);
+    expect(closed.sort()).toEqual(["ordered", "unordered"]);
   });
 });

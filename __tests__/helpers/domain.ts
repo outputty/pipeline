@@ -25,6 +25,11 @@ export const ordersB: Order[] = [
   { id: 10, total: 20, region: "us" },
 ];
 
+/** `ordersA` under its other name - #133's own Interface names `orders` (not `ordersA`) as the
+ * shared declaration replacing `branch.e2e.test.ts`'s own moved shadowed re-declarations; kept as
+ * a separate export (not a second array) so both names resolve to the SAME reference. */
+export const orders: Order[] = ordersA;
+
 /** The canonical chain: no data, built once, reused by every case that needs a real `.transform()`
  * over `Order`s. */
 export const withVat = new Pipeline<Order>().transform((t) =>

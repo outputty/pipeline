@@ -13,7 +13,7 @@ import { Pipeline } from "@src/pipeline";
 import { PipelineResult } from "@src/result";
 import { SimpleContextManager } from "@src/context/simple";
 import { runFixtureJson, FIXTURE_TIMEOUT } from "./helpers/fixtures";
-import { chunksOf, countPromises, closingSource } from "./helpers/sequences";
+import { chunksOf, countPromises } from "./helpers/sequences";
 import { type Order, ordersA, ordersB, withVat } from "./helpers/domain";
 
 async function* asStream<T>(items: readonly T[]): AsyncGenerator<T> {
@@ -358,9 +358,18 @@ describe("L8 review findings, each reproduced before it was fixed", () => {
   it("closes a sync source that a terminal stopped reading early", () => {
     // Before: `drainSync`'s early exit abandoned the iterator, so a generator's `finally` never
     // ran - a file handle or cursor held by a sync source leaked on `.first()` alone.
-    const state = { closed: false };
-    expect(new Pipeline<number>().buffer(1)(closingSource(state, 3)).first(1)).toEqual([0]);
-    expect(state.closed).toBe(true);
+    let closed = false;
+    function* source(): Generator<number> {
+      try {
+        yield 1;
+        yield 2;
+        yield 3;
+      } finally {
+        closed = true;
+      }
+    }
+    expect(new Pipeline<number>().buffer(1)(source()).first(1)).toEqual([1]);
+    expect(closed).toBe(true);
   });
 
   it("shows the same chunks whichever engine folded them", async () => {
