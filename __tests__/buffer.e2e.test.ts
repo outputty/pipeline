@@ -397,6 +397,26 @@ describe("#88 buffer(fn)'s recut-from-chunks sub-path keeps every emit its own c
 
     expect(chunks).toEqual([[0], [2, 4], [6, 8], [10, 12], [14, 16], [18]]);
   });
+
+  it("also drains correctly through .toArray()'s own iterator-driven consumer, not just .chunks()", async () => {
+    // `driveFold`'s `remaining` queue is written inside a yielded chunk's OWN `.then` and read back
+    // synchronously at the next `for` pass - correct only if every consumer awaits a pending chunk
+    // before calling `.next()` again. `chunksOf` above proves it through `.chunks()`'s `for await`;
+    // `.toArray()` goes through a different path (`drainSync`, a manual iterator) and must agree.
+    let count = 0;
+    const sizeTwo = (item: number, _ctx: IContextManager, emit: () => void): number => {
+      count++;
+      if (count % 2 === 0) emit();
+      return item;
+    };
+    const items = await new Pipeline<number>()
+      .buffer(10)
+      .transform((t) => t.map(async (x: number) => x * 2))
+      .buffer(sizeTwo)([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+      .toArray();
+
+    expect(items).toEqual([0, 2, 4, 6, 8, 10, 12, 14, 16, 18]);
+  });
 });
 
 describe("#88 a flush-then-append on the LAST item is not dropped (found while verifying the fix above)", () => {
