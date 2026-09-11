@@ -17,16 +17,16 @@ import { Pipeline, ConcurrentPipeline, HttpPipeline } from "../src";
 import {
   FIXTURE_TIMEOUT,
   HTTP_TIMEOUT,
-  runFixture,
   withServer,
-  expectFixtureOk,
-  lastJsonLine,
+  withTrackedServer,
+  runFixtureJson,
 } from "./helpers/fixtures";
 // The SAME parser the client (HttpPipeline.reduceWork) and server (.fetch's /reduce/<n> handling)
 // use - review found this test hand-rolling its own copy, missing the shared one's trailing-buffer
 // flush (a final unterminated frame silently dropped), so a wire-format bug there would be
 // invisible here. Reusing it also means a fix to the shared parser IS exercised by this test.
 import { readNdjsonLines } from "../src/utils/ndjson";
+import { chunksOf } from "./helpers/sequences";
 
 /** The emit-at-6 reducer the ticket's own Done-when 2 and 4 both use: banks a running total once it
  * reaches 6, resetting to 0 - no trailing value when the last item already banked one. */
@@ -79,6 +79,31 @@ describe("#45 Transformer.reduce still folds ONE chunk and still chains (Done-wh
   });
 });
 
+/** A request body that sends `leadIn` immediately, then trickles `frames` out one at a time, 60ms
+ * apart, each JSON-encoded as its own NDJSON line - slow enough that a duplex-aware server can
+ * answer before the body closes. `onClosed` fires the moment the LAST frame is enqueued and the
+ * stream closes. */
+function trickleNdjsonBody(
+  frames: unknown[],
+  onClosed: () => void,
+  leadIn: unknown[] = [],
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      for (const frame of leadIn) {
+        controller.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
+      }
+      for (const frame of frames) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        controller.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
+      }
+      controller.close();
+      onClosed();
+    },
+  });
+}
+
 describe("#45 a real duplex connection streams emits before the request body closes (Done-when 4)", () => {
   test(
     "emits [6,9], at least one arriving before the request body closes",
@@ -87,20 +112,10 @@ describe("#45 a real duplex connection streams emits before the request body clo
 
       await withServer(worker.fetch, async (url) => {
         let bodyClosed = false;
-        const encoder = new TextEncoder();
-        const framesToSend: number[][] = [[1, 2], [3, 4], [5]];
-
-        const requestBody = new ReadableStream<Uint8Array>({
-          async start(controller) {
-            controller.enqueue(encoder.encode(`${JSON.stringify({ context: {} })}\n`));
-            for (const chunk of framesToSend) {
-              await new Promise((resolve) => setTimeout(resolve, 60));
-              controller.enqueue(encoder.encode(`${JSON.stringify({ chunk })}\n`));
-            }
-            controller.close();
-            bodyClosed = true;
-          },
-        });
+        const framesToSend = [{ chunk: [1, 2] }, { chunk: [3, 4] }, { chunk: [5] }];
+        const requestBody = trickleNdjsonBody(framesToSend, () => (bodyClosed = true), [
+          { context: {} },
+        ]);
 
         const response = await fetch(`${url}/reduce/0`, {
           method: "POST",
@@ -146,18 +161,10 @@ describe("#45 toNodeHandler streams both directions (Done-when 5)", () => {
     async () => {
       await withServer(echoHandler, async (url) => {
         let bodyClosed = false;
-        const encoder = new TextEncoder();
-
-        const requestBody = new ReadableStream<Uint8Array>({
-          async start(controller) {
-            for (const item of [1, 2, 3]) {
-              await new Promise((resolve) => setTimeout(resolve, 60));
-              controller.enqueue(encoder.encode(`${JSON.stringify({ item })}\n`));
-            }
-            controller.close();
-            bodyClosed = true;
-          },
-        });
+        const requestBody = trickleNdjsonBody(
+          [{ item: 1 }, { item: 2 }, { item: 3 }],
+          () => (bodyClosed = true),
+        );
 
         const response = await fetch(url, {
           method: "POST",
@@ -213,26 +220,23 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
   test(
     "HttpPipeline, the reduce stage itself dispatched over /reduce/<n>",
     async () => {
-      const requestPaths: string[] = [];
       // The worker must register the IDENTICAL stage sequence the orchestrator below dispatches
       // against, so the worker's own `.transform()` lands at the SAME index the orchestrator's
       // does (architecture.md: "index N means the same transform on both sides").
       const worker = new HttpPipeline<number>({ url: "" })
         .reduce((acc: number, x: number) => acc + x, 0)
         .transform((t) => t.map((n: number) => n * 10));
-      const trackingHandler = async (request: Request): Promise<Response> => {
-        requestPaths.push(new URL(request.url).pathname);
-        return worker.fetch(request);
-      };
-      await withServer(trackingHandler, async (url) => {
-        const data = await new HttpPipeline<number>({ url })
+      const { value: data, paths: requestPaths } = await withTrackedServer(
+        (request) => worker.fetch(request),
+        (url) =>
+          new HttpPipeline<number>({ url })
 
-          .reduce((acc: number, x: number) => acc + x, 0)
-          .transform((t) => t.map((n: number) => n * 10))([1, 2, 3, 4, 5])
-          .toArray();
-        expect(data).toEqual([150]);
-        expect(requestPaths.some((p) => p.includes("/reduce/"))).toBe(true);
-      });
+            .reduce((acc: number, x: number) => acc + x, 0)
+            .transform((t) => t.map((n: number) => n * 10))([1, 2, 3, 4, 5])
+            .toArray(),
+      );
+      expect(data).toEqual([150]);
+      expect(requestPaths.some((p) => p.includes("/reduce/"))).toBe(true);
     },
     HTTP_TIMEOUT,
   );
@@ -241,9 +245,9 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
   test(
     "ClusterPipeline, dispatched to a real worker process",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-reduce.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{ sum: number; dispatchedToWorker: boolean }>(fixture);
+      const result = await runFixtureJson<{ sum: number; dispatchedToWorker: boolean }>(
+        "__tests__/fixtures/cluster-reduce.ts",
+      );
       expect(result.sum * 10).toBe(150);
       expect(result.dispatchedToWorker).toBe(true);
     },
@@ -331,7 +335,6 @@ describe("#62 a dispatched reduce partitions - each partition's result flows thr
 
 describe("#62 an input chunk's emits stay together as one output chunk", () => {
   test("each output chunk holds exactly one input chunk's emits", async () => {
-    const observedChunks: number[][] = [];
     const partitioned = new ConcurrentPipeline<number>({ maxConcurrency: 2 })
 
       .buffer(2)
@@ -339,9 +342,7 @@ describe("#62 an input chunk's emits stay together as one output chunk", () => {
         emit(x * 10);
         return 0;
       }, 0);
-    for await (const chunk of partitioned([1, 2, 3, 4, 5]).chunks()) {
-      observedChunks.push([...chunk]);
-    }
+    const observedChunks = (await chunksOf(partitioned([1, 2, 3, 4, 5]))) as number[][];
     // buffer(2) over [1,2,3,4,5] -> input chunks [1,2],[3,4],[5]; each item emits its own value,
     // so one INPUT chunk's emits (folded together) must equal that chunk's own doubled-times-ten
     // sum - partition assignment is timing-dependent, but the per-input-chunk grouping is not.
@@ -428,14 +429,12 @@ describe("#62 the same chains behave identically over HttpPipeline and ClusterPi
   test(
     "ClusterPipeline - sum and count both flow through as N values; .local() still merges to one",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/cluster-partitioned-reduce.ts");
-      expectFixtureOk(fixture);
-      const result = lastJsonLine<{
+      const result = await runFixtureJson<{
         sumTotal: number;
         countTotal: number;
         merged: number[];
         countMerged: number[];
-      }>(fixture);
+      }>("__tests__/fixtures/cluster-partitioned-reduce.ts");
       expect(result.sumTotal).toBe(15);
       expect(result.countTotal).toBe(5);
       expect(result.merged).toEqual([15]);

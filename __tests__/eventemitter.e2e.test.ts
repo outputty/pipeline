@@ -17,7 +17,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { EventEmitterPipeline, type WorkEvent } from "../src";
-import { FIXTURE_TIMEOUT, runFixture, expectFixtureOk } from "./helpers/fixtures";
+import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -128,12 +128,11 @@ describe("#124 an async Worker that throws after its own await never hangs or le
   it(
     "rejects the chunk exactly as an explicit reject() would, and leaves no unhandled rejection",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/eventemitter-async-throw.ts");
-      expectFixtureOk(fixture);
-      const result = JSON.parse(fixture.stdout.trim()) as {
-        rejection: string | null;
-        unhandled: string[];
-      };
+      const result = await runFixtureJson<{ rejection: string | null; unhandled: string[] }>(
+        "__tests__/fixtures/eventemitter-async-throw.ts",
+        [],
+        true,
+      );
       expect(result.rejection).toBe("worker-threw-after-await-1,2,3");
       expect(result.unhandled).toEqual([]);
     },
@@ -259,15 +258,13 @@ describe("#124 review round 1/2 - a throwing lifecycle observer never absorbs or
   it(
     "F3 (:dispatched), F4 (:done) and F5 (:end/pipeline:end) each surface as their own separate failure, never the dispatch's own",
     async () => {
-      const fixture = await runFixture("__tests__/fixtures/eventemitter-throwing-observers.ts");
-      expectFixtureOk(fixture);
-      const result = JSON.parse(fixture.stdout.trim()) as {
+      const result = await runFixtureJson<{
         dispatched: { out: number[] | null; rejection: string | null };
         done: { out: number[] | null; rejection: string | null };
         ended: { rejection: string | null };
         unhandled: string[];
         uncaught: string[];
-      };
+      }>("__tests__/fixtures/eventemitter-throwing-observers.ts", [], true);
 
       // F3: a throwing :dispatched listener used to reject the whole dispatch as if it were a
       // Worker failure - .onError() silently absorbed it and `out` came back [].

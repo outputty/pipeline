@@ -8,57 +8,13 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { createHook } from "node:async_hooks";
 
 import { Pipeline } from "@src/pipeline";
 import { PipelineResult } from "@src/result";
 import { SimpleContextManager } from "@src/context/simple";
-import { runFixture, expectFixtureOk, lastJsonLine, FIXTURE_TIMEOUT } from "./helpers/fixtures";
-
-/** Every chunk a pipeline yields, for the cases that assert a chunk BOUNDARY rather than items. */
-async function chunksOf(result: { chunks(): AsyncIterable<unknown> }): Promise<unknown[]> {
-  const out: unknown[] = [];
-  for await (const chunk of result.chunks()) out.push(chunk);
-  return out;
-}
-
-/** Counts every `Promise` created while `fn` runs, via `node:async_hooks`'s `PROMISE` resource
- * type - the same instrument `sync-mode.e2e.test.ts` uses, and for the same reason: patching
- * `queueMicrotask`/`process.nextTick` reports `0` even for real async work, so it would pass
- * vacuously. */
-function countPromises(fn: () => unknown): number {
-  let created = 0;
-  const hook = createHook({
-    init(_id, type) {
-      if (type === "PROMISE") created++;
-    },
-  });
-  hook.enable();
-  try {
-    fn();
-  } finally {
-    hook.disable();
-  }
-  return created;
-}
-
-type Order = { id: number; total: number; region: string };
-
-const ordersA: Order[] = [
-  { id: 1, total: 50, region: "eu" },
-  { id: 2, total: 300, region: "us" },
-  { id: 3, total: 120, region: "eu" },
-  { id: 4, total: 900, region: "us" },
-];
-const ordersB: Order[] = [
-  { id: 9, total: 400, region: "eu" },
-  { id: 10, total: 20, region: "us" },
-];
-
-/** The canonical chain: no data, built once, reused by every test below. */
-const withVat = new Pipeline<Order>().transform((t) =>
-  t.map((o) => ({ ...o, total: Math.round(o.total * 1.2) })),
-);
+import { runFixtureJson, FIXTURE_TIMEOUT } from "./helpers/fixtures";
+import { chunksOf, countPromises } from "./helpers/sequences";
+import { type Order, ordersA, ordersB, withVat } from "./helpers/domain";
 
 async function* asStream<T>(items: readonly T[]): AsyncGenerator<T> {
   for (const item of items) yield item;
@@ -275,11 +231,12 @@ describe("L6 review findings, each reproduced before it was fixed", () => {
       //
       // The ban is a process-level flag, so this runs in a child process. It is the real assertion;
       // the in-process checks below only say what the reparenting buys.
-      const fixture = await runFixture("__tests__/fixtures/no-codegen.ts", [
-        "--disallow-code-generation-from-strings",
-      ]);
-      expectFixtureOk(fixture);
-      expect(lastJsonLine(fixture)).toEqual({
+      const result = await runFixtureJson(
+        "__tests__/fixtures/no-codegen.ts",
+        ["--disallow-code-generation-from-strings"],
+        true,
+      );
+      expect(result).toEqual({
         values: [2, 4, 6],
         isFunction: true,
         hasCall: true,
@@ -423,14 +380,12 @@ describe("L8 review findings, each reproduced before it was fixed", () => {
       .transform((t) => t.map(async (x) => x))
       .reduce((a: number, x: number) => a + x, 0);
 
-    const viaSync: number[][] = [];
-    for await (const chunk of folded([1, 2, 3, 4, 5]).chunks()) viaSync.push(chunk);
+    const viaSync = await chunksOf(folded([1, 2, 3, 4, 5]));
 
     async function* stream(): AsyncGenerator<number> {
       for (const x of [1, 2, 3, 4, 5]) yield x;
     }
-    const viaAsync: number[][] = [];
-    for await (const chunk of folded(stream()).chunks()) viaAsync.push(chunk);
+    const viaAsync = await chunksOf(folded(stream()));
 
     expect(viaSync).toEqual(viaAsync);
     expect(viaSync).toEqual([[15]]);

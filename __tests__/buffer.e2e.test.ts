@@ -8,6 +8,7 @@ import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Transformer } from "@src/transformer";
+import { closingSource, closingAsyncSource, chunksOf } from "./helpers/sequences";
 
 /** Records each chunk `.apply()` hands to a stage, before that stage's own transform runs -
  * a chunk-level probe, not a per-item one (`.tap(fn)` runs per item and can't see boundaries). */
@@ -89,21 +90,10 @@ describe("#90 review - .buffer() refuses an invalid size at the call, not at the
 
 describe("#39 two .buffer() calls back to back collapse to the last one (Done-when 3)", () => {
   it("matches .buffer(4) alone over [1..9]", async () => {
-    const chained: number[][] = [];
-    for await (const chunk of new Pipeline<number>()
-      .buffer(2)
-      .buffer(3)
-      .buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9])
-      .chunks()) {
-      chained.push(chunk);
-    }
-
-    const direct: number[][] = [];
-    for await (const chunk of new Pipeline<number>()
-      .buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9])
-      .chunks()) {
-      direct.push(chunk);
-    }
+    const chained = await chunksOf(
+      new Pipeline<number>().buffer(2).buffer(3).buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9]),
+    );
+    const direct = await chunksOf(new Pipeline<number>().buffer(4)([1, 2, 3, 4, 5, 6, 7, 8, 9]));
 
     expect(chained).toEqual([[1, 2, 3, 4], [5, 6, 7, 8], [9]]);
     expect(direct).toEqual(chained);
@@ -111,18 +101,6 @@ describe("#39 two .buffer() calls back to back collapse to the last one (Done-wh
 });
 
 describe("#90 review - an early exit closes the source on both engines", () => {
-  /** A generator that records when its own `finally` runs. 100 items, so a `.buffer(10)` chain
-   * stops well short of exhausting it. */
-  function counted(state: { closed: boolean }) {
-    return (function* () {
-      try {
-        for (let i = 0; i < 100; i++) yield i;
-      } finally {
-        state.closed = true;
-      }
-    })();
-  }
-
   it("closes a sync generator when .first(1) stops a chain that re-cuts after a stage", () => {
     // `recutSyncChunks` drives its source through a MANUAL iterator, so closing the recut
     // generator taught the source nothing. Measured before the fix: `closed` stayed `false` here
@@ -134,25 +112,18 @@ describe("#90 review - an early exit closes the source on both engines", () => {
       .transform((t) => t.map((x) => x * 2))
       .buffer(2);
 
-    expect(chain(counted(state)).first(1)).toEqual([0]);
+    expect(chain(closingSource(state)).first(1)).toEqual([0]);
     expect(state.closed).toBe(true);
   });
 
   it("closes an async generator on the same chain", async () => {
     const state = { closed: false };
-    const source = (async function* () {
-      try {
-        for (let i = 0; i < 100; i++) yield i;
-      } finally {
-        state.closed = true;
-      }
-    })();
     const chain = new Pipeline<number>()
       .buffer(10)
       .transform((t) => t.map((x) => x * 2))
       .buffer(2);
 
-    expect(await chain(source).first(1)).toEqual([0]);
+    expect(await chain(closingAsyncSource(state)).first(1)).toEqual([0]);
     expect(state.closed).toBe(true);
   });
 
@@ -169,18 +140,11 @@ describe("#90 review - an early exit closes the source on both engines", () => {
       }),
     );
 
-    await expect(boom(counted(syncState)).toArray()).rejects.toThrow("boom");
+    await expect(boom(closingSource(syncState)).toArray()).rejects.toThrow("boom");
     expect(syncState.closed).toBe(true);
 
     const asyncState = { closed: false };
-    const asyncSource = (async function* () {
-      try {
-        for (let i = 0; i < 100; i++) yield i;
-      } finally {
-        asyncState.closed = true;
-      }
-    })();
-    await expect(boom(asyncSource).toArray()).rejects.toThrow("boom");
+    await expect(boom(closingAsyncSource(asyncState)).toArray()).rejects.toThrow("boom");
     expect(asyncState.closed).toBe(true);
   });
 
@@ -198,7 +162,7 @@ describe("#90 review - an early exit closes the source on both engines", () => {
     );
 
     const seen: number[] = [];
-    for (const item of chain(counted(state))) {
+    for (const item of chain(closingSource(state))) {
       seen.push(item);
       if (seen.length === 3) break;
     }
@@ -218,7 +182,7 @@ describe("#90 review - an early exit closes the source on both engines", () => {
       .transform((t) => t.map(async (x) => x * 2))
       .buffer(2);
 
-    expect(await chain(counted(state)).first(1)).toEqual([0]);
+    expect(await chain(closingSource(state)).first(1)).toEqual([0]);
     expect(state.closed).toBe(true);
   });
 });
