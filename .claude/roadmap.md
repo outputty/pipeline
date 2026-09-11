@@ -125,8 +125,8 @@ The two older candidates, still not filed:
   made the four one-liner overrides cheap; and a test asserting an exact pull count depended on how
   many microtask ticks had run rather than on `capacity`, replaced with a poll-until-stable helper
   (`untilStable`, `__tests__/helpers/sequences.ts`). `.claude/architecture.md`'s own "Prefetching"
-  section has the full engine. PRs #148 (L1, pinned cases), #149 (L2, the engine + wiring), plus this
-  docs layer.
+  section has the full engine. PRs #148 (L1, pinned cases), #149 (L2, the engine + wiring), #151
+  (docs).
 - **A repo-wide reuse and simplification pass** (#133, `refactor`) - 15 named duplications, each
   unified in its own layer, no observable output change anywhere: the canonical
   `new Pipeline<number>().transform((t) => t.map((x) => x * 2).filter((x) => x > 4))` example
