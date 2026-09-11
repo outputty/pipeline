@@ -7,6 +7,20 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-11 `.tap()`'s async overload narrowed `Promise<unknown>` to `Promise<void>`, silently matching the wrong overload
+
+Building #117's anti-slop cleanup, the same `unknown` → `void` swap that is safe at a bare return
+position (`(item, ctx) => void`) was applied unchanged to the async overload's `Promise<...>`
+wrapper too. `void`'s own bivariant leniency does not extend through a concrete generic: `tsc
+--strict` refuses `Promise<string>` assigned to `Promise<void>` (TS2322) in isolation - but inside
+the real two-overload method, TypeScript doesn't error at all, it silently falls through to the
+sync `void` overload instead, so an async `.tap()` callback stopped widening the caller's Mode with
+no diagnostic anywhere. `/code-review medium` caught it before merge; 297 tests stayed green
+throughout, since the runtime output is identical either way. `tap<R>(fn: (item, ctx) =>
+Promise<R>)` restores correct overload selection, pinned by two new tests using an explicit
+intermediate type annotation (`Promise<number[]>`/`Transformer<..., "async">`) - a plain `expect()`
+cannot catch a wrong-overload static-type regression. `~/.claude/rules/typescript.md` gains a line.
+
 ## 2026-09-11 #88's Done-when file-scope restriction collided with a sibling ticket's own shipped README/changeset precedent
 
 Building #88's docs layer, Done-when 6 named `src/`, `__tests__/`, `.claude/` as the only files any
