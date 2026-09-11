@@ -37,6 +37,25 @@ export function countPromises(fn: () => unknown): number {
   return created;
 }
 
+/** Polls `read()` until two consecutive reads, one microtask-flush apart, agree - a case asserting
+ * on a value a chain of internal generators updates over several hops (`.queue()`'s own cumulative
+ * pull count, #123) needs this instead of a fixed number of flushes: the RIGHT number of hops is an
+ * implementation detail of how many generators sit between the source and the assertion, and a
+ * fixed count is exactly as fragile as the code it wraps - review-caught, #123 (a single
+ * `setImmediate` flush read `2` where the correct, fully-settled value was `4`).
+ *
+ * `await untilStable(() => counter)` → the counter's own final value, once it stops changing. */
+export async function untilStable(read: () => number): Promise<number> {
+  let previous = -1;
+  let current = read();
+  while (current !== previous) {
+    previous = current;
+    await new Promise((resolve) => setImmediate(resolve));
+    current = read();
+  }
+  return current;
+}
+
 /** Every chunk a pipeline result yields, for a case that asserts a chunk BOUNDARY rather than
  * items.
  *

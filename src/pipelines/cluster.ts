@@ -327,6 +327,13 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
     return super.local(build) as unknown as ClusterPipeline<U, In>;
   }
 
+  /** Re-declared ONLY to narrow `Pipeline.queue()`'s return type (#123,
+   * `~/.claude/rules/typescript.md`) - same reason as `.local()` above. `HttpPipeline.queue()`'s own
+   * logic runs unchanged via `super`. */
+  override queue(capacity: number): ClusterPipeline<T, In> {
+    return super.queue(capacity) as unknown as ClusterPipeline<T, In>;
+  }
+
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain
    * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`http.ts`) exists for, so several
    * `ClusterPipeline`s can share one worker server without colliding on stage 0. */
