@@ -16,8 +16,8 @@ restricts it.
 ├─────────────────────────────────────────────────────────┤
 │ @outputty/pipeline — Pipeline family · Transformer        │
 ├─────────────────────────────────────────────────────────┤
-│ node:cluster / node:http — ClusterPipeline/HttpPipeline   │
-│ only; a plain Pipeline/ConcurrentPipeline needs neither   │
+│ node:* — ClusterPipeline/HttpPipeline/EventEmitterPipeline │
+│ only; a plain Pipeline/ConcurrentPipeline needs neither    │
 ├─────────────────────────────────────────────────────────┤
 │ the caller's own AsyncIterable source                    │
 └─────────────────────────────────────────────────────────┘
@@ -29,7 +29,13 @@ client of its own beyond what dispatching a stage requires. A `Pipeline` accepts
 structurally (`outputty/laygo`'s `Source` accepts any `AsyncIterable`), with no import edge in either
 direction (#743, #745).
 
-The `node:cluster`/`node:http` boundary above is oxlint-enforced - pending #117.
+Both boundaries are oxlint-enforced, not merely descriptive (#117): `.oxlintrc.json`'s
+`import/no-nodejs-modules` override fails any `node:` import added to a `src/**/*.ts` file other than
+`pipelines/http.ts`, `pipelines/cluster.ts` and `pipelines/eventemitter.ts` (the third dispatching
+file, added when #124 shipped `EventEmitterPipeline` after this diagram's own node: exception list was
+first written); a `no-restricted-imports` override fails any `@outputty/laygo` or `@outputty/laygo/**`
+import from anywhere in `src/`. A reader no longer has to compare a new import against this diagram by
+hand - `bunx oxlint src/` does it on every run.
 
 ## Module layout
 

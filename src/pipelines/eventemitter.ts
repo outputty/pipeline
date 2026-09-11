@@ -16,12 +16,12 @@ import { Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
+  Drainable,
   IContextManager,
   InternalTransformer,
   PipelineMode,
   ReduceFunction,
 } from "@src/types";
-import type { MaybeAsyncChunks } from "@src/utils/chunk";
 import { EventEmitter } from "node:events";
 
 /**
@@ -30,13 +30,13 @@ import { EventEmitter } from "node:events";
  * test double).
  */
 export interface PipelineEmitter {
-  on(event: string, listener: (...args: any[]) => void): unknown;
-  off(event: string, listener: (...args: any[]) => void): unknown;
+  on(event: string, listener: (...args: any[]) => void): void;
+  off(event: string, listener: (...args: any[]) => void): void;
   listeners(event: string): Array<(...args: any[]) => void>;
   /** Done-when 3's own check (`emitter.listenerCount("stage:0")`) reads this directly - `node:events`
    * ships it natively, so declaring it here costs nothing for the shipped emitter. */
   listenerCount(event: string): number;
-  emit(event: string, ...args: unknown[]): unknown;
+  emit(event: string, ...args: unknown[]): void;
 }
 
 /** `options.emitter` is a trust-boundary value - a caller's own compatible emitter, not necessarily
@@ -243,6 +243,7 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           }
         };
         const respond = (value: U[]): void => settle({ ok: true, value });
+        // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a Worker may reject with anything, the same as a Promise; genuinely unknown, not a gap
         const doReject = (error: unknown): void => settle({ ok: false, error });
 
         const listeners = emitter.listeners(eventName);
@@ -255,7 +256,7 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
         const event: WorkEvent<T, U> = { chunk, ctx, respond, reject: doReject };
         for (const fn of listeners) {
           try {
-            Promise.resolve((fn as (event: WorkEvent<T, U>) => unknown)(event)).catch(doReject);
+            Promise.resolve((fn as (event: WorkEvent<T, U>) => void)(event)).catch(doReject);
           } catch (error) {
             // The Worker threw SYNCHRONOUSLY, before Promise.resolve ever wrapped it - caught here
             // so it settles like any other failure instead of aborting the loop and skipping every
@@ -273,12 +274,7 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * twice (Done-when 10), since each terminal calls `drainable()` fresh. `syncChunks` is always
    * `null` here - a dispatching class forces `"async"` Mode, so there is no sync stream to wrap.
    */
-  override drainable(input: PipelineSource<In>): {
-    syncChunks: MaybeAsyncChunks<T> | null;
-    items: () => AsyncIterable<T>;
-    chunks: () => AsyncIterable<T[]>;
-    context: IContextManager;
-  } {
+  override drainable(input: PipelineSource<In>): Drainable<T> {
     const base = super.drainable(input);
     const emitter = this.emitter;
     let fired = false;
@@ -302,6 +298,7 @@ export interface WorkEvent<In, Out> {
   chunk: In[];
   ctx: IContextManager;
   respond: (value: Out[]) => void;
+  // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a Worker may reject with anything, the same as a Promise; genuinely unknown, not a gap
   reject: (error: unknown) => void;
 }
 
@@ -330,7 +327,7 @@ async function* withEndSignal<V>(source: AsyncIterable<V>, onEnd: () => void): A
  * this class makes about listener isolation; an ASYNC listener throwing AFTER its own `await` leaks
  * as a real `unhandledRejection` instead, since `.emit()` never awaits a listener's return value.
  */
-function emitSafely(emitter: PipelineEmitter, event: string, payload?: unknown): void {
+function emitSafely<P>(emitter: PipelineEmitter, event: string, payload?: P): void {
   try {
     emitter.emit(event, payload);
   } catch (error) {

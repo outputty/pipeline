@@ -152,6 +152,7 @@ export const DROP: unique symbol = Symbol("DROP");
  * `(item, error, ctx) => (error.message.includes("Invalid") ? DROP : -1)` recovers a bad row to
  * `-1` and drops anything else that fails.
  */
+// oxlint-disable-next-line anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns -- one handler covers every element-wise link in a chain at a different item type each time (Transformer.pipe() carries it forward unaffected by Out -> U); narrowing would break that contract
 export type RowErrorHandler = (item: unknown, error: Error, ctx: IContextManager) => unknown;
 
 /**
@@ -245,11 +246,13 @@ export interface IContextManager {
   /**
    * Get a value by key. Returns undefined if not present.
    */
+  // oxlint-disable-next-line anti-slop/no-unknown-returns -- a generic bag by design, unknown until a caller parses it at its own boundary (see .oxlintrc.json)
   get(key: string): unknown;
 
   /**
    * Set a value by key.
    */
+  // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a generic bag by design, unknown until a caller parses it at its own boundary (see .oxlintrc.json)
   set(key: string, value: unknown): void;
 
   /**
@@ -260,6 +263,7 @@ export interface IContextManager {
   /**
    * Convert context to a plain object (snapshot).
    */
+  // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- a generic bag by design, unknown until a caller parses it at its own boundary (see .oxlintrc.json)
   toDict(): Record<string, unknown>;
 }
 

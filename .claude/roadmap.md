@@ -9,15 +9,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **The node: import boundary as an oxlint rule** (#117) - `architecture.md`'s own stack diagram draws
-  `node:cluster`/`node:http` as scoped to `ClusterPipeline`/`HttpPipeline` only, and nothing has ever
-  checked it - the same shape `outputty/laygo` already mechanizes as six `no-restricted-imports`
-  overrides (roadmap #58/#669). `import/no-nodejs-modules`, scoped via `excludeFiles` rather than a
-  hand-rolled `node:*` glob (a real spike showed the glob misses a subpath specifier,
-  `node:fs/promises`), closes the gap with zero violations on the current tree. First candidate of a
-  wider sweep for prose that is really a lint-mechanizable structural rule; the sweep found one more
-  (`never class Pipeline extends Function`) with no oxlint mechanism to enforce it, recorded as
-  considered rather than converted.
 - **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
   `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
   change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results
@@ -84,6 +75,42 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **The node:/laygo import boundaries, mechanized as oxlint rules** (#117, `feat`) -
+  `architecture.md`'s own stack diagram drew `node:cluster`/`node:http` as scoped to
+  `ClusterPipeline`/`HttpPipeline` only, and this package's own split from laygo (#743-745) drew "no
+  import edge in either direction" - nothing ever checked either claim, the same shape
+  `outputty/laygo` already mechanizes as six `no-restricted-imports` overrides. Two new
+  `.oxlintrc.json` overrides close both gaps: `import/no-nodejs-modules` scoped via `excludeFiles`
+  (a real spike showed a hand-rolled `node:*` glob misses a subpath specifier, `node:fs/promises`) -
+  and, caught live rather than assumed from the ticket's own text, `EventEmitterPipeline`'s
+  `node:events` import (#124, shipped after this ticket's file list was written) needed adding as a
+  THIRD exception, not two; `no-restricted-imports` banning `@outputty/laygo` and its subpaths, both
+  `paths` and `patterns` verified live for the identical subpath gap. First candidate of a wider
+  sweep for prose that is really a lint-mechanizable structural rule; the sweep found one more
+  (`never class Pipeline extends Function`) with no oxlint 1.81 mechanism to enforce it, recorded as
+  considered rather than converted.
+  Widened mid-build, on the user's own pick, into clearing the 36-warning `anti-slop` backlog
+  `.oxlintrc.json`'s own header comment had deferred: 13 real fixes (a discarded-value `unknown`
+  becomes `void`, or a real generic parameter - `PipelineEmitter`, `ndjsonFrame`, `emitSafely`,
+  `splitLines`/`drainable` widening; two `defer`/replay casts now read `item: any`, matching
+  `AnyPipeline<any>`'s own established convention rather than a placeholder `unknown`);
+  `.tap()`'s two sync overloads join those 13 as a `void` fix, and its two async overloads become
+  a generic `Promise<R>` (a `Promise<void>` attempt was caught by `/code-review`, below) - plus a
+  real runtime validator (`isReadyMessage`) replacing a blind IPC-message cast in
+  `cluster.ts`. 23 sites verified genuinely load-bearing FROM SOURCE, not their docstrings alone -
+  `Transformer.pipe()`'s own comment confirms `RowErrorHandler` carries forward across `.map()`/
+  `.filter()` calls with a DIFFERENT item type each time, so no type narrower than `unknown` is
+  sound; `IContextManager`'s own canonical example needs a manual `as number` cast to read a value
+  back, confirming its bag is genuinely heterogeneous - carry a disclosed `oxlint-disable-next-line`
+  reason at the site instead of a cosmetic `<T = unknown>` default that would satisfy the lint
+  rule's own AST check (it only refuses a non-generic alias) with zero real type-safety gain, a
+  candidate spiked and killed during the same build. The four promoted rules move from `warn` to
+  `error` in an override scoped to `src/**/*.ts` alone, not the top-level `rules` block - promoting
+  globally would have turned every pre-existing `__tests__/` warning into a gate-breaking error too,
+  caught by running the repo's own `pnpm lint` (not just the ticket's own `bunx oxlint src/`) before
+  trusting the scope. `bunx oxlint src/` prints nothing and exits 0. PR #154 (both layers, one PR
+  under the 200-line threshold - measured via `git diff --stat` before committing to a stack, not
+  guessed).
 - **`.buffer()` accepts a callback for custom buffering windows** (#88, `feat`) - `.buffer(size)`
   could only cut a chunk boundary by count, and the closest existing shape (`ChunkerFunction`) was
   dead code with no way to hand one to `.buffer()` at all. `.buffer(fn: BufferFunction<T>)` folds

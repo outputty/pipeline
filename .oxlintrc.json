@@ -24,13 +24,16 @@
     "anti-slop/no-reflect-get": "error",
     "anti-slop/no-shape-in-symbol-names": "error",
 
-    // WARN — real existing violations (count in the comment): `Context`'s dynamic key/value store
-    // (`SimpleContext`) is a generic bag by design, `unknown` until a caller parses it at its own
-    // boundary. A promotion backlog, not fixed here.
-    "anti-slop/no-known-value-widening": "warn", // 1
-    "anti-slop/no-unknown-parameters": "warn", // 2
-    "anti-slop/no-unknown-returns": "warn", // 3
-    "anti-slop/no-unsafe-dictionary-type": "warn", // 6
+    // WARN at this level (governs __tests__/ and everything outside src/) - a test may legitimately
+    // drive a looser shape than shipped code (oxlint-expert skill: never scope this kind of boundary
+    // to the test tree). Promoted to "error" for src/**/*.ts alone, in the override below (#117):
+    // every real src/ site is fixed or, where the type is genuinely load-bearing (Context's own
+    // generic bag, RowErrorHandler's one-handler-many-item-types contract, a JS catch/reject
+    // boundary), disclosed with an `oxlint-disable-next-line` reason at the site itself.
+    "anti-slop/no-known-value-widening": "warn",
+    "anti-slop/no-unknown-parameters": "warn",
+    "anti-slop/no-unknown-returns": "warn",
+    "anti-slop/no-unsafe-dictionary-type": "warn",
 
     // OFF — same fundamental conflict as laygo (CLAUDE.md): no safety-comment convention for the
     // occasional deliberate cast, and no runtime-typeof ban where a shape guard reads clearer than
@@ -40,6 +43,9 @@
     "anti-slop/no-runtime-typeof": "off"
     // DELIBERATELY NOT ENABLED: max-lines-per-function, complexity, max-params — same rejection as
     // laygo (CLAUDE.md Control-flow): unit size is an architectural question, not a numeric cap.
+    // CONSIDERED, NOT MECHANIZABLE (#117's own sweep): "never `class Pipeline extends Function`"
+    // (CLAUDE.md, architecture.md) — no-restricted-syntax does not exist in oxlint 1.81; no-extend-native
+    // targets prototype mutation, not an `extends` clause. Stays prose.
   },
   "overrides": [
     {
@@ -48,6 +54,52 @@
       "files": ["src/**/*.ts"],
       "rules": {
         "max-depth": ["error", { "max": 2 }]
+      }
+    },
+    {
+      // Promotes the four anti-slop rules above from warn to error, for src/**/*.ts only - the
+      // promotion backlog the top-level "warn" comment used to name is fixed (#117): every real
+      // site takes a named type or a generic parameter; every genuinely load-bearing `unknown`
+      // (Context's own bag, RowErrorHandler's one-handler-many-item-types contract, a JS
+      // catch/reject boundary) carries its own `oxlint-disable-next-line` reason at the site.
+      "files": ["src/**/*.ts"],
+      "rules": {
+        "anti-slop/no-known-value-widening": "error",
+        "anti-slop/no-unknown-parameters": "error",
+        "anti-slop/no-unknown-returns": "error",
+        "anti-slop/no-unsafe-dictionary-type": "error"
+      }
+    },
+    {
+      // Mechanizes architecture.md's stack-diagram claim (#117): a plain Pipeline/ConcurrentPipeline
+      // needs no node: builtin, only a DISPATCHING class does. excludeFiles over a single broad
+      // override, not two overrides fighting for the same files (oxlint-expert skill).
+      // eventemitter.ts is the third exception, not two (#117's own ticket text predates #124):
+      // EventEmitterPipeline is architecture.md's own "SIBLING of HttpPipeline" and genuinely needs
+      // node:events for its PipelineEmitter default - verified live, dropping it here flagged a real,
+      // already-shipped import as a violation.
+      "files": ["src/**/*.ts"],
+      "excludeFiles": [
+        "src/pipelines/http.ts",
+        "src/pipelines/cluster.ts",
+        "src/pipelines/eventemitter.ts"
+      ],
+      "rules": {
+        "import/no-nodejs-modules": ["error", { "allow": [] }]
+      }
+    },
+    {
+      // Mechanizes architecture.md's split-from-laygo claim (#743-745): this package reaches a
+      // laygo Model structurally (any AsyncIterable), "with no import edge in either direction" -
+      // nothing checked that until now. Both `paths` and `patterns` are needed: a bare `node:*`-style
+      // glob does not cross `/`, so a subpath import (`@outputty/laygo/sub`) needs its own pattern
+      // (verified live, same gap #117's own node: rule spike found).
+      "files": ["src/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          { "paths": ["@outputty/laygo"], "patterns": ["@outputty/laygo/**"] }
+        ]
       }
     }
   ],

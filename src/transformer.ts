@@ -115,6 +115,7 @@ function attemptRow<T, R>(
   attempt: (item: T) => R | Promise<R>,
   rowHandler: RowErrorHandler,
   ctx: IContextManager,
+  // oxlint-disable-next-line anti-slop/no-unknown-parameters -- recovered is RowErrorHandler's own unknown return value, by the same design (see types.ts)
   onRecovered: (recovered: unknown) => R,
 ): R | Promise<R> {
   // `onRecovered` is what keeps SUCCESS and RECOVERY on separate channels. Sniffing the value's own
@@ -475,8 +476,8 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    */
 
   // Overload signatures
-  tap(fn: (item: Out, ctx: IContextManager) => Promise<unknown>): Transformer<In, Out, "async">;
-  tap(fn: (item: Out, ctx: IContextManager) => unknown): Transformer<In, Out, M>;
+  tap<R>(fn: (item: Out, ctx: IContextManager) => Promise<R>): Transformer<In, Out, "async">;
+  tap(fn: (item: Out, ctx: IContextManager) => void): Transformer<In, Out, M>;
   tap(transformer: Transformer<Out, unknown, "async">): Transformer<In, Out, "async">;
   tap(transformer: Transformer<Out, unknown, "sync">): Transformer<In, Out, M>;
   tap(
@@ -498,7 +499,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
     const fn = arg;
     const call = isContextAware(fn)
       ? (x: Out, ctx: IContextManager) => fn(x, ctx)
-      : (x: Out, _ctx: IContextManager) => (fn as (item: Out) => unknown)(x);
+      : (x: Out, _ctx: IContextManager) => (fn as (item: Out) => void)(x);
     return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
         return chain(
