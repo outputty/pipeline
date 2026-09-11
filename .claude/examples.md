@@ -539,7 +539,7 @@ const widened = await new Pipeline()
 with the consumer's own processing instead of adding to it. Order is unchanged from the base
 pipeline - `.queue()` only changes WHEN a chunk is pulled, never what it contains.
 
-<!-- illustrative, pending #123 -->
+<!-- compiles -->
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
@@ -547,12 +547,8 @@ import { Pipeline } from "@outputty/pipeline";
 const data = await new Pipeline<number>()
   .buffer(2)
   .queue(3)
-  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
-  ([1, 2, 3, 4, 5]).toArray();
-```
-
-```json
-[6, 8, 10]
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))([1, 2, 3, 4, 5])
+  .toArray();
 ```
 
 ```json
