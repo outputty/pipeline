@@ -3,6 +3,14 @@
 Each line is one rule: the moment, then the action. Rules that hold in any repo live in
 `~/.claude/rules/`; this file is for what names this codebase's own seams and probes.
 
+## Reuse, before writing
+
+- Before writing a new import-boundary or structural prose rule, check whether an `.oxlintrc.json`
+  override already covers it or could. (2026-09-11)
+  - `.oxlintrc.json`'s own `overrides` array is a `files`/`excludeFiles`-scoped rule, checked on every
+    `bunx oxlint src/` run - a `CLAUDE.md`/`architecture.md` sentence describing the same boundary is
+    checked only when a reader happens to compare a new import against it by hand (#117).
+
 ## Prove it
 
 - Start feeding a streaming or duplex probe's input BEFORE awaiting the call that consumes it.

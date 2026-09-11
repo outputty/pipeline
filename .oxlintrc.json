@@ -40,6 +40,9 @@
     "anti-slop/no-runtime-typeof": "off"
     // DELIBERATELY NOT ENABLED: max-lines-per-function, complexity, max-params — same rejection as
     // laygo (CLAUDE.md Control-flow): unit size is an architectural question, not a numeric cap.
+    // CONSIDERED, NOT MECHANIZABLE (#117's own sweep): "never `class Pipeline extends Function`"
+    // (CLAUDE.md, architecture.md) — no-restricted-syntax does not exist in oxlint 1.81; no-extend-native
+    // targets prototype mutation, not an `extends` clause. Stays prose.
   },
   "overrides": [
     {
@@ -48,6 +51,38 @@
       "files": ["src/**/*.ts"],
       "rules": {
         "max-depth": ["error", { "max": 2 }]
+      }
+    },
+    {
+      // Mechanizes architecture.md's stack-diagram claim (#117): a plain Pipeline/ConcurrentPipeline
+      // needs no node: builtin, only a DISPATCHING class does. excludeFiles over a single broad
+      // override, not two overrides fighting for the same files (oxlint-expert skill).
+      // eventemitter.ts is the third exception, not two (#117's own ticket text predates #124):
+      // EventEmitterPipeline is architecture.md's own "SIBLING of HttpPipeline" and genuinely needs
+      // node:events for its PipelineEmitter default - verified live, dropping it here flagged a real,
+      // already-shipped import as a violation.
+      "files": ["src/**/*.ts"],
+      "excludeFiles": [
+        "src/pipelines/http.ts",
+        "src/pipelines/cluster.ts",
+        "src/pipelines/eventemitter.ts"
+      ],
+      "rules": {
+        "import/no-nodejs-modules": ["error", { "allow": [] }]
+      }
+    },
+    {
+      // Mechanizes architecture.md's split-from-laygo claim (#743-745): this package reaches a
+      // laygo Model structurally (any AsyncIterable), "with no import edge in either direction" -
+      // nothing checked that until now. Both `paths` and `patterns` are needed: a bare `node:*`-style
+      // glob does not cross `/`, so a subpath import (`@outputty/laygo/sub`) needs its own pattern
+      // (verified live, same gap #117's own node: rule spike found).
+      "files": ["src/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          { "paths": ["@outputty/laygo"], "patterns": ["@outputty/laygo/**"] }
+        ]
       }
     }
   ],
