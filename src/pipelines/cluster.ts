@@ -19,7 +19,7 @@ import { availableParallelism } from "node:os";
 import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler } from "@src/pipelines/http";
-import { EMPTY_CHUNKS, Pipeline } from "@src/pipeline";
+import { emptyChunks, Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
@@ -173,7 +173,7 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
 
   /** Wraps a chain built elsewhere, dispatching its stages to forked worker processes (#90). The
    * CALLER no longer writes a placeholder source, because a wrapped chain has none by construction.
-   * `EMPTY_CHUNKS` below is a different thing and still runs: it empties a WORKER process's own
+   * `emptyChunks()` below is a different thing and still runs: it empties a WORKER process's own
    * already-bound copy, so a worker never orchestrates a drain of its own. */
   constructor(pipeline: WrappablePipeline<T, In>, options?: ClusterPipelineOptions);
   constructor(options?: ClusterPipelineConstructorOptions);
@@ -220,7 +220,7 @@ export class ClusterPipeline<T, In = T> extends HttpPipeline<T, In> {
     // copy-on-write step automatically: a fan-out built over an empty source yields nothing, so
     // the NEXT instance's own `_chunks` (that fan-out's generator) is empty too.
     if (cluster.isWorker) {
-      this._chunks = EMPTY_CHUNKS as AsyncIterable<T[]>;
+      this._chunks = emptyChunks<T>();
       this._preBufferItems = null;
     }
   }
