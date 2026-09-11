@@ -44,8 +44,9 @@ src/
                           R>() + defer<U,R>() (each takes its own return type, letting a
                           DISPATCHING SUBCLASS's own two-argument call - `ConcurrentPipeline.apply()`
                           - skip the `as X` cast its base-class caller still needs, #133) + onError()
-                          (#78); isSync()/freshPreBuffer()/asyncIterableFrom()/isAsyncSource() are
-                          its own private helpers unifying 2-4 raw-spelled copies each within this
+                          (#78); isSync()/freshPreBuffer() are `protected` methods a dispatching
+                          subclass may override, `asyncIterableFrom()`/`isAsyncSource()` are unexported
+                          module-level functions - all 4 unify 2-4 raw-spelled copies each within this
                           file (#133); emptyChunks<U>() is EXPORTED (`cluster.ts` calls it too, to empty
                           a worker's own chunk stream)
   transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError()
@@ -352,12 +353,24 @@ default (`AnyPipeline<U>`) cannot narrow to `this` without a second argument onl
 actually supplies. `createPipeline()` itself is declared ONCE, on the base, and is never overridden
 again (#133, replacing a `createPipeline()` override at every level): it merges its `options`
 argument with `this.carriedKnobs()`, and each subclass overrides ONLY `carriedKnobs()` to add its
-own extra fields - `protected carriedKnobs(): object { return {}; }` on the base,
-`{ maxConcurrency: this.maxConcurrency, ordered: this.ordered }` on `ConcurrentPipeline` (its
-`super` is the base's empty object, so nothing to spread), each subclass BELOW that one adding its
-own field on top of `{ ...super.carriedKnobs(), ... }` (`HttpPipeline`'s `url`, `ClusterPipeline`'s
-`workers`/`pipelineIndex`, `EventEmitterPipeline`'s `emitter`/`registeredStages`) - `chunkSize`
-never appears here at all
+own extra fields:
+
+```ts
+// pipeline.ts (base) - no super to spread
+protected carriedKnobs(): object {
+  return {};
+}
+// concurrent.ts - FLAT, since super is the base's empty {}
+protected override carriedKnobs(): ConcurrentPipelineOptions {
+  return { maxConcurrency: this.maxConcurrency, ordered: this.ordered };
+}
+// http.ts / cluster.ts / eventemitter.ts - each spreads its super, adds its own fields
+protected override carriedKnobs(): HttpPipelineOptions {
+  return { ...super.carriedKnobs(), url: this._url };
+}
+```
+
+`chunkSize` never appears here at all
 (#39), since `.buffer()` is `Pipeline`'s own knob now, not a constructor option. The `options`
 argument `createPipeline()` merges `carriedKnobs()` on top of is `this.carriedOptions()` (pre-#133,
 unchanged) - the FULL `PipelineState`, declared apart from the exported `PipelineOptions` (#90): a
