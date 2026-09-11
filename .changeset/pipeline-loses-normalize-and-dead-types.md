@@ -11,9 +11,32 @@ exported only by inertia.
   pre-chunked arrays and flushed the loose ones into a chunk whenever a real array arrived or the
   stream ended - `Pipeline`'s own cutting (`.buffer(size)`) is what does this job now, on a stream
   that is never mixed to begin with.
-- Migration: delete the import. A caller who genuinely needs to normalize a loose/pre-chunked mix
-  of its own writes the same generator directly.
 - Every other public export is unaffected: `buildChunkGenerator` and `isContextAware` are untouched.
+
+Migration: delete the import. A caller who genuinely needs to normalize a loose/pre-chunked mix of
+its own writes the same generator directly - `normalize`'s own body took no dependency on anything
+else in this package.
+
+```diff
+-import { normalize } from "@outputty/pipeline";
+-const chunks = normalize(mixedSource);
++async function* normalize(stream) {
++  let buffer = [];
++  for await (const item of stream) {
++    if (!Array.isArray(item)) {
++      buffer.push(item);
++      continue;
++    }
++    if (buffer.length > 0) {
++      yield buffer;
++      buffer = [];
++    }
++    yield item;
++  }
++  if (buffer.length > 0) yield buffer;
++}
++const chunks = normalize(mixedSource);
+```
 
 Two more internal changes ship in this same release, neither requiring any action from a consumer:
 

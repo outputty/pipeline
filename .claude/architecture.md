@@ -53,7 +53,7 @@ src/
                           (the row handler, #78) and runnable() (the seam that carries it in); every
                           element-wise link (map/filter/flatMap/tap(fn)) shares one pipe() body (#133)
   branch.ts               BranchBuilder (.when/.otherwise), BranchOwner/BranchRunner/BranchArm,
-                          runBranch/joinArms(dispatch: ArmDispatch<T>, context)/demux - pushArm()
+                          runBranch/joinArms(grouped, dispatch: ArmDispatch<T>, context)/demux - pushArm()
                           and findCatchAll() are BranchBuilder's own private helpers, replacing a
                           repeated cast-and-push and a repeated find(isCatchAll) (#133)
   result.ts               PipelineResult - every terminal op; drainable() returns Drainable<T>
@@ -90,9 +90,9 @@ src/
                              (`__tests__/normalize-and-chunks.e2e.test.ts`) reaches it through this
                              internal `@src/utils/chunk` path, same as before
     cut.ts                  buildChunkGenerator/buildSyncChunkGenerator (cut) / flattenChunks
-                             (undo) / normalize / share / collectItems / collectAsyncItems;
-                             assertPositiveChunkSize() is the one `chunkSize < 1` guard 3 sites
-                             shared inline before (#133)
+                             (undo) / normalize / share / collectItems (`collectAsyncItems()` is
+                             `collectItems()`'s own unexported async half); assertPositiveChunkSize()
+                             is the one `chunkSize < 1` guard 3 sites shared inline before (#133)
     drain.ts                 MaybeAsyncChunks<T>, drainSync/drainSyncSettled/close/dispatchSync -
                              dispatchSync(syncChunks, onSync, onAsync) is the sync/async branch
                              result.ts's forEach/[Symbol.iterator] and cut.ts's collectItems all
