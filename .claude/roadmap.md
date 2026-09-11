@@ -91,10 +91,12 @@ The two older candidates, still not filed:
   considered rather than converted.
   Widened mid-build, on the user's own pick, into clearing the 36-warning `anti-slop` backlog
   `.oxlintrc.json`'s own header comment had deferred: 13 real fixes (a discarded-value `unknown`
-  becomes `void`, or a real generic parameter - `PipelineEmitter`, `.tap()`'s two overloads,
-  `ndjsonFrame`, `emitSafely`, `splitLines`/`drainable` widening; two `defer`/replay casts now read
-  `item: any`, matching `AnyPipeline<any>`'s own established convention rather than a placeholder
-  `unknown`) plus a real runtime validator (`isReadyMessage`) replacing a blind IPC-message cast in
+  becomes `void`, or a real generic parameter - `PipelineEmitter`, `ndjsonFrame`, `emitSafely`,
+  `splitLines`/`drainable` widening; two `defer`/replay casts now read `item: any`, matching
+  `AnyPipeline<any>`'s own established convention rather than a placeholder `unknown`);
+  `.tap()`'s two sync overloads join those 13 as a `void` fix, and its two async overloads become
+  a generic `Promise<R>` (a `Promise<void>` attempt was caught by `/code-review`, below) - plus a
+  real runtime validator (`isReadyMessage`) replacing a blind IPC-message cast in
   `cluster.ts`. 23 sites verified genuinely load-bearing FROM SOURCE, not their docstrings alone -
   `Transformer.pipe()`'s own comment confirms `RowErrorHandler` carries forward across `.map()`/
   `.filter()` calls with a DIFFERENT item type each time, so no type narrower than `unknown` is
