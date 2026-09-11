@@ -287,6 +287,13 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     return super.local(build) as unknown as HttpPipeline<U, In>;
   }
 
+  /** Re-declared ONLY to narrow `Pipeline.queue()`'s return type (#123,
+   * `~/.claude/rules/typescript.md`) - same reason as `.local()` above. `ConcurrentPipeline.queue()`'s
+   * own logic runs unchanged via `super`. */
+  override queue(capacity: number): HttpPipeline<T, In> {
+    return super.queue(capacity) as unknown as HttpPipeline<T, In>;
+  }
+
   /**
    * Carries `url` into the NEXT instance a copy-on-write call builds, on top of what
    * `ConcurrentPipeline.carriedKnobs()` already carries forward (#133) - same reason, one more

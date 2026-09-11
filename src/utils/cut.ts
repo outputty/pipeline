@@ -1,8 +1,12 @@
 /**
  * Cutting a stream into chunks, flattening chunks back to items, sharing one iterator across several
- * consumers, and collecting a drain to an array (#133) - split out of `chunk.ts` along with
- * `drain.ts` (draining a `MaybeAsyncChunks` stream) and `recut.ts` (re-cutting an already-staged
- * one), re-exported from `chunk.ts` so nothing importing that barrel has to change.
+ * consumers, collecting a drain to an array, and prefetching a shared iterator's own chunks ahead of
+ * the consumer (`prefetch`, #123) - split out of `chunk.ts` along with `drain.ts` (draining a
+ * `MaybeAsyncChunks` stream) and `recut.ts` (re-cutting an already-staged one), re-exported from
+ * `chunk.ts` so nothing importing that barrel has to change. `prefetch` lands here rather than a
+ * dedicated file: the ticket's own file scope named `share()` as its neighbor, and #133's own split
+ * groups real seams, not one file per function - a prefetching helper over a shared iterator is the
+ * same "sharing" family `share()` itself is.
  */
 
 import type { ChunkerFunction } from "@src/types";
@@ -19,6 +23,21 @@ import { drainSync, dispatchSync, type MaybeAsyncChunks } from "@src/utils/drain
 export function assertPositiveChunkSize(size: number): void {
   if (size < 1) {
     throw new Error("chunkSize must be at least 1");
+  }
+}
+
+/** The `capacity`/`size` guard a NUMERIC knob shares across two call sites - `.buffer(size)`'s own
+ * deferred-branch check and `.queue(capacity)` (#123) - labelled so each throws under its own name
+ * rather than a generic one. Kept apart from `assertPositiveChunkSize` above: that one's own message
+ * is asserted verbatim by `sync-mode.e2e.test.ts` and is never the wording a caller-facing knob like
+ * `.buffer(fn)`'s `size` overload or `.queue()` owes its user - see `.buffer()`'s own deferred check
+ * for the two-site duplication this replaces.
+ *
+ * `assertWholeNumberAtLeastOne("queue capacity", 0)` throws `Error("queue capacity must be a whole
+ * number of at least 1")`; `assertWholeNumberAtLeastOne("queue capacity", 3)` returns. */
+export function assertWholeNumberAtLeastOne(label: string, value: number): void {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${label} must be a whole number of at least 1`);
   }
 }
 
@@ -175,6 +194,72 @@ export function share<T>(iterator: AsyncIterator<T>): AsyncIterable<T> {
       return { next: () => iterator.next() };
     },
   };
+}
+
+/**
+ * Prefetches up to `capacity` chunks ahead of the consumer (#123) - an already-cut chunk stream in,
+ * the same stream out, only WHEN each chunk is fetched changes. Written as a plain `async function*`
+ * deliberately, mirroring `ConcurrentPipeline`'s own `fanOutOrdered` (`src/pipelines/concurrent.ts`)
+ * rather than a hand-rolled `AsyncIterable` object: a generator's body does not run at all until its
+ * OWN first `.next()` call, which is what makes "the pump starts on the first consumer pull, not at
+ * construction" free rather than a flag this function has to track itself. The same guarantee makes
+ * concurrent callers safe with NO manual locking - the language serializes concurrent `.next()` calls
+ * on one generator instance into one resumption at a time, so `share()`-based fan-out
+ * (`ConcurrentPipeline.reduce()`'s own partitioning) can wrap this generator's iterator exactly the
+ * way it wraps `_chunks`' own, with the identical no-dealer fairness `share()` already documents.
+ *
+ * `pending` holds exactly `capacity` `upstream.next()` calls at every steady-state point: the first
+ * `capacity` are issued before the first chunk is ever yielded, and each `.shift()` is followed by
+ * one more `upstream.next()` call, keeping the window full until `upstream` reports done. Every
+ * pushed promise gets a throwaway `.catch(() => {})` the instant it is created (the ORIGINAL
+ * reference is what `pending` holds and what a later `await` re-throws for real) - `fanOutOrdered`'s
+ * own comment explains why: without it, a chunk queued `capacity` deep but never reached because an
+ * EARLIER one threw first is an unhandled rejection, not a caught one.
+ *
+ * No `Promise.race` anywhere: a single async generator source serializes its own internal work
+ * regardless of how many `.next()` calls are already in flight, so racing them buys no overlap -
+ * proven during #123's own planning. The overlap this function buys comes from PRODUCTION and
+ * CONSUMPTION running concurrently (the source keeps working while the consumer processes an
+ * earlier chunk), never from concurrent production itself.
+ *
+ * @example
+ * `prefetch(upstream, 3)` over a 100ms/item source feeding a 30ms/item consumer, 5 items: the fully
+ * serial baseline (no queue) runs ~671ms; queued, ~539ms - overlap, same 5 outputs, same order.
+ */
+export async function* prefetch<T>(
+  upstream: AsyncIterable<T[]>,
+  capacity: number,
+): AsyncGenerator<T[]> {
+  const iterator = upstream[Symbol.asyncIterator]();
+  const pending: Promise<IteratorResult<T[]>>[] = [];
+
+  const pull = (): void => {
+    const next = iterator.next();
+    next.catch(() => {});
+    pending.push(next);
+  };
+
+  try {
+    for (let i = 0; i < capacity; i++) pull();
+    yield* drainPrefetched(pending, pull);
+  } finally {
+    await iterator.return?.();
+  }
+}
+
+/** `prefetch()`'s own steady-state loop, its own function so the `try/finally` around it (which
+ * must wrap the WHOLE pump, not just this loop, so an early `.return()` during the initial fill
+ * still closes `iterator`) costs one nesting level, not two (this repo's own `max-depth: 2`). */
+async function* drainPrefetched<T>(
+  pending: Promise<IteratorResult<T[]>>[],
+  pull: () => void,
+): AsyncGenerator<T[]> {
+  for (;;) {
+    const { done, value } = await pending.shift()!;
+    if (done) return;
+    pull();
+    yield value;
+  }
 }
 
 /**
