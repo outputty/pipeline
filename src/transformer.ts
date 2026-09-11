@@ -31,14 +31,6 @@ import { isContextAware, dropOrRethrow, chain, mapSettle, isThenable } from "./u
 import { Reducer, foldChunk } from "./utils/reduce";
 
 /**
- * Construction-time knobs shared by every `Transformer<In, Out>` constructor overload below —
- * named once rather than repeated per overload.
- */
-type TransformerConstructorOptions<In, Out> = TransformerOptions<In, Out> & {
-  rowHandler?: RowErrorHandler;
-};
-
-/**
  * The one chunk-draining order a standalone `Transformer.process()` runs, one chunk at a time, in
  * order (#17: replaces the deleted `sequential` execution strategy, which had the identical body -
  * a `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` is the replacement for concurrency,
@@ -201,9 +193,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    * copy-on-write rebuild site below (`.pipe()`, `.onError()`) already carries a real `transform`
    * forward, so all of them land here.
    */
-  constructor(
-    options: TransformerConstructorOptions<In, Out> & { transform: InternalTransformer<In, Out> },
-  );
+  constructor(options: TransformerOptions<In, Out> & { transform: InternalTransformer<In, Out> });
   /**
    * Overload 2 — no `transform` given. Only sound when `In` is assignable to `Out` (the identity
    * default below is a real conversion, not a lie): `new Transformer<number, { id: number }>()`
@@ -214,8 +204,8 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    * resolve it too and must route through overload 1 with a real `transform` instead, even where
    * `In`/`Out` happen to be the same type parameter (`T extends T` is never specially recognized).
    */
-  constructor(...args: In extends Out ? [options?: TransformerConstructorOptions<In, Out>] : never);
-  constructor(options?: TransformerConstructorOptions<In, Out>) {
+  constructor(...args: In extends Out ? [options?: TransformerOptions<In, Out>] : never);
+  constructor(options?: TransformerOptions<In, Out>) {
     // Reachable only via overload 2's `In extends Out` branch — a real conversion there, not a lie.
     this.transform = options?.transform ?? ((chunk, _ctx) => chunk as unknown as Out[]);
     this.rowHandler = options?.rowHandler;

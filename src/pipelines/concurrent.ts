@@ -17,6 +17,7 @@ import type {
   ReduceFunction,
   SourcePolicy,
   PipelineMode,
+  ChunkTransform,
 } from "@src/types";
 import {
   Pipeline,
@@ -24,7 +25,6 @@ import {
   type PipelineSource,
   type WrappablePipeline,
 } from "@src/pipeline";
-import type { ChunkTransform } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
 import { share } from "@src/utils/chunk";

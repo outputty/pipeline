@@ -23,8 +23,9 @@ export { DEFAULT_CHUNK_SIZE, DROP } from "./types";
 // Context
 export { SimpleContextManager } from "./context/simple";
 
-// Utils
-export { buildChunkGenerator, normalize, isContextAware } from "./utils";
+// Utils - `normalize` is not exported here (#133, BREAKING): zero production callers post-#39,
+// still defined internally in `./utils/chunk` for the one module that still uses it.
+export { buildChunkGenerator, isContextAware } from "./utils";
 
 // Transformer
 export { Transformer } from "./transformer";

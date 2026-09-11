@@ -21,7 +21,7 @@
  * ```
  */
 
-import type { IContextManager } from "./types";
+import type { IContextManager } from "@src/types";
 
 /**
  * Simple in-memory context manager for sharing state across pipeline operations.
