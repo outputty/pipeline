@@ -1,28 +1,14 @@
-/**
- * What calling a `Pipeline` produces (#90): one call's output, over one input.
- *
- * A `Pipeline` holds its input TYPE and no data, so it carries no terminal ops - it cannot be
- * drained without being given something to drain. Calling it pairs the chain with an input and
- * hands back this, which is where `toArray`/`first`/`consume`/`forEach` and both iteration
- * protocols live. The split is what keeps a chain reusable: `score(a)` and `score(b)` are two
- * results over one chain, not two chains.
- *
- * A result is not chainable. `score(rows).transform(...)` is `TS2339` - a chain is composed before
- * the data arrives, never after.
- */
 
 import type { Drainable, PipelineMode } from "./types";
 import type { Pipeline, PipelineSource } from "./pipeline";
 import type { MaybeAsyncChunks } from "./utils/chunk";
 import { isThenable } from "./utils/helpers";
 import { collectItems, drainSyncSettled } from "./utils/chunk";
-// Straight from `drain.ts`, not the `chunk.ts` barrel (#133 review, same reason `recut.ts` reaches
-// `cut.ts`/`drain.ts` directly): `dispatchSync` is new, with no pre-existing public contract at the
-// barrel path to preserve, so it stays off that barrel's own re-export list.
 import { dispatchSync } from "./utils/drain";
 
-/** The pipeline shape a result drains, with the Mode and policy erased - a result is handed its
- * pipeline by `Pipeline`'s own call signature, which has already fixed both. */
+/** The pipeline shape a `PipelineResult` drains, with the Mode and dispatch policy erased to a
+ * plain `"sync" | "async"` union: a result is handed its pipeline by `Pipeline`'s own call
+ * signature, which has already fixed both, so nothing downstream needs to track which one it got. */
 type BoundPipeline<T> = Pipeline<T, "sync" | "async", unknown>;
 
 /**
@@ -39,25 +25,22 @@ type BoundPipeline<T> = Pipeline<T, "sync" | "async", unknown>;
  * `const r = score([1, 2, 3]); r.first(1)` → `[2]`, then `r.toArray()` → `[2, 4, 6]`.
  */
 export class PipelineResult<T, M extends PipelineMode> {
-  /** The chain, still source-less - re-bound to `_input` once per terminal. */
   private readonly _pipeline: BoundPipeline<unknown>;
-  /** The input this result was called with, kept rather than drained, so a terminal can re-run. */
   private readonly _input: PipelineSource<unknown>;
 
+  /** Pairs a chain with the one input it will run over for this call. */
   constructor(pipeline: BoundPipeline<unknown>, input: PipelineSource<unknown>) {
     this._pipeline = pipeline;
     this._input = input;
   }
 
-  /** Binds the input to the chain and returns the views a terminal drains through. Runs ONCE per
-   * terminal call - which is what makes every terminal re-drain, and equally what stops one from
-   * re-draining twice: each terminal destructures both halves here and threads `items` into its own
-   * async arm. Calling it again there ran a user's `.local(build)` callback twice per call.
+  /**
+   * Binds this result's input to its pipeline and returns the drain view a terminal reads from.
+   * Called exactly once per terminal call, so each terminal re-drains independently without
+   * running a user's `.local(build)` callback twice for the same call.
    *
-   * Typed `Drainable<T>` (#133) - the SAME shape `Pipeline.drainable()` itself returns, so this
-   * wrapper needs only the cast from `Drainable<unknown>` (this result's own `_pipeline` is bound
-   * to `T = unknown`) to `Drainable<T>`, never a second, independent spelling of the four fields.
-   * `context` goes unread here - only `branch.ts`'s own `runBranch` needs it. */
+   * The returned `context` field goes unread here; only `branch.ts`'s own `runBranch` needs it.
+   */
   private drainable(): Drainable<T> {
     return this._pipeline.drainable(this._input) as Drainable<T>;
   }
@@ -66,19 +49,15 @@ export class PipelineResult<T, M extends PipelineMode> {
    * Iterate the CHUNKS this run produces, rather than its items - the boundary `.buffer(size)`
    * declared, as the chain actually cut it.
    *
-   * `Pipeline` used to carry this as its own `[Symbol.asyncIterator]`. With no input on a chain
-   * there is nothing to iterate, so it moved here with the rest of the drains, and the item-wise
-   * `for await` above stays the default: a chunk view is the deliberate ask, never what a plain
-   * loop hands you by accident.
+   * A chunk view is the deliberate ask, never what a plain `for await` hands you by accident; the
+   * item-wise loop (`[Symbol.asyncIterator]`, below) stays the default.
    *
    * @example
-   * `for await (const chunk of pipeline.buffer(2).chunks([1, 2, 3]))` yields `[1, 2]`, then `[3]`.
+   * `for await (const chunk of pipeline.buffer(2)([1, 2, 3]).chunks())` yields `[1, 2]`, then `[3]`.
    */
   async *chunks(): AsyncGenerator<T[]> {
     // Empty chunks are dropped, so the two engines agree on what a consumer sees. A sync fold
-    // cannot guard its own pending yields - emptiness is not knowable before a chunk settles -
-    // so `.buffer(2).transform(t => t.map(async x => x)).reduce(sum, 0)` over `[1..5]` produced
-    // `[[],[],[],[15]]` on a sync source against `[[15]]` on an async one.
+    // cannot guard its own pending yields, since emptiness is not knowable before a chunk settles.
     for await (const chunk of this.drainable().chunks()) {
       if (chunk.length > 0) yield chunk;
     }
@@ -107,9 +86,9 @@ export class PipelineResult<T, M extends PipelineMode> {
     return this.collect(n);
   }
 
-  /** Collects up to `limit` items, `undefined` for the whole stream (#90) - `first` IS `toArray`
-   * with an early exit, so the two engines' collect decision is made once here rather than twice
-   * per method. Calls `drainable()` exactly once, like every other terminal. */
+  /** Collects up to `limit` items, `undefined` for the whole stream - `first` IS `toArray` with an
+   * early exit, so the two engines' collect decision is made once here rather than twice per
+   * method. Calls `drainable()` exactly once, like every other terminal. */
   private collect(limit: number | undefined): M extends "sync" ? T[] : Promise<T[]> {
     const { syncChunks, items } = this.drainable();
     return collectItems(syncChunks, items, limit) as M extends "sync" ? T[] : Promise<T[]>;
@@ -185,9 +164,9 @@ export class PipelineResult<T, M extends PipelineMode> {
    * Iterate the ITEMS asynchronously. Present on every result, sync ones included, so one loop
    * shape reads any chain.
    *
-   * ⚠ This yields items where `Pipeline`'s own `[Symbol.asyncIterator]` yields CHUNKS. The
-   * divergence is deliberate: on a result, `[...r]` yields items and `forEach` receives items, so a
-   * `for await` handing back an array would be the one loop out of three that reads differently.
+   * ⚠ This yields items where this SAME result's own `.chunks()` yields CHUNKS. The divergence is
+   * deliberate: `[...r]` yields items and `forEach` receives items, so a `for await` handing back
+   * an array would be the one loop out of three that reads differently.
    *
    * @example
    * `for await (const x of score([1, 2, 3]))` yields `2`, `4`, `6`.
@@ -198,13 +177,11 @@ export class PipelineResult<T, M extends PipelineMode> {
 }
 
 /**
- * A `"sync"` result's items, yielded lazily (#90) - what `[Symbol.iterator]` hands back.
+ * A `"sync"` result's items, yielded lazily - what `[Symbol.iterator]` hands back.
  *
- * Lazy, not `toArray()[Symbol.iterator]()`: a `for…of` with a `break` used to run the whole chain
- * first and leave the source open, where `.first(n)` over the same chain stopped early and closed
- * it - so one object's two iteration protocols disagreed, the async one having been lazy all along.
- * A generator's own `return()` runs its `finally`, which closes the chunk iterator exactly as an
- * early `.first(n)` does.
+ * Lazy, not `toArray()[Symbol.iterator]()`: a generator's own `return()` runs its `finally`, which
+ * closes the chunk iterator exactly as an early `.first(n)` does, so both of a result's iteration
+ * protocols agree on when the source closes.
  *
  * A pending chunk throws rather than blocking: the type says `"sync"`, so reaching one means an
  * `any` boundary let an async callback through, and there is nothing to hand back item by item.
