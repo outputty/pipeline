@@ -144,16 +144,23 @@ The two older candidates, still not filed:
   `pushArm()`/`findCatchAll()`, replacing a repeated cast-and-push and a repeated
   `find(isCatchAll)`. `context/types.ts` (a dead re-export nothing outside `context/simple.ts`'s own
   relative import used) is deleted whole. The test suite gets the same treatment:
-  `__tests__/helpers/` gains `countPromises`/`Order`+`ordersA`+`ordersB`+`withVat`/`parseStrict`/
-  `chunksOf`/`closingSource`+`closingAsyncSource`/`runFixtureJson`/`withTrackedServer`, each
-  replacing 3-5 copies; the 4 hand-rolled `IContextManager` test doubles now extend
+  `__tests__/helpers/` gains `countPromises`/`Order`+`ordersA`+`ordersB`+`orders`+`withVat`/
+  `parseStrict`/`chunksOf`/`closingSource`+`closingAsyncSource`/`runFixtureJson`/`withTrackedServer`,
+  each replacing 3-5 copies; the 4 hand-rolled `IContextManager` test doubles now extend
   `SimpleContextManager`, fixing a pre-#113 `value !== undefined` bug all 4 of them still carried.
-  Every layer's diff went through `/code-review medium` at least once, several through 2-3 rounds
-  until zero findings remained - one round caught a real bug the tooling's own mechanical rename
-  introduced (a test string literal silently corrupted from `"big orders"` to `"big ordersA"`),
-  which is itself the case for running the review loop to convergence rather than once. PRs #135
-  (types), #136 (pipeline.ts), #138 (transformer/reduce/helpers), #139 (dispatching classes), #140
-  (chunk.ts split), #141 (branch.ts + result.ts), #142 (test helpers), #143 (docs).
+  Every layer's diff went through `/code-review medium` at least once, several through 2-4 rounds
+  until zero findings remained. Two findings were fixed and then found to be wrong fixes on a later
+  advisor pass: a mechanical `orders`->`ordersA` rename corrupted the unrelated string literal
+  `"big orders"` into `"big ordersA"` (caught by review, fixed); dropping the `orders` alias itself
+  should have been REJECTED - #133's own Interface names `orders`, not `ordersA`, for
+  `branch.e2e.test.ts`'s own shared declaration - and 3 shared-helper conversions changed a
+  caller's own `expect` value, which the ticket's own "every caller's own expect unchanged" line
+  forbids. All 3 were restored byte-for-byte against the pre-#133 original, and the closing-
+  generator pair honestly covers 3 of the ticket's own named 5 sites, with the other 2 documented as
+  not fitting the pair's contract without changing what they assert - the same shape as
+  `cluster-basic.ts`'s own carve-out from `runFixtureJson`. PRs #135 (types), #136 (pipeline.ts),
+  #138 (transformer/reduce/helpers), #139 (dispatching classes), #140 (chunk.ts split), #141
+  (branch.ts + result.ts), #142 (test helpers), #143 (docs).
 - **`EventEmitterPipeline`, a fourth dispatch mode** (#124, `feat`) - no mode lets another module
   attach a worker to a named stage after the chain already exists, or observe a stage's chunks
   without composing an observer into the chain. `.transform()`'s own composed function
