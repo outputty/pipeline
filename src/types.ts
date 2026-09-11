@@ -209,6 +209,27 @@ export type InternalTransformer<In, Out> = (
 export type ChunkerFunction<T> = (data: AsyncIterable<T>) => AsyncGenerator<T[]>;
 
 /**
+ * `.buffer(fn)`'s own callback (#88) - decides the chunk boundary per item, in place of
+ * `ChunkerFunction`'s whole-stream cut. `item` is folded into a `T[]` pending array the framework
+ * owns and never hands to `fn`; `emit()` takes no value because there is nothing to pass - it flushes
+ * whatever is currently pending and resets it to `[]`. Returning a value appends it to the
+ * (possibly just-reset) pending array; returning `DROP` skips the item entirely, the same sentinel
+ * `RowErrorHandler` already uses to mean "no row here." `.buffer(size)` is this same mechanism
+ * configured with an identity `fn` and a framework-side auto-flush at `pending.length >= size` - see
+ * `src/utils/reduce.ts`'s `sizeReduceFunction`/`bufferReduceFunction`, the two adapters onto the
+ * `Reducer<T[], T>` class `Pipeline.reduce()` already uses.
+ *
+ * `(item, ctx, emit) => (item.ts - windowStart >= FIVE_MINUTES ? (emit(), windowStart = item.ts, item)
+ * : item)` cuts a chunk boundary every time an item's own timestamp crosses a five-minute window,
+ * the real chunk boundary `.tap()` observes in `product.md`'s own example.
+ */
+export type BufferFunction<T> = (
+  item: T,
+  ctx: IContextManager,
+  emit: () => void,
+) => T | typeof DROP | Promise<T | typeof DROP>;
+
+/**
  * Context manager interface for sharing state across pipeline operations.
  *
  * Python equivalent:

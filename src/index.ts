@@ -11,7 +11,7 @@ export type {
   PipelineFunction,
   ReduceFunction,
   InternalTransformer,
-  ChunkerFunction,
+  BufferFunction,
   IContextManager,
   TransformerOptions,
   RowErrorHandler,

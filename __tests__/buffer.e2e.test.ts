@@ -8,6 +8,7 @@ import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Transformer } from "@src/transformer";
+import type { IContextManager } from "@src/types";
 import { DROP } from "@src/types";
 import { closingSource, closingAsyncSource, chunksOf } from "./helpers/sequences";
 
@@ -195,62 +196,57 @@ describe("#90 review - an early exit closes the source on both engines", () => {
 // same way on .toArray(), on async iteration and on a .local() stage.
 
 // #88 - `.buffer()` accepts a `BufferFunction<T>` in place of a size, deciding the chunk boundary
-// per item instead of by count. Pinned here as expected-fail: neither `.buffer(fn)` nor the
-// `BufferFunction<T>` type exists on `main` yet, so every callback below is typed inline (never
-// importing the not-yet-real `BufferFunction`) and every `.buffer(fn)` call carries
-// `@ts-expect-error` for the missing overload - flipped live, `BufferFunction`-typed and
-// `@ts-expect-error`-free, in L2. Done-when 5 (`ChunkerFunction` gone from the public export
-// surface) and 6 (no file outside src/, __tests__/, .claude/ changed) are structural checks, run via
-// `rg`/`git diff` rather than a runtime case here.
+// per item instead of by count - `sizeReduceFunction`/`bufferReduceFunction` fold both forms
+// through the same `Reducer<T[], T>` engine (`src/utils/reduce.ts`). Done-when 5 (`ChunkerFunction`
+// gone from the public export surface) and 6 (no file outside src/, __tests__/, .claude/ changed)
+// are structural checks, run via `rg`/`git diff` rather than a runtime case here.
 
 describe("#88 buffer(fn) cuts a custom chunk boundary (Done-when 1)", () => {
-  it.fails(
-    "groups events into five-minute windows by their own timestamp, the exact boundary a tap sees",
-    async () => {
-      // The ticket's own literal expression, `t.tap(createTransformer<Event[]>().tap((chunk) =>
-      // seen.push(chunk)))`, does not typecheck against `Transformer.tap`'s real overloads - the
-      // `transformer` form takes `Transformer<Out, unknown>` (`Out` = the OUTER transformer's per-
-      // ITEM type, `Event` here) and runs it over the whole chunk AT ONCE, never wrapping the chunk
-      // as one opaque item the way `createTransformer<Event[]>()` would need. `boundaryProbe` (top
-      // of this file) is this file's own proven idiom for "push the exact chunk array to `seen`" -
-      // ticket #39's own Done-when 1 above uses it for the identical assertion shape.
-      type Event = { id: number; ts: number };
-      const events: Event[] = [
-        { id: 1, ts: 0 },
-        { id: 2, ts: 60_000 },
-        { id: 3, ts: 240_000 },
-        { id: 4, ts: 300_000 },
-        { id: 5, ts: 301_000 },
-      ];
+  it("groups events into five-minute windows by their own timestamp, the exact boundary a tap sees", async () => {
+    // The ticket's own literal expression, `t.tap(createTransformer<Event[]>().tap((chunk) =>
+    // seen.push(chunk)))`, does not typecheck against `Transformer.tap`'s real overloads - the
+    // `transformer` form takes `Transformer<Out, unknown>` (`Out` = the OUTER transformer's per-
+    // ITEM type, `Event` here) and runs it over the whole chunk AT ONCE, never wrapping the chunk
+    // as one opaque item the way `createTransformer<Event[]>()` would need. `boundaryProbe` (top of
+    // this file) is this file's own proven idiom for "push the exact chunk array to `seen`" -
+    // ticket #39's own Done-when 1 above uses it for the identical assertion shape.
+    type Event = { id: number; ts: number };
+    const events: Event[] = [
+      { id: 1, ts: 0 },
+      { id: 2, ts: 60_000 },
+      { id: 3, ts: 240_000 },
+      { id: 4, ts: 300_000 },
+      { id: 5, ts: 301_000 },
+    ];
 
-      let windowStart = 0;
-      const fiveMinuteWindow = (item: Event, _ctx: unknown, emit: () => void): Event => {
-        if (item.ts - windowStart >= 300_000) {
-          emit();
-          windowStart = item.ts;
-        }
-        return item;
-      };
+    let windowStart = 0;
+    // Typed by its own params/return, never `BufferFunction<Event>` - that union type (covering a
+    // Promise-returning `fn` too) matches neither of `.buffer()`'s two narrower overloads (#88,
+    // code-review: they split on Promise so an async `fn` widens the chain's own Mode).
+    const fiveMinuteWindow = (item: Event, _ctx: IContextManager, emit: () => void): Event => {
+      if (item.ts - windowStart >= 300_000) {
+        emit();
+        windowStart = item.ts;
+      }
+      return item;
+    };
 
-      const seen: Event[][] = [];
-      const out = await new Pipeline<Event>()
-        // @ts-expect-error - .buffer(fn) doesn't exist on main yet (#88, flips live in L2)
-        .buffer(fiveMinuteWindow)
-        .apply(boundaryProbe(seen))(events)
-        .toArray();
+    const seen: Event[][] = [];
+    const out = await new Pipeline<Event>()
 
-      expect(out).toEqual(events);
-      expect(seen).toEqual([
-        [events[0], events[1], events[2]],
-        [events[3], events[4]],
-      ]);
-    },
-  );
+      .buffer(fiveMinuteWindow)
+      .apply(boundaryProbe(seen))(events)
+      .toArray();
+
+    expect(out).toEqual(events);
+    expect(seen).toEqual([
+      [events[0], events[1], events[2]],
+      [events[3], events[4]],
+    ]);
+  });
 });
 
 describe("#88 buffer(size) stays unaffected by the reimplementation (Done-when 2)", () => {
-  // Already holds today - `.buffer(size)`'s own reimplementation is the layer that must not change
-  // this, so it stays a live `it`, per this file's own #39 precedent above.
   it("still prints all five events unchanged, individually, in order", async () => {
     const events = [1, 2, 3, 4, 5];
     const out = await new Pipeline<number>().buffer(3)(events).toArray();
@@ -259,7 +255,7 @@ describe("#88 buffer(size) stays unaffected by the reimplementation (Done-when 2
 });
 
 describe("#88 buffer(fn) drops an item via DROP (Done-when 3)", () => {
-  it.fails("omits the invalid item from the output entirely", async () => {
+  it("omits the invalid item from the output entirely", async () => {
     const items = [
       { v: 1, invalid: false },
       { v: 2, invalid: true },
@@ -267,128 +263,199 @@ describe("#88 buffer(fn) drops an item via DROP (Done-when 3)", () => {
     ];
     const dropInvalid = (item: (typeof items)[number]) => (item.invalid ? DROP : item);
 
-    const out = await new Pipeline<(typeof items)[number]>()
-      // @ts-expect-error - .buffer(fn) doesn't exist on main yet (#88, flips live in L2)
-      .buffer(dropInvalid)(items)
-      .toArray();
+    const out = await new Pipeline<(typeof items)[number]>().buffer(dropInvalid)(items).toArray();
 
     expect(out).toEqual([items[0], items[2]]);
   });
 
-  it.fails(
-    "never lets a flush-then-drop leave an empty pending array as its own chunk",
-    async () => {
-      // `Reducer.itemsSinceEmit` increments BEFORE `fn` runs and DROP never undoes it outside a row
-      // handler (none is registered here, per this ticket's own Constraints) - a flush immediately
-      // followed by an item that drops leaves `pending` empty, and `.buffer(fn)`'s engine must guard
-      // every yield against it (`.toArray()` alone would hide the gap; `boundaryProbe` does not).
-      const items = [
-        { v: 1, invalid: false },
-        { v: 2, invalid: false },
-        { v: 3, invalid: true }, // flushes [1, 2], then drops - pending is [] going into item 4
-        { v: 4, invalid: true }, // drops again - final() must not push a trailing []
-      ];
-      const flushThenDrop = (item: (typeof items)[number], _ctx: unknown, emit: () => void) => {
-        if (item.v === 3) emit();
-        return item.invalid ? DROP : item;
-      };
+  it("never lets a flush-then-drop leave an empty pending array as its own chunk", async () => {
+    // `Reducer.itemsSinceEmit` increments BEFORE `fn` runs and DROP never undoes it outside a row
+    // handler (none is registered here, per this ticket's own Constraints) - a flush immediately
+    // followed by an item that drops leaves `pending` empty, and `.buffer(fn)`'s engine must guard
+    // every yield against it (`.toArray()` alone would hide the gap; `boundaryProbe` does not).
+    const items = [
+      { v: 1, invalid: false },
+      { v: 2, invalid: false },
+      { v: 3, invalid: true }, // flushes [1, 2], then drops - pending is [] going into item 4
+      { v: 4, invalid: true }, // drops again - final() must not push a trailing []
+    ];
+    const flushThenDrop = (
+      item: (typeof items)[number],
+      _ctx: IContextManager,
+      emit: () => void,
+    ) => {
+      if (item.v === 3) emit();
+      return item.invalid ? DROP : item;
+    };
 
-      const seen: (typeof items)[number][][] = [];
-      const out = await new Pipeline<(typeof items)[number]>()
-        // @ts-expect-error - .buffer(fn) doesn't exist on main yet (#88, flips live in L2)
-        .buffer(flushThenDrop)
-        .apply(boundaryProbe(seen))(items)
-        .toArray();
+    const seen: (typeof items)[number][][] = [];
+    const out = await new Pipeline<(typeof items)[number]>()
 
-      expect(out).toEqual([items[0], items[1]]);
-      expect(seen).toEqual([[items[0], items[1]]]);
-    },
-  );
+      .buffer(flushThenDrop)
+      .apply(boundaryProbe(seen))(items)
+      .toArray();
+
+    expect(out).toEqual([items[0], items[1]]);
+    expect(seen).toEqual([[items[0], items[1]]]);
+  });
 });
 
 describe("#88 ConcurrentPipeline items in flight follow buffer(fn)'s own window size (Done-when 4)", () => {
-  it.fails(
-    "holds window-size x maxConcurrency callbacks at once, for a fixed 3-item window",
-    async () => {
-      let count = 0;
-      const windowOfThree = (item: number, _ctx: unknown, emit: () => void): number => {
-        count++;
-        if (count % 3 === 0) emit();
-        return item;
-      };
+  it("holds window-size x maxConcurrency callbacks at once, for a fixed 3-item window", async () => {
+    let count = 0;
+    const windowOfThree = (item: number, _ctx: IContextManager, emit: () => void): number => {
+      count++;
+      if (count % 3 === 0) emit();
+      return item;
+    };
 
-      let inFlight = 0;
-      let peak = 0;
-      const items = Array.from({ length: 12 }, (_, i) => i);
+    let inFlight = 0;
+    let peak = 0;
+    const items = Array.from({ length: 12 }, (_, i) => i);
 
-      await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
-        // @ts-expect-error - .buffer(fn) doesn't exist on main yet (#88, flips live in L2)
-        .buffer(windowOfThree)
-        .transform((t) =>
-          t.map(async (x: number) => {
-            inFlight++;
-            peak = Math.max(peak, inFlight);
-            await new Promise((resolve) => setTimeout(resolve, 20));
-            inFlight--;
-            return x;
-          }),
-        )(items)
-        .toArray();
+    await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
+      .buffer(windowOfThree)
+      .transform((t) =>
+        t.map(async (x: number) => {
+          inFlight++;
+          peak = Math.max(peak, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          inFlight--;
+          return x;
+        }),
+      )(items)
+      .toArray();
 
-      // The same relationship product.md's own "Items in flight" table documents for a fixed size:
-      // buffer's own window size (3) times maxConcurrency (2).
-      expect(peak).toBe(3 * 2);
-    },
-  );
+    // The same relationship product.md's own "Items in flight" table documents for a fixed size:
+    // buffer's own window size (3) times maxConcurrency (2).
+    expect(peak).toBe(3 * 2);
+  });
 });
 
 describe("#88 buffer(fn) runs with no Transformer in scope, matching Pipeline.reduce()'s own docs", () => {
-  it.fails(
-    "propagates a throwing fn - no row-handler recovery, staying synchronous over a sync source",
-    () => {
-      const boom = (item: number): number => {
-        if (item === 2) throw new Error("boom");
-        return item;
-      };
+  it("propagates a throwing fn - no row-handler recovery, staying synchronous over a sync source", () => {
+    const boom = (item: number): number => {
+      if (item === 2) throw new Error("boom");
+      return item;
+    };
 
-      // A plain array is a "sync"-Mode source, so `.buffer(boom)` stays zero-promise (#90) and its
-      // failure THROWS out of `.toArray()` directly, rather than rejecting.
-      expect(() =>
-        new Pipeline<number>()
-          // @ts-expect-error - .buffer(fn) doesn't exist on main yet (#88, flips live in L2)
-          .buffer(boom)([1, 2, 3])
-          .toArray(),
-      ).toThrow("boom");
-    },
-  );
+    // A plain array is a "sync"-Mode source, so `.buffer(boom)` stays zero-promise (#90) and its
+    // failure THROWS out of `.toArray()` directly, rather than rejecting.
+    expect(() => new Pipeline<number>().buffer(boom)([1, 2, 3]).toArray()).toThrow("boom");
+  });
 });
 
 describe("#88 buffer(fn) closes the source on early exit after a real stage already ran", () => {
-  it.fails(
-    "closes a sync generator when .first(1) stops a chain that re-cuts with a BufferFunction",
-    () => {
-      // The numeric sibling of this case (above, "#90 review - an early exit closes the source on
-      // both engines") exercises `recutSyncChunks`'s own manual-iterator cleanup; `.buffer(fn)`'s
-      // equivalent sub-path (`recutSyncChunksWith`, src/utils/reduce.ts) folds each existing chunk
-      // slot through the same engine instead, via a plain nested `for...of` - the same shape
-      // `foldSyncChunkStream` already uses - relying on a generator's own `.return()` propagation
-      // rather than a manual iterator, and this is what proves that propagation still closes the
-      // source once folding replaces a plain re-slice.
-      const state = { closed: false };
-      let count = 0;
-      const sizeTwo = (item: number, _ctx: unknown, emit: () => void): number => {
-        count++;
-        if (count % 2 === 0) emit();
-        return item;
-      };
-      const chain = new Pipeline<number>()
-        .buffer(10)
-        .transform((t) => t.map((x) => x * 2))
-        // @ts-expect-error - .buffer(fn) doesn't exist on main yet (#88, flips live in L2)
-        .buffer(sizeTwo);
+  it("closes a sync generator when .first(1) stops a chain that re-cuts with a BufferFunction", () => {
+    // The numeric sibling of this case (above, "#90 review - an early exit closes the source on
+    // both engines") exercises `recutSyncChunks`'s own manual-iterator cleanup; `.buffer(fn)`'s
+    // equivalent sub-path (`recutSyncChunksWith`, src/utils/reduce.ts) folds each existing chunk
+    // SLOT through the same `driveFold` engine instead - a plain nested `for...of`, the same shape
+    // `foldSyncChunkStream` already uses - relying on a generator's own `.return()` propagation
+    // rather than a manual iterator, and this is what proves that propagation still closes the
+    // source once folding replaces a plain re-slice.
+    const state = { closed: false };
+    let count = 0;
+    const sizeTwo = (item: number, _ctx: IContextManager, emit: () => void): number => {
+      count++;
+      if (count % 2 === 0) emit();
+      return item;
+    };
+    const chain = new Pipeline<number>()
+      .buffer(10)
+      .transform((t) => t.map((x) => x * 2))
+      .buffer(sizeTwo);
 
-      expect(chain(closingSource(state)).first(1)).toEqual([0]);
-      expect(state.closed).toBe(true);
-    },
-  );
+    expect(chain(closingSource(state)).first(1)).toEqual([0]);
+    expect(state.closed).toBe(true);
+  });
+});
+
+describe("#88 buffer(fn)'s recut-from-chunks sub-path keeps every emit its own chunk (code-review)", () => {
+  it("never merges an async stage's own single slot back into one oversized chunk", async () => {
+    // `recutSyncChunksWith` used to fold one incoming SLOT (here, the map stage's own single
+    // 10-item chunk) and `.flat()` every value it emitted into ONE downstream chunk - correct only
+    // when a slot emits at most once. A window function folding a real, multi-item slot emits
+    // several times per slot as the ordinary case, not an edge case: measured before the fix,
+    // `.buffer(10).transform((t) => t.map(async (x) => x * 2)).buffer(sizeTwo)` over the doubled
+    // `[0,2,4,...,18]` yielded ONE 9-item chunk instead of six. `sizeTwo` flushes on every EVEN
+    // count, so its own first flush fires after the second item, leaving item 0 as its own
+    // 1-item chunk - real output, not a hand-derived guess (this repo's own "run before stating
+    // an example's output" rule).
+    let count = 0;
+    const sizeTwo = (item: number, _ctx: IContextManager, emit: () => void): number => {
+      count++;
+      if (count % 2 === 0) emit();
+      return item;
+    };
+    const chunks = await chunksOf(
+      new Pipeline<number>()
+        .buffer(10)
+        .transform((t) => t.map(async (x: number) => x * 2))
+        .buffer(sizeTwo)([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+    );
+
+    expect(chunks).toEqual([[0], [2, 4], [6, 8], [10, 12], [14, 16], [18]]);
+  });
+
+  it("also drains correctly through .toArray()'s own iterator-driven consumer, not just .chunks()", async () => {
+    // `driveFold`'s `remaining` queue is written inside a yielded chunk's OWN `.then` and read back
+    // synchronously at the next `for` pass - correct only if every consumer awaits a pending chunk
+    // before calling `.next()` again. `chunksOf` above proves it through `.chunks()`'s `for await`;
+    // `.toArray()` goes through a different path (`drainSync`, a manual iterator) and must agree.
+    let count = 0;
+    const sizeTwo = (item: number, _ctx: IContextManager, emit: () => void): number => {
+      count++;
+      if (count % 2 === 0) emit();
+      return item;
+    };
+    const items = await new Pipeline<number>()
+      .buffer(10)
+      .transform((t) => t.map(async (x: number) => x * 2))
+      .buffer(sizeTwo)([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+      .toArray();
+
+    expect(items).toEqual([0, 2, 4, 6, 8, 10, 12, 14, 16, 18]);
+  });
+});
+
+describe("#88 a flush-then-append on the LAST item is not dropped (found while verifying the fix above)", () => {
+  it("keeps the item that caused the final flush as its own trailing chunk", async () => {
+    // `Reducer.final()`'s own `itemsSinceEmit` gate reads `0` right after an `emit()` - correct for
+    // `.reduce()`'s contract (`Reducer`'s own docstring), where a post-emit return value may be an
+    // unrelated fresh seed, but wrong for `bufferReduceFunction`'s flush-THEN-append shape: the
+    // item that triggers the flush also becomes the first (and here, only) item of the new pending
+    // array. `Reducer.current()`/`trailingOf` (src/utils/reduce.ts) reads the real pending state
+    // instead, so this item survives as its own trailing chunk rather than vanishing.
+    let windowStart = 0;
+    const fiveMinuteWindow = (item: { ts: number }, _ctx: IContextManager, emit: () => void) => {
+      if (item.ts - windowStart >= 300_000) {
+        emit();
+        windowStart = item.ts;
+      }
+      return item;
+    };
+    const events = [{ ts: 0 }, { ts: 300_000 }];
+
+    const chunks = await chunksOf(new Pipeline<{ ts: number }>().buffer(fiveMinuteWindow)(events));
+
+    expect(chunks).toEqual([[events[0]], [events[1]]]);
+  });
+});
+
+describe("#88 buffer(fn) widens Mode to async for a Promise-returning fn (code-review)", () => {
+  it("returns a real array once awaited, matching what .toArray()'s own async type already promises", async () => {
+    // Before this fix, `.buffer(fn)` always returned `this`, so an async `fn` on an otherwise-sync
+    // chain typechecked as `number[]` while `.toArray()` actually handed back a `Promise` at
+    // runtime - exactly the type/runtime divergence #90 exists to prevent. `.reduce()`'s own two
+    // overloads are the precedent this follows (Promise-returning first, widening Mode).
+    const doubleAsync = async (item: number): Promise<number> => item * 2;
+    // Assigned to a `Promise<number[]>`-typed binding with no cast: this line itself fails
+    // `tsc --noEmit` if `.buffer(fn)` ever stops widening Mode for a Promise-returning `fn`.
+    const result: Promise<number[]> = new Pipeline<number>()
+      .buffer(doubleAsync)([1, 2, 3])
+      .toArray();
+
+    expect(await result).toEqual([2, 4, 6]);
+  });
 });
