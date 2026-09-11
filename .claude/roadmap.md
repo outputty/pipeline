@@ -9,20 +9,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **Simplify `@outputty/pipeline`: reused patterns, smaller units, simpler types** (#133) - `src/`
-  reached 5626 lines and `__tests__/` 5200 through nine tickets landing one behind another, each
-  adding its own seam with no pass back over the whole tree - the same shape written more than once
-  in several places (the sync/async engine fork in `pipeline.ts` spelled out four times, four
-  `Pipeline` subclasses - including `EventEmitterPipeline`, shipped mid-planning by #124 with the
-  identical pattern - each hand-copying their own knobs into a fresh `createPipeline()` override),
-  exactly the duplication shape that produced #113's own `pipelineIndex` collision bug. Now, because
-  #90 already answered this for `Pipeline` itself (split into `pipeline.ts`/`result.ts`/`branch.ts`)
-  and this applies the same treatment to what #90 left behind: `chunk.ts` splits into three files
-  along its own real seams, `ClusterPipeline`'s module-level bootstrap state becomes a `WorkerSet`
-  class, and ~40 anchored duplication findings collapse behind shared types (`Drainable<T>`,
-  `StageRegistries`, `ReduceWork<T,U>`) and helpers. No numeric complexity/line-count gate - the
-  stopping criterion is `/code-review medium`'s own reuse/simplification/efficiency dimension
-  returning zero findings per module, `.oxlintrc.json:34-36` having already rejected a numeric one.
 - **The node: import boundary as an oxlint rule** (#117) - `architecture.md`'s own stack diagram draws
   `node:cluster`/`node:http` as scoped to `ClusterPipeline`/`HttpPipeline` only, and nothing has ever
   checked it - the same shape `outputty/laygo` already mechanizes as six `no-restricted-imports`
@@ -111,6 +97,37 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **A repo-wide reuse and simplification pass** (#133, `refactor`) - 15 named duplications, each
+  unified in its own layer, no observable output change anywhere: the canonical
+  `new Pipeline<number>().transform((t) => t.map((x) => x * 2).filter((x) => x > 4))` example
+  returns `[6, 8, 10]` before this stack and after every layer of it. `types.ts` gains
+  `StageRegistries`/`Drainable<T>`/`ReduceWork<T,U>`/`RouteVerb`+`StageRoute`/`Tagged<R>`, each
+  replacing a shape spelled inline 3-6 times with no shared name; `pipeline.ts`'s sync/async engine
+  fork, `EMPTY_CHUNKS` cast, pre-buffer reset and `defer` cast each collapse to one call
+  (`.claude/architecture.md`'s own Module layout names them), `createPipeline<U,R>()` gaining its
+  own return type so a caller gets back its real class with no trailing cast; `transformer.ts`'s
+  element-wise `pipe()` body, written twice per method, is one call per method, and `tryRecover()`
+  unifies the try/catch-if-thenable/recover skeleton two other sites shared (`Reducer.fold`'s own
+  hot per-item path keeps its measured-faster inlined form by decision).
+  The four dispatching classes' `createPipeline()` overrides collapse behind one `carriedKnobs()`
+  hook; 5 overrides that narrowed a return type nothing read are deleted; `ClusterPipeline`'s 5
+  mutable module bindings and 4 free functions become one `WorkerSet` class; `http.ts`'s
+  `fetch()`/`reduceWork()`/`handleOverBridge` each split their own mixed concerns into named
+  helpers. `utils/chunk.ts` splits into `cut.ts`/`drain.ts`/`recut.ts` along its own real seams,
+  re-exported from `chunk.ts` so no existing import changes; `normalize` drops out of the PUBLIC
+  barrels only (`chunk.ts`'s own internal re-export is untouched - BREAKING, no deprecation
+  period, never a documented capability). `branch.ts`/`result.ts` adopt `Drainable<T>`, collapsing
+  3 independent re-spellings of the same 4-field drain view; `PipelineResult`'s three different
+  sync/async terminal-dispatch styles share one `dispatchSync()`. `context/types.ts` (a dead
+  re-export) is deleted whole.
+  The test suite gets the same treatment: `__tests__/helpers/` gains the small utilities copied
+  3-5x each (`countPromises`, the `Order`/`orders`/`withVat` trio, `parseStrict`, `chunksOf`, a
+  closing-generator source pair, `runFixtureJson`, `withTrackedServer`); the 4 hand-rolled
+  `IContextManager` test doubles now extend `SimpleContextManager`, fixing a pre-#113
+  `value !== undefined` bug all 4 of them still carried. Every layer's diff shows zero
+  `/code-review medium` findings. PRs #135 (types), #136 (pipeline.ts), #138
+  (transformer/reduce/helpers), #139 (dispatching classes), #140 (chunk.ts split), #141
+  (branch.ts + result.ts), #142 (test helpers), #143 (docs).
 - **`EventEmitterPipeline`, a fourth dispatch mode** (#124, `feat`) - no mode lets another module
   attach a worker to a named stage after the chain already exists, or observe a stage's chunks
   without composing an observer into the chain. `.transform()`'s own composed function

@@ -37,43 +37,78 @@ The `node:cluster`/`node:http` boundary above is oxlint-enforced - pending #117.
 src/
   types.ts              PipelineFunction, IContextManager, InternalTransformer, every options
                           interface, plus DROP/RowErrorHandler/PipelineErrorHandler/RunScope (#78);
-                          pending #133: RowErrorHandler's return respelled to bare `unknown` (the
-                          `| typeof DROP | Promise<...>` union was already compiler-identical to
-                          it), plus new shared types collapsing inline-spelled duplicates elsewhere
-                          - Drainable<T>, StageRegistries, ReduceWork<T,U>
-  pipeline.ts            Pipeline: the chain, context, stages and Pipeline.drainable +
-                          createPipeline() + onError() (#78)
+                          StageRegistries (a stage's chunkTransforms+reduceStages pair),
+                          Drainable<T> (the 4-field drain view PipelineResult/BranchOwner share),
+                          ReduceWork<T,U>, RouteVerb/StageRoute, Tagged<R> (#133)
+  pipeline.ts            Pipeline: the chain, context, stages, Pipeline.drainable, createPipeline<U,
+                          R>() + defer<U,R>() (each takes its own return type, letting a
+                          DISPATCHING SUBCLASS's own two-argument call - `ConcurrentPipeline.apply()`
+                          - skip the `as X` cast its base-class caller still needs, #133) + onError()
+                          (#78); isSync()/freshPreBuffer() are `protected` methods a dispatching
+                          subclass may override, `asyncIterableFrom()`/`isAsyncSource()` are unexported
+                          module-level functions - all 4 unify 2-4 raw-spelled copies each within this
+                          file (#133); emptyChunks<U>() is EXPORTED (`cluster.ts` calls it too, to empty
+                          a worker's own chunk stream)
   transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError()
-                          (the row handler, #78) and runnable() (the seam that carries it in)
+                          (the row handler, #78) and runnable() (the seam that carries it in); every
+                          element-wise link (map/filter/flatMap/tap(fn)) shares one pipe() body (#133)
+  branch.ts               BranchBuilder (.when/.otherwise), BranchOwner/BranchRunner/BranchArm,
+                          runBranch/joinArms(grouped, dispatch: ArmDispatch<T>, context)/demux - pushArm()
+                          and findCatchAll() are BranchBuilder's own private helpers, replacing a
+                          repeated cast-and-push and a repeated find(isCatchAll) (#133)
+  result.ts               PipelineResult - every terminal op; drainable() returns Drainable<T>
+                          directly; forEach()/[Symbol.iterator]() share utils/drain.ts's own
+                          dispatchSync() instead of each testing syncChunks separately (#133)
   pipelines/
     concurrent.ts          ConcurrentPipeline - the fan-out (fanOutOrdered/fanOutUnordered),
-                             stageWork()/reduceWork()
+                             stageWork()/reduceWork(); carriedKnobs() (not createPipeline()) is the
+                             one override a subclass writes to carry its own knobs forward (#133)
     http.ts                 HttpPipeline - stageWork()/reduceWork() overrides, routePath(verb,
-                             index), .fetch() (/transform/<n> and /reduce/<n>), toNodeHandler
-    cluster.ts               ClusterPipeline - worker bootstrap, the shared pipeline registry,
-                             bootstrapAndSetUrl() shared by stageWork()/reduceWork(); the module-
-                             level bootstrap state (nextPipelineIndex/registry/bootstrapPromise/
-                             inFlight/idleTimer + killWorkers/scheduleIdleCheck/bootstrapCluster/
-                             startWorkerServer) becomes one per-process WorkerSet class, pending
-                             #133
+                             index), .fetch() (/transform/<n> and /reduce/<n>), toNodeHandler;
+                             errorResponse()/unknownBranchRoute() replace 6+ inline
+                             Response.json({error}) calls, buildReduceRequestBody()/
+                             parseReduceFrames() split reduceWork()'s own dispatch generator,
+                             nodeRequestToFetchRequest() is handleOverBridge's own request half (#133)
+    cluster.ts               ClusterPipeline - the WorkerSet class (register/claimIndex/lookup/
+                             bootstrap/enter/kill/startWorkerServer) replaces 5 module-level mutable
+                             bindings and 4 free functions with one per-process singleton (#133);
+                             bootstrapAndSetUrl() calls workerSet.enter() once, no longer bootstraps
+                             twice
     eventemitter.ts           EventEmitterPipeline (#124) - stageWork() dispatches through
                              pipeline.emitter instead of HTTP/cluster; apply()/drainable() overridden
-                             a second and third time for stage:<n>:end/pipeline:end
+                             a second and third time for stage:<n>:end/pipeline:end; carriedKnobs()
+                             (not createPipeline()) carries its emitter/registeredStages (#133)
   context/
-    types.ts              re-exported IContextManager shape - deleted, pending #133 (zero
-                             importers anywhere; IContextManager's one real home stays types.ts)
-    simple.ts              SimpleContextManager - the one shipped IContextManager
+    simple.ts              SimpleContextManager - the one shipped IContextManager; context/types.ts
+                             (a dead re-export) is deleted (#133)
   utils/
-    chunk.ts                buildChunkGenerator (cuts) / flattenChunks (undoes) / normalize (dead
-                             in production code post-#39, dropped from the public barrel pending
-                             #133 - stays defined and used internally here) - splits into three
-                             files pending #133: cut/flatten/normalize/share stay here, sync drains
-                             + collect move to sync-drain.ts, the recut family to recut.ts
+    chunk.ts                a thin re-export barrel over cut.ts/drain.ts/recut.ts, so an existing
+                             `from "@src/utils/chunk"` import keeps resolving (#133), normalize
+                             included - this internal path is unchanged. What dropped is the
+                             PACKAGE's own public surface: `utils/index.ts` and `src/index.ts`
+                             never re-export normalize any more (BREAKING) - the one caller left
+                             (`__tests__/normalize-and-chunks.e2e.test.ts`) reaches it through this
+                             internal `@src/utils/chunk` path, same as before
+    cut.ts                  buildChunkGenerator/buildSyncChunkGenerator (cut) / flattenChunks
+                             (undo) / normalize / share / collectItems (`collectAsyncItems()` is
+                             `collectItems()`'s own unexported async half); assertPositiveChunkSize()
+                             is the one `chunkSize < 1` guard 3 sites shared inline before (#133)
+    drain.ts                 MaybeAsyncChunks<T>, drainSync/drainSyncSettled/close/dispatchSync -
+                             dispatchSync(syncChunks, onSync, onAsync) is the sync/async branch
+                             result.ts's forEach/[Symbol.iterator] and cut.ts's collectItems all
+                             shared inline before (#133)
+    recut.ts                 RecutState<T> ({iterator, size}) / recutFrom / recutPending /
+                             cutChunk / recutSyncChunks - the iterator+size pair `recutFrom` and
+                             `recutPending` used to thread separately is now one state object (#133)
     helpers.ts               isContextAware - fn.length arity check (isContextAwareReduce, its
                              reduce-side twin, is gone: every reduce path always passes all four
                              ReduceFunction arguments, #45); dropOrRethrow - the run handler's own
                              "call it, or propagate" decision, shared by runSequentially and
-                             ConcurrentPipeline.apply()'s wrapped work (#78)
+                             ConcurrentPipeline.apply()'s wrapped work (#78); tryRecover() is the
+                             try/catch-if-thenable/recover skeleton runStageChunk here and
+                             transformer.ts's attemptRow both now share - NOT used by
+                             utils/reduce.ts's Reducer.fold, whose own hot per-item path keeps its
+                             measured-faster inlined form (#133)
     reduce.ts                Reducer/foldChunk/foldChunkStream - the shared fold, used by
                              Transformer.reduce, Pipeline.reduce and http.ts's own frame folding;
                              Reducer takes an optional row handler (#78)
@@ -306,24 +341,46 @@ level, needing no per-level code - the base implementation is already correct ev
 bare `Pipeline`'s own `.transform()`/`.reduce()` never fan out or POST.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
-createPipeline()` calling `this.constructor` rather than a hard-coded `new Pipeline<U>`, so a
-subclass survives a `.transform()`/`.context()`/`.buffer()` chain; each level overrides
-`createPipeline()` again to carry its OWN extra knobs forward (`ConcurrentPipeline`'s own
-`concurrentOptions()` helper is the one place `maxConcurrency`/`ordered` are listed - `chunkSize`
-dropped out of it (#39), since `.buffer()` is `Pipeline`'s own knob now, not
-`ConcurrentPipelineOptions`' - so `HttpPipeline`/`ClusterPipeline` only add their own field).
-Pending #133: a base-level `protected carriedKnobs()` hook (default `{}`) replaces the 3 hand-rolled
-`createPipeline()` bodies - `Pipeline.createPipeline()` spreads `this.carriedKnobs()` once, and each
-subclass overrides only the hook (`{ ...super.carriedKnobs(), ...ownKnobs }`), narrowing
-`createPipeline()`'s own return type only where something in-file reads it (`ConcurrentPipeline`;
-`HttpPipeline`/`ClusterPipeline` don't, so their `createPipeline()` overrides go with it). Probed
-live during #133's planning: `pnpm typecheck` and the full suite (real forked `ClusterPipeline`
-workers included) stay clean, and the exact knob-survives-copy-on-write and sibling-`pipelineIndex`
-cases this section documents below both re-run correct under the hook. What
-`createPipeline()` carries is `PipelineState`, declared apart from the exported `PipelineOptions`
-(#90): a caller writes `context`/`contextFactory`, and every carried knob is named once in
-`carriedOptions()` rather than field by field at each call site - which is what stops one being
-dropped, as `mode` and then `bound` each silently were. And a
+createPipeline<U, R = AnyPipeline<U>>(chunks, options)` that calls `this.constructor` rather than a
+hard-coded `new Pipeline<U>`, so a subclass survives a `.transform()`/`.context()`/`.buffer()`
+chain. Its own `R` type parameter is what lets a DISPATCHING SUBCLASS's own two-argument call get
+back its OWN narrower type with no trailing `as X` cast -
+`this.createPipeline<U, ConcurrentPipeline<U, In>>(...)` in `ConcurrentPipeline.apply()`/`.reduce()`
+(#133); `defer<U, R = AnyPipeline<U>>()` carries the identical pattern for the source-less path. The
+base `Pipeline`'s OWN copy-on-write methods still call the one-argument form and still cast
+`as this` (`.context()`/`.onError()`/`.buffer()`'s three branches), since `R`'s default
+(`AnyPipeline<U>`) cannot narrow to `this` without a second argument only a subclass site actually
+supplies.
+
+`createPipeline()` itself is declared ONCE, on the base, and is never overridden again (#133,
+replacing a `createPipeline()` override at every level). It merges its `options` argument with
+`this.carriedKnobs()`, and each subclass overrides ONLY `carriedKnobs()` to add its own extra
+fields:
+
+```ts
+// pipeline.ts (base) - no super to spread
+protected carriedKnobs(): object {
+  return {};
+}
+// concurrent.ts - FLAT, since super is the base's empty {}
+protected override carriedKnobs(): ConcurrentPipelineOptions {
+  return { maxConcurrency: this.maxConcurrency, ordered: this.ordered };
+}
+// http.ts / cluster.ts / eventemitter.ts - each spreads its super, adds its own fields
+protected override carriedKnobs(): HttpPipelineOptions {
+  return { ...super.carriedKnobs(), url: this._url };
+}
+```
+
+`chunkSize` never appears here at all
+(#39), since `.buffer()` is `Pipeline`'s own knob now, not a constructor option. The `options`
+argument `createPipeline()` merges `carriedKnobs()` on top of is `this.carriedOptions()` (pre-#133,
+unchanged) - the FULL `PipelineState`, declared apart from the exported `PipelineOptions` (#90): a
+caller writes `context`/`contextFactory`, and every carried knob is named once in `carriedOptions()`
+rather than field by field at each call site, which is what stops one being dropped, as `mode` and
+then `bound` each silently were. `carriedKnobs()` is the narrower, #133-introduced sibling: only the
+handful of fields a DISPATCHING subclass alone adds (never `mode`/`bound`/`context`, which
+`carriedOptions()` already owns). And a
 stage's identity is its INDEX in `_chunkTransforms` - the table `apply()` already maintains - so a
 dispatching class sends a chunk plus an index, never a function. Every instance runs the same code,
 so index N means the same transform on both sides; a mixed-version fleet breaks that assumption
@@ -534,10 +591,14 @@ the bound pipeline when one arrives. Recording the call is what keeps a deferred
 one on identical code, and what preserves a stage's position - recording only a `.buffer()`'s SIZE
 instead applied it to the source cut, so a `.buffer()` written after a stage took effect before it.
 
-`Pipeline.drainable(input)` is the ONE seam between the two classes: it binds, then returns the sync
-chunk stream where there is one, the item stream, and the chunk stream. Each terminal calls it
-exactly once and threads what it got into its own async arm; calling it again there ran a user's
-`.local(build)` callback twice per call.
+`Pipeline.drainable(input)` is the ONE seam between the two classes: it binds, then returns a
+`Drainable<T>` - `{ syncChunks, items, chunks, context }` (`types.ts`, #133; three independent
+re-spellings of this exact 4-field shape collapsed to the one type - `BranchOwner.drainable()` and
+`PipelineResult`'s own field each used to declare it inline). Each terminal calls it exactly once
+and threads what it got into its own async arm; calling it again there ran a user's `.local(build)`
+callback twice per call. `PipelineResult.forEach()`/`[Symbol.iterator]()` and `utils/cut.ts`'s
+`collectItems()` share one `dispatchSync(syncChunks, onSync, onAsync)` (`utils/drain.ts`, #133) for
+the "is there a sync chunk stream, or not" branch every one of them used to test inline.
 
 Two knobs that look alike are deliberately apart. `PipelineMode` (`"unset" | "sync" | "async"`) is a
 TYPE fact about what a chain produces; `_bound` is the RUNTIME fact of whether an input is attached.
@@ -683,11 +744,12 @@ class's own `.local()` row is measured and its correctness asserted (a pinned re
   passed ONE `this._context` to every concurrently in-flight chunk. #31 carries that pre-existing
   sharing across a process boundary; it neither introduces nor worsens it, and no fix landed in that
   ticket by explicit decision.
-- `ClusterPipeline`'s module-level pipeline registry (`cluster.ts`) never evicts an entry - every
-  distinct `ClusterPipeline` constructed in a process stays reachable for that process's life. Sound
-  for the documented construction pattern (one `ClusterPipeline` per logical chain, built once at
-  module scope, the same "no top-level side effects beyond registering transforms" rule above already
-  assumes); a caller constructing a fresh `ClusterPipeline` per request grows the registry unbounded.
+- `WorkerSet`'s own `registry` field (`cluster.ts`, one per-process singleton since #133 - was 5
+  separate module-level bindings) never evicts an entry - every distinct `ClusterPipeline`
+  constructed in a process stays reachable for that process's life. Sound for the documented
+  construction pattern (one `ClusterPipeline` per logical chain, built once at module scope, the
+  same "no top-level side effects beyond registering transforms" rule above already assumes); a
+  caller constructing a fresh `ClusterPipeline` per request grows the registry unbounded.
 - The idle-kill window between a `ClusterPipeline`'s last dispatch and its workers being killed
   (`cluster.ts`'s `IDLE_KILL_MS`) is `500`ms - a chosen value, not a tuned or caller-facing one. Long
   enough that back-to-back dispatches in a real workload never trigger a re-fork (~50-60ms per the
