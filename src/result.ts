@@ -11,11 +11,15 @@
  * the data arrives, never after.
  */
 
-import type { PipelineMode } from "./types";
+import type { Drainable, PipelineMode } from "./types";
 import type { Pipeline, PipelineSource } from "./pipeline";
 import type { MaybeAsyncChunks } from "./utils/chunk";
 import { isThenable } from "./utils/helpers";
 import { collectItems, drainSyncSettled } from "./utils/chunk";
+// Straight from `drain.ts`, not the `chunk.ts` barrel (#133 review, same reason `recut.ts` reaches
+// `cut.ts`/`drain.ts` directly): `dispatchSync` is new, with no pre-existing public contract at the
+// barrel path to preserve, so it stays off that barrel's own re-export list.
+import { dispatchSync } from "./utils/drain";
 
 /** The pipeline shape a result drains, with the Mode and policy erased - a result is handed its
  * pipeline by `Pipeline`'s own call signature, which has already fixed both. */
@@ -48,17 +52,14 @@ export class PipelineResult<T, M extends PipelineMode> {
   /** Binds the input to the chain and returns the views a terminal drains through. Runs ONCE per
    * terminal call - which is what makes every terminal re-drain, and equally what stops one from
    * re-draining twice: each terminal destructures both halves here and threads `items` into its own
-   * async arm. Calling it again there ran a user's `.local(build)` callback twice per call. */
-  private drainable(): {
-    syncChunks: MaybeAsyncChunks<T> | null;
-    items: () => AsyncIterable<T>;
-    chunks: () => AsyncIterable<T[]>;
-  } {
-    return this._pipeline.drainable(this._input) as {
-      syncChunks: MaybeAsyncChunks<T> | null;
-      items: () => AsyncIterable<T>;
-      chunks: () => AsyncIterable<T[]>;
-    };
+   * async arm. Calling it again there ran a user's `.local(build)` callback twice per call.
+   *
+   * Typed `Drainable<T>` (#133) - the SAME shape `Pipeline.drainable()` itself returns, so this
+   * wrapper needs only the cast from `Drainable<unknown>` (this result's own `_pipeline` is bound
+   * to `T = unknown`) to `Drainable<T>`, never a second, independent spelling of the four fields.
+   * `context` goes unread here - only `branch.ts`'s own `runBranch` needs it. */
+  private drainable(): Drainable<T> {
+    return this._pipeline.drainable(this._input) as Drainable<T>;
   }
 
   /**
@@ -141,12 +142,13 @@ export class PipelineResult<T, M extends PipelineMode> {
   forEach(fn: (item: T) => void): M extends "sync" ? void : Promise<void>;
   forEach(fn: (item: T) => void | Promise<void>): void | Promise<void> {
     const { syncChunks, items } = this.drainable();
-    if (syncChunks !== null) {
-      // Each callback's own return is settled before the next item, so a `forEach` that turns out
-      // to be async still runs strictly in order and still reports its own failures.
-      return drainSyncSettled(syncChunks, fn);
-    }
-    return this.forEachAsync(fn, items);
+    // Each callback's own return is settled before the next item, so a `forEach` that turns out to
+    // be async still runs strictly in order and still reports its own failures.
+    return dispatchSync(
+      syncChunks,
+      (chunks) => drainSyncSettled(chunks, fn),
+      () => this.forEachAsync(fn, items),
+    );
   }
 
   /** `forEach`'s async arm, which awaits each callback in turn. */
@@ -168,12 +170,15 @@ export class PipelineResult<T, M extends PipelineMode> {
    */
   [Symbol.iterator](): M extends "sync" ? Iterator<T> : never {
     const { syncChunks } = this.drainable();
-    if (syncChunks === null) {
-      throw new TypeError(
-        "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
-      );
-    }
-    return syncItems(syncChunks) as unknown as M extends "sync" ? Iterator<T> : never;
+    return dispatchSync(
+      syncChunks,
+      (chunks) => syncItems(chunks),
+      () => {
+        throw new TypeError(
+          "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
+        );
+      },
+    ) as unknown as M extends "sync" ? Iterator<T> : never;
   }
 
   /**

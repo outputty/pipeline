@@ -15,6 +15,22 @@ import { chain, isThenable } from "@src/utils/helpers";
 export type MaybeAsyncChunks<T> = Iterable<T[] | Promise<T[]>>;
 
 /**
+ * The one sync/async decision every consumer of a `MaybeAsyncChunks | null` view shares (#133
+ * review): `syncChunks !== null` picks `onSync` over `onAsync`. `cut.ts`'s own `collectItems` and
+ * `result.ts`'s `PipelineResult.forEach()`/`[Symbol.iterator]()` all call this now, rather than
+ * three independent `if (syncChunks !== null) { … } else { … }` spellings of the identical check.
+ *
+ * `dispatchSync(null, (c) => "sync", () => "async")` → `"async"`.
+ */
+export function dispatchSync<T, S, A>(
+  syncChunks: MaybeAsyncChunks<T> | null,
+  onSync: (chunks: MaybeAsyncChunks<T>) => S,
+  onAsync: () => A,
+): S | A {
+  return syncChunks !== null ? onSync(syncChunks) : onAsync();
+}
+
+/**
  * Drains a `MaybeAsyncChunks` stream item by item into `onItem`, staying synchronous until the first
  * pending chunk (#90) - the ONE drain every synchronous terminal op goes through (`toArray`,
  * `first`, `consume`, `forEach`), so the "did this stay synchronous?" decision and the early-exit

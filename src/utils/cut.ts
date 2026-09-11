@@ -7,7 +7,7 @@
 
 import type { ChunkerFunction } from "@src/types";
 import { chain } from "@src/utils/helpers";
-import { drainSync, type MaybeAsyncChunks } from "@src/utils/drain";
+import { drainSync, dispatchSync, type MaybeAsyncChunks } from "@src/utils/drain";
 
 /** The `chunkSize`/`size` guard `buildChunkGenerator`, `buildSyncChunkGenerator` and
  * `recut.ts`'s own `recutSyncChunks` each need before doing any real work (#133: was spelled
@@ -194,16 +194,18 @@ export function collectItems<T>(
   limit?: number,
 ): T[] | Promise<T[]> {
   const results: T[] = [];
-  if (syncChunks !== null) {
-    return chain(
-      drainSync(syncChunks, (item) => {
-        results.push(item);
-        return limit !== undefined && results.length >= limit;
-      }),
-      () => results,
-    );
-  }
-  return collectAsyncItems(results, limit, items);
+  return dispatchSync(
+    syncChunks,
+    (chunks) =>
+      chain(
+        drainSync(chunks, (item) => {
+          results.push(item);
+          return limit !== undefined && results.length >= limit;
+        }),
+        () => results,
+      ),
+    () => collectAsyncItems(results, limit, items),
+  );
 }
 
 /** `collectItems`'s async arm, its own function so the caller above stays one expression per

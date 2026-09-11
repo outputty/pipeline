@@ -17,8 +17,7 @@
  */
 
 import type { AnyPipeline, Pipeline, PipelineSource } from "./pipeline";
-import type { IContextManager, JoinMode, PipelineMode } from "./types";
-import type { MaybeAsyncChunks } from "./utils/chunk";
+import type { Drainable, IContextManager, JoinMode, PipelineMode } from "./types";
 import { collectItems } from "./utils/chunk";
 import { chain, mapSettle } from "./utils/helpers";
 
@@ -26,13 +25,14 @@ import { chain, mapSettle } from "./utils/helpers";
 export type ArmPipeline<T> = Pipeline<T, "unset", T>;
 
 /** What `runBranch` needs of the pipeline it belongs to: the one drain seam, nothing else. Declared
- * structurally so this file never imports `Pipeline` at runtime. */
+ * structurally so this file never imports `Pipeline` at runtime. `Drainable<T>`'s own `chunks`
+ * field goes unused here - `runBranch` (below) only ever needs the sync view, the item stream and
+ * the run's own context - but `Pick` names the three it does read rather than re-spelling their
+ * types (#133: this interface used to repeat `Drainable<T>`'s own three fields inline, one of three
+ * independent readings of that shape - `pipeline.ts`'s own `drainable()` and `result.ts`'s own
+ * private wrapper being the other two, both now typed `Drainable<T>` directly). */
 export interface BranchOwner<T, In> {
-  drainable(input: PipelineSource<In>): {
-    syncChunks: MaybeAsyncChunks<T> | null;
-    items: () => AsyncIterable<T>;
-    context: IContextManager;
-  };
+  drainable(input: PipelineSource<In>): Pick<Drainable<T>, "syncChunks" | "items" | "context">;
 }
 
 /** The record a builder's arms produce, read off the builder the caller's callback returned. */
@@ -80,8 +80,7 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
     build?: (pipeline: Pipeline<T, "unset", T>) => Pipeline<U, M2, any>,
   ): BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>> {
     this.claim(name);
-    this._arms.push({ name, predicate, build: build as BranchArm<T>["build"] });
-    return this as unknown as BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>>;
+    return this.pushArm<K, U, M2>(name, predicate, build);
   }
 
   /**
@@ -102,16 +101,11 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
     build?: (pipeline: Pipeline<T, "unset", T>) => Pipeline<U, M2, any>,
   ): BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>> {
     this.claim(name);
-    if (this._arms.some((arm) => arm.isCatchAll)) {
-      throw new Error(`.otherwise() is already declared as "${this.catchAllName()}"`);
+    const existing = this.findCatchAll();
+    if (existing !== undefined) {
+      throw new Error(`.otherwise() is already declared as "${existing.name}"`);
     }
-    this._arms.push({
-      name,
-      predicate: () => true,
-      build: build as BranchArm<T>["build"],
-      isCatchAll: true,
-    });
-    return this as unknown as BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>>;
+    return this.pushArm<K, U, M2>(name, () => true, build, true);
   }
 
   /**
@@ -137,13 +131,31 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
    * `.branch()` after the caller's builder returns. */
   arms(): BranchArm<T>[] {
     const ordered = this._arms.filter((arm) => !arm.isCatchAll);
-    const catchAll = this._arms.find((arm) => arm.isCatchAll);
+    const catchAll = this.findCatchAll();
     return catchAll ? [...ordered, catchAll] : ordered;
   }
 
   /** Whether every matching arm takes an item, rather than only the first. */
   isBroadcast(): boolean {
     return this._broadcast;
+  }
+
+  /** Builds the arm, pushes it, and recasts `this` to the builder's own next generic instantiation -
+   * the "cast `build`, push, recast" triplet `.when()`/`.otherwise()` each repeated (#133 review:
+   * an earlier cut still left each caller casting `build` to `BranchArm<T>["build"]` itself; typing
+   * `build` here at the SAME signature both callers already share moves that one cast inside,
+   * rather than repeating it at each call site). Called after each caller has already `claim()`ed
+   * the arm's own name (and, for `.otherwise()`, checked for an existing catch-all) - two checks
+   * specific enough to each caller that folding them in here would either run the catch-all check
+   * for `.when()` too or skip it for `.otherwise()`. */
+  private pushArm<K extends string, U, M2 extends PipelineMode>(
+    name: string,
+    predicate: (item: T) => boolean,
+    build: ((pipeline: Pipeline<T, "unset", T>) => Pipeline<U, M2, any>) | undefined,
+    isCatchAll?: boolean,
+  ): BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>> {
+    this._arms.push({ name, predicate, build: build as BranchArm<T>["build"], isCatchAll });
+    return this as unknown as BranchBuilder<T, R & Record<K, U[]>, JoinMode<AM, M2>>;
   }
 
   /** Refuses a name twice in ONE branch. Two separate `.branch()` calls may each declare a `rest`,
@@ -167,8 +179,10 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
     }
   }
 
-  private catchAllName(): string {
-    return this._arms.find((arm) => arm.isCatchAll)!.name;
+  /** The catch-all arm, if one has been declared - `arms()` and `.otherwise()`'s own conflict check
+   * both read this instead of each spelling `find((arm) => arm.isCatchAll)` (#133). */
+  private findCatchAll(): BranchArm<T> | undefined {
+    return this._arms.find((arm) => arm.isCatchAll);
   }
 }
 
@@ -227,6 +241,17 @@ export interface BranchRunner<In, R, M extends PipelineMode> {
  * because a builder's arms are collected at runtime rather than inferred from an object literal. */
 export type BranchResults = Record<string, unknown[]>;
 
+/** The three fields `joinArms` (below) needs from `runBranch`'s own config, threaded as one object
+ * instead of three of its five positional parameters (#133) - reused as part of `runBranch`'s own
+ * config type too, rather than a second, separate spelling of the same three fields. `context`
+ * stays its own parameter on `joinArms`: it comes from the drain, once per RUN, never from the
+ * config `.branch()` built once when the arms were declared. */
+interface ArmDispatch<T> {
+  arms: readonly BranchArm<T>[];
+  branchIndex: number;
+  makeArm: (context: IContextManager, routeTrail: string) => ArmPipeline<T>;
+}
+
 /**
  * One `.branch()` call's runner (#90): binds the parent chain to an input, groups the items by arm,
  * runs each arm's own pipeline over its own group, and joins the results into one record.
@@ -241,14 +266,10 @@ export type BranchResults = Record<string, unknown[]>;
  * `runBranch({ owner, arms: [big, rest], broadcast: false, branchIndex: 0, makeArm })(orders)` →
  * `{ big: ["BIG:2"], rest: [order 1] }`.
  */
-export function runBranch<T, In>(config: {
-  owner: BranchOwner<T, In>;
-  arms: readonly BranchArm<T>[];
-  broadcast: boolean;
-  branchIndex: number;
-  makeArm: (context: IContextManager, routeTrail: string) => ArmPipeline<T>;
-}): (input?: PipelineSource<In>) => BranchResults | Promise<BranchResults> {
-  const { owner, arms, broadcast, branchIndex, makeArm } = config;
+export function runBranch<T, In>(
+  config: { owner: BranchOwner<T, In>; broadcast: boolean } & ArmDispatch<T>,
+): (input?: PipelineSource<In>) => BranchResults | Promise<BranchResults> {
+  const { owner, arms, broadcast } = config;
 
   return (input?: PipelineSource<In>) => {
     if (input === undefined) {
@@ -263,8 +284,11 @@ export function runBranch<T, In>(config: {
     const items = collectItems(syncChunks, itemsOf) as T[] | Promise<T[]>;
 
     // `chain` defers only at a real thenable, so a synchronous parent stays synchronous here.
+    // `config` itself already satisfies `ArmDispatch<T>` (#133 review: rebuilding
+    // `{ arms, branchIndex, makeArm }` here duplicated the object `ArmDispatch<T>` exists to let a
+    // caller forward directly).
     return chain(items, (settled: T[]) =>
-      joinArms(demux(settled, arms, broadcast), arms, branchIndex, makeArm, context),
+      joinArms(demux(settled, arms, broadcast), config, context),
     ) as BranchResults | Promise<BranchResults>;
   };
 }
@@ -280,11 +304,10 @@ export function runBranch<T, In>(config: {
  */
 function joinArms<T>(
   grouped: Map<string, T[]>,
-  arms: readonly BranchArm<T>[],
-  branchIndex: number,
-  makeArm: (context: IContextManager, routeTrail: string) => ArmPipeline<T>,
+  dispatch: ArmDispatch<T>,
   context: IContextManager,
 ): BranchResults | Promise<BranchResults> {
+  const { arms, branchIndex, makeArm } = dispatch;
   // `mapSettle`, never a bare `arms.map(...)`: an arm's own callbacks can throw SYNCHRONOUSLY after
   // an earlier arm already returned a pending `toArray()`. `Array.prototype.map` abandons the array
   // there, so that promise never reaches `settleMaybe` and never gets a rejection handler - measured
