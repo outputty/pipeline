@@ -194,11 +194,12 @@ two knobs and nothing else - everything a chain carries between calls is interna
 - **`.local(build)`** - run a whole region of the chain in the orchestrating process; on
   `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline`, nothing `build` does
   can dispatch.
-- **`.buffer(size)`** - collect items and re-chunk.
-- **`.buffer(fn)`** - decide the chunk boundary per item instead of by count. `fn`'s own `emit()`
-  flushes whatever is pending and resets it to `[]`; returning a value appends it to the (possibly
-  just-reset) pending array, returning `DROP` skips the item. A `Promise`-returning `fn` widens the
-  pipeline's Mode to `"async"`.
+- **`.buffer(size)`** - collect items and re-chunk. `size` defaults to the exported
+  `DEFAULT_CHUNK_SIZE` (`1000`) when `.buffer()` is never called.
+- **`.buffer(fn)`** - decide the chunk boundary per item instead of by count, via a `BufferFunction<T>`.
+  `fn`'s own `emit()` flushes whatever is pending and resets it to `[]`; returning a value appends it
+  to the (possibly just-reset) pending array, returning `DROP` skips the item. A `Promise`-returning
+  `fn` widens the pipeline's Mode to `"async"`.
 - **`.queue(capacity)`** - prefetch up to `capacity` chunks ahead of the consumer, decoupling when a
   chunk is pulled from when a downstream terminal asks for it. Always widens the pipeline's Mode to
   `"async"`.
@@ -206,15 +207,19 @@ two knobs and nothing else - everything a chain carries between calls is interna
   orchestrating process, on every class; the stages either side of it still dispatch. Use
   `Transformer.tap` inside a `.transform()` to observe beside the work instead.
 - **`.branch(build)`** - route items into named arms, each with its own pipeline. A stage, not a
-  terminal: it returns a runner, and the runner produces one record keyed by arm name.
-- **`.onError(fn)`** - the run handler. `fn` receives the error and the context; returning drops
-  the failing chunk and the run continues, throwing stops the run. Position-dependent: only a
-  stage applied AFTER this call is covered. See [Error Handling](#error-handling).
+  terminal: it returns a runner, and the runner produces one record keyed by arm name. `build`
+  receives a `BranchBuilder`; `.when(name, predicate, build?)` and `.otherwise(name, build?)` each
+  add a `BranchArm`. `ResultsOf<B>` extracts a builder's own record type, for a caller who names it
+  explicitly.
+- **`.onError(fn)`** - the run handler, a `PipelineErrorHandler`. `fn` receives the error and the
+  context; returning drops the failing chunk and the run continues, throwing stops the run.
+  Position-dependent: only a stage applied AFTER this call is covered. See
+  [Error Handling](#error-handling).
 
 #### Calling a pipeline
 
-`pipeline(input)` runs it. `input` is an `Iterable<T>` or an `AsyncIterable<T>`, and the result is a
-`PipelineResult<T>` - never another pipeline, so a result cannot be extended.
+`pipeline(input)` runs it. `input` is a `PipelineSource<T>` (`Iterable<T> | AsyncIterable<T>`), and
+the result is a `PipelineResult<T>` - never another pipeline, so a result cannot be extended.
 
 ### PipelineResult
 
@@ -233,20 +238,35 @@ One call's output. Every operation below re-drains the input, so a spent generat
 
 ### Transformer
 
+#### Constructor
+
+<!-- illustrative -->
+
+```typescript
+new Transformer<In, Out>(options?: TransformerOptions<In, Out>)
+```
+
+`options.transform` is the internal `InternalTransformer<In, Out>` function a chain composes onto;
+a caller building a `Transformer` directly never sets this - it starts as the identity and every
+chainable operation below returns a new one composing further. `createTransformer<T>()`
+(`import { createTransformer } from "@outputty/pipeline"`) is sugar for `new Transformer<T, T>()`.
+
 #### Chainable Operations
 
-- **`.map(fn)`** - transform each element.
+- **`.map(fn)`** - transform each element. `fn` is a `PipelineFunction<Out, U>`.
 - **`.flatMap(fn)`** - transform and flatten results.
 - **`.filter(fn)`** - keep elements matching predicate.
-- **`.reduce(fn, initial)`** - fold this ONE chunk; `fn` is `(acc, item, ctx, emit) => acc`, called
-  with all four arguments regardless of its own declared arity. See [Reducing](#reducing).
+- **`.reduce(fn, initial)`** - fold this ONE chunk; `fn` is a `ReduceFunction<U, Out>` -
+  `(acc, item, ctx, emit) => acc`, called with all four arguments regardless of its own declared
+  arity. See [Reducing](#reducing).
 - **`.tap(fn | transformer)`** - execute a side-effect without changing data. `fn` receives each item
   and the context; the `transformer` form receives the whole chunk. This one travels with its stage,
   so on `HttpPipeline`/`ClusterPipeline` it runs in the worker. `Pipeline.tap(...)` is the same
   observation point run in the orchestrating process instead - see [Where the work runs](#where-the-work-runs).
-- **`.onError(fn)`** - the row handler. `fn` receives the failing item, error and context; a
-  returned value replaces the row, `DROP` removes it, throwing escalates to the pipeline. See
-  [Error Handling](#error-handling).
+- **`.onError(fn)`** - the row handler, a `RowErrorHandler`. `fn` receives the failing item, error
+  and context; a returned value replaces the row, `DROP` removes it, throwing escalates to the
+  pipeline. See [Error Handling](#error-handling). Internally carried into a runnable chunk-transform
+  as a `RunScope`, which every element-wise link reads.
 
 ### ConcurrentPipeline
 
@@ -270,6 +290,8 @@ const data = await new ConcurrentPipeline<number>({ maxConcurrency: 2 })
 
 console.log(JSON.stringify(data)); // [6,8,10]
 ```
+
+Every option below is a `ConcurrentPipelineOptions` field.
 
 - **`options.maxConcurrency`** - chunks kept in flight at once. Default `4`.
 - **`options.ordered`** - restore input order in the output. Default `true`.
@@ -342,8 +364,8 @@ const data = await new ClusterPipeline<number>()
 console.log(JSON.stringify(data)); // [2,4,6,8,10]
 ```
 
-- **`options.workers`** - worker processes to bring up on first drain. Default
-  `os.availableParallelism()`.
+- **`options.workers`** (`ClusterPipelineOptions`) - worker processes to bring up on first drain.
+  Default `os.availableParallelism()`.
 
 ### EventEmitterPipeline
 
@@ -367,18 +389,28 @@ const data = await pipeline([1, 2, 3, 4, 5]).toArray();
 console.log(JSON.stringify(data)); // [2,4,6,8,10]
 ```
 
-Every Worker registered on a stage runs on every chunk that reaches it; whichever settles first -
-`respond(value)` or `reject(error)` - decides that chunk. Lifecycle events
-(`stage:<n>:dispatched`/`:done`/`:error`/`:end`, `pipeline:end`) let other code watch a run without
-becoming a Worker itself, as long as it listens on one of those names rather than the bare
-`stage:<n>` channel - registering on the bare channel makes that listener a Worker too.
+A registered Worker function receives one `WorkEvent<In, Out>` argument - `{ chunk, ctx, respond,
+reject }` - regardless of the composed transform's own arity. Every Worker registered on a stage
+runs on every chunk that reaches it; whichever settles first - `respond(value)` or `reject(error)` -
+decides that chunk. Lifecycle events (`stage:<n>:dispatched`/`:done`/`:error`/`:end`, `pipeline:end`)
+let other code watch a run without becoming a Worker itself, as long as it listens on one of those
+names rather than the bare `stage:<n>` channel - registering on the bare channel makes that listener
+a Worker too.
 
-- **`options.emitter`** - a caller-supplied `node:events`-compatible emitter. Optional; a fresh
-  `EventEmitter` is built when omitted. Validated at construction: a caller's own compatible
-  emitter (a namespaced one, a test double) must still carry `on`/`off`/`listeners`/
-  `listenerCount`/`emit`.
+- **`options.emitter`** (`EventEmitterPipelineOptions`) - a caller-supplied emitter satisfying the
+  `PipelineEmitter` interface (`on`/`off`/`listeners`/`listenerCount`/`emit`) - `node:events`'s own
+  `EventEmitter` satisfies it, and so does a namespaced one or a test double. Optional; a fresh
+  `EventEmitter` is built when omitted.
 - `.reduce()` is inherited unchanged from `ConcurrentPipeline` - it folds in-process, with no
   emitter involvement.
+
+### Utilities
+
+Low-level building blocks the higher-level API is built from; most callers never need these
+directly.
+
+- **`buildChunkGenerator(chunkSize)`** - the async chunk cutter `.buffer(size)` uses internally.
+- **`isContextAware(fn)`** - a type guard: does `fn` declare a `ctx` second parameter?
 
 ### SimpleContextManager
 

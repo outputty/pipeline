@@ -503,6 +503,30 @@ once where `.buffer(1)` pays it per item. The gap closes when the callback domin
 over a 2 ms-per-item workload, N=160, ran 23 ms each. Prefer the widest chunk that fits the
 in-flight budget.
 
+## HttpPipeline's wire format and routing
+
+One route per stage index, plain JSON both ways for `/transform/<n>`:
+
+```text
+POST <mount>/transform/0   { "chunk": [1, 2], "context": { "multiplier": 10 } }
+                    -> { "chunk": [2, 4] }
+```
+
+The verb is `transform`, not `stage`: a route reads as the chain was BUILT rather than as a flat
+counter, so a reader can walk `/transform/1` back to the second `.transform()` call without counting
+dispatched stages. `.branch()`'s own arms extend the same scheme with a `/branch/<i>/<name>/` trail.
+
+A dispatched stage that throws - its own transform chain, row recovery included, already ran and did
+NOT recover - 500s with the error message on the serving side. `stageWork()` turns that into a
+thrown error on the DISPATCHING side, which never reaches that side's own unrelated
+`Pipeline.onError()` run handler until `ConcurrentPipeline.apply()`'s wrapped `work` catches it
+there, since the HTTP round trip happens entirely outside any `Transformer` chain.
+
+`writeStreamedBody`'s own backpressure wait removes BOTH its `'drain'` and `'close'` listeners once
+either fires. `once` alone removes only the one that fired, so the loser stays attached to a response
+that outlives the wait: a reduce stage emitting faster than a slow client drains backs up repeatedly
+on one response, and each retained closure holds its own `resolve` alive for the connection's life.
+
 ## EventEmitterPipeline - #124
 
 `stageWork()` is the only DISPATCH override, the same seam `HttpPipeline` overrides to POST -
@@ -617,6 +641,11 @@ construction only - gated on the ABSENCE of the internal `registeredStages` opti
 (`.transform()`/`.buffer()`/`.context()`) never re-validate the identical, unchanged `emitter`
 object a second time.
 
+`_registeredStages` tracks the composed function's own registration by EVENT NAME, not by
+`emitter.listeners().length`: a caller removing that listener between two calls must not cause a
+silent re-registration. Carried forward by REFERENCE through `createPipeline()`, never copied - the
+same `Set` the original, unbound pipeline holds.
+
 One emitter per chain, in two DIFFERENT failure shapes depending on where the `Set` comes from -
 `#113`'s `pipelineIndex` fix for `ClusterPipeline` is the family's precedent for solving either
 properly; unbuilt here, both named in `#124`'s own Settle first.
@@ -649,7 +678,9 @@ unchanged at `2` after both calls.
 A `Pipeline` declares the type it ACCEPTS, holds no data, and IS the function you call. Calling one
 returns a `PipelineResult`, which is where every drain lives. The split is what makes draining
 without an input a compile error rather than a call resolving to `[]`, and what lets one chain serve
-any number of inputs.
+any number of inputs. A `PipelineResult` is not chainable either: `score(rows).transform(...)` is a
+compile error (`TS2339`), never a runtime one - a chain is composed before the data arrives, never
+after, so a `PipelineResult` itself carries no `.transform()`/chain-composing method at all.
 
 ```text
 new Pipeline<In>(options?)      the chain. Stages are RECORDED, not run.
@@ -697,6 +728,13 @@ duration of one call - made that impossible.
 which is what decides where its work runs - a `Transformer` has no class, so the shape this replaces
 ran every arm in the orchestrating process however the chain was built.
 
+`Pipeline.branch()` (`pipeline.ts`) is a thin method over `runBranch()` (`branch.ts`): it claims the
+branch's own index in the shared stage space and hands the arms to `runBranch`. The whole feature -
+the demux, the router and the join - lives in `branch.ts`, and its edge back to `pipeline.ts` is
+type-only. `BranchBuilder` is a fluent builder rather than an object literal on purpose: declaration
+order IS routing order, and a fluent chain makes that literal instead of leaving it as a property of
+key iteration a caller could reorder without changing behavior.
+
 ```text
 routed(orders)
 	parent chain drains          /transform/0                 worker
@@ -722,16 +760,24 @@ view to completion gives it everything and the other `[]`. Owning the concurrenc
 what makes that unrepresentable.
 
 Nothing here is new machinery: the demux is `Transformer.reduce()`'s own shape - fold one chunk, keep
-no state between chunks - and the join is `settleMaybe` + `chain`. That reuse is what makes the Mode
-rule reachable rather than aspirational: every arm synchronous creates ZERO promises, and one
-asynchronous arm widens the whole record to a single `Promise` while its synchronous siblings are
-never wrapped.
+no state between chunks - and the join is `mapSettle` + `chain` (`joinArms`, `branch.ts`). That reuse
+is what makes the Mode rule reachable rather than aspirational: every arm synchronous creates ZERO
+promises, and one asynchronous arm widens the whole record to a single `Promise` while its
+synchronous siblings are never wrapped. `mapSettle`, never a bare `arms.map(...)`: a later arm's own
+callback can throw SYNCHRONOUSLY after an earlier arm already returned a pending `toArray()`, and
+`Array.prototype.map` would abandon that pending promise with no rejection handler ever attached -
+`mapSettle` disarms what was already created before rethrowing, and settles the rest.
 
 An arm's stages address themselves under `/branch/<i>/<name>/`, the branch positional so two
 `.branch()` calls may each declare an arm called `rest`, the arm by name. Without the trail an arm's
 stage 0 collided with the parent's on the worker: measured, the parent's map ran twice
 (`300 -> 360 -> 432`) and the arm's own transform never ran. The name must survive a URL path, so the
-builder refuses one that would not.
+builder refuses one that would not: the name goes straight into a route and `.fetch()` matches
+against an ENCODED pathname, so anything needing encoding never resolves (`.when("big orders", …)`
+dispatched `/branch/0/big%20orders/transform/0` and 404'd). `.` and `..` pass the character class but
+are RELATIVE path segments - `new URL()` rewrites `/branch/0/./transform/0` to
+`/branch/0/transform/0`, which misses `.fetch()`'s trail regex and serves the PARENT chain's stage 0
+instead, wrong data with no error - so the builder refuses both names outright.
 
 ## Benchmarks - pending #11
 

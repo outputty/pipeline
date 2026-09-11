@@ -15,16 +15,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   committed as JSON; the second table controls measured ITEMS IN FLIGHT rather than any declared
   concurrency option, because no two libraries name that knob the same way. Layout and rationale in
   `.claude/architecture.md`'s Benchmarks section.
-- **Every exported symbol's TSDoc follows one convention, gated by `typedoc`** (#118) - `src/`'s
-  docstrings mix what a symbol does with ticket numbers, benchmarks and mechanism narration that
-  duplicates `.claude/architecture.md`, and some describe machinery #90 already deleted
-  (`Pipeline.buffer()` still narrated `_preBufferItems`, gone since #90's own rewrite). Several
-  current exports carry no docstring at all (`Pipeline`'s own call signature, `BranchOwner.drainable`),
-  and nothing checks a `@param` name or a missing description - #90 alone renamed or deleted dozens
-  of signatures in one stack with no tool catching drift. Now, because #90 and #113 landing the same
-  day this was planned is exactly the kind of large, fast-moving change this gap lets through
-  silently; `typedoc --validation.notDocumented` is proven this session to catch it for real
-  (`Pipeline.local has an @param with name "wrongName", which was not used`).
 - **A benchmark harness for the package's own internal overhead, and closing the gap it finds**
   (#120) - `#90`'s own ~430 ns/row figure predates its `L13` fix and nothing replaced it; nothing at
   all measures `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` against a hand-rolled
@@ -111,6 +101,20 @@ The two older candidates, still not filed:
   trusting the scope. `bunx oxlint src/` prints nothing and exits 0. PR #154 (both layers, one PR
   under the 200-line threshold - measured via `git diff --stat` before committing to a stack, not
   guessed).
+- **Every exported symbol's TSDoc follows one convention, gated by `typedoc`** (#118, `docs`) -
+  `src/`'s docstrings mixed what a symbol does with ticket numbers, benchmarks and mechanism
+  narration that duplicated `.claude/architecture.md`, and some described machinery #90 had already
+  deleted. Several exports carried no docstring at all (`Pipeline`'s own call signature,
+  `BranchOwner.drainable`), and nothing checked a `@param` name or a missing description. Every
+  docstring in `src/` is swept: history, provenance and benchmark narration cut, a mechanism
+  paragraph with no match in `architecture.md` moved there, every Python-equivalent block deleted,
+  every previously-undocumented required symbol documented. `typedoc.json` plus a `docs:check`
+  script (`pnpm --package=typescript@5.9.3 --package=typedoc@0.28.20 dlx typedoc …`) is the new
+  gate, wired into CI as its own step - typedoc 0.28.20 cannot run against this repo's pinned
+  `typescript@^7.0.2` at all (the TS7 npm package carries no Compiler API), so the gate resolves
+  typedoc's own peer through `pnpm dlx`, isolated from the workspace's pin, rather than adding a
+  devDependency. A narrowing-only override carries no docstring of its own, confirmed by both the
+  gate and a real IDE hover resolving to the base method's doc.
 - **`.buffer()` accepts a callback for custom buffering windows** (#88, `feat`) - `.buffer(size)`
   could only cut a chunk boundary by count, and the closest existing shape (`ChunkerFunction`) was
   dead code with no way to hand one to `.buffer()` at all. `.buffer(fn: BufferFunction<T>)` folds
