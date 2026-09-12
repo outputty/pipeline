@@ -193,10 +193,19 @@ describe("async-engine tax spike (#120 follow-up) - a sync source on a forced-as
   it("still cuts the exact same chunks .buffer(size) always did, on ConcurrentPipeline", async () => {
     // `sourcePolicy()` forces ConcurrentPipeline's Mode to "async" regardless of input shape - the
     // fast path this covers (a sync pre-buffer view kept alive through that forced Mode) must
-    // produce IDENTICAL output to the per-item path it replaces, not just run faster.
-    const out = await new ConcurrentPipeline<number>().buffer(3)([1, 2, 3, 4, 5, 6, 7]).toArray();
+    // produce IDENTICAL output to the per-item path it replaces, not just run faster. `.toArray()`
+    // alone can't see a chunk boundary (`boundaryProbe`'s own docstring, above) - flattening
+    // hides a wrong cut (e.g. one 7-item chunk) behind an identical array, so this reads the
+    // actual boundary `.apply()` hands the next stage.
+    const seen: number[][] = [];
+
+    const out = await new ConcurrentPipeline<number>()
+      .buffer(3)
+      .apply(boundaryProbe(seen))([1, 2, 3, 4, 5, 6, 7])
+      .toArray();
 
     expect(out).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(seen).toEqual([[1, 2, 3], [4, 5, 6], [7]]);
   });
 
   it("still drops an item via DROP and never emits an empty trailing chunk, on ConcurrentPipeline", async () => {

@@ -671,8 +671,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * both views null out. Named once here rather than repeated as a `{ preBufferItems: null,
    * syncPreBufferItems: null }` pair at `apply()`/`reduce()` (below) and
    * `ConcurrentPipeline.apply()`/`.reduce()`'s own dispatched equivalents - a dispatching
-   * subclass has no sync chunk stream of its own, so nulling `syncPreBufferItems` there is a
-   * no-op, not a behavior change. */
+   * subclass CAN carry a real `syncPreBufferItems` view now (F3: `fromSource()` keeps a sync
+   * source's item view alive alongside the forced-async chunk stream, for `.buffer()`'s own
+   * fast path), so this reset is genuine there too, not the no-op it was before that view
+   * existed. */
   protected freshPreBuffer(): Pick<
     PipelineConstructorOptions,
     "preBufferItems" | "syncPreBufferItems"
