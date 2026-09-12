@@ -14,6 +14,22 @@ once, across processes, or across machines. It is `outputty/laygo`'s caller-side
 laygo dependency. It must never grow a query-planning or storage layer of its own: chunking,
 transforming and controlling concurrency over data already in flight is the whole job.
 
+It trades per-row speed for bounded memory, deliberately. The `Array` methods this package reads
+like materialize every intermediate row before the next link sees any of them; a `Pipeline` holds
+one chunk per stage, so a run whose terminal op retains nothing retains nothing. A design change
+that accepts per-row overhead to remove per-row allocation is therefore the intended trade, never a
+regression - and the reverse, a change that buys per-row speed by materializing more rows, needs a
+stated reason. A benchmark this package commits reports time, memory held and time spent in garbage
+collection together, so neither side of that trade can move unobserved - the committed harness
+measures time today and gains the other two axes with `#178`.
+
+> **Bounded memory** - the live set of a run is one chunk per stage, never the whole source. Rows
+> enter, transform and leave; only what the terminal op itself retains survives the pass, so
+> `.toArray()` retains every output row by definition where `.forEach()`/`.consume()` retain none.
+> The guarantee is about the rows a run HOLDS, never about how many objects it allocates in total:
+> a chunked run allocates more short-lived objects than one fused loop, and collects them in more,
+> cheaper collections rather than fewer, expensive ones.
+
 ## Functionality
 
 ### Pipeline and Transformer
