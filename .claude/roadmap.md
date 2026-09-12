@@ -67,9 +67,11 @@ The two older candidates, still not filed:
 - **A benchmark harness for the package's own internal overhead, and closing the gap it finds**
   (#120, `perf`, PR #166/#167/#169/#170/#175/#176) - `bench/overhead.ts` measures one leg per
   pipeline runner class (`Pipeline`, `ConcurrentPipeline`, `HttpPipeline`, `ClusterPipeline`)
-  against a hand-rolled, output-matched floor, gated on a committed baseline (absolute
-  `pipelineNsPerRow` only - `.ratio` prints but is never gated, since dividing two noisy
-  measurements compounds their noise past what a tight tolerance survives), plus each dispatching
+  against a hand-rolled, output-matched floor, gated on a committed baseline (absolute ns/row -
+  `pipelineNsPerRow` for `Pipeline`, `local.nsPerRow` for a dispatching class, since its own
+  DISPATCHED leg crosses a real network/IPC boundary whose jitter is not this package's own overhead;
+  `.ratio` prints but is never gated, since dividing two noisy measurements compounds their noise past
+  what a tight tolerance survives), plus each dispatching
   class's own `.local()` row proving a pinned region never dispatches (0 `stageWork()` calls, 0
   HTTP requests, every item on the primary's own pid). Found and fixed O1: `Transformer.filter()`'s
   sync no-handler branch paid for three passes over the chunk where `.map()` pays for two -
@@ -81,9 +83,8 @@ The two older candidates, still not filed:
   function*`, `buildBufferGenerator` no longer awaits a fold result that was never a thenable, and
   `fromSource()` keeps a sync pre-buffer view alive under a forced-async Mode so `.buffer()` can
   fold through it synchronously - together roughly halving every dispatching class's own `.local()`
-  row (`ConcurrentPipeline` 535 → 271 ns/row, `HttpPipeline` 480 → 255, `ClusterPipeline` 496 →
-  250). Layout and the full table in `.claude/architecture.md`'s Internal overhead benchmarks
-  section.
+  row; see `bench/baseline.json` for the exact committed figures. Layout and the full table in
+  `.claude/architecture.md`'s Internal overhead benchmarks section.
 - **The node:/laygo import boundaries, mechanized as oxlint rules** (#117, `feat`) -
   `architecture.md`'s own stack diagram drew `node:cluster`/`node:http` as scoped to
   `ClusterPipeline`/`HttpPipeline` only, and this package's own split from laygo (#743-745) drew "no

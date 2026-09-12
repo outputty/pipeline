@@ -782,11 +782,14 @@ package against ITSELF: one leg per pipeline runner class (`Pipeline`, `Concurre
 `HttpPipeline`, `ClusterPipeline`), each against a hand-rolled, output-matched, non-`Pipeline`
 equivalent - the quickest in-process code producing the identical result, even where that skips a
 real network/IPC boundary a dispatching class would cross. A committed baseline gates future runs on
-ABSOLUTE `pipelineNsPerRow` only, 20% tolerance, one warm-up round discarded; `.ratio` is read from
-every report and printed in the table below but never gated - dividing two independently noisy
-measurements compounds their noise past what a 10% tolerance survives (post-planning finding:
-`pipelineNsPerRow` held a 5% spread across 5 real consecutive runs while the same runs' `.ratio`
-spread 14%, and the gate failed 2 of those 5 with no code change between them). Each dispatching
+an ABSOLUTE ns/row figure, 20% tolerance, one warm-up round discarded - `pipelineNsPerRow` for
+`Pipeline`, `local.nsPerRow` instead for a dispatching class, since its own DISPATCHED leg crosses a
+real network/IPC boundary whose jitter is not this package's own overhead (`bench/gate.ts`'s own
+header has the full split). `.ratio` is read from every report and printed in the table below but
+never gated - dividing two independently noisy measurements compounds their noise past what a 10%
+tolerance survives (post-planning finding: `pipelineNsPerRow` held a 5% spread across 5 real
+consecutive runs while the same runs' `.ratio` spread 14%, and the gate failed 2 of those 5 with no
+code change between them). Each dispatching
 class's own `.local()` row is measured and its correctness asserted (a pinned region never reaches
 `stageWork()`/serves a request/runs on a worker pid). `pnpm bench:overhead` runs it; `bench/canonical.ts`
 declares the one chain (`.map((x) => x * 2).filter((x) => x > 4)`) every leg and its floor measure.
