@@ -93,7 +93,9 @@ describe("#120 Done-when 3 - .local() correctness per dispatching class", () => 
   it(
     "HttpPipeline: 0 requests served while pinned",
     async () => {
-      const report = await measureHttpPipeline(2);
+      // floorNsPerRow (first arg) is irrelevant to this assertion - any finite placeholder works,
+      // since measureHttpPipeline no longer measures it itself (bench/overhead.ts does, once).
+      const report = await measureHttpPipeline(1, 2);
       expect(report.local?.requestsWhilePinned).toBe(0);
     },
     HTTP_TIMEOUT,

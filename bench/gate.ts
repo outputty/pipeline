@@ -7,13 +7,12 @@
  * `bench/baseline.json`.
  *
  * Gates ABSOLUTE `pipelineNsPerRow` only, never `.ratio` (post-planning finding): `.ratio` divides by
- * `floorNsPerRow`, and dividing two
- * independently noisy measurements compounds their noise - measured, `pipelineNsPerRow` held to a 5%
- * spread across 5 real consecutive runs while the same runs' `.ratio` spread 14%, past this gate's
- * own 10% tolerance with no code change between runs. `pnpm bench:overhead` failed 2 of those 5 runs
- * before the ratio check was removed. `.ratio` still prints in every report and every doc table -
- * it answers "is dispatching worth it here", which absolute `pipelineNsPerRow` alone does not - it
- * is simply no longer a gated number.
+ * `floorNsPerRow`, and dividing two independently noisy measurements compounds their noise -
+ * measured, `pipelineNsPerRow` held to a 5% spread across 5 real consecutive runs while the same
+ * runs' `.ratio` spread 14%, past this gate's own 10% tolerance with no code change between runs.
+ * `pnpm bench:overhead` failed 2 of those 5 runs before the ratio check was removed. `.ratio` still
+ * prints in every report and every doc table - it answers "is dispatching worth it here", which
+ * absolute `pipelineNsPerRow` alone does not - it is simply no longer a gated number.
  */
 
 /** One class's own measured (or committed-baseline) row - `local` is present only for the three
@@ -35,6 +34,22 @@ export type LegName = "Pipeline" | "ConcurrentPipeline" | "HttpPipeline" | "Clus
 export type OverheadReport = Record<LegName, LegReport>;
 
 export const ABSOLUTE_TOLERANCE = 0.2;
+
+/**
+ * Builds one `LegReport`, `ratio` always `pipelineNsPerRow / floorNsPerRow` - the ONE place that
+ * division happens (code-review finding: it was retyped by hand at 5 call sites - once per leg in
+ * `bench/legs/*.ts`, and a 6th time recomputing it under `BENCH_SYNTHETIC_REGRESSION`, with no
+ * type error to catch a future site drifting from this file's own stated invariant).
+ *
+ * `legReport(30, 10)` → `{ pipelineNsPerRow: 30, floorNsPerRow: 10, ratio: 3 }`.
+ */
+export function legReport(
+  pipelineNsPerRow: number,
+  floorNsPerRow: number,
+  local?: LegReport["local"],
+): LegReport {
+  return { pipelineNsPerRow, floorNsPerRow, ratio: pipelineNsPerRow / floorNsPerRow, local };
+}
 
 export interface GateResult {
   ok: boolean;

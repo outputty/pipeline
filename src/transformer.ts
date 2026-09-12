@@ -122,16 +122,25 @@ function filterSettle<T>(
 ): T[] | Promise<T[]> {
   const kept: T[] = [];
   let tail: (boolean | Promise<boolean>)[] | undefined;
+  // tailStart is recorded AT the index where tail is born (never derived from chunk.length -
+  // tail.length afterward), so it stays correct independent of how many entries filterStep pushes
+  // per item - code-review finding: the derived form depended on an invariant (exactly one push per
+  // remaining item) that lives entirely in filterStep's own body and is invisible here.
+  let tailStart = -1;
   try {
-    for (const item of chunk) {
-      tail = filterStep(item, predicate, kept, tail);
+    for (let i = 0; i < chunk.length; i++) {
+      const before = tail;
+      tail = filterStep(chunk[i], predicate, kept, tail);
+      // No `if`: an extra nested block here would push this loop past this repo's `max-depth: 2`
+      // (the try above is depth 1, this for is depth 2) - the same reason filterStep is its own
+      // function in the first place.
+      tailStart = !before && tail ? i : tailStart;
     }
   } catch (error) {
     if (tail) disarm(tail);
     throw error;
   }
   if (!tail) return kept;
-  const tailStart = chunk.length - tail.length;
   return chain(settleMaybe(tail), (keep) => {
     for (let i = 0; i < keep.length; i++) {
       if (keep[i]) kept.push(chunk[tailStart + i]);

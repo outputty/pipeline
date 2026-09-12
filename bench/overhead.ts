@@ -32,7 +32,8 @@ import { measurePipeline } from "./legs/pipeline";
 import { measureConcurrentPipeline } from "./legs/concurrent";
 import { measureHttpPipeline } from "./legs/http";
 import { measureClusterPipeline } from "./legs/cluster";
-import { checkGate, type OverheadReport } from "./gate";
+import { checkGate, legReport, type OverheadReport } from "./gate";
+import { timeFloor } from "./canonical";
 
 const BASELINE_PATH = fileURLToPath(new URL("./baseline.json", import.meta.url));
 
@@ -55,27 +56,33 @@ function rounds(): number | undefined {
 
 async function main(): Promise<void> {
   if (!cluster.isPrimary) {
-    await measureClusterPipeline(rounds());
+    // A placeholder floor (0), never the real handRolledFloor timing: this call's whole return
+    // value is discarded below, kept only for its construction side effect (registry alignment,
+    // this file's own header) - re-timing an unrelated 1,000,000-row loop for a result nobody
+    // reads would only waste CPU on every forked worker (code-review finding).
+    await measureClusterPipeline(0, rounds());
     return;
   }
 
+  // Measured ONCE and shared by every leg: handRolledFloor is class-independent
+  // (bench/canonical.ts's own timeFloor docstring), so timing it separately per leg was 4 redundant
+  // 5-round, 1,000,000-row measurements of the identical conceptual number (code-review finding).
+  const floorNsPerRow = await timeFloor(rounds());
   const report: OverheadReport = {
-    Pipeline: await measurePipeline(rounds()),
-    ConcurrentPipeline: await measureConcurrentPipeline(rounds()),
-    HttpPipeline: await measureHttpPipeline(rounds()),
-    ClusterPipeline: await measureClusterPipeline(rounds()),
+    Pipeline: await measurePipeline(floorNsPerRow, rounds()),
+    ConcurrentPipeline: await measureConcurrentPipeline(floorNsPerRow, rounds()),
+    HttpPipeline: await measureHttpPipeline(floorNsPerRow, rounds()),
+    ClusterPipeline: await measureClusterPipeline(floorNsPerRow, rounds()),
   };
 
   if (process.env.BENCH_SYNTHETIC_REGRESSION === "1") {
-    const widenedNsPerRow = report.Pipeline.pipelineNsPerRow * 100;
-    report.Pipeline = {
-      ...report.Pipeline,
-      pipelineNsPerRow: widenedNsPerRow,
-      // ratio is ALWAYS pipelineNsPerRow / floorNsPerRow (gate.ts's own docstring) - recomputed
-      // here too, so the printed report stays internally consistent under the synthetic multiplier
-      // instead of showing a ratio that no longer matches its own two inputs.
-      ratio: widenedNsPerRow / report.Pipeline.floorNsPerRow,
-    };
+    // legReport() recomputes ratio (gate.ts's own docstring: ALWAYS pipelineNsPerRow /
+    // floorNsPerRow) so the printed report stays internally consistent under the synthetic
+    // multiplier instead of showing a ratio that no longer matches its own two inputs.
+    report.Pipeline = legReport(
+      report.Pipeline.pipelineNsPerRow * 100,
+      report.Pipeline.floorNsPerRow,
+    );
   }
 
   // Single-line, not pretty-printed: `runFixtureJson`'s own convention (every cluster-backed
