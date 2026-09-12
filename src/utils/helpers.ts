@@ -146,82 +146,13 @@ export function mapSettle<T, R>(chunk: T[], run: (item: T) => R | Promise<R>): R
  * Attaches a throwaway rejection handler to every pending value in `created` (#90) - what
  * `mapSettle` above owes the siblings of an item whose callback threw synchronously, since nothing
  * downstream will ever await them. Its own function to keep `mapSettle`'s `catch` at this repo's
- * `max-depth: 2`.
+ * `max-depth: 2`. Exported for `transformer.ts`'s own `filterSettle` (#120's O1), which owes its
+ * `tail` the identical disarm on a synchronous throw.
  */
-function disarm<R>(created: (R | Promise<R>)[]): void {
+export function disarm<R>(created: (R | Promise<R>)[]): void {
   for (const value of created) {
     if (isThenable(value)) void Promise.resolve(value).catch(() => {});
   }
-}
-
-/**
- * One item's own step of `filterSettle`'s loop, pulled out to keep that loop's own `try` at this
- * repo's `max-depth: 2` (the same reason `disarm` above is its own function, for `mapSettle`'s
- * `catch`) - `tail` is threaded through as the return value rather than closed over, since
- * `filterSettle` needs the UPDATED value back at its own scope to read after the loop ends.
- *
- * Once `tail` exists, every later item's raw result (sync or thenable) joins it unconditionally -
- * membership for those items is decided only once `tail` is settled, in `filterSettle` itself.
- * Before that, a sync-true item is pushed into `kept` immediately and a sync-false one is dropped;
- * the FIRST thenable seen is what starts `tail`.
- */
-function filterStep<T>(
-  item: T,
-  predicate: (item: T) => boolean | Promise<boolean>,
-  kept: T[],
-  tail: (boolean | Promise<boolean>)[] | undefined,
-): (boolean | Promise<boolean>)[] | undefined {
-  const result = predicate(item);
-  if (tail) {
-    tail.push(result);
-    return tail;
-  }
-  if (isThenable(result)) return [result];
-  if (result) kept.push(item);
-  return undefined;
-}
-
-/**
- * Filters `chunk` by `predicate` in ONE pass over it (#120's O1) - a synchronously-true item is
- * pushed into the kept array the moment its own predicate call returns, rather than `.filter()`'s
- * old three-pass shape: `mapSettle` building a keep-flag per item, `settleMaybe`'s own `.some()`
- * scanning that whole array for a thenable, then `chunk.filter()` reading the flags back a third
- * time. The common, fully-synchronous case now costs exactly what `mapSettle` alone costs for
- * `.map()` - one call per item, no second array, no second pass.
- *
- * Every item before the FIRST thenable predicate result is already decided synchronously, so
- * nothing after that point re-evaluates it: once a thenable appears, later raw results (sync or
- * async) collect into `tail` instead, settled together (`settleMaybe`, the same async-safe
- * collect-then-filter shape `.map()`'s own async arm already pays for) and appended to `kept` in
- * order once resolved. A synchronous throw is disarmed exactly like `mapSettle`'s own `results` -
- * only `tail` can hold a live, unattached promise at that point, since every earlier item already
- * settled into a real `T` inside `kept`.
- *
- * `filterSettle([1, 2, 3], (x) => x > 1)` → `[2, 3]`, no `Promise` created, one predicate call per
- * item.
- */
-export function filterSettle<T>(
-  chunk: T[],
-  predicate: (item: T) => boolean | Promise<boolean>,
-): T[] | Promise<T[]> {
-  const kept: T[] = [];
-  let tail: (boolean | Promise<boolean>)[] | undefined;
-  try {
-    for (const item of chunk) {
-      tail = filterStep(item, predicate, kept, tail);
-    }
-  } catch (error) {
-    if (tail) disarm(tail);
-    throw error;
-  }
-  if (!tail) return kept;
-  const tailStart = chunk.length - tail.length;
-  return chain(settleMaybe(tail), (keep) => {
-    for (let i = 0; i < keep.length; i++) {
-      if (keep[i]) kept.push(chunk[tailStart + i]);
-    }
-    return kept;
-  });
 }
 
 /**
