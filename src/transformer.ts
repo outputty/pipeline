@@ -32,6 +32,7 @@ import {
   dropOrRethrow,
   chain,
   mapSettle,
+  filterSettle,
   isThenable,
   tryRecover,
 } from "./utils/helpers";
@@ -397,10 +398,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
           (predicate as (item: Out) => boolean | Promise<boolean>)(x);
     return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
-        return chain(
-          mapSettle(chunk, (x) => call(x, ctx)),
-          (keep) => chunk.filter((_x, i) => keep[i]),
-        );
+        return filterSettle(chunk, (x) => call(x, ctx));
       }
       return settleRows(
         chunk,

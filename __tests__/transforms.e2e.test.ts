@@ -63,6 +63,46 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
     expect(withCtx).toEqual([4, 5]);
   });
 
+  it("filter (#120's O1): a predicate mixing sync and thenable results keeps every kept item in order", async () => {
+    // The one-loop path (filterSettle) decides every item before the FIRST thenable synchronously;
+    // from there it collects into a separate tail and settles it - this is the case that proves the
+    // two halves splice back together in the original order, not just each half on its own. No
+    // typed overload of the PUBLIC `.filter()` admits a callback that returns a plain `boolean` for
+    // some items and a `Promise<boolean>` for others (each overload is uniform), so the cast below
+    // exercises `filterSettle`'s own runtime branch directly, the same way it would for an `any`
+    // boundary a caller's own code could produce (a JSON-typed predicate, say).
+    const mixedPredicate = ((x: number) => (x === 3 ? Promise.resolve(true) : x % 2 === 1)) as (
+      item: number,
+    ) => Promise<boolean>;
+    const [out] = await run([1, 2, 3, 4, 5, 6], T<number>().filter(mixedPredicate));
+    expect(out).toEqual([1, 3, 5]);
+  });
+
+  it("filter (#120's O1): a sync throw after an earlier thenable leaves no unhandled rejection behind", async () => {
+    // The same `mapSettle`/`disarm` hazard `.map()` already guards against (sync-mode.e2e.test.ts's
+    // own "a synchronously-throwing row handler" case), now for filterSettle's own `tail`: item 1
+    // returns a pending promise (goes into tail), item 2 throws synchronously while `tail` is
+    // already live - the one path that can leave a created promise with no rejection handler if
+    // `disarm(tail)` were missing.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    const throwingPredicate = ((x: number) => {
+      if (x === 1) return Promise.reject(new Error("slow failure"));
+      if (x === 2) throw new Error("fast failure");
+      return true;
+    }) as (item: number) => boolean;
+    const t = T<number>().filter(throwingPredicate);
+    expect(() => t.runnable()([1, 2, 3], new SimpleContextManager())).toThrow("fast failure");
+
+    // One turn of the event loop is enough for an abandoned rejection to surface.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    process.off("unhandledRejection", onUnhandled);
+
+    expect(unhandled).toEqual([]);
+  });
+
   it("flatten expands arrays and flatMap maps-then-flattens", async () => {
     const [flat] = await run(
       [
