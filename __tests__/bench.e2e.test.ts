@@ -1,8 +1,8 @@
 /**
  * #120's own Done-when cases, proven against the real `bench/` harness - no mocks, real `Pipeline`
- * family instances, a real loopback server (HttpPipeline, L2) and a real forked worker
- * (ClusterPipeline, L3, run as a subprocess fixture - `pipelines.e2e.test.ts`'s own header explains
- * why a `ClusterPipeline` is never constructed directly inside a Vitest worker).
+ * family instances, a real loopback server (HttpPipeline) and a real forked worker (ClusterPipeline,
+ * L3, run as a subprocess fixture - `pipelines.e2e.test.ts`'s own header explains why a
+ * `ClusterPipeline` is never constructed directly inside a Vitest worker).
  *
  * A case naming a class or a CLI behavior this layer hasn't built yet is `it.fails`, flipping to
  * `it` as each layer lands (`pipelines.e2e.test.ts`'s own established convention).
@@ -18,7 +18,9 @@ import { checkGate, type OverheadReport } from "../bench/gate";
 import { pipelineMatchesFloor } from "../bench/legs/pipeline";
 import { concurrentMatchesFloor, countingConcurrentPipeline } from "../bench/legs/concurrent";
 import { httpMatchesFloor, measureHttpPipeline } from "../bench/legs/http";
-import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
+import { withLoopbackServer, countingHandler } from "../bench/utils/loopbackServer";
+import { HttpPipeline } from "../src";
+import { FIXTURE_TIMEOUT, HTTP_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
 
 describe("#120 Done-when 2 - each class's hand-rolled floor matches its Pipeline-based leg", () => {
   it("Pipeline: identical output at a small N", async () => {
@@ -29,9 +31,13 @@ describe("#120 Done-when 2 - each class's hand-rolled floor matches its Pipeline
     expect(await concurrentMatchesFloor(50)).toBe(true);
   });
 
-  it.fails("HttpPipeline: identical output at a small N (#120 L2)", async () => {
-    expect(await httpMatchesFloor(50)).toBe(true);
-  });
+  it(
+    "HttpPipeline: identical output at a small N",
+    async () => {
+      expect(await httpMatchesFloor(50)).toBe(true);
+    },
+    HTTP_TIMEOUT,
+  );
 
   it.fails(
     "ClusterPipeline: identical output at a small N (#120 L3, subprocess fixture)",
@@ -62,10 +68,30 @@ describe("#120 Done-when 3 - .local() correctness per dispatching class", () => 
     expect(counter.calls).toBe(0);
   });
 
-  it.fails("HttpPipeline: 0 requests served while pinned (#120 L2)", async () => {
-    const report = await measureHttpPipeline(2);
-    expect(report.local?.requestsWhilePinned).toBe(0);
-  });
+  it(
+    "HttpPipeline: a stage OUTSIDE .local() DOES reach the worker - negative control",
+    async () => {
+      const { handler, counter } = countingHandler(
+        new HttpPipeline<number>({ url: "" }).transform(canonicalChain).fetch,
+      );
+      await withLoopbackServer(handler, async (url) => {
+        await new HttpPipeline<number>({ url })
+          .transform(canonicalChain)(canonicalInput(10))
+          .toArray();
+      });
+      expect(counter.requests).toBeGreaterThan(0);
+    },
+    HTTP_TIMEOUT,
+  );
+
+  it(
+    "HttpPipeline: 0 requests served while pinned",
+    async () => {
+      const report = await measureHttpPipeline(2);
+      expect(report.local?.requestsWhilePinned).toBe(0);
+    },
+    HTTP_TIMEOUT,
+  );
 
   it.fails(
     "ClusterPipeline: every item's stage runs on the primary's own pid (#120 L3, subprocess fixture)",
