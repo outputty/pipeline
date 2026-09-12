@@ -66,6 +66,15 @@ export function checkGate(
       violations.push(`${leg}: missing from the report - baseline has it, nothing to compare`);
       continue;
     }
+    if (!Number.isFinite(current.pipelineNsPerRow)) {
+      // Every comparison against NaN is false, so an unguarded `>` below would silently PASS a
+      // broken measurement (the exact hazard `median()`'s own docstring names) - a non-finite
+      // reading has failed to prove no regression, same as a missing leg above.
+      violations.push(
+        `${leg}: pipelineNsPerRow is ${current.pipelineNsPerRow} - not a finite measurement`,
+      );
+      continue;
+    }
     const absoluteCeiling = base.pipelineNsPerRow * (1 + ABSOLUTE_TOLERANCE);
     if (current.pipelineNsPerRow > absoluteCeiling) {
       violations.push(

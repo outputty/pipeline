@@ -19,7 +19,14 @@ import { concurrentMatchesFloor, countingConcurrentPipeline } from "../bench/leg
 import { httpMatchesFloor, measureHttpPipeline } from "../bench/legs/http";
 import { withLoopbackServer, countingHandler } from "../bench/utils/loopbackServer";
 import { HttpPipeline } from "../src";
-import { FIXTURE_TIMEOUT, HTTP_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
+import {
+  FIXTURE_TIMEOUT,
+  HTTP_TIMEOUT,
+  runFixtureJson,
+  runFixture,
+  expectFixtureOk,
+  lastJsonLine,
+} from "./helpers/fixtures";
 
 describe("#120 Done-when 2 - each class's hand-rolled floor matches its Pipeline-based leg", () => {
   it("Pipeline: identical output at a small N", async () => {
@@ -148,7 +155,6 @@ describe("#120 Done-when 4 - a synthetic regression makes the gate fail", () => 
       // compares to a baseline committed on another one, proving only that the harness runs end to
       // end. The regressed run gates for real: its 100x multiplier dominates any real machine noise,
       // so the resulting exit 1 is deterministic too.
-      const { runFixture, expectFixtureOk, lastJsonLine } = await import("./helpers/fixtures");
       process.env.BENCH_ROUNDS = "2";
       try {
         process.env.BENCH_SKIP_GATE = "1";
@@ -239,6 +245,19 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
     expect(result.ok).toBe(false);
     expect(result.violations[0]).toMatch(/Pipeline: missing from the report/);
   });
+
+  it("fails when a leg's pipelineNsPerRow is NaN, rather than silently passing (code-review finding)", () => {
+    // Every comparison against NaN is false, so an unguarded `current.pipelineNsPerRow > ceiling`
+    // would report `{ ok: true }` for a broken measurement - the same hazard median()'s own
+    // docstring names, now for checkGate's own comparison.
+    const report = {
+      ...baseline,
+      Pipeline: { pipelineNsPerRow: NaN, floorNsPerRow: 4.2, ratio: NaN },
+    };
+    const result = checkGate(report, baseline);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/Pipeline: pipelineNsPerRow is NaN/);
+  });
 });
 
 describe("#120 median/timeRounds - fail loud rather than a silent NaN", () => {
@@ -258,7 +277,6 @@ describe("#120 median/timeRounds - fail loud rather than a silent NaN", () => {
 
 describe("#120 bench/overhead.ts - BENCH_ROUNDS validation", () => {
   it("a non-numeric BENCH_ROUNDS fails loud, naming the bad value, rather than silently becoming NaN", async () => {
-    const { runFixture } = await import("./helpers/fixtures");
     process.env.BENCH_ROUNDS = "5x";
     try {
       const result = await runFixture("bench/overhead.ts");
@@ -277,7 +295,6 @@ describe("#120 bench/overhead.ts - BENCH_ROUNDS validation", () => {
       // terminates. `timedOut: false` is the discriminator: an unfixed rounds() hangs until
       // FIXTURE_TIMEOUT kills the process (timedOut: true, code 1 from the kill, not from a real
       // exit) - this asserts the CLI itself exits, and names the bad value, well before that.
-      const { runFixture } = await import("./helpers/fixtures");
       process.env.BENCH_ROUNDS = "Infinity";
       try {
         const result = await runFixture("bench/overhead.ts");

@@ -148,6 +148,9 @@ export function mapSettle<T, R>(chunk: T[], run: (item: T) => R | Promise<R>): R
  * downstream will ever await them. Its own function to keep `mapSettle`'s `catch` at this repo's
  * `max-depth: 2`. Exported for `transformer.ts`'s own `filterSettle` (#120's O1), which owes its
  * `tail` the identical disarm on a synchronous throw.
+ *
+ * `disarm([Promise.reject(new Error("x"))])` → `undefined`, no unhandled rejection (the rejection
+ * gets a throwaway `.catch()`, its reason never read).
  */
 export function disarm<R>(created: (R | Promise<R>)[]): void {
   for (const value of created) {

@@ -88,19 +88,25 @@ describe("transforms e2e — element ops through a full pipeline run", () => {
     const onUnhandled = (reason: unknown) => unhandled.push(reason);
     process.on("unhandledRejection", onUnhandled);
 
-    const throwingPredicate = ((x: number) => {
-      if (x === 1) return Promise.reject(new Error("slow failure"));
-      if (x === 2) throw new Error("fast failure");
-      return true;
-    }) as (item: number) => boolean;
-    const t = T<number>().filter(throwingPredicate);
-    expect(() => t.runnable()([1, 2, 3], new SimpleContextManager())).toThrow("fast failure");
+    // try/finally: the assertion below throws on a real regression (filterSettle no longer
+    // throwing synchronously as expected) - without it, a failed assertion would skip
+    // process.off, leaving this listener registered for the rest of the Vitest worker's run and
+    // silently swallowing an unrelated LATER test's own genuine unhandled rejection.
+    try {
+      const throwingPredicate = ((x: number) => {
+        if (x === 1) return Promise.reject(new Error("slow failure"));
+        if (x === 2) throw new Error("fast failure");
+        return true;
+      }) as (item: number) => boolean;
+      const t = T<number>().filter(throwingPredicate);
+      expect(() => t.runnable()([1, 2, 3], new SimpleContextManager())).toThrow("fast failure");
 
-    // One turn of the event loop is enough for an abandoned rejection to surface.
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    process.off("unhandledRejection", onUnhandled);
-
-    expect(unhandled).toEqual([]);
+      // One turn of the event loop is enough for an abandoned rejection to surface.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   it("flatten expands arrays and flatMap maps-then-flattens", async () => {
