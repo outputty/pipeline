@@ -261,9 +261,31 @@ describe("#120 bench/overhead.ts - BENCH_ROUNDS validation", () => {
     try {
       const result = await runFixture("bench/overhead.ts");
       expect(result.code).not.toBe(0);
-      expect(result.stderr).toMatch(/BENCH_ROUNDS must be a number, got "5x"/);
+      expect(result.stderr).toMatch(/BENCH_ROUNDS must be a finite number, got "5x"/);
     } finally {
       delete process.env.BENCH_ROUNDS;
     }
   });
+
+  it(
+    "BENCH_ROUNDS=Infinity fails loud rather than hanging the round loop forever (code-review finding)",
+    async () => {
+      // Number("Infinity") is Infinity, not NaN - a bare Number.isNaN guard lets it through, and
+      // timeRounds's own `rounds < 2` check is false for Infinity too, so the round loop never
+      // terminates. `timedOut: false` is the discriminator: an unfixed rounds() hangs until
+      // FIXTURE_TIMEOUT kills the process (timedOut: true, code 1 from the kill, not from a real
+      // exit) - this asserts the CLI itself exits, and names the bad value, well before that.
+      const { runFixture } = await import("./helpers/fixtures");
+      process.env.BENCH_ROUNDS = "Infinity";
+      try {
+        const result = await runFixture("bench/overhead.ts");
+        expect(result.timedOut).toBe(false);
+        expect(result.code).not.toBe(0);
+        expect(result.stderr).toMatch(/BENCH_ROUNDS must be a finite number, got "Infinity"/);
+      } finally {
+        delete process.env.BENCH_ROUNDS;
+      }
+    },
+    FIXTURE_TIMEOUT,
+  );
 });

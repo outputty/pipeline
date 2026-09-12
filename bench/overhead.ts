@@ -36,17 +36,19 @@ import { checkGate, type OverheadReport } from "./gate";
 
 const BASELINE_PATH = fileURLToPath(new URL("./baseline.json", import.meta.url));
 
-/** Parses `BENCH_ROUNDS`, raising on a non-numeric value rather than letting it become `NaN` -
- * unguarded, `timeRounds`'s own `rounds < 2` check is false for `NaN` (every `NaN` comparison is),
- * so the round loop would silently run zero times and the real failure would surface as `median()
- * of an empty array has no defined value` from a wholly unrelated function, naming neither
- * `BENCH_ROUNDS` nor the bad value it was given. */
+/** Parses `BENCH_ROUNDS`, raising on a non-finite value rather than letting it become `NaN` or
+ * `Infinity` - unguarded, `timeRounds`'s own `rounds < 2` check is false for BOTH (every `NaN`
+ * comparison is false, and `Infinity` is never less than 2), so a non-numeric value would silently
+ * run the round loop zero times (surfacing as `median() of an empty array has no defined value`,
+ * naming neither `BENCH_ROUNDS` nor the bad value) while `Infinity` itself would hang the loop
+ * forever instead of failing at all - caught by `/code-review`, `BENCH_ROUNDS=Infinity` reaching
+ * `Number("Infinity")` unrejected by a bare `Number.isNaN` check. */
 function rounds(): number | undefined {
   const raw = process.env.BENCH_ROUNDS;
   if (!raw) return undefined;
   const parsed = Number(raw);
-  if (Number.isNaN(parsed)) {
-    throw new Error(`BENCH_ROUNDS must be a number, got ${JSON.stringify(raw)}`);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`BENCH_ROUNDS must be a finite number, got ${JSON.stringify(raw)}`);
   }
   return parsed;
 }
