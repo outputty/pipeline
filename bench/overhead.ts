@@ -36,9 +36,19 @@ import { checkGate, type OverheadReport } from "./gate";
 
 const BASELINE_PATH = fileURLToPath(new URL("./baseline.json", import.meta.url));
 
+/** Parses `BENCH_ROUNDS`, raising on a non-numeric value rather than letting it become `NaN` -
+ * unguarded, `timeRounds`'s own `rounds < 2` check is false for `NaN` (every `NaN` comparison is),
+ * so the round loop would silently run zero times and the real failure would surface as `median()
+ * of an empty array has no defined value` from a wholly unrelated function, naming neither
+ * `BENCH_ROUNDS` nor the bad value it was given. */
 function rounds(): number | undefined {
   const raw = process.env.BENCH_ROUNDS;
-  return raw ? Number(raw) : undefined;
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  if (Number.isNaN(parsed)) {
+    throw new Error(`BENCH_ROUNDS must be a number, got ${JSON.stringify(raw)}`);
+  }
+  return parsed;
 }
 
 async function main(): Promise<void> {

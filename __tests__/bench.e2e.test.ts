@@ -253,3 +253,17 @@ describe("#120 median/timeRounds - fail loud rather than a silent NaN", () => {
     await expect(timeRounds(() => 1, 1)).rejects.toThrow(/at least 2 rounds/);
   });
 });
+
+describe("#120 bench/overhead.ts - BENCH_ROUNDS validation", () => {
+  it("a non-numeric BENCH_ROUNDS fails loud, naming the bad value, rather than silently becoming NaN", async () => {
+    const { runFixture } = await import("./helpers/fixtures");
+    process.env.BENCH_ROUNDS = "5x";
+    try {
+      const result = await runFixture("bench/overhead.ts");
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toMatch(/BENCH_ROUNDS must be a number, got "5x"/);
+    } finally {
+      delete process.env.BENCH_ROUNDS;
+    }
+  });
+});
