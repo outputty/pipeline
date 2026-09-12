@@ -10,5 +10,4 @@ pull, `.return()` still forwarded for an early `.first(n)`); `.buffer()`'s async
 the original sync view alive under a forced-async Mode so `.buffer()` can fold through it
 synchronously and cross the async boundary once per chunk instead of once per raw item. Output
 unchanged - measured on this package's own committed `bench/overhead.ts` harness, each dispatching
-class's own `.local()` row roughly halved (`ConcurrentPipeline` 535 → 271 ns/row, `HttpPipeline`
-480 → 255, `ClusterPipeline` 496 → 250).
+class's own `.local()` row roughly halved; see `bench/baseline.json` for the exact figures.
