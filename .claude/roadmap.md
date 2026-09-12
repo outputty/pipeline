@@ -65,18 +65,25 @@ The two older candidates, still not filed:
 ## Built
 
 - **A benchmark harness for the package's own internal overhead, and closing the gap it finds**
-  (#120, `perf`, PR #166/#167/#169/#170/#171) - `bench/overhead.ts` measures one leg per pipeline
-  runner class (`Pipeline`, `ConcurrentPipeline`, `HttpPipeline`, `ClusterPipeline`) against a
-  hand-rolled, output-matched floor, gated on a committed baseline (absolute `pipelineNsPerRow`
-  only - `.ratio` prints but is never gated, since dividing two noisy measurements compounds their
-  noise past what a tight tolerance survives), plus each dispatching class's own `.local()` row
-  proving a pinned region never dispatches (0 `stageWork()` calls, 0 HTTP requests, every item on
-  the primary's own pid). Found and fixed O1: `Transformer.filter()`'s sync no-handler branch paid
-  for three passes over the chunk where `.map()` pays for two - collapsed to one
-  (`filterSettle`/`filterStep`), dropping `Pipeline`'s own ns/row from ~50 to ~30, output unchanged.
-  O2 (fusing adjacent sync `map`/`filter` links) was spiked against the same baseline and killed -
-  1.36x end to end, see Killed below. Layout and the full table in `.claude/architecture.md`'s
-  Internal overhead benchmarks section.
+  (#120, `perf`, PR #166/#167/#169/#170/#175/#176) - `bench/overhead.ts` measures one leg per
+  pipeline runner class (`Pipeline`, `ConcurrentPipeline`, `HttpPipeline`, `ClusterPipeline`)
+  against a hand-rolled, output-matched floor, gated on a committed baseline (absolute
+  `pipelineNsPerRow` only - `.ratio` prints but is never gated, since dividing two noisy
+  measurements compounds their noise past what a tight tolerance survives), plus each dispatching
+  class's own `.local()` row proving a pinned region never dispatches (0 `stageWork()` calls, 0
+  HTTP requests, every item on the primary's own pid). Found and fixed O1: `Transformer.filter()`'s
+  sync no-handler branch paid for three passes over the chunk where `.map()` pays for two -
+  collapsed to one (`filterSettle`/`filterStep`), dropping `Pipeline`'s own ns/row from ~50 to ~30,
+  output unchanged. O2 (fusing adjacent sync `map`/`filter` links) was spiked against the same
+  baseline and killed - 1.36x end to end, see Killed below. A user follow-up ("do a spike on how
+  the async pipeline's performance could improve") found and fixed a real, measured cost inside the
+  async-engine tax itself: `toAsyncIterable` hand-rolls its iterator instead of an `async
+  function*`, `buildBufferGenerator` no longer awaits a fold result that was never a thenable, and
+  `fromSource()` keeps a sync pre-buffer view alive under a forced-async Mode so `.buffer()` can
+  fold through it synchronously - together roughly halving every dispatching class's own `.local()`
+  row (`ConcurrentPipeline` 535 → 271 ns/row, `HttpPipeline` 480 → 255, `ClusterPipeline` 496 →
+  250). Layout and the full table in `.claude/architecture.md`'s Internal overhead benchmarks
+  section.
 - **The node:/laygo import boundaries, mechanized as oxlint rules** (#117, `feat`) -
   `architecture.md`'s own stack diagram drew `node:cluster`/`node:http` as scoped to
   `ClusterPipeline`/`HttpPipeline` only, and this package's own split from laygo (#743-745) drew "no

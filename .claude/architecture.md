@@ -427,11 +427,23 @@ dispatching subclass re-declares `local()` to narrow its return type only
 (`~/.claude/rules/typescript.md`); the body is an unchanged `super.local(build)` call at every
 level, needing no per-level code - the base implementation is already correct everywhere because a
 bare `Pipeline`'s own `.transform()`/`.reduce()` never fan out or POST. `.local()` runs the async
-engine, skips only the round trip: the bare `Pipeline` it builds still pays the full chunk/generator
-cost every `Pipeline` pays, never 0 (#120's own benchmark measures `ConcurrentPipeline`'s pinned row
-at 535.34 ns/row, `HttpPipeline`'s at 479.72, `ClusterPipeline`'s at 496.05 - each well above the
-floor), so the speedup a pinned region buys is the removed dispatch (a `stageWork()` call, an HTTP
+engine, skips only the round trip: the bare `Pipeline` it builds still pays chunk/generator cost,
+never 0, so the speedup a pinned region buys is the removed dispatch (a `stageWork()` call, an HTTP
 round trip, a cross-process hop), not the framework itself.
+
+That async-engine cost is itself reducible, though not eliminable while `sourcePolicy()` still pins
+Mode to `"async"` for dispatch purposes (#120's own follow-up spike, comment thread on #120): a
+dispatching class over a SYNC source paid a microtask per raw item twice over - once converting the
+source to an async iterable (`toAsyncIterable`, an `async function*` wrapping every yield in its
+own Promise) and again inside `.buffer()`'s own fold loop (`buildBufferGenerator`, a naked `await`
+per item even though the fold itself is synchronous). Fixed three ways: `toAsyncIterable` hand-rolls
+its iterator instead of using a generator (fewer Promise-wraps per pull, `.return()` still forwarded
+for an early `.first(n)`); `buildBufferGenerator` awaits only a genuinely-thenable fold result;
+`fromSource()` keeps the original sync view alive under a forced-async Mode so `.buffer()` can fold
+through it synchronously and cross the async boundary once per CHUNK rather than once per raw item.
+Together: `ConcurrentPipeline`'s pinned row moved from 535.34 ns/row to 271.47, `HttpPipeline`'s
+from 479.72 to 254.98, `ClusterPipeline`'s from 496.05 to 249.56 - roughly halved, still well above
+the sync floor, since a `.local()` region still runs the async engine, only a cheaper one.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
 createPipeline<U, R = AnyPipeline<U>>(chunks, options)` that calls `this.constructor` rather than a
@@ -788,13 +800,17 @@ identical across every row for exactly this reason - one measurement, not four.
 Committed baseline (`bench/baseline.json`), one machine, `Array.prototype` kept as a reference row -
 it runs no `Pipeline` machinery at all, so it carries no ratio of its own:
 
-| Class                | ns/row  | floor ns/row | ratio | `.local()` ns/row | `.local()` correctness      |
-| --------------------- | ------- | ------------ | ----- | ------------------ | ---------------------------- |
-| `Array.prototype`     | 16.40   | -            | -     | -                   | -                             |
-| `Pipeline`             | 27.83   | 11.51        | 2.42x | -                   | (never dispatches)           |
-| `ConcurrentPipeline`   | 541.49  | 11.51        | 47.03x| 535.34              | 0 `stageWork()` calls         |
-| `HttpPipeline`         | 1103.72 | 11.51        | 95.86x| 479.72              | 0 HTTP requests served        |
-| `ClusterPipeline`      | 831.81  | 11.51        | 72.24x| 496.05              | every item on the primary pid |
+| Class                | ns/row | floor ns/row | ratio  | `.local()` ns/row | `.local()` correctness      |
+| --------------------- | ------ | ------------ | ------ | ------------------ | ---------------------------- |
+| `Array.prototype`     | 16.40  | -            | -      | -                   | -                             |
+| `Pipeline`             | 27.21  | 12.03        | 2.26x  | -                   | (never dispatches)           |
+| `ConcurrentPipeline`   | 296.46 | 12.03        | 24.65x | 271.47              | 0 `stageWork()` calls         |
+| `HttpPipeline`         | 744.66 | 12.03        | 61.90x | 254.98              | 0 HTTP requests served        |
+| `ClusterPipeline`      | 640.89 | 12.03        | 53.28x | 249.56              | every item on the primary pid |
+
+`ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`'s numbers above already carry the async-engine
+tax reduction (#120 follow-up, above): the committed pre-reduction baseline read 541.49 / 1103.72 /
+831.81 ns/row dispatched and 535.34 / 479.72 / 496.05 pinned - roughly double every figure here.
 
 `Pipeline` has no `.local()` row: the base class never dispatches, so pinning it changes nothing to
 measure. O1 (#120) collapsed `Transformer.filter()`'s sync no-handler branch from three passes to
