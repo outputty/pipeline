@@ -166,6 +166,13 @@ instead of configuring the `Transformer`.
 
 ## buffer(fn) - a callback-driven chunk boundary - #88
 
+⚠ **pending #172**: `.buffer(size)`'s own "same engine as `.buffer(fn)`" design below is what #172
+reverts for the numeric case - measured, it cost `.buffer(1000)` 119.8-136.5 ns/row against a
+53.9 ns/row no-`.buffer()`-call baseline, N=1M. Once #172 ships, `sizeReduceFunction` is deleted and
+the numeric branch dispatches straight to `buildChunkGenerator`/`buildSyncChunkGenerator` in all
+three sub-cases (deferred/sync-pre-buffer/fully-async), matching the sync-post-buffer sub-path's own
+`recutSyncChunks` bypass below - "one engine" then describes `.buffer(fn)` alone.
+
 `.buffer(size)` and `.buffer(fn: BufferFunction<T>)` fold through the SAME engine - one
 `Reducer<T[], T>` (`src/utils/reduce.ts`, unchanged from what `Pipeline.reduce()` already uses),
 configured by one of two adapters: `sizeReduceFunction(size)` (identity, framework-side auto-flush
@@ -765,7 +772,14 @@ equivalent - the quickest in-process code producing the identical result, even w
 real network/IPC boundary a dispatching class would cross. A committed baseline gates future runs
 (20% tolerance on absolute ns/row, 10% on the ratio, one warm-up round discarded); each dispatching
 class's own `.local()` row is measured and its correctness asserted (a pinned region never reaches
-`stageWork()`/serves a request/runs on a worker pid).
+`stageWork()`/serves a request/runs on a worker pid). `bench/` itself is not yet built (#120 is
+`ready`, unbuilt) - #172's own `.buffer()` regression fix carries its own standalone e2e ratio
+assertion in `buffer.e2e.test.ts` rather than waiting on this harness to exist.
+
+⚠ **pending #172**: found while researching this section's own baseline, `.buffer(size)` costs
+119.8-136.5 ns/row against the 53.9 ns/row no-`.buffer()`-call floor above (N=1M) - #120's own
+benchmark never calls `.buffer()`, so it never caught this. #172 fixes it and adds the discriminating
+case #120's own harness will otherwise still be missing once built.
 
 ## Constraints in dependencies
 
@@ -928,3 +942,13 @@ then `{"chunk":[…]}` per upstream chunk, with `{"emit":[…]}` frames coming b
 emitted have already entered downstream stages - the price paid for results that arrive as they
 happen, and the same property that killed the pull topology (`.claude/roadmap.md`) accepted
 deliberately here.
+
+⚠ **pending #172**: whether this JSON/NDJSON wire (here and `/transform/<n>`'s one-shot
+`application/json` POST) is worth swapping for a binary format is under real investigation, not
+assumed either way. A same-machine loopback probe measured a 1000-row chunk (115.5 KB as JSON) at
+~549 ns/row end to end, but isolated JSON stringify+parse (427 µs, one direction) did not cleanly
+double into that round-trip total, and `node:v8`'s own native binary codec measured SLOWER than JSON
+on this shape (698 µs vs 427 µs) for only ~7.5% smaller bytes - V8's native JSON path is already fast
+for plain object arrays. #172's own build-time layer runs a real MessagePack library A/B against this
+actual dispatch path before any codec change ships; if the A/B shows no real win, this section stays
+as written.

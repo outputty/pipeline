@@ -7,6 +7,19 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-12 An isolated JSON codec cost did not decompose additively into a real HTTP round trip
+
+Planning #172's wire-format half, a loopback `HttpPipeline` probe isolated JSON stringify+parse at
+0.427ms (one direction) and expected a real round trip to cost roughly double; the real measured
+round trip was only 0.549ms, because Node's `fetch` stack overlaps parsing with the wire rather than
+paying encode-transfer-decode strictly in series. `~/.claude/rules/code.md`'s Prove it section gains
+a line: an isolated sub-cost does not subtract or add cleanly against a real end-to-end total when
+the real system pipelines work the isolated measurement can't see - A/B the real path instead of
+doing arithmetic on the isolated number. The same session's directional finding (`node:v8`'s own
+binary codec measured slower than JSON on a plain object-array chunk) is recorded in the
+`node-http-runtime` skill's new `wire-encoding-cost` reference, not here - a vendor/library fact, not
+a process lesson.
+
 ## 2026-09-11 `.tap()`'s async overload narrowed `Promise<unknown>` to `Promise<void>`, silently matching the wrong overload
 
 Building #117's anti-slop cleanup, the same `unknown` → `void` swap that is safe at a bare return
