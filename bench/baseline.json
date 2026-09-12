@@ -1,25 +1,25 @@
 {
   "Pipeline": {
-    "pipelineNsPerRow": 27.214354500000013,
-    "floorNsPerRow": 12.029125000000008,
-    "ratio": 2.262371909843816
+    "pipelineNsPerRow": 27.457666500000016,
+    "floorNsPerRow": 11.149979500000015,
+    "ratio": 2.462575514152289
   },
   "ConcurrentPipeline": {
-    "pipelineNsPerRow": 296.4615625,
-    "floorNsPerRow": 12.029125000000008,
-    "ratio": 24.64531397753368,
-    "local": { "nsPerRow": 271.4712499999999, "dispatchesWhilePinned": 0 }
+    "pipelineNsPerRow": 289.10010499999987,
+    "floorNsPerRow": 11.149979500000015,
+    "ratio": 25.92830820899711,
+    "local": { "nsPerRow": 278.4338550000001, "dispatchesWhilePinned": 0 }
   },
   "HttpPipeline": {
-    "pipelineNsPerRow": 744.657275000003,
-    "floorNsPerRow": 12.029125000000008,
-    "ratio": 61.904525474629494,
-    "local": { "nsPerRow": 254.97815000000514, "requestsWhilePinned": 0 }
+    "pipelineNsPerRow": 744.4208249999946,
+    "floorNsPerRow": 11.149979500000015,
+    "ratio": 66.76432230211667,
+    "local": { "nsPerRow": 252.7593749999994, "requestsWhilePinned": 0 }
   },
   "ClusterPipeline": {
-    "pipelineNsPerRow": 640.8854000000019,
-    "floorNsPerRow": 12.029125000000008,
-    "ratio": 53.277806989286546,
-    "local": { "nsPerRow": 249.56354999999917, "workerPidsWhilePinned": [] }
+    "pipelineNsPerRow": 656.8270750000011,
+    "floorNsPerRow": 11.149979500000015,
+    "ratio": 58.90836615439519,
+    "local": { "nsPerRow": 257.11145000000215, "workerPidsWhilePinned": [] }
   }
 }
