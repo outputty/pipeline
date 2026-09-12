@@ -25,17 +25,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   day this was planned is exactly the kind of large, fast-moving change this gap lets through
   silently; `typedoc --validation.notDocumented` is proven this session to catch it for real
   (`Pipeline.local has an @param with name "wrongName", which was not used`).
-- **A benchmark harness for the package's own internal overhead, and closing the gap it finds**
-  (#120) - `#90`'s own ~430 ns/row figure predates its `L13` fix and nothing replaced it; nothing at
-  all measures `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` against a hand-rolled
-  equivalent, or `.local()`'s own cost. A fresh planning-time run found the base sync chain now at
-  ~50 ns/row (not ~430), and a real, un-explained third pass in `Transformer.filter()`'s sync branch
-  worth ~19 of those - `.map()`'s sync branch costs ~1 ns/row over baseline, `.filter()`'s costs ~19.
-  Now, because a committed regression gate is missing entirely and the one concrete, low-risk
-  permutation (`filter()` as one loop, no `pipe()`/`.onError()` contract change) is sitting there
-  unclaimed. Layout and rationale in `.claude/architecture.md`'s new Internal overhead benchmarks
-  section.
-
 ### Later - not yet filed
 
 - **A distributed event emitter solution layer for `EventEmitterPipeline`** (#124's own planning) -
@@ -75,6 +64,19 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **A benchmark harness for the package's own internal overhead, and closing the gap it finds**
+  (#120, `perf`, PR #166/#167/#169/#170/#171) - `bench/overhead.ts` measures one leg per pipeline
+  runner class (`Pipeline`, `ConcurrentPipeline`, `HttpPipeline`, `ClusterPipeline`) against a
+  hand-rolled, output-matched floor, gated on a committed baseline (absolute `pipelineNsPerRow`
+  only - `.ratio` prints but is never gated, since dividing two noisy measurements compounds their
+  noise past what a tight tolerance survives), plus each dispatching class's own `.local()` row
+  proving a pinned region never dispatches (0 `stageWork()` calls, 0 HTTP requests, every item on
+  the primary's own pid). Found and fixed O1: `Transformer.filter()`'s sync no-handler branch paid
+  for three passes over the chunk where `.map()` pays for two - collapsed to one
+  (`filterSettle`/`filterStep`), dropping `Pipeline`'s own ns/row from ~50 to ~30, output unchanged.
+  O2 (fusing adjacent sync `map`/`filter` links) was spiked against the same baseline and killed -
+  1.36x end to end, see Killed below. Layout and the full table in `.claude/architecture.md`'s
+  Internal overhead benchmarks section.
 - **The node:/laygo import boundaries, mechanized as oxlint rules** (#117, `feat`) -
   `architecture.md`'s own stack diagram drew `node:cluster`/`node:http` as scoped to
   `ClusterPipeline`/`HttpPipeline` only, and this package's own split from laygo (#743-745) drew "no
@@ -394,6 +396,22 @@ The two older candidates, still not filed:
 
 ## Killed
 
+- **Fusing adjacent sync `map`/`filter` links into one loop** (#120's O2, spiked in
+  `tmp/spike-o2-fusion.ts`, deleted) - measured through the real shape (a full `Pipeline` run with
+  chunking, N=1,000,000, matching `measurePipeline()`), not the isolated `.runnable()` call an
+  earlier draft used (which read 35.7 ns/row, above the real `Pipeline` leg's own 29.7 - a shape
+  the real chain never runs in). The real-shape number: 28.25 ns/row today, 20.73 ns/row fused,
+  1.36x - well under the isolated draft's own 2.78x. Priced both forms: the general mechanism
+  (converting `pipe()`'s eager composition to a deferred, fusable stage list, preserving
+  `.onError()`'s per-original-link row-handler semantics under fusion, threading Mode-widening
+  fallback) is the shape `#45`'s "forward-descending Transformer composition" was already killed
+  for - "a larger contract than map/filter/reduce need." A narrow peephole (`.filter()` checking for
+  a `lastLink: { kind: "map", fn }` marker with no row handler, fusing only that one pair) catches
+  ONLY `map -> filter` immediately adjacent - a third chained link falls back to the general problem
+  - and the marker is a copy-on-write field needing the same explicit carry-forward every subclass
+  knob already needs through `.transform()`/`.local()`/`.buffer()`. `#90`'s own chunk-level costs
+  (this ticket's own scope boundary) already dominate the per-row number more than fusion would
+  close. Findings and both prices posted in full on `#120`'s own tracker thread.
 - **A numeric complexity/line-count lint gate** (predates any ticket, `.oxlintrc.json`) -
   `max-lines-per-function`/`complexity`/`max-params` are deliberately not enabled, per the config's
   own comment: "unit size is an architectural question, not a numeric cap." Planning #133 (the

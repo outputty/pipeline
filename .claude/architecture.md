@@ -305,8 +305,10 @@ Every piece above (`buildChunkGenerator`, `flattenChunks`, `Transformer.process(
 `runSequentially`, `.pipe()`'s own `await currentTransform(...)`) is unconditionally async, so a
 `Pipeline` over a plain in-memory array with only synchronous functions still pays a full
 async-generator round trip per item to convert its source into `_chunks`, before any stage or
-`Promise.all` ever runs - measured at ~430 ns/row end to end against a plain `Array.prototype`
-chain's ~20 ns/row, ~290 ns/row of it paid with zero transform stages at all (#90's own ticket).
+`Promise.all` ever runs - measured (#120) at 27.83 ns/row end to end for a two-stage
+`.map().filter()` chain against that same chain's hand-rolled equivalent at 11.51 ns/row (2.42x),
+19.94 ns/row of the framework's own cost paid with zero transform stages at all, against a bare
+array copy's 0.61 ns/row. See "Internal overhead benchmarks" below for the full per-class table.
 
 `.from(source)` becomes the one place `PipelineMode` (`"unset" | "sync" | "async"`) is decided -
 `Symbol.asyncIterator in Object(source)` the same way `toAsyncIterable()` already checks today. A
@@ -424,7 +426,12 @@ region's `_chunks`/`_context`/`_chunkTransforms`/`_reduceStages` back through `t
 dispatching subclass re-declares `local()` to narrow its return type only
 (`~/.claude/rules/typescript.md`); the body is an unchanged `super.local(build)` call at every
 level, needing no per-level code - the base implementation is already correct everywhere because a
-bare `Pipeline`'s own `.transform()`/`.reduce()` never fan out or POST.
+bare `Pipeline`'s own `.transform()`/`.reduce()` never fan out or POST. `.local()` runs the async
+engine, skips only the round trip: the bare `Pipeline` it builds still pays the full chunk/generator
+cost every `Pipeline` pays, never 0 (#120's own benchmark measures `ConcurrentPipeline`'s pinned row
+at 535.34 ns/row, `HttpPipeline`'s at 479.72, `ClusterPipeline`'s at 496.05 - each well above the
+floor), so the speedup a pinned region buys is the removed dispatch (a `stageWork()` call, an HTTP
+round trip, a cross-process hop), not the framework itself.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
 createPipeline<U, R = AnyPipeline<U>>(chunks, options)` that calls `this.constructor` rather than a
@@ -755,17 +762,45 @@ resolves immediately with an EMPTY result - the worker exists only to hold the t
 (`_chunkTransforms`, registered by running the same entry module the primary runs) and serve
 `.fetch()` requests against them.
 
-## Internal overhead benchmarks - pending #120
+## Internal overhead benchmarks - done (#120)
 
 `bench/` is a committed, in-repo, single-runtime harness - independent of `benchmarks/` above, which
 stays the Docker/six-runtime/`npm pack` comparison against OTHER libraries. This one compares the
 package against ITSELF: one leg per pipeline runner class (`Pipeline`, `ConcurrentPipeline`,
 `HttpPipeline`, `ClusterPipeline`), each against a hand-rolled, output-matched, non-`Pipeline`
 equivalent - the quickest in-process code producing the identical result, even where that skips a
-real network/IPC boundary a dispatching class would cross. A committed baseline gates future runs
-(20% tolerance on absolute ns/row, 10% on the ratio, one warm-up round discarded); each dispatching
+real network/IPC boundary a dispatching class would cross. A committed baseline gates future runs on
+ABSOLUTE `pipelineNsPerRow` only, 20% tolerance, one warm-up round discarded; `.ratio` is read from
+every report and printed in the table below but never gated - dividing two independently noisy
+measurements compounds their noise past what a 10% tolerance survives (post-planning finding:
+`pipelineNsPerRow` held a 5% spread across 5 real consecutive runs while the same runs' `.ratio`
+spread 14%, and the gate failed 2 of those 5 with no code change between them). Each dispatching
 class's own `.local()` row is measured and its correctness asserted (a pinned region never reaches
-`stageWork()`/serves a request/runs on a worker pid).
+`stageWork()`/serves a request/runs on a worker pid). `pnpm bench:overhead` runs it; `bench/canonical.ts`
+declares the one chain (`.map((x) => x * 2).filter((x) => x > 4)`) every leg and its floor measure.
+The floor (`handRolledFloor`) is class-independent - the same loop regardless of which class its
+ratio is compared against - so `bench/overhead.ts` measures it ONCE at `FLOOR_ROWS` (1,000,000 rows)
+and shares that single number across every leg's own report, rather than each leg re-timing it at
+its own smaller row count: at 20,000 rows the same function read 3.44 ns/row on one run and 11.67 on
+the next, below stable measurement resolution (code-review finding). The floor column below is
+identical across every row for exactly this reason - one measurement, not four.
+
+Committed baseline (`bench/baseline.json`), one machine, `Array.prototype` kept as a reference row -
+it runs no `Pipeline` machinery at all, so it carries no ratio of its own:
+
+| Class                | ns/row  | floor ns/row | ratio | `.local()` ns/row | `.local()` correctness      |
+| --------------------- | ------- | ------------ | ----- | ------------------ | ---------------------------- |
+| `Array.prototype`     | 16.40   | -            | -     | -                   | -                             |
+| `Pipeline`             | 27.83   | 11.51        | 2.42x | -                   | (never dispatches)           |
+| `ConcurrentPipeline`   | 541.49  | 11.51        | 47.03x| 535.34              | 0 `stageWork()` calls         |
+| `HttpPipeline`         | 1103.72 | 11.51        | 95.86x| 479.72              | 0 HTTP requests served        |
+| `ClusterPipeline`      | 831.81  | 11.51        | 72.24x| 496.05              | every item on the primary pid |
+
+`Pipeline` has no `.local()` row: the base class never dispatches, so pinning it changes nothing to
+measure. O1 (#120) collapsed `Transformer.filter()`'s sync no-handler branch from three passes to
+one, dropping `Pipeline`'s own ns/row from ~50 to ~30; O2 (fusing adjacent sync `map`/`filter` links)
+was spiked against this same baseline and killed - 1.36x end to end, priced against a `#45`-shaped
+rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed section.
 
 ## Constraints in dependencies
 
