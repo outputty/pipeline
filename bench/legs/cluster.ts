@@ -17,6 +17,7 @@ import {
   canonicalInput,
   handRolledFloor,
   timeRounds,
+  timeFloor,
   ROWS,
   BUFFER_SIZE,
   MAX_CONCURRENCY,
@@ -24,15 +25,33 @@ import {
 } from "../canonical";
 import type { LegReport } from "../gate";
 
+/** A small (`n`-item), separate `.local()` run mapping each item's own `process.pid` - never folded
+ * into `measureClusterPipeline`'s own timed row, which a `process.pid`-capturing link would add real
+ * per-item cost to. `processedCount` is `pids.length` BEFORE filtering - a caller asserting
+ * `workerPidsWhilePinned` is empty also has to assert `processedCount === n`, since an empty result
+ * proves nothing if the region silently produced no output at all.
+ * `__tests__/fixtures/bench-cluster-local.ts` calls this directly, standalone, for the fast
+ * correctness-only case. */
+export async function localPidCheck(
+  n = 10,
+): Promise<{ processedCount: number; workerPidsWhilePinned: number[] }> {
+  const primaryPid = process.pid;
+  const pids = await new ClusterPipeline<number>({ workers: CLUSTER_WORKERS })
+    .buffer(1)
+    .local((p) => p.transform((t) => t.map((_x: number) => process.pid)))(canonicalInput(n))
+    .toArray();
+  return {
+    processedCount: pids.length,
+    workerPidsWhilePinned: [...new Set(pids)].filter((pid) => pid !== primaryPid),
+  };
+}
+
 /** Real, timed `pipelineNsPerRow`/`floorNsPerRow`/`ratio` at `ROWS.ClusterPipeline` rows over real
  * forked workers, plus the `.local()` row and its `workerPidsWhilePinned` correctness check. */
 export async function measureClusterPipeline(rounds?: number): Promise<LegReport> {
   const items = canonicalInput(ROWS.ClusterPipeline);
 
-  const floorNsPerRow = await timeRounds(() => {
-    handRolledFloor(items);
-    return items.length;
-  }, rounds);
+  const floorNsPerRow = await timeFloor(items, rounds);
 
   const pipeline = new ClusterPipeline<number>({
     workers: CLUSTER_WORKERS,
@@ -56,14 +75,7 @@ export async function measureClusterPipeline(rounds?: number): Promise<LegReport
     return items.length;
   }, rounds);
 
-  // Small, separate correctness run (never folded into the timed row above): a link that captures
-  // `process.pid` is real per-item cost `localNsPerRow` must not pay for.
-  const primaryPid = process.pid;
-  const pids = await new ClusterPipeline<number>({ workers: CLUSTER_WORKERS })
-    .buffer(1)
-    .local((p) => p.transform((t) => t.map((_x: number) => process.pid)))(canonicalInput(10))
-    .toArray();
-  const workerPidsWhilePinned = [...new Set(pids)].filter((pid) => pid !== primaryPid);
+  const { workerPidsWhilePinned } = await localPidCheck();
 
   return {
     pipelineNsPerRow,

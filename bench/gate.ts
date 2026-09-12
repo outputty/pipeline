@@ -37,7 +37,9 @@ export interface GateResult {
  * `checkGate(report, baseline)` - `report[leg].pipelineNsPerRow` past `baseline`'s own value by more
  * than `ABSOLUTE_TOLERANCE`, or `.ratio` past it by more than `RATIO_TOLERANCE`, either direction
  * WORSE (slower ns/row, or a wider ratio) is a violation; a leg that got faster or narrowed its
- * ratio never is.
+ * ratio never is. A leg the baseline has but `report` does NOT is a violation too - a report
+ * that cannot even be compared has failed to prove no regression, the same as one that measured a
+ * real one (`code.md`'s "fail loud", not a silent pass for a lookup that came up empty).
  *
  * `checkGate({ Pipeline: { pipelineNsPerRow: 100, floorNsPerRow: 4.2, ratio: 23.8 } }, { Pipeline: {
  * pipelineNsPerRow: 50, floorNsPerRow: 4.2, ratio: 11.9 } })` → one violation: `100` is double `50`,
@@ -51,7 +53,11 @@ export function checkGate(
   for (const leg of Object.keys(baseline) as LegName[]) {
     const current = report[leg];
     const base = baseline[leg];
-    if (!current || !base) continue;
+    if (!base) continue; // nothing in the baseline to compare this leg against
+    if (!current) {
+      violations.push(`${leg}: missing from the report - baseline has it, nothing to compare`);
+      continue;
+    }
     const absoluteCeiling = base.pipelineNsPerRow * (1 + ABSOLUTE_TOLERANCE);
     if (current.pipelineNsPerRow > absoluteCeiling) {
       violations.push(

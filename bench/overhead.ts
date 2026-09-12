@@ -13,7 +13,11 @@
  * noise, so the resulting failure is deterministic regardless of round count. `BENCH_SKIP_GATE=1`
  * skips the baseline comparison outright (report and exit 0 unconditionally) - test-only, for
  * proving the harness runs end to end without depending on the CURRENT machine's own noise staying
- * inside tolerance of a baseline committed on a different one.
+ * inside tolerance of a baseline committed on a different one. A MISSING `bench/baseline.json`
+ * (never expected once this ticket's own bootstrap run is committed) exits 1 too, same as a real
+ * gate failure - a gate that cannot run is not a passing one; regenerate it deliberately with
+ * `BENCH_SKIP_GATE=1 pnpm bench:overhead > bench/baseline.json` (then re-format the file) rather
+ * than relying on this path's own silence.
  *
  * A forked `ClusterPipeline` worker re-executes this file (`cluster.fork()` re-execs
  * `process.argv[1]`) - `cluster.isPrimary` gates the "measure everything and print" path so a worker
@@ -51,9 +55,14 @@ async function main(): Promise<void> {
   };
 
   if (process.env.BENCH_SYNTHETIC_REGRESSION === "1") {
+    const widenedNsPerRow = report.Pipeline.pipelineNsPerRow * 100;
     report.Pipeline = {
       ...report.Pipeline,
-      pipelineNsPerRow: report.Pipeline.pipelineNsPerRow * 100,
+      pipelineNsPerRow: widenedNsPerRow,
+      // ratio is ALWAYS pipelineNsPerRow / floorNsPerRow (gate.ts's own docstring) - recomputed
+      // here too, so the printed report stays internally consistent under the synthetic multiplier
+      // instead of showing a ratio that no longer matches its own two inputs.
+      ratio: widenedNsPerRow / report.Pipeline.floorNsPerRow,
     };
   }
 
@@ -66,8 +75,10 @@ async function main(): Promise<void> {
 
   if (!existsSync(BASELINE_PATH)) {
     console.error(
-      "No bench/baseline.json yet - printed only, not gated. Commit this run's own numbers as the baseline.",
+      "bench:overhead GATE FAILED: bench/baseline.json is missing - nothing to gate against. " +
+        "Regenerate it deliberately (see this file's own header) rather than treating this as a pass.",
     );
+    process.exitCode = 1;
     return;
   }
 

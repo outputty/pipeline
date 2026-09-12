@@ -4,7 +4,14 @@
  * that the chain doesn't already do.
  */
 import { Pipeline } from "../../src";
-import { canonicalChain, canonicalInput, handRolledFloor, timeRounds, ROWS } from "../canonical";
+import {
+  canonicalChain,
+  canonicalInput,
+  handRolledFloor,
+  timeRounds,
+  timeFloor,
+  ROWS,
+} from "../canonical";
 import type { LegReport } from "../gate";
 
 /** Real, timed `pipelineNsPerRow`/`floorNsPerRow`/`ratio` at `ROWS.Pipeline` rows, `rounds` rounds
@@ -16,10 +23,7 @@ export async function measurePipeline(rounds?: number): Promise<LegReport> {
     await pipeline(items).toArray();
     return items.length; // ns/row is normalized to rows IN, not rows kept by the filter
   }, rounds);
-  const floorNsPerRow = await timeRounds(() => {
-    handRolledFloor(items);
-    return items.length;
-  }, rounds);
+  const floorNsPerRow = await timeFloor(items, rounds);
   return { pipelineNsPerRow, floorNsPerRow, ratio: pipelineNsPerRow / floorNsPerRow };
 }
 

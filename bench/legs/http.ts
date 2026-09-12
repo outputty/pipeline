@@ -12,6 +12,7 @@ import {
   canonicalInput,
   handRolledFloor,
   timeRounds,
+  timeFloor,
   ROWS,
   BUFFER_SIZE,
 } from "../canonical";
@@ -32,10 +33,7 @@ function worker(): HttpPipeline<number> {
 export async function measureHttpPipeline(rounds?: number): Promise<LegReport> {
   const items = canonicalInput(ROWS.HttpPipeline);
 
-  const floorNsPerRow = await timeRounds(() => {
-    handRolledFloor(items);
-    return items.length;
-  }, rounds);
+  const floorNsPerRow = await timeFloor(items, rounds);
 
   const pipelineNsPerRow = await withLoopbackServer(worker().fetch, async (url) => {
     const pipeline = new HttpPipeline<number>({ url })

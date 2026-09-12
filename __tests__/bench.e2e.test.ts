@@ -95,9 +95,13 @@ describe("#120 Done-when 3 - .local() correctness per dispatching class", () => 
   it(
     "ClusterPipeline: every item's stage runs on the primary's own pid (subprocess fixture)",
     async () => {
-      const result = await runFixtureJson<{ workerPidsWhilePinned: number[] }>(
-        "__tests__/fixtures/bench-cluster-local.ts",
-      );
+      const result = await runFixtureJson<{
+        processedCount: number;
+        workerPidsWhilePinned: number[];
+      }>("__tests__/fixtures/bench-cluster-local.ts");
+      // processedCount proves the region actually ran all 10 items - workerPidsWhilePinned being
+      // empty means nothing on its own if the region silently produced no output at all.
+      expect(result.processedCount).toBe(10);
       expect(result.workerPidsWhilePinned).toEqual([]);
     },
     FIXTURE_TIMEOUT,
@@ -144,7 +148,7 @@ describe("#120 Done-when 4 - a synthetic regression makes the gate fail", () => 
       // compares to a baseline committed on another one, proving only that the harness runs end to
       // end. The regressed run gates for real: its 100x multiplier dominates any real machine noise,
       // so the resulting exit 1 is deterministic too.
-      const { runFixture, expectFixtureOk } = await import("./helpers/fixtures");
+      const { runFixture, expectFixtureOk, lastJsonLine } = await import("./helpers/fixtures");
       process.env.BENCH_ROUNDS = "2";
       try {
         process.env.BENCH_SKIP_GATE = "1";
@@ -154,6 +158,16 @@ describe("#120 Done-when 4 - a synthetic regression makes the gate fail", () => 
         process.env.BENCH_SYNTHETIC_REGRESSION = "1";
         const regressed = await runFixture("bench/overhead.ts");
         expect(regressed.code).toBe(1);
+        // The exit code alone proves the GATE fired, not that the multiplier reached the right
+        // field: read the printed report back and confirm ratio still agrees with its own two
+        // inputs (catches the multiplier updating pipelineNsPerRow but leaving ratio stale).
+        const report = lastJsonLine<{
+          Pipeline: { pipelineNsPerRow: number; floorNsPerRow: number; ratio: number };
+        }>(regressed);
+        expect(report.Pipeline.ratio).toBeCloseTo(
+          report.Pipeline.pipelineNsPerRow / report.Pipeline.floorNsPerRow,
+          6,
+        );
       } finally {
         delete process.env.BENCH_ROUNDS;
         delete process.env.BENCH_SKIP_GATE;
@@ -215,6 +229,13 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
       Pipeline: { pipelineNsPerRow: 60, floorNsPerRow: 4.2, ratio: 13.09 },
     };
     expect(checkGate(report, baseline).ok).toBe(true);
+  });
+
+  it("fails when a leg the baseline has is missing from the report, rather than silently skipping it", () => {
+    const { Pipeline: _omitted, ...report } = baseline;
+    const result = checkGate(report, baseline);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/Pipeline: missing from the report/);
   });
 });
 
