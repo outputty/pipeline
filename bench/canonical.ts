@@ -99,3 +99,13 @@ export async function timeRounds(
   }
   return median(nsPerRowByRound);
 }
+
+/** `timeRounds` over `handRolledFloor(items)` specifically - every leg's own floor measurement was
+ * the identical closure copy-pasted four times; this is the one home for it (`code.md`'s "adjacent
+ * sibling already does the same subtask" rule). */
+export function timeFloor(items: number[], rounds?: number): Promise<number> {
+  return timeRounds(() => {
+    handRolledFloor(items);
+    return items.length;
+  }, rounds);
+}
