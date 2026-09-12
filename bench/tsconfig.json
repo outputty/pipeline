@@ -1,8 +1,12 @@
 {
   // Root tsconfig.json's own `include` is `["src/**/*", "__tests__/**/*"]` (#120's own Where scope
-  // keeps that file untouched), so `bench/` needs its own project to be typechecked at all - run via
-  // `pnpm typecheck:bench`, kept separate from `pnpm check`/`pnpm typecheck` since a benchmark run is
-  // slow and machine-dependent, never a gate condition.
+  // keeps that file untouched). `pnpm typecheck` already reaches most of bench/ transitively -
+  // __tests__/bench.e2e.test.ts and the two cluster fixtures import canonical.ts/gate.ts/legs/*.ts -
+  // but bench/overhead.ts itself is never statically imported (only ever run as a subprocess), so it
+  // alone would go unchecked without this project. `pnpm typecheck:bench` (`tsc --noEmit -p
+  // bench/tsconfig.json`) is wired into `pnpm check` (code-review finding: it was a standalone script
+  // for one commit, during which bench/'s own type errors went uncaught by the repo's one
+  // authoritative gate) - cheap and deterministic, unlike a real `pnpm bench:overhead` run.
   "extends": "../tsconfig.json",
   // `paths` is inherited unchanged from the root config: TypeScript resolves an EXTENDED config's
   // own relative paths against ITS OWN directory (the repo root), not the extending config's

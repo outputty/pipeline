@@ -146,9 +146,13 @@ export function mapSettle<T, R>(chunk: T[], run: (item: T) => R | Promise<R>): R
  * Attaches a throwaway rejection handler to every pending value in `created` (#90) - what
  * `mapSettle` above owes the siblings of an item whose callback threw synchronously, since nothing
  * downstream will ever await them. Its own function to keep `mapSettle`'s `catch` at this repo's
- * `max-depth: 2`.
+ * `max-depth: 2`. Exported for `transformer.ts`'s own `filterSettle` (#120's O1), which owes its
+ * `tail` the identical disarm on a synchronous throw.
+ *
+ * `disarm([Promise.reject(new Error("x"))])` → `undefined`, no unhandled rejection (the rejection
+ * gets a throwaway `.catch()`, its reason never read).
  */
-function disarm<R>(created: (R | Promise<R>)[]): void {
+export function disarm<R>(created: (R | Promise<R>)[]): void {
   for (const value of created) {
     if (isThenable(value)) void Promise.resolve(value).catch(() => {});
   }

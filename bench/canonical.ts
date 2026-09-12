@@ -52,6 +52,17 @@ export const ROWS = {
   ClusterPipeline: 20_000,
 } as const;
 
+/** The floor is measured at THIS row count once, by `bench/overhead.ts`, and the one result is
+ * shared by every leg's own report - never re-measured per leg at that leg's own smaller
+ * `ROWS.<Class>` (code-review finding, post-planning): `handRolledFloor` is class-independent - the
+ * same loop regardless of which `Pipeline` subclass its ratio is compared against - so timing it at
+ * `ROWS.HttpPipeline`/`ROWS.ClusterPipeline` (20,000) finishes in tens of microseconds, below what
+ * `performance.now`'s own resolution plus JIT/GC jitter can measure stably. Measured: the SAME
+ * `handRolledFloor` read 3.44 ns/row on one run and 11.67 on the next at 20,000 rows, a 3x swing
+ * with no code change; at `ROWS.Pipeline` (1,000,000) the same function's spread across 5 runs was
+ * 9.91-10.91 ns/row, under 10%. */
+export const FLOOR_ROWS = ROWS.Pipeline;
+
 /** `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` all measure at this buffer and
  * `maxConcurrency` (the package's own default - #120's Interface names it only for
  * `ConcurrentPipeline`, and leaves the other two at that same default rather than overriding it). */
@@ -100,10 +111,13 @@ export async function timeRounds(
   return median(nsPerRowByRound);
 }
 
-/** `timeRounds` over `handRolledFloor(items)` specifically - every leg's own floor measurement was
- * the identical closure copy-pasted four times; this is the one home for it (`code.md`'s "adjacent
- * sibling already does the same subtask" rule). */
-export function timeFloor(items: number[], rounds?: number): Promise<number> {
+/** `timeRounds` over `handRolledFloor` at `FLOOR_ROWS` - every leg's own floor measurement used to
+ * be the identical closure copy-pasted four times, each at that LEG's own (sometimes far smaller)
+ * row count; this is the one home for it now (`code.md`'s "adjacent sibling already does the same
+ * subtask" rule), called ONCE by `bench/overhead.ts` and shared across every leg's report, since
+ * `handRolledFloor` measures the same cost no matter which class's ratio it is compared against. */
+export function timeFloor(rounds?: number): Promise<number> {
+  const items = canonicalInput(FLOOR_ROWS);
   return timeRounds(() => {
     handRolledFloor(items);
     return items.length;

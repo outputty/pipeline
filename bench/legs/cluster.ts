@@ -17,13 +17,12 @@ import {
   canonicalInput,
   handRolledFloor,
   timeRounds,
-  timeFloor,
   ROWS,
   BUFFER_SIZE,
   MAX_CONCURRENCY,
   CLUSTER_WORKERS,
 } from "../canonical";
-import type { LegReport } from "../gate";
+import { legReport, type LegReport } from "../gate";
 
 /** A small (`n`-item), separate `.local()` run mapping each item's own `process.pid` - never folded
  * into `measureClusterPipeline`'s own timed row, which a `process.pid`-capturing link would add real
@@ -46,12 +45,19 @@ export async function localPidCheck(
   };
 }
 
-/** Real, timed `pipelineNsPerRow`/`floorNsPerRow`/`ratio` at `ROWS.ClusterPipeline` rows over real
- * forked workers, plus the `.local()` row and its `workerPidsWhilePinned` correctness check. */
-export async function measureClusterPipeline(rounds?: number): Promise<LegReport> {
+/** Real, timed `pipelineNsPerRow`/`ratio` at `ROWS.ClusterPipeline` rows over real forked workers,
+ * plus the `.local()` row and its `workerPidsWhilePinned` correctness check. `floorNsPerRow` is
+ * measured ONCE by the caller and passed in - see `measurePipeline`'s own docstring for why; a
+ * forked WORKER (`bench/overhead.ts`'s own `!cluster.isPrimary` branch) calls this function too, to
+ * replicate the primary's exact construction order/count for registry alignment
+ * (`architecture.md`'s own constraint) - it passes a placeholder `0` here rather than re-measuring
+ * `handRolledFloor`, which has nothing to do with `ClusterPipeline` construction at all and whose
+ * result the worker's own caller discards outright. */
+export async function measureClusterPipeline(
+  floorNsPerRow: number,
+  rounds?: number,
+): Promise<LegReport> {
   const items = canonicalInput(ROWS.ClusterPipeline);
-
-  const floorNsPerRow = await timeFloor(items, rounds);
 
   const pipeline = new ClusterPipeline<number>({
     workers: CLUSTER_WORKERS,
@@ -77,12 +83,10 @@ export async function measureClusterPipeline(rounds?: number): Promise<LegReport
 
   const { workerPidsWhilePinned } = await localPidCheck();
 
-  return {
-    pipelineNsPerRow,
-    floorNsPerRow,
-    ratio: pipelineNsPerRow / floorNsPerRow,
-    local: { nsPerRow: localNsPerRow, workerPidsWhilePinned },
-  };
+  return legReport(pipelineNsPerRow, floorNsPerRow, {
+    nsPerRow: localNsPerRow,
+    workerPidsWhilePinned,
+  });
 }
 
 /** `clusterMatchesFloor(50)` → `true` - small-N equality (Done-when 2), never the full

@@ -3,8 +3,16 @@
  * feed it a synthetic report with no real benchmark run, and `bench/overhead.ts`'s CLI can feed it a
  * real one. REGRESSION-ONLY by decision: the ticket states a tolerance, never a direction, and
  * failing a run because it got FASTER would fight the ticket's own opening complaint (a stale
- * number nobody trusts) - `checkGate` only ever flags a leg that got slower or a worse ratio than
- * the committed `bench/baseline.json`.
+ * number nobody trusts) - `checkGate` only ever flags a leg that got slower than the committed
+ * `bench/baseline.json`.
+ *
+ * Gates ABSOLUTE `pipelineNsPerRow` only, never `.ratio` (post-planning finding): `.ratio` divides by
+ * `floorNsPerRow`, and dividing two independently noisy measurements compounds their noise -
+ * measured, `pipelineNsPerRow` held to a 5% spread across 5 real consecutive runs while the same
+ * runs' `.ratio` spread 14%, past this gate's own 10% tolerance with no code change between runs.
+ * `pnpm bench:overhead` failed 2 of those 5 runs before the ratio check was removed. `.ratio` still
+ * prints in every report and every doc table - it answers "is dispatching worth it here", which
+ * absolute `pipelineNsPerRow` alone does not - it is simply no longer a gated number.
  */
 
 /** One class's own measured (or committed-baseline) row - `local` is present only for the three
@@ -26,7 +34,22 @@ export type LegName = "Pipeline" | "ConcurrentPipeline" | "HttpPipeline" | "Clus
 export type OverheadReport = Record<LegName, LegReport>;
 
 export const ABSOLUTE_TOLERANCE = 0.2;
-export const RATIO_TOLERANCE = 0.1;
+
+/**
+ * Builds one `LegReport`, `ratio` always `pipelineNsPerRow / floorNsPerRow` - the ONE place that
+ * division happens (code-review finding: it was retyped by hand at 5 call sites - once per leg in
+ * `bench/legs/*.ts`, and a 6th time recomputing it under `BENCH_SYNTHETIC_REGRESSION`, with no
+ * type error to catch a future site drifting from this file's own stated invariant).
+ *
+ * `legReport(30, 10)` → `{ pipelineNsPerRow: 30, floorNsPerRow: 10, ratio: 3 }`.
+ */
+export function legReport(
+  pipelineNsPerRow: number,
+  floorNsPerRow: number,
+  local?: LegReport["local"],
+): LegReport {
+  return { pipelineNsPerRow, floorNsPerRow, ratio: pipelineNsPerRow / floorNsPerRow, local };
+}
 
 export interface GateResult {
   ok: boolean;
@@ -35,9 +58,9 @@ export interface GateResult {
 
 /**
  * `checkGate(report, baseline)` - `report[leg].pipelineNsPerRow` past `baseline`'s own value by more
- * than `ABSOLUTE_TOLERANCE`, or `.ratio` past it by more than `RATIO_TOLERANCE`, either direction
- * WORSE (slower ns/row, or a wider ratio) is a violation; a leg that got faster or narrowed its
- * ratio never is. A leg the baseline has but `report` does NOT is a violation too - a report
+ * than `ABSOLUTE_TOLERANCE`, WORSE (slower ns/row) is a violation; a leg that got faster never is.
+ * `.ratio` is read from the report but never gated (see this file's own header). A leg the baseline
+ * has but `report` does NOT is a violation too - a report
  * that cannot even be compared has failed to prove no regression, the same as one that measured a
  * real one (`code.md`'s "fail loud", not a silent pass for a lookup that came up empty).
  *
@@ -58,19 +81,21 @@ export function checkGate(
       violations.push(`${leg}: missing from the report - baseline has it, nothing to compare`);
       continue;
     }
+    if (!Number.isFinite(current.pipelineNsPerRow)) {
+      // Every comparison against NaN is false, so an unguarded `>` below would silently PASS a
+      // broken measurement (the exact hazard `median()`'s own docstring names) - a non-finite
+      // reading has failed to prove no regression, same as a missing leg above.
+      violations.push(
+        `${leg}: pipelineNsPerRow is ${current.pipelineNsPerRow} - not a finite measurement`,
+      );
+      continue;
+    }
     const absoluteCeiling = base.pipelineNsPerRow * (1 + ABSOLUTE_TOLERANCE);
     if (current.pipelineNsPerRow > absoluteCeiling) {
       violations.push(
         `${leg}: pipelineNsPerRow ${current.pipelineNsPerRow.toFixed(1)} exceeds baseline ` +
           `${base.pipelineNsPerRow.toFixed(1)} by more than ${ABSOLUTE_TOLERANCE * 100}% ` +
           `(ceiling ${absoluteCeiling.toFixed(1)})`,
-      );
-    }
-    const ratioCeiling = base.ratio * (1 + RATIO_TOLERANCE);
-    if (current.ratio > ratioCeiling) {
-      violations.push(
-        `${leg}: ratio ${current.ratio.toFixed(2)} exceeds baseline ${base.ratio.toFixed(2)} by ` +
-          `more than ${RATIO_TOLERANCE * 100}% (ceiling ${ratioCeiling.toFixed(2)})`,
       );
     }
   }
