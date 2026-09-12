@@ -38,7 +38,7 @@ import {
   prefetch,
 } from "./utils/chunk";
 import { assertWholeNumberAtLeastOne } from "./utils/cut";
-import { chain, runStageChunk } from "./utils/helpers";
+import { chain, isThenable, runStageChunk } from "./utils/helpers";
 import { PipelineResult } from "./result";
 import { BranchBuilder, runBranch } from "./branch";
 import type {
@@ -99,11 +99,29 @@ function toAsyncIterable<U>(data: PipelineSource<U>): AsyncIterable<U> {
     return data as AsyncIterable<U>;
   }
   const syncIterable = data as Iterable<U>;
-  return asyncIterableFrom(async function* () {
-    for (const item of syncIterable) {
-      yield item;
-    }
-  });
+  // A hand-rolled `next()` rather than an `async function*` (F2): every generator yield pays its
+  // own Promise-wrap (`AsyncGeneratorResolve`) regardless of the yielded value, where a hand-built
+  // iterator pays exactly one `Promise.resolve` per pull - measured, 94.3 ns/row (generator) vs
+  // 42.3 ns/row (hand-rolled) over 200,000 plain items, no Pipeline involved.
+  //
+  // `return()` forwards to the underlying sync iterator's own `.return()`: an early `.first(n)`
+  // (or any consumer `break`ing a `for await`) must still run a source generator's own `finally` -
+  // a version without this left a `try { yield… } finally { … }` source's `finally` NOT run on an
+  // early stop, where the `async function*` it replaces (and this fixed version) both run it.
+  return {
+    [Symbol.asyncIterator]() {
+      const iterator = syncIterable[Symbol.iterator]();
+      return {
+        next(): Promise<IteratorResult<U>> {
+          return Promise.resolve(iterator.next());
+        },
+        return(value?: U): Promise<IteratorResult<U>> {
+          iterator.return?.(value as U);
+          return Promise.resolve({ value: value as U, done: true });
+        },
+      };
+    },
+  };
 }
 
 /**
@@ -531,7 +549,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
         bound: true,
         preBufferItems: items,
         syncChunks: null,
-        syncPreBufferItems: null,
+        // F3: `data` itself was never really async here - only `policy`/`this._mode` forced this
+        // branch (a dispatching class's own `sourcePolicy()`) - so the original sync iterable
+        // survives alongside the async view, giving `.buffer()`'s async arm (below) a sync view to
+        // re-cut through instead of paying a microtick per raw item.
+        syncPreBufferItems: isAsyncSource(data) ? null : (data as Iterable<U>),
       }),
     );
   }
@@ -1149,6 +1171,29 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
             : recutSyncChunksWith<T>(this._syncChunks!, reduceFn, this._context),
         syncPreBufferItems: null,
       }) as this;
+    }
+
+    // F3: `data` was never really async here either - only a dispatching class's own
+    // `sourcePolicy()` forced Mode `"async"`, and `fromSource()` kept the original sync view alive
+    // for exactly this. Fold synchronously (`buildSyncBufferGenerator`, the SAME engine the
+    // `isSync()` branch above already uses) and cross the async boundary once per CHUNK instead of
+    // once per raw item - `buildBufferGenerator`'s own `for await` pays a Promise-wrap per item
+    // regardless of how cheap the fold itself is.
+    if (this._syncPreBufferItems !== null) {
+      const syncItems = this._syncPreBufferItems;
+      const syncChunks = buildSyncBufferGenerator<T>(reduceFn, this._context)(syncItems);
+      return this.createPipeline<T>(
+        (async function* () {
+          for (const chunkOrPromise of syncChunks) {
+            yield isThenable(chunkOrPromise) ? await chunkOrPromise : chunkOrPromise;
+          }
+        })(),
+        {
+          ...this.carriedOptions(),
+          preBufferItems: null,
+          syncPreBufferItems: null,
+        },
+      ) as this;
     }
 
     const items = this._preBufferItems ?? flattenChunks(this._chunks);

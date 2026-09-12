@@ -189,6 +189,46 @@ describe("#90 review - an early exit closes the source on both engines", () => {
   });
 });
 
+describe("async-engine tax spike (#120 follow-up) - a sync source on a forced-async class", () => {
+  it("still cuts the exact same chunks .buffer(size) always did, on ConcurrentPipeline", async () => {
+    // `sourcePolicy()` forces ConcurrentPipeline's Mode to "async" regardless of input shape - the
+    // fast path this covers (a sync pre-buffer view kept alive through that forced Mode) must
+    // produce IDENTICAL output to the per-item path it replaces, not just run faster.
+    const out = await new ConcurrentPipeline<number>().buffer(3)([1, 2, 3, 4, 5, 6, 7]).toArray();
+
+    expect(out).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  });
+
+  it("still drops an item via DROP and never emits an empty trailing chunk, on ConcurrentPipeline", async () => {
+    // The `.buffer(fn)` overload's own engine (`bufferReduceFunction`), exercised through the same
+    // fast path - #88's Done-when 3 case, restated on a dispatching class.
+    const items = [
+      { v: 1, invalid: false },
+      { v: 2, invalid: true },
+      { v: 3, invalid: false },
+    ];
+    const dropInvalid = (item: (typeof items)[number]) => (item.invalid ? DROP : item);
+
+    const out = await new ConcurrentPipeline<(typeof items)[number]>()
+      .buffer(dropInvalid)(items)
+      .toArray();
+
+    expect(out).toEqual([items[0], items[2]]);
+  });
+
+  it("closes a sync generator source when .first(1) stops it early, on ConcurrentPipeline", async () => {
+    // `toAsyncIterable()`'s hand-rolled iterator (replacing an `async function*`) must still forward
+    // an early stop into `.return()` on the underlying sync generator - a version without that
+    // forwarding left this `false` where the `async function*` it replaces left it `true`.
+    const state = { closed: false };
+
+    expect(await new ConcurrentPipeline<number>().buffer(1)(closingSource(state)).first(1)).toEqual(
+      [0],
+    );
+    expect(state.closed).toBe(true);
+  });
+});
+
 // #39's own Done-when 4 and 5 - lifecycle hooks firing identically across every consumption path,
 // and async iteration reading the same persisted chunk stream a terminal op does - are covered by
 // __tests__/transforms.e2e.test.ts's single tap observation case now that #72 deletes hooks in
