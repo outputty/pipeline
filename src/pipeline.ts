@@ -113,7 +113,17 @@ function toAsyncIterable<U>(data: PipelineSource<U>): AsyncIterable<U> {
       const iterator = syncIterable[Symbol.iterator]();
       return {
         next(): Promise<IteratorResult<U>> {
-          return Promise.resolve(iterator.next());
+          // Defensive: a generator's own body can throw SYNCHRONOUSLY from `.next()`. Every
+          // consumer of this iterable in this package pulls it through `for await`, which already
+          // normalizes a synchronous throw into that generator's own rejection regardless (verified:
+          // the un-wrapped form passes the identical rejection case below) - this wrap matches the
+          // `AsyncIterator` protocol's own contract for any FUTURE consumer that calls `.next()`
+          // directly rather than through `for await`.
+          try {
+            return Promise.resolve(iterator.next());
+          } catch (error) {
+            return Promise.reject(error as Error);
+          }
         },
         return(value?: U): Promise<IteratorResult<U>> {
           iterator.return?.(value as U);
@@ -1193,7 +1203,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
         {
           ...this.carriedOptions(),
           preBufferItems: null,
-          syncPreBufferItems: null,
+          // The item view survives, mirroring the `isSync()` branch above (`items !== null`) -
+          // nothing has consumed the stream since the last cut, so a back-to-back `.buffer()`
+          // call collapses to the LAST one by re-cutting from these SAME raw items, rather than
+          // falling through to `buildBufferGenerator`'s per-item path for the second call.
+          syncPreBufferItems: syncItems,
         },
       ) as this;
     }
