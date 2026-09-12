@@ -195,8 +195,18 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
       ratio: 18.4,
       local: { nsPerRow: 300, dispatchesWhilePinned: 0 },
     },
-    HttpPipeline: { pipelineNsPerRow: 1000, floorNsPerRow: 22, ratio: 45.5 },
-    ClusterPipeline: { pipelineNsPerRow: 1200, floorNsPerRow: 21, ratio: 57.1 },
+    HttpPipeline: {
+      pipelineNsPerRow: 1000,
+      floorNsPerRow: 22,
+      ratio: 45.5,
+      local: { nsPerRow: 260, requestsWhilePinned: 0 },
+    },
+    ClusterPipeline: {
+      pipelineNsPerRow: 1200,
+      floorNsPerRow: 21,
+      ratio: 57.1,
+      local: { nsPerRow: 265, workerPidsWhilePinned: [] },
+    },
   };
 
   it("passes when the report matches the baseline exactly", () => {
@@ -225,7 +235,8 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
     // .ratio divides by floorNsPerRow, and dividing two independently noisy measurements compounds
     // their noise (bench/gate.ts's own header, the post-planning finding): a smaller floorNsPerRow
     // alone can double the ratio with pipelineNsPerRow untouched, which is exactly what this report
-    // simulates. Only pipelineNsPerRow is gated now.
+    // simulates. `Pipeline` has no `local` row, so pipelineNsPerRow is the gated field here - a
+    // dispatching class instead gates local.nsPerRow (bench/gate.ts's own header).
     const report = {
       ...baseline,
       Pipeline: { pipelineNsPerRow: 50, floorNsPerRow: 1.5, ratio: 33.3 },
