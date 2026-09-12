@@ -441,8 +441,8 @@ its iterator instead of using a generator (fewer Promise-wraps per pull, `.retur
 for an early `.first(n)`); `buildBufferGenerator` awaits only a genuinely-thenable fold result;
 `fromSource()` keeps the original sync view alive under a forced-async Mode so `.buffer()` can fold
 through it synchronously and cross the async boundary once per CHUNK rather than once per raw item.
-Together: `ConcurrentPipeline`'s pinned row moved from 535.34 ns/row to 271.47, `HttpPipeline`'s
-from 479.72 to 254.98, `ClusterPipeline`'s from 496.05 to 249.56 - roughly halved, still well above
+Together: `ConcurrentPipeline`'s pinned row moved from 535.34 ns/row to 278.43, `HttpPipeline`'s
+from 479.72 to 252.76, `ClusterPipeline`'s from 496.05 to 257.11 - roughly halved, still well above
 the sync floor, since a `.local()` region still runs the async engine, only a cheaper one.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
@@ -803,10 +803,10 @@ it runs no `Pipeline` machinery at all, so it carries no ratio of its own:
 | Class                | ns/row | floor ns/row | ratio  | `.local()` ns/row | `.local()` correctness      |
 | --------------------- | ------ | ------------ | ------ | ------------------ | ---------------------------- |
 | `Array.prototype`     | 16.40  | -            | -      | -                   | -                             |
-| `Pipeline`             | 27.21  | 12.03        | 2.26x  | -                   | (never dispatches)           |
-| `ConcurrentPipeline`   | 296.46 | 12.03        | 24.65x | 271.47              | 0 `stageWork()` calls         |
-| `HttpPipeline`         | 744.66 | 12.03        | 61.90x | 254.98              | 0 HTTP requests served        |
-| `ClusterPipeline`      | 640.89 | 12.03        | 53.28x | 249.56              | every item on the primary pid |
+| `Pipeline`             | 27.46  | 11.15        | 2.46x  | -                   | (never dispatches)           |
+| `ConcurrentPipeline`   | 289.10 | 11.15        | 25.93x | 278.43              | 0 `stageWork()` calls         |
+| `HttpPipeline`         | 744.42 | 11.15        | 66.76x | 252.76              | 0 HTTP requests served        |
+| `ClusterPipeline`      | 656.83 | 11.15        | 58.91x | 257.11              | every item on the primary pid |
 
 `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`'s numbers above already carry the async-engine
 tax reduction (#120 follow-up, above): the committed pre-reduction baseline read 541.49 / 1103.72 /
