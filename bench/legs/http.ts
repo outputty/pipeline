@@ -12,11 +12,10 @@ import {
   canonicalInput,
   handRolledFloor,
   timeRounds,
-  timeFloor,
   ROWS,
   BUFFER_SIZE,
 } from "../canonical";
-import type { LegReport } from "../gate";
+import { legReport, type LegReport } from "../gate";
 import { withLoopbackServer, countingHandler } from "../utils/loopbackServer";
 
 /** The "another instance" side: an empty-source `HttpPipeline` holding the SAME stage definitions,
@@ -26,14 +25,16 @@ function worker(): HttpPipeline<number> {
   return new HttpPipeline<number>({ url: "" }).transform(canonicalChain);
 }
 
-/** Real, timed `pipelineNsPerRow`/`floorNsPerRow`/`ratio` at `ROWS.HttpPipeline` rows over a real
- * loopback server, plus the `.local()` row. The un-pinned (main) run serves the worker's `.fetch`
- * directly, uncounted - only the `.local()` run needs `countingHandler`, since that is the one run
- * whose request count the ticket's own Done-when 3 asserts. */
-export async function measureHttpPipeline(rounds?: number): Promise<LegReport> {
+/** Real, timed `pipelineNsPerRow`/`ratio` at `ROWS.HttpPipeline` rows over a real loopback server,
+ * plus the `.local()` row. The un-pinned (main) run serves the worker's `.fetch` directly,
+ * uncounted - only the `.local()` run needs `countingHandler`, since that is the one run whose
+ * request count the ticket's own Done-when 3 asserts. `floorNsPerRow` is measured ONCE by the caller
+ * and passed in - see `measurePipeline`'s own docstring for why. */
+export async function measureHttpPipeline(
+  floorNsPerRow: number,
+  rounds?: number,
+): Promise<LegReport> {
   const items = canonicalInput(ROWS.HttpPipeline);
-
-  const floorNsPerRow = await timeFloor(items, rounds);
 
   const pipelineNsPerRow = await withLoopbackServer(worker().fetch, async (url) => {
     const pipeline = new HttpPipeline<number>({ url })
@@ -56,12 +57,10 @@ export async function measureHttpPipeline(rounds?: number): Promise<LegReport> {
     }, rounds);
   });
 
-  return {
-    pipelineNsPerRow,
-    floorNsPerRow,
-    ratio: pipelineNsPerRow / floorNsPerRow,
-    local: { nsPerRow: localNsPerRow, requestsWhilePinned: counter.requests },
-  };
+  return legReport(pipelineNsPerRow, floorNsPerRow, {
+    nsPerRow: localNsPerRow,
+    requestsWhilePinned: counter.requests,
+  });
 }
 
 /** `httpMatchesFloor(50)` → `true` - small-N equality (Done-when 2), never the full

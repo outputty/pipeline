@@ -1,7 +1,7 @@
 /**
  * `pnpm bench:overhead` (#120) - the CLI: measures all four `Pipeline` runner classes against their
  * hand-rolled floors (`bench/canonical.ts`), prints the report, and gates it against the committed
- * `bench/baseline.json` (20% absolute tolerance, 10% ratio tolerance, regression-only -
+ * `bench/baseline.json` (20% absolute tolerance on `pipelineNsPerRow`, regression-only -
  * `bench/gate.ts`'s own docstring). Exits 1 on a gate failure, 0 otherwise.
  *
  * `BENCH_ROUNDS=<n>` overrides the default round count (`bench/canonical.ts`'s `ROUNDS`) - useful
@@ -32,38 +32,57 @@ import { measurePipeline } from "./legs/pipeline";
 import { measureConcurrentPipeline } from "./legs/concurrent";
 import { measureHttpPipeline } from "./legs/http";
 import { measureClusterPipeline } from "./legs/cluster";
-import { checkGate, type OverheadReport } from "./gate";
+import { checkGate, legReport, type OverheadReport } from "./gate";
+import { timeFloor } from "./canonical";
 
 const BASELINE_PATH = fileURLToPath(new URL("./baseline.json", import.meta.url));
 
+/** Parses `BENCH_ROUNDS`, raising on a non-finite value rather than letting it become `NaN` or
+ * `Infinity` - unguarded, `timeRounds`'s own `rounds < 2` check is false for BOTH (every `NaN`
+ * comparison is false, and `Infinity` is never less than 2), so a non-numeric value would silently
+ * run the round loop zero times (surfacing as `median() of an empty array has no defined value`,
+ * naming neither `BENCH_ROUNDS` nor the bad value) while `Infinity` itself would hang the loop
+ * forever instead of failing at all - caught by `/code-review`, `BENCH_ROUNDS=Infinity` reaching
+ * `Number("Infinity")` unrejected by a bare `Number.isNaN` check. */
 function rounds(): number | undefined {
   const raw = process.env.BENCH_ROUNDS;
-  return raw ? Number(raw) : undefined;
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`BENCH_ROUNDS must be a finite number, got ${JSON.stringify(raw)}`);
+  }
+  return parsed;
 }
 
 async function main(): Promise<void> {
   if (!cluster.isPrimary) {
-    await measureClusterPipeline(rounds());
+    // A placeholder floor (0), never the real handRolledFloor timing: this call's whole return
+    // value is discarded below, kept only for its construction side effect (registry alignment,
+    // this file's own header) - re-timing an unrelated 1,000,000-row loop for a result nobody
+    // reads would only waste CPU on every forked worker (code-review finding).
+    await measureClusterPipeline(0, rounds());
     return;
   }
 
+  // Measured ONCE and shared by every leg: handRolledFloor is class-independent
+  // (bench/canonical.ts's own timeFloor docstring), so timing it separately per leg was 4 redundant
+  // 5-round, 1,000,000-row measurements of the identical conceptual number (code-review finding).
+  const floorNsPerRow = await timeFloor(rounds());
   const report: OverheadReport = {
-    Pipeline: await measurePipeline(rounds()),
-    ConcurrentPipeline: await measureConcurrentPipeline(rounds()),
-    HttpPipeline: await measureHttpPipeline(rounds()),
-    ClusterPipeline: await measureClusterPipeline(rounds()),
+    Pipeline: await measurePipeline(floorNsPerRow, rounds()),
+    ConcurrentPipeline: await measureConcurrentPipeline(floorNsPerRow, rounds()),
+    HttpPipeline: await measureHttpPipeline(floorNsPerRow, rounds()),
+    ClusterPipeline: await measureClusterPipeline(floorNsPerRow, rounds()),
   };
 
   if (process.env.BENCH_SYNTHETIC_REGRESSION === "1") {
-    const widenedNsPerRow = report.Pipeline.pipelineNsPerRow * 100;
-    report.Pipeline = {
-      ...report.Pipeline,
-      pipelineNsPerRow: widenedNsPerRow,
-      // ratio is ALWAYS pipelineNsPerRow / floorNsPerRow (gate.ts's own docstring) - recomputed
-      // here too, so the printed report stays internally consistent under the synthetic multiplier
-      // instead of showing a ratio that no longer matches its own two inputs.
-      ratio: widenedNsPerRow / report.Pipeline.floorNsPerRow,
-    };
+    // legReport() recomputes ratio (gate.ts's own docstring: ALWAYS pipelineNsPerRow /
+    // floorNsPerRow) so the printed report stays internally consistent under the synthetic
+    // multiplier instead of showing a ratio that no longer matches its own two inputs.
+    report.Pipeline = legReport(
+      report.Pipeline.pipelineNsPerRow * 100,
+      report.Pipeline.floorNsPerRow,
+    );
   }
 
   // Single-line, not pretty-printed: `runFixtureJson`'s own convention (every cluster-backed

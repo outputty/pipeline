@@ -32,8 +32,10 @@ import {
   dropOrRethrow,
   chain,
   mapSettle,
+  settleMaybe,
   isThenable,
   tryRecover,
+  disarm,
 } from "./utils/helpers";
 import { Reducer, foldChunk } from "./utils/reduce";
 
@@ -66,6 +68,85 @@ async function* runSequentially<In, Out>(
       await dropOrRethrow(runHandler, error as Error, context);
     }
   }
+}
+
+/**
+ * One item's own step of `filterSettle`'s loop, pulled out to keep that loop's own `try` at this
+ * repo's `max-depth: 2` (the same reason `disarm` in `utils/helpers.ts` is its own function, for
+ * `mapSettle`'s `catch`) - `tail` is threaded through as the return value rather than closed over,
+ * since `filterSettle` needs the UPDATED value back at its own scope to read after the loop ends.
+ *
+ * Once `tail` exists, every later item's raw result (sync or thenable) joins it unconditionally -
+ * membership for those items is decided only once `tail` is settled, in `filterSettle` itself.
+ * Before that, a sync-true item is pushed into `kept` immediately and a sync-false one is dropped;
+ * the FIRST thenable seen is what starts `tail`.
+ */
+function filterStep<T>(
+  item: T,
+  predicate: (item: T) => boolean | Promise<boolean>,
+  kept: T[],
+  tail: (boolean | Promise<boolean>)[] | undefined,
+): (boolean | Promise<boolean>)[] | undefined {
+  const result = predicate(item);
+  if (tail) {
+    tail.push(result);
+    return tail;
+  }
+  if (isThenable(result)) return [result];
+  if (result) kept.push(item);
+  return undefined;
+}
+
+/**
+ * Filters `chunk` by `predicate` in ONE pass over it (#120's O1) - a synchronously-true item is
+ * pushed into the kept array the moment its own predicate call returns, rather than `.filter()`'s
+ * old three-pass shape: `mapSettle` building a keep-flag per item, `settleMaybe`'s own `.some()`
+ * scanning that whole array for a thenable, then `chunk.filter()` reading the flags back a third
+ * time. The common, fully-synchronous case now costs exactly what `mapSettle` alone costs for
+ * `.map()` - one call per item, no second array, no second pass.
+ *
+ * Every item before the FIRST thenable predicate result is already decided synchronously, so
+ * nothing after that point re-evaluates it: once a thenable appears, later raw results (sync or
+ * async) collect into `tail` instead, settled together (`settleMaybe`, the same async-safe
+ * collect-then-filter shape `.map()`'s own async arm already pays for) and appended to `kept` in
+ * order once resolved. A synchronous throw is disarmed exactly like `mapSettle`'s own `results` -
+ * only `tail` can hold a live, unattached promise at that point, since every earlier item already
+ * settled into a real `T` inside `kept`.
+ *
+ * `filterSettle([1, 2, 3], (x) => x > 1)` → `[2, 3]`, no `Promise` created, one predicate call per
+ * item.
+ */
+function filterSettle<T>(
+  chunk: T[],
+  predicate: (item: T) => boolean | Promise<boolean>,
+): T[] | Promise<T[]> {
+  const kept: T[] = [];
+  let tail: (boolean | Promise<boolean>)[] | undefined;
+  // tailStart is recorded AT the index where tail is born (never derived from chunk.length -
+  // tail.length afterward), so it stays correct independent of how many entries filterStep pushes
+  // per item - code-review finding: the derived form depended on an invariant (exactly one push per
+  // remaining item) that lives entirely in filterStep's own body and is invisible here.
+  let tailStart = -1;
+  try {
+    for (let i = 0; i < chunk.length; i++) {
+      const before = tail;
+      tail = filterStep(chunk[i], predicate, kept, tail);
+      // No `if`: an extra nested block here would push this loop past this repo's `max-depth: 2`
+      // (the try above is depth 1, this for is depth 2) - the same reason filterStep is its own
+      // function in the first place.
+      tailStart = !before && tail ? i : tailStart;
+    }
+  } catch (error) {
+    if (tail) disarm(tail);
+    throw error;
+  }
+  if (!tail) return kept;
+  return chain(settleMaybe(tail), (keep) => {
+    for (let i = 0; i < keep.length; i++) {
+      if (keep[i]) kept.push(chunk[tailStart + i]);
+    }
+    return kept;
+  });
 }
 
 /**
@@ -397,10 +478,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
           (predicate as (item: Out) => boolean | Promise<boolean>)(x);
     return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
-        return chain(
-          mapSettle(chunk, (x) => call(x, ctx)),
-          (keep) => chunk.filter((_x, i) => keep[i]),
-        );
+        return filterSettle(chunk, (x) => call(x, ctx));
       }
       return settleRows(
         chunk,

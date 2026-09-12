@@ -12,12 +12,11 @@ import {
   canonicalInput,
   handRolledFloor,
   timeRounds,
-  timeFloor,
   ROWS,
   BUFFER_SIZE,
   MAX_CONCURRENCY,
 } from "../canonical";
-import type { LegReport } from "../gate";
+import { legReport, type LegReport } from "../gate";
 
 /** A counting `ConcurrentPipeline` subclass, plus the counter its `stageWork()` override
  * increments - `countingConcurrentPipeline()`'s own return shape, named so its callers don't widen
@@ -45,12 +44,16 @@ export function countingConcurrentPipeline(): CountingConcurrentPipeline {
   return { Pipeline: StageWorkCounter, counter };
 }
 
-/** Real, timed `pipelineNsPerRow`/`floorNsPerRow`/`ratio` at `ROWS.ConcurrentPipeline` rows, plus the
- * `.local()` row: same rows, same chain, wrapped in `.local(build)` instead of dispatched, timed the
- * same way - `dispatchesWhilePinned` is read once, after every timed round, since the override body
- * never runs while pinned (architecture.md's own guarantee) and so never adds cost to the timed
- * path. */
-export async function measureConcurrentPipeline(rounds?: number): Promise<LegReport> {
+/** Real, timed `pipelineNsPerRow`/`ratio` at `ROWS.ConcurrentPipeline` rows, plus the `.local()`
+ * row: same rows, same chain, wrapped in `.local(build)` instead of dispatched, timed the same way -
+ * `dispatchesWhilePinned` is read once, after every timed round, since the override body never runs
+ * while pinned (architecture.md's own guarantee) and so never adds cost to the timed path.
+ * `floorNsPerRow` is measured ONCE by the caller and passed in - see `measurePipeline`'s own
+ * docstring for why. */
+export async function measureConcurrentPipeline(
+  floorNsPerRow: number,
+  rounds?: number,
+): Promise<LegReport> {
   const items = canonicalInput(ROWS.ConcurrentPipeline);
   const pipeline = new ConcurrentPipeline<number>({ maxConcurrency: MAX_CONCURRENCY })
     .buffer(BUFFER_SIZE)
@@ -59,7 +62,6 @@ export async function measureConcurrentPipeline(rounds?: number): Promise<LegRep
     await pipeline(items).toArray();
     return items.length;
   }, rounds);
-  const floorNsPerRow = await timeFloor(items, rounds);
 
   const { Pipeline: CountingPipeline, counter } = countingConcurrentPipeline();
   const localPipeline = new CountingPipeline({ maxConcurrency: MAX_CONCURRENCY })
@@ -70,12 +72,10 @@ export async function measureConcurrentPipeline(rounds?: number): Promise<LegRep
     return items.length;
   }, rounds);
 
-  return {
-    pipelineNsPerRow,
-    floorNsPerRow,
-    ratio: pipelineNsPerRow / floorNsPerRow,
-    local: { nsPerRow: localNsPerRow, dispatchesWhilePinned: counter.calls },
-  };
+  return legReport(pipelineNsPerRow, floorNsPerRow, {
+    nsPerRow: localNsPerRow,
+    dispatchesWhilePinned: counter.calls,
+  });
 }
 
 /** `concurrentMatchesFloor(50)` → `true` - small-N equality (Done-when 2), never the full
