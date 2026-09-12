@@ -1,0 +1,12 @@
+{
+  // Root tsconfig.json's own `include` is `["src/**/*", "__tests__/**/*"]` (#120's own Where scope
+  // keeps that file untouched), so `bench/` needs its own project to be typechecked at all - run via
+  // `pnpm typecheck:bench`, kept separate from `pnpm check`/`pnpm typecheck` since a benchmark run is
+  // slow and machine-dependent, never a gate condition.
+  "extends": "../tsconfig.json",
+  // `paths` is inherited unchanged from the root config: TypeScript resolves an EXTENDED config's
+  // own relative paths against ITS OWN directory (the repo root), not the extending config's
+  // (`bench/`) - clearing it here broke `src/`'s own internal `@src/*` imports the moment `bench/`
+  // pulled `src/**` into its program by importing the package at all.
+  "include": ["**/*"]
+}

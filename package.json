@@ -31,6 +31,7 @@
     "build": "tsup && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json",
     "build:watch": "tsup --watch",
     "typecheck": "tsc --noEmit",
+    "typecheck:bench": "tsc --noEmit -p bench/tsconfig.json",
     "test": "vitest",
     "test:run": "vitest run --passWithNoTests",
     "test:coverage": "vitest run --coverage",
