@@ -6,13 +6,24 @@
  * number nobody trusts) - `checkGate` only ever flags a leg that got slower than the committed
  * `bench/baseline.json`.
  *
- * Gates ABSOLUTE `pipelineNsPerRow` only, never `.ratio` (post-planning finding): `.ratio` divides by
+ * Gates ABSOLUTE ns/row only, never `.ratio` (post-planning finding): `.ratio` divides by
  * `floorNsPerRow`, and dividing two independently noisy measurements compounds their noise -
  * measured, `pipelineNsPerRow` held to a 5% spread across 5 real consecutive runs while the same
  * runs' `.ratio` spread 14%, past this gate's own 10% tolerance with no code change between runs.
  * `pnpm bench:overhead` failed 2 of those 5 runs before the ratio check was removed. `.ratio` still
  * prints in every report and every doc table - it answers "is dispatching worth it here", which
- * absolute `pipelineNsPerRow` alone does not - it is simply no longer a gated number.
+ * absolute ns/row alone does not - it is simply no longer a gated number.
+ *
+ * WHICH field is gated splits on whether a leg has a `local` row (#120 follow-up, post-L5): `Pipeline`
+ * has none and gates its own `pipelineNsPerRow`, unchanged. `ConcurrentPipeline`/`HttpPipeline`/
+ * `ClusterPipeline` gate `local.nsPerRow` instead - their own DISPATCHED `pipelineNsPerRow` crosses a
+ * real network/IPC boundary (`HttpPipeline`'s loopback POST, `ClusterPipeline`'s worker IPC), and
+ * that leg's own `.ratio` already measures "is dispatching worth it here," never the package's own
+ * overhead - gating its absolute ns/row on real machine jitter gates the wrong thing. Found when
+ * L5's real ~48% reduction on every `.local()` row narrowed the SAME 20% tolerance's absolute band on
+ * these two legs' DISPATCHED rows against unchanged real jitter, raising their flake rate to roughly
+ * 1-in-10 with no regression to show for it - `local.nsPerRow` is a pure in-process measurement with
+ * none of that noise, and is what this ticket's own Interface actually cares about protecting.
  */
 
 /** One class's own measured (or committed-baseline) row - `local` is present only for the three
@@ -57,16 +68,20 @@ export interface GateResult {
 }
 
 /**
- * `checkGate(report, baseline)` - `report[leg].pipelineNsPerRow` past `baseline`'s own value by more
- * than `ABSOLUTE_TOLERANCE`, WORSE (slower ns/row) is a violation; a leg that got faster never is.
- * `.ratio` is read from the report but never gated (see this file's own header). A leg the baseline
- * has but `report` does NOT is a violation too - a report
- * that cannot even be compared has failed to prove no regression, the same as one that measured a
- * real one (`code.md`'s "fail loud", not a silent pass for a lookup that came up empty).
+ * `checkGate(report, baseline)` - the gated field (`pipelineNsPerRow` on `Pipeline`, `local.nsPerRow`
+ * on a dispatching class - this file's own header) past `baseline`'s own value by more than
+ * `ABSOLUTE_TOLERANCE`, WORSE (slower) is a violation; a leg that got faster never is. `.ratio` is
+ * read from the report but never gated. A leg the baseline has but `report` does NOT is a violation
+ * too - a report that cannot even be compared has failed to prove no regression, the same as one
+ * that measured a real one (`code.md`'s "fail loud", not a silent pass for a lookup that came up
+ * empty); the same holds for a dispatching class's own `local` row.
  *
  * `checkGate({ Pipeline: { pipelineNsPerRow: 100, floorNsPerRow: 4.2, ratio: 23.8 } }, { Pipeline: {
  * pipelineNsPerRow: 50, floorNsPerRow: 4.2, ratio: 11.9 } })` → one violation: `100` is double `50`,
- * past the 20% absolute tolerance.
+ * past the 20% absolute tolerance. `checkGate({ ConcurrentPipeline: { pipelineNsPerRow: 900, ...,
+ * local: { nsPerRow: 280 } } }, { ConcurrentPipeline: { pipelineNsPerRow: 300, ...,
+ * local: { nsPerRow: 280 } } })` → no violation: the DISPATCHED leg tripled, but `local.nsPerRow` -
+ * the gated field for this leg - is unchanged.
  */
 export function checkGate(
   report: Partial<OverheadReport>,
@@ -81,23 +96,54 @@ export function checkGate(
       violations.push(`${leg}: missing from the report - baseline has it, nothing to compare`);
       continue;
     }
-    if (!Number.isFinite(current.pipelineNsPerRow)) {
-      // Every comparison against NaN is false, so an unguarded `>` below would silently PASS a
-      // broken measurement (the exact hazard `median()`'s own docstring names) - a non-finite
-      // reading has failed to prove no regression, same as a missing leg above.
-      violations.push(
-        `${leg}: pipelineNsPerRow is ${current.pipelineNsPerRow} - not a finite measurement`,
+    // Which field gates: this file's own header. `base.local` present is what marks a dispatching
+    // class here; `Pipeline` has none and keeps its dispatched-leg gate unchanged.
+    if (!base.local) {
+      pushIfOverCeiling(
+        violations,
+        leg,
+        "pipelineNsPerRow",
+        current.pipelineNsPerRow,
+        base.pipelineNsPerRow,
       );
       continue;
     }
-    const absoluteCeiling = base.pipelineNsPerRow * (1 + ABSOLUTE_TOLERANCE);
-    if (current.pipelineNsPerRow > absoluteCeiling) {
+    if (!current.local) {
       violations.push(
-        `${leg}: pipelineNsPerRow ${current.pipelineNsPerRow.toFixed(1)} exceeds baseline ` +
-          `${base.pipelineNsPerRow.toFixed(1)} by more than ${ABSOLUTE_TOLERANCE * 100}% ` +
-          `(ceiling ${absoluteCeiling.toFixed(1)})`,
+        `${leg}: local is missing from the report - baseline has it, nothing to compare`,
       );
+      continue;
     }
+    pushIfOverCeiling(
+      violations,
+      leg,
+      "local.nsPerRow",
+      current.local.nsPerRow,
+      base.local.nsPerRow,
+    );
   }
   return { ok: violations.length === 0, violations };
+}
+
+/** The one `> ceiling` check both gated fields share (`pipelineNsPerRow` on `Pipeline`, `local.nsPerRow`
+ * on every dispatching class) - failing loud on a non-finite reading rather than letting an unguarded
+ * `>` silently pass a broken measurement (`median()`'s own docstring names this exact hazard). */
+function pushIfOverCeiling(
+  violations: string[],
+  leg: LegName,
+  field: string,
+  currentValue: number,
+  baseValue: number,
+): void {
+  if (!Number.isFinite(currentValue)) {
+    violations.push(`${leg}: ${field} is ${currentValue} - not a finite measurement`);
+    return;
+  }
+  const ceiling = baseValue * (1 + ABSOLUTE_TOLERANCE);
+  if (currentValue > ceiling) {
+    violations.push(
+      `${leg}: ${field} ${currentValue.toFixed(1)} exceeds baseline ${baseValue.toFixed(1)} by ` +
+        `more than ${ABSOLUTE_TOLERANCE * 100}% (ceiling ${ceiling.toFixed(1)})`,
+    );
+  }
 }

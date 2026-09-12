@@ -260,6 +260,38 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
     expect(result.ok).toBe(false);
     expect(result.violations[0]).toMatch(/Pipeline: pipelineNsPerRow is NaN/);
   });
+
+  it("passes when a dispatching class's DISPATCHED ns/row triples, local.nsPerRow unchanged (#120 follow-up)", () => {
+    // A dispatching class's own DISPATCHED leg crosses a real network/IPC boundary (real jitter,
+    // not this package's own overhead) - `local` present marks it as one, and it is `local.nsPerRow`
+    // that gates now, never the dispatched `pipelineNsPerRow` itself.
+    const report = {
+      ...baseline,
+      ConcurrentPipeline: { ...baseline.ConcurrentPipeline, pipelineNsPerRow: 1050 },
+    };
+    expect(checkGate(report, baseline).ok).toBe(true);
+  });
+
+  it("fails when a dispatching class's own local.nsPerRow widens past 20% (#120 follow-up)", () => {
+    const report = {
+      ...baseline,
+      ConcurrentPipeline: {
+        ...baseline.ConcurrentPipeline,
+        local: { ...baseline.ConcurrentPipeline.local!, nsPerRow: 400 },
+      },
+    };
+    const result = checkGate(report, baseline);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/ConcurrentPipeline: local\.nsPerRow/);
+  });
+
+  it("fails when a dispatching class's local row is missing from the report (#120 follow-up)", () => {
+    const { local: _omitted, ...concurrentWithoutLocal } = baseline.ConcurrentPipeline;
+    const report = { ...baseline, ConcurrentPipeline: concurrentWithoutLocal };
+    const result = checkGate(report, baseline);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/ConcurrentPipeline: local is missing/);
+  });
 });
 
 describe("#120 median/timeRounds - fail loud rather than a silent NaN", () => {
