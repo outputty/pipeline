@@ -5,12 +5,36 @@
  * stage until called again.
  */
 import { describe, it, expect } from "vitest";
+import { createHook } from "node:async_hooks";
 import { Pipeline } from "@src/pipeline";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Transformer } from "@src/transformer";
 import type { IContextManager } from "@src/types";
 import { DROP } from "@src/types";
 import { closingSource, closingAsyncSource, chunksOf } from "./helpers/sequences";
+
+/** Counts every `Promise` created across a whole ASYNC drain, not just `fn`'s own synchronous
+ * call (`./helpers/sequences`' own `countPromises` disables its hook the instant `fn()` returns,
+ * before an awaited drain's own later ticks run) - the one case here that needs a promise count
+ * spanning several microtask turns, since the fast path vs. per-item fallback this ticket adds
+ * differ only in HOW MANY promises the drain creates, never in its output.
+ *
+ * `await countPromisesAsync(() => Promise.resolve(1).then(() => Promise.resolve(2)))` → `2`. */
+async function countPromisesAsync(fn: () => Promise<unknown>): Promise<number> {
+  let created = 0;
+  const hook = createHook({
+    init(_id, type) {
+      if (type === "PROMISE") created++;
+    },
+  });
+  hook.enable();
+  try {
+    await fn();
+  } finally {
+    hook.disable();
+  }
+  return created;
+}
 
 /** Records each chunk `.apply()` hands to a stage, before that stage's own transform runs -
  * a chunk-level probe, not a per-item one (`.tap(fn)` runs per item and can't see boundaries). */
@@ -186,6 +210,93 @@ describe("#90 review - an early exit closes the source on both engines", () => {
 
     expect(await chain(closingSource(state)).first(1)).toEqual([0]);
     expect(state.closed).toBe(true);
+  });
+});
+
+describe("async-engine tax spike (#120 follow-up) - a sync source on a forced-async class", () => {
+  it("still cuts the exact same chunks .buffer(size) always did, on ConcurrentPipeline", async () => {
+    // `sourcePolicy()` forces ConcurrentPipeline's Mode to "async" regardless of input shape - the
+    // fast path this covers (a sync pre-buffer view kept alive through that forced Mode) must
+    // produce IDENTICAL output to the per-item path it replaces, not just run faster. `.toArray()`
+    // alone can't see a chunk boundary (`boundaryProbe`'s own docstring, above) - flattening
+    // hides a wrong cut (e.g. one 7-item chunk) behind an identical array, so this reads the
+    // actual boundary `.apply()` hands the next stage.
+    const seen: number[][] = [];
+
+    const out = await new ConcurrentPipeline<number>()
+      .buffer(3)
+      .apply(boundaryProbe(seen))([1, 2, 3, 4, 5, 6, 7])
+      .toArray();
+
+    expect(out).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(seen).toEqual([[1, 2, 3], [4, 5, 6], [7]]);
+  });
+
+  it("still drops an item via DROP and never emits an empty trailing chunk, on ConcurrentPipeline", async () => {
+    // The `.buffer(fn)` overload's own engine (`bufferReduceFunction`), exercised through the same
+    // fast path - #88's Done-when 3 case, restated on a dispatching class.
+    const items = [
+      { v: 1, invalid: false },
+      { v: 2, invalid: true },
+      { v: 3, invalid: false },
+    ];
+    const dropInvalid = (item: (typeof items)[number]) => (item.invalid ? DROP : item);
+
+    const out = await new ConcurrentPipeline<(typeof items)[number]>()
+      .buffer(dropInvalid)(items)
+      .toArray();
+
+    expect(out).toEqual([items[0], items[2]]);
+  });
+
+  it("closes a sync generator source when .first(1) stops it early, on ConcurrentPipeline", async () => {
+    // `toAsyncIterable()`'s hand-rolled iterator (replacing an `async function*`) must still forward
+    // an early stop into `.return()` on the underlying sync generator - a version without that
+    // forwarding left this `false` where the `async function*` it replaces left it `true`.
+    const state = { closed: false };
+
+    expect(await new ConcurrentPipeline<number>().buffer(1)(closingSource(state)).first(1)).toEqual(
+      [0],
+    );
+    expect(state.closed).toBe(true);
+  });
+
+  it("a second back-to-back .buffer() still takes the fast path, on ConcurrentPipeline", async () => {
+    // #39's Done-when 3 (two `.buffer()` calls collapse to the last) already holds for OUTPUT
+    // either way - what's at stake here is F3's fast path staying live for the SECOND call too:
+    // if the sync item view were nulled after the first `.buffer()` (rather than kept alive, as
+    // the `isSync()` branch above already does), the second call would silently fall through to
+    // `buildBufferGenerator`'s per-item path with no wrong OUTPUT to catch it - only more promises
+    // created, at 1000 items an easy regression no `.toEqual()` on the result would ever see.
+    // Measured directly (spiked, both real): the fast path creates 79 promises for this 9-item
+    // case (`ConcurrentPipeline`'s own construction/dispatch scaffolding is most of that, unrelated
+    // to `.buffer()`); temporarily nulling the kept-alive view to force the per-item fallback for
+    // BOTH calls creates 196. The threshold sits between the two, with margin either side.
+    const items = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+    const created = await countPromisesAsync(() =>
+      new ConcurrentPipeline<number>().buffer(2).buffer(3)(items).toArray(),
+    );
+
+    expect(created).toBeLessThan(140);
+  });
+
+  it("rejects, rather than throws synchronously, when the sync source itself throws mid-pull", async () => {
+    // `toAsyncIterable()`'s hand-rolled `next()` wraps the underlying sync iterator's own
+    // `.next()` in a try/catch so a synchronous throw there surfaces as a REJECTED Promise, per
+    // the `AsyncIterator` protocol's own contract - defensive, since every consumer in this
+    // package pulls through `for await` (which already normalizes this regardless, verified: this
+    // exact case still passes with the try/catch removed), but real for any future direct
+    // `.next()` caller.
+    function* throwsOnThird(): Generator<number> {
+      yield 1;
+      yield 2;
+      throw new Error("bad item");
+    }
+
+    await expect(new ConcurrentPipeline<number>()(throwsOnThird()).toArray()).rejects.toThrow(
+      "bad item",
+    );
   });
 });
 

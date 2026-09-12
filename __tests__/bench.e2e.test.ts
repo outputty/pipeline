@@ -195,8 +195,18 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
       ratio: 18.4,
       local: { nsPerRow: 300, dispatchesWhilePinned: 0 },
     },
-    HttpPipeline: { pipelineNsPerRow: 1000, floorNsPerRow: 22, ratio: 45.5 },
-    ClusterPipeline: { pipelineNsPerRow: 1200, floorNsPerRow: 21, ratio: 57.1 },
+    HttpPipeline: {
+      pipelineNsPerRow: 1000,
+      floorNsPerRow: 22,
+      ratio: 45.5,
+      local: { nsPerRow: 260, requestsWhilePinned: 0 },
+    },
+    ClusterPipeline: {
+      pipelineNsPerRow: 1200,
+      floorNsPerRow: 21,
+      ratio: 57.1,
+      local: { nsPerRow: 265, workerPidsWhilePinned: [] },
+    },
   };
 
   it("passes when the report matches the baseline exactly", () => {
@@ -225,7 +235,8 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
     // .ratio divides by floorNsPerRow, and dividing two independently noisy measurements compounds
     // their noise (bench/gate.ts's own header, the post-planning finding): a smaller floorNsPerRow
     // alone can double the ratio with pipelineNsPerRow untouched, which is exactly what this report
-    // simulates. Only pipelineNsPerRow is gated now.
+    // simulates. `Pipeline` has no `local` row, so pipelineNsPerRow is the gated field here - a
+    // dispatching class instead gates local.nsPerRow (bench/gate.ts's own header).
     const report = {
       ...baseline,
       Pipeline: { pipelineNsPerRow: 50, floorNsPerRow: 1.5, ratio: 33.3 },
@@ -259,6 +270,38 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
     const result = checkGate(report, baseline);
     expect(result.ok).toBe(false);
     expect(result.violations[0]).toMatch(/Pipeline: pipelineNsPerRow is NaN/);
+  });
+
+  it("passes when a dispatching class's DISPATCHED ns/row triples, local.nsPerRow unchanged (#120 follow-up)", () => {
+    // A dispatching class's own DISPATCHED leg crosses a real network/IPC boundary (real jitter,
+    // not this package's own overhead) - `local` present marks it as one, and it is `local.nsPerRow`
+    // that gates now, never the dispatched `pipelineNsPerRow` itself.
+    const report = {
+      ...baseline,
+      ConcurrentPipeline: { ...baseline.ConcurrentPipeline, pipelineNsPerRow: 1050 },
+    };
+    expect(checkGate(report, baseline).ok).toBe(true);
+  });
+
+  it("fails when a dispatching class's own local.nsPerRow widens past 20% (#120 follow-up)", () => {
+    const report = {
+      ...baseline,
+      ConcurrentPipeline: {
+        ...baseline.ConcurrentPipeline,
+        local: { ...baseline.ConcurrentPipeline.local!, nsPerRow: 400 },
+      },
+    };
+    const result = checkGate(report, baseline);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/ConcurrentPipeline: local\.nsPerRow/);
+  });
+
+  it("fails when a dispatching class's local row is missing from the report (#120 follow-up)", () => {
+    const { local: _omitted, ...concurrentWithoutLocal } = baseline.ConcurrentPipeline;
+    const report = { ...baseline, ConcurrentPipeline: concurrentWithoutLocal };
+    const result = checkGate(report, baseline);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/ConcurrentPipeline: local is missing/);
   });
 });
 

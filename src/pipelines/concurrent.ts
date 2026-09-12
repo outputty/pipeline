@@ -347,9 +347,11 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
         transformer.runnable() as unknown as ChunkTransform,
       ],
       // A dispatched stage's own output IS a real chunk stream now (#39) - a later `.buffer()`
-      // flattens it like any other stage's output, so no pre-buffer item view survives this call
-      // (`freshPreBuffer()` also nulls `syncPreBufferItems`, a no-op here - this class is always
-      // `"async"` and has no sync chunk stream of its own to reset).
+      // flattens it like any other stage's output, so no pre-buffer item view survives this call.
+      // `freshPreBuffer()` also nulls `syncPreBufferItems` here - a genuine reset, not a no-op,
+      // whenever `.from()` kept a sync source's own item view alive for `.buffer()`'s F3 fast
+      // path (`pipeline.ts`'s own `fromSource()`); this class still has no `_syncChunks` of its
+      // own, but `syncPreBufferItems` is a separate, now-populatable field.
       ...this.freshPreBuffer(),
     });
   }

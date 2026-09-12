@@ -354,7 +354,12 @@ export function buildBufferGenerator<T>(
   return async function* bufferGenerator(data: AsyncIterable<T>): AsyncGenerator<T[]> {
     const reducer = new Reducer<T[], T>(reduceFn, []);
     for await (const item of data) {
-      yield* nonEmpty(await reducer.fold(item, ctx));
+      // Not a naked `await` (mirrors `Reducer.fold()`'s own docstring, and `chain()`'s pattern
+      // everywhere else in this file): `fold()` already returns a plain array for a synchronous
+      // `fn`, and `await`ing it unconditionally still costs a microtick per item regardless -
+      // undoing that avoidance at exactly the granularity it exists to protect.
+      const folded = reducer.fold(item, ctx);
+      yield* nonEmpty(isThenable(folded) ? await folded : folded);
     }
     yield* nonEmpty(trailingOf(reducer));
   };
