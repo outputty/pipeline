@@ -23,7 +23,7 @@ export async function measurePipeline(rounds?: number): Promise<LegReport> {
     await pipeline(items).toArray();
     return items.length; // ns/row is normalized to rows IN, not rows kept by the filter
   }, rounds);
-  const floorNsPerRow = await timeFloor(items, rounds);
+  const floorNsPerRow = await timeFloor(rounds);
   return { pipelineNsPerRow, floorNsPerRow, ratio: pipelineNsPerRow / floorNsPerRow };
 }
 

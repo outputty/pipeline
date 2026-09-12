@@ -33,7 +33,7 @@ function worker(): HttpPipeline<number> {
 export async function measureHttpPipeline(rounds?: number): Promise<LegReport> {
   const items = canonicalInput(ROWS.HttpPipeline);
 
-  const floorNsPerRow = await timeFloor(items, rounds);
+  const floorNsPerRow = await timeFloor(rounds);
 
   const pipelineNsPerRow = await withLoopbackServer(worker().fetch, async (url) => {
     const pipeline = new HttpPipeline<number>({ url })

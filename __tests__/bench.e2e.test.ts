@@ -213,20 +213,22 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
     expect(result.violations[0]).toMatch(/Pipeline: pipelineNsPerRow/);
   });
 
-  it("fails when a leg's ratio widens past 10% even with absolute ns/row unchanged", () => {
+  it("passes when a leg's ratio widens a lot with absolute ns/row unchanged - ratio is never gated", () => {
+    // .ratio divides by floorNsPerRow, and dividing two independently noisy measurements compounds
+    // their noise (bench/gate.ts's own header, the post-planning finding): a smaller floorNsPerRow
+    // alone can double the ratio with pipelineNsPerRow untouched, which is exactly what this report
+    // simulates. Only pipelineNsPerRow is gated now.
     const report = {
       ...baseline,
-      Pipeline: { pipelineNsPerRow: 50, floorNsPerRow: 3.5, ratio: 14.3 },
+      Pipeline: { pipelineNsPerRow: 50, floorNsPerRow: 1.5, ratio: 33.3 },
     };
-    const result = checkGate(report, baseline);
-    expect(result.ok).toBe(false);
-    expect(result.violations[0]).toMatch(/Pipeline: ratio/);
+    expect(checkGate(report, baseline).ok).toBe(true);
   });
 
-  it("stays within tolerance at exactly the boundary", () => {
+  it("stays within tolerance at exactly the absolute boundary", () => {
     const report = {
       ...baseline,
-      Pipeline: { pipelineNsPerRow: 60, floorNsPerRow: 4.2, ratio: 13.09 },
+      Pipeline: { pipelineNsPerRow: 60, floorNsPerRow: 4.2, ratio: 14.3 },
     };
     expect(checkGate(report, baseline).ok).toBe(true);
   });

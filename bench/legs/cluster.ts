@@ -51,7 +51,7 @@ export async function localPidCheck(
 export async function measureClusterPipeline(rounds?: number): Promise<LegReport> {
   const items = canonicalInput(ROWS.ClusterPipeline);
 
-  const floorNsPerRow = await timeFloor(items, rounds);
+  const floorNsPerRow = await timeFloor(rounds);
 
   const pipeline = new ClusterPipeline<number>({
     workers: CLUSTER_WORKERS,

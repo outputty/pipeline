@@ -1,7 +1,7 @@
 /**
  * `pnpm bench:overhead` (#120) - the CLI: measures all four `Pipeline` runner classes against their
  * hand-rolled floors (`bench/canonical.ts`), prints the report, and gates it against the committed
- * `bench/baseline.json` (20% absolute tolerance, 10% ratio tolerance, regression-only -
+ * `bench/baseline.json` (20% absolute tolerance on `pipelineNsPerRow`, regression-only -
  * `bench/gate.ts`'s own docstring). Exits 1 on a gate failure, 0 otherwise.
  *
  * `BENCH_ROUNDS=<n>` overrides the default round count (`bench/canonical.ts`'s `ROUNDS`) - useful

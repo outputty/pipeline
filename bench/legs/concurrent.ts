@@ -59,7 +59,7 @@ export async function measureConcurrentPipeline(rounds?: number): Promise<LegRep
     await pipeline(items).toArray();
     return items.length;
   }, rounds);
-  const floorNsPerRow = await timeFloor(items, rounds);
+  const floorNsPerRow = await timeFloor(rounds);
 
   const { Pipeline: CountingPipeline, counter } = countingConcurrentPipeline();
   const localPipeline = new CountingPipeline({ maxConcurrency: MAX_CONCURRENCY })
