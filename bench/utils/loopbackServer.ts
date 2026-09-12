@@ -1,8 +1,10 @@
 /**
  * `bench/`'s own real loopback HTTP server helper - the same shape as
- * `__tests__/helpers/fixtures.ts`'s `withServer`/`withTrackedServer`, not imported from there: that
- * file imports `expect` from `vitest` at module top, which `bench/` never depends on (`bench/` runs
- * as a plain script, `pnpm bench:overhead`, outside the test runner entirely).
+ * `__tests__/helpers/fixtures.ts`'s `withServer`/`countingHandler`, deliberately not imported from
+ * there: that file is test-only infrastructure (its `expectFixtureOk`/`runFixtureJson` DO call
+ * `vitest`'s `expect`, even though `withServer` itself does not), and `bench/` runs as a plain
+ * script, `pnpm bench:overhead`, outside the test runner entirely - importing a `__tests__/` module
+ * from shipped-adjacent tooling reads backwards, whatever any one export in it happens to need.
  */
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";

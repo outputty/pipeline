@@ -1,16 +1,15 @@
 /**
  * #120's own Done-when cases, proven against the real `bench/` harness - no mocks, real `Pipeline`
  * family instances, a real loopback server (HttpPipeline) and a real forked worker (ClusterPipeline,
- * L3, run as a subprocess fixture - `pipelines.e2e.test.ts`'s own header explains why a
+ * run as a subprocess fixture - `pipelines.e2e.test.ts`'s own header explains why a
  * `ClusterPipeline` is never constructed directly inside a Vitest worker).
  *
- * A case naming a class or a CLI behavior this layer hasn't built yet is `it.fails`, flipping to
- * `it` as each layer lands (`pipelines.e2e.test.ts`'s own established convention).
- *
  * No case here asserts against `bench/baseline.json`'s own numbers or wall-clock timing at all -
- * that would fail on any machine slower or faster than the one the baseline was measured on. The
- * gate's OWN logic is tested with synthetic reports (the "checkGate" describe block below); a real
- * `pnpm bench:overhead` run, pasted into the PR, is Done-when 1's actual proof.
+ * that would fail on any machine slower or faster than the one the baseline was measured on: the
+ * gate's OWN logic is tested with synthetic reports (the "checkGate" describe block below), and
+ * every CLI-level case that must reference the real gate sets `BENCH_SKIP_GATE=1` or leans on
+ * `BENCH_SYNTHETIC_REGRESSION`'s 100x multiplier to stay deterministic. A real, full-round `pnpm
+ * bench:overhead` run, pasted into the PR, is Done-when 1's actual proof.
  */
 import { describe, it, expect } from "vitest";
 import { canonicalChain, canonicalInput, median, timeRounds } from "../bench/canonical";
@@ -39,8 +38,8 @@ describe("#120 Done-when 2 - each class's hand-rolled floor matches its Pipeline
     HTTP_TIMEOUT,
   );
 
-  it.fails(
-    "ClusterPipeline: identical output at a small N (#120 L3, subprocess fixture)",
+  it(
+    "ClusterPipeline: identical output at a small N (subprocess fixture)",
     async () => {
       const result = await runFixtureJson<{ matches: boolean }>(
         "__tests__/fixtures/bench-cluster-floor.ts",
@@ -93,12 +92,16 @@ describe("#120 Done-when 3 - .local() correctness per dispatching class", () => 
     HTTP_TIMEOUT,
   );
 
-  it.fails(
-    "ClusterPipeline: every item's stage runs on the primary's own pid (#120 L3, subprocess fixture)",
+  it(
+    "ClusterPipeline: every item's stage runs on the primary's own pid (subprocess fixture)",
     async () => {
-      const result = await runFixtureJson<{ workerPidsWhilePinned: number[] }>(
-        "__tests__/fixtures/bench-cluster-local.ts",
-      );
+      const result = await runFixtureJson<{
+        processedCount: number;
+        workerPidsWhilePinned: number[];
+      }>("__tests__/fixtures/bench-cluster-local.ts");
+      // processedCount proves the region actually ran all 10 items - workerPidsWhilePinned being
+      // empty means nothing on its own if the region silently produced no output at all.
+      expect(result.processedCount).toBe(10);
       expect(result.workerPidsWhilePinned).toEqual([]);
     },
     FIXTURE_TIMEOUT,
@@ -106,37 +109,68 @@ describe("#120 Done-when 3 - .local() correctness per dispatching class", () => 
 });
 
 describe("#120 Done-when 1 - pnpm bench:overhead prints all four legs' rows", () => {
-  it.fails(
-    "bench/overhead.ts exists and reports all four classes plus their .local() rows (#120 L3)",
+  it(
+    "bench/overhead.ts reports all four classes plus their .local() rows",
     async () => {
-      const result = await runFixtureJson<Record<string, unknown>>("bench/overhead.ts");
-      expect(Object.keys(result)).toEqual([
-        "Pipeline",
-        "ConcurrentPipeline",
-        "HttpPipeline",
-        "ClusterPipeline",
-      ]);
+      // BENCH_ROUNDS=2 (1 warm-up + 1 measured) keeps this a quick smoke check - the SHAPE of the
+      // report does not depend on the round count. BENCH_SKIP_GATE=1 keeps it deterministic
+      // regardless of how this machine's own noise compares to a baseline committed on another one
+      // - a real, full-round, gated run is what gets pasted into the PR as Done-when 1's own proof.
+      process.env.BENCH_ROUNDS = "2";
+      process.env.BENCH_SKIP_GATE = "1";
+      try {
+        const result =
+          await runFixtureJson<Record<string, { local?: unknown }>>("bench/overhead.ts");
+        expect(Object.keys(result)).toEqual([
+          "Pipeline",
+          "ConcurrentPipeline",
+          "HttpPipeline",
+          "ClusterPipeline",
+        ]);
+        expect(result.ConcurrentPipeline.local).toBeDefined();
+        expect(result.HttpPipeline.local).toBeDefined();
+        expect(result.ClusterPipeline.local).toBeDefined();
+      } finally {
+        delete process.env.BENCH_ROUNDS;
+        delete process.env.BENCH_SKIP_GATE;
+      }
     },
     FIXTURE_TIMEOUT,
   );
 });
 
 describe("#120 Done-when 4 - a synthetic regression makes the gate fail", () => {
-  it.fails(
-    "pnpm bench:overhead exits 0 clean, and 1 under BENCH_SYNTHETIC_REGRESSION=1 (#120 L3)",
+  it(
+    "pnpm bench:overhead exits 0 clean, and 1 under BENCH_SYNTHETIC_REGRESSION=1",
     async () => {
-      // BENCH_ROUNDS=2 (1 warm-up + 1 measured) keeps this test's two full CLI runs inside
-      // FIXTURE_TIMEOUT - the exit code the gate produces does not depend on the round count.
-      const { runFixture, expectFixtureOk } = await import("./helpers/fixtures");
+      // BENCH_ROUNDS=2 keeps this test's two full CLI runs inside FIXTURE_TIMEOUT. The "clean" run
+      // sets BENCH_SKIP_GATE=1 - deterministic exit 0 regardless of how this machine's own noise
+      // compares to a baseline committed on another one, proving only that the harness runs end to
+      // end. The regressed run gates for real: its 100x multiplier dominates any real machine noise,
+      // so the resulting exit 1 is deterministic too.
+      const { runFixture, expectFixtureOk, lastJsonLine } = await import("./helpers/fixtures");
       process.env.BENCH_ROUNDS = "2";
       try {
+        process.env.BENCH_SKIP_GATE = "1";
         const clean = await runFixture("bench/overhead.ts");
         expectFixtureOk(clean);
+        delete process.env.BENCH_SKIP_GATE;
         process.env.BENCH_SYNTHETIC_REGRESSION = "1";
         const regressed = await runFixture("bench/overhead.ts");
         expect(regressed.code).toBe(1);
+        // The exit code alone proves the GATE fired, not that the multiplier reached the right
+        // field: read the printed report back and confirm ratio still agrees with its own two
+        // inputs (catches the multiplier updating pipelineNsPerRow but leaving ratio stale).
+        const report = lastJsonLine<{
+          Pipeline: { pipelineNsPerRow: number; floorNsPerRow: number; ratio: number };
+        }>(regressed);
+        expect(report.Pipeline.ratio).toBeCloseTo(
+          report.Pipeline.pipelineNsPerRow / report.Pipeline.floorNsPerRow,
+          6,
+        );
       } finally {
         delete process.env.BENCH_ROUNDS;
+        delete process.env.BENCH_SKIP_GATE;
         delete process.env.BENCH_SYNTHETIC_REGRESSION;
       }
     },
@@ -195,6 +229,13 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
       Pipeline: { pipelineNsPerRow: 60, floorNsPerRow: 4.2, ratio: 13.09 },
     };
     expect(checkGate(report, baseline).ok).toBe(true);
+  });
+
+  it("fails when a leg the baseline has is missing from the report, rather than silently skipping it", () => {
+    const { Pipeline: _omitted, ...report } = baseline;
+    const result = checkGate(report, baseline);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/Pipeline: missing from the report/);
   });
 });
 
