@@ -9,6 +9,21 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
+- **`.buffer()`'s numeric case stops sharing #88's Reducer engine, and the HTTP/cluster wire's JSON
+  format gets a real A/B** (#172) - found while establishing #120's own baseline: `.buffer(1000)`
+  costs 119.8-136.5 ns/row against a 53.9 ns/row no-`.buffer()`-call floor, N=1M, because the numeric
+  case routes through the same per-item `Reducer` fold `.buffer(fn)` needs for a predicate boundary,
+  in two of its three branches. The fix (own e2e ratio assertion, since #120's `bench/` harness isn't
+  built yet) is ready-sized and spiked this session (measured live, reverted before commit): the
+  sync-pre-buffer path recovers from ~96-100 ns/row to ~18-23 ns/row; the already-fast sync-post-buffer
+  path is untouched; the fully-async path shows no measurable change either way, since Promise
+  scheduling already dominates there. Filed as one ticket with the wire-format question because the
+  user chose to build both as a stack rather than split them: nobody has measured whether
+  `HttpPipeline`/`ClusterPipeline`'s JSON wire is a real optimization target, and this session's own
+  probe found the ceiling unproven rather than obviously large (JSON stringify+parse and `node:v8`'s
+  own native binary codec measured within the same order of magnitude on a representative chunk,
+  the binary codec actually slower) - a real MessagePack A/B against the live dispatch path is the
+  build's own next step before any wire-format code ships.
 - **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
   `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
   change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results
