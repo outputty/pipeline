@@ -447,12 +447,24 @@ function cases(): Case[] {
   ];
 }
 
+/** Widest label this file's own `cases()` produces, computed rather than hand-counted - the longest
+ * comparison-leg label (#178) is 46 characters, well past the eight original legs' own widest
+ * ("Concurrent .local() region", 27), and a fixed `padEnd(30)` misaligns every row past it. */
+const LABEL_WIDTH = 46;
+
 const HEADER =
-  "case                           promises/row   GC   GC ms   alloc MB  held MB  leak MB    ns/row";
+  "case".padEnd(LABEL_WIDTH + 2) +
+  "promises/row".padStart(13) +
+  "GC".padStart(5) +
+  "GC ms".padStart(9) +
+  "alloc MB".padStart(11) +
+  "held MB".padStart(9) +
+  "leak MB".padStart(9) +
+  "ns/row".padStart(10);
 
 function formatRow(label: string, s: MemorySample): string {
   return (
-    label.padEnd(30) +
+    label.padEnd(LABEL_WIDTH + 2) +
     s.promisesPerRow.toFixed(3).padStart(13) +
     String(s.gcCount).padStart(5) +
     s.gcCostMs.toFixed(1).padStart(9) +
