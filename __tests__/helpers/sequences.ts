@@ -37,6 +37,28 @@ export function countPromises(fn: () => unknown): number {
   return created;
 }
 
+/** Counts every `Promise` created across a whole ASYNC drain, not just `fn`'s own synchronous call -
+ * `countPromises` above disables its hook the instant `fn()` returns, before an awaited drain's own
+ * later ticks run. The case a per-row microtask cost is measured by needs this one: a fast path and
+ * a per-item fallback differ only in HOW MANY promises the drain creates, never in its output.
+ *
+ * `await countPromisesAsync(() => Promise.resolve(1).then(() => Promise.resolve(2)))` → `2`. */
+export async function countPromisesAsync(fn: () => Promise<unknown>): Promise<number> {
+  let created = 0;
+  const hook = createHook({
+    init(_id, type) {
+      if (type === "PROMISE") created++;
+    },
+  });
+  hook.enable();
+  try {
+    await fn();
+  } finally {
+    hook.disable();
+  }
+  return created;
+}
+
 /** Polls `read()` until two consecutive reads, one microtask-flush apart, agree - a case asserting
  * on a value a chain of internal generators updates over several hops (`.queue()`'s own cumulative
  * pull count, #123) needs this instead of a fixed number of flushes: the RIGHT number of hops is an

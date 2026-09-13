@@ -5,36 +5,17 @@
  * stage until called again.
  */
 import { describe, it, expect } from "vitest";
-import { createHook } from "node:async_hooks";
 import { Pipeline } from "@src/pipeline";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Transformer } from "@src/transformer";
 import type { IContextManager } from "@src/types";
 import { DROP } from "@src/types";
-import { closingSource, closingAsyncSource, chunksOf } from "./helpers/sequences";
-
-/** Counts every `Promise` created across a whole ASYNC drain, not just `fn`'s own synchronous
- * call (`./helpers/sequences`' own `countPromises` disables its hook the instant `fn()` returns,
- * before an awaited drain's own later ticks run) - the one case here that needs a promise count
- * spanning several microtask turns, since the fast path vs. per-item fallback this ticket adds
- * differ only in HOW MANY promises the drain creates, never in its output.
- *
- * `await countPromisesAsync(() => Promise.resolve(1).then(() => Promise.resolve(2)))` → `2`. */
-async function countPromisesAsync(fn: () => Promise<unknown>): Promise<number> {
-  let created = 0;
-  const hook = createHook({
-    init(_id, type) {
-      if (type === "PROMISE") created++;
-    },
-  });
-  hook.enable();
-  try {
-    await fn();
-  } finally {
-    hook.disable();
-  }
-  return created;
-}
+import {
+  closingSource,
+  closingAsyncSource,
+  chunksOf,
+  countPromisesAsync,
+} from "./helpers/sequences";
 
 /** Records each chunk `.apply()` hands to a stage, before that stage's own transform runs -
  * a chunk-level probe, not a per-item one (`.tap(fn)` runs per item and can't see boundaries). */

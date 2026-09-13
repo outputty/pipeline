@@ -155,12 +155,23 @@ export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenera
  * 0.42, 0.36 for `slice`. `fromSource()` (`src/pipeline.ts`) hands this function the caller's own
  * array unwrapped, so an ordinary `new Pipeline<number>()(items)` takes this arm.
  *
- * ⚠ `Array.isArray` is the test, never a `length` check: a string is iterable AND length-bearing, so
- * a `length`-based guard would cut a `Pipeline<string>` over a string source into characters rather
- * than letting the per-item arm below reject it. Every other `Iterable` - a `Set`, a `Map`, a
+ * ⚠ `Array.isArray` is the test, never a `length` check. A string is iterable AND length-bearing,
+ * and a `length`-plus-`slice` guard would hand back STRINGS where every other source yields arrays:
+ * `slice` on a string returns a string, so a `Pipeline<string>` over `"abcd"` would produce `"ab"`
+ * rather than `["a", "b"]`. The per-item arm rejects nothing - it cuts a string into its characters,
+ * which is the shipped behaviour and stays so. Every other `Iterable` - a `Set`, a `Map`, a
  * generator, a caller's own iterable object - keeps the per-item arm, including its own early-stop
  * behaviour: the array arm never touches the iterator protocol at all, so a source's `finally` block
  * has nothing to run there and nothing to close.
+ *
+ * ⚠ `Number.isInteger` guards the arm too, and is not optional. `slice(i, i + chunkSize)` truncates
+ * both bounds where the per-item arm cuts at `length >= chunkSize`, so a fractional size made the
+ * two arms disagree on the SAME data: `chunkSize: 2.5` over `[1..7]` cut an array into
+ * `[[1,2],[3,4,5],[6,7]]` against a `Set`'s own `[[1,2,3],[4,5,6],[7]]` - one knob, two chunkings,
+ * the engine disagreeing with itself (review-caught). A fractional size is incoherent either way and
+ * the constructor refuses it now (`Pipeline`'s own `chunkSize` guard, the same one `.buffer(size)`
+ * has always had); this arm still checks, because this function is reached from `recut.ts` and from
+ * `.buffer()` as well, and an arm that silently re-cuts differently is worse than a slower one.
  *
  * `[...buildSyncChunkGenerator<number>(3)([1, 2, 3, 4, 5, 6, 7])]` → `[[1, 2, 3], [4, 5, 6], [7]]`,
  * by either arm.
@@ -171,7 +182,7 @@ export function buildSyncChunkGenerator<T>(
   assertPositiveChunkSize(chunkSize);
 
   return function* chunkGenerator(data: Iterable<T>): Generator<T[]> {
-    if (Array.isArray(data)) {
+    if (Array.isArray(data) && Number.isInteger(chunkSize)) {
       for (let i = 0; i < data.length; i += chunkSize) {
         yield (data as T[]).slice(i, i + chunkSize);
       }
@@ -290,41 +301,67 @@ async function* drainPrefetched<T>(
  * `PipelineResult.toArray()`, its `first(n)` (which IS `toArray` with a limit), and `.branch()`,
  * which collects the parent chain before routing. Three copies of the same engine decision before.
  *
- * `syncChunks` is `Pipeline.drainable()`'s own sync view, `null` on the async engine, where `items`
+ * `syncChunks` is `Pipeline.drainable()`'s own sync view, `null` on the async engine, where `chunks`
  * is read instead.
  *
- * `collectItems(chunksOf([[1, 2], [3]]), noItems)` → `[1, 2, 3]`, no `Promise` created.
+ * The async arm walks CHUNKS, never a flattened item stream (#179). `Pipeline.drainable()`'s own
+ * chunk view already arrives in chunks, so flattening it first cost one `await` - and therefore one
+ * microtask - per ROW, for data that was never per-row to begin with. Measured on
+ * `ConcurrentPipeline` at N=10,000 over an async generator with `.buffer(1000)`, output asserted
+ * identical: `.toArray()` fell from 12.009 promises per row to 7.006, which is the source's own
+ * floor - an async generator costs 4.000 per row before any package code runs, and `.buffer(size)`
+ * a further 3.001.
+ *
+ * `collectItems(chunksOf([[1, 2], [3]]), noChunks)` → `[1, 2, 3]`, no `Promise` created.
  */
 export function collectItems<T>(
   syncChunks: MaybeAsyncChunks<T> | null,
-  items: () => AsyncIterable<T>,
+  chunks: () => AsyncIterable<T[]>,
   limit?: number,
 ): T[] | Promise<T[]> {
   const results: T[] = [];
   return dispatchSync(
     syncChunks,
-    (chunks) =>
+    (syncView) =>
       chain(
-        drainSync(chunks, (item) => {
+        drainSync(syncView, (item) => {
           results.push(item);
           return limit !== undefined && results.length >= limit;
         }),
         () => results,
       ),
-    () => collectAsyncItems(results, limit, items),
+    () => collectAsyncChunks(results, limit, chunks),
   );
 }
 
 /** `collectItems`'s async arm, its own function so the caller above stays one expression per
- * engine. */
-async function collectAsyncItems<T>(
+ * engine. The early exit is a `break` out of the `for await`, exactly as the flattened version's
+ * was, so the chunk iterator's own `.return()` still runs and a generator source still reaches its
+ * `finally`. */
+async function collectAsyncChunks<T>(
   results: T[],
   limit: number | undefined,
-  items: () => AsyncIterable<T>,
+  chunks: () => AsyncIterable<T[]>,
 ): Promise<T[]> {
-  for await (const item of items()) {
-    results.push(item);
-    if (limit !== undefined && results.length >= limit) break;
+  for await (const chunk of chunks()) {
+    if (takeChunk(results, chunk, limit)) break;
   }
   return results;
+}
+
+/** Appends one chunk's items to `results`, reporting whether `limit` is now reached - its own
+ * function so `collectAsyncChunks` above stays within this repo's own `max-depth: 2`. The
+ * unlimited case skips the per-item check entirely, which is `.toArray()`'s own path; a spread
+ * (`results.push(...chunk)`) is deliberately not used, since it passes a whole chunk as arguments
+ * and a large enough one overflows the call stack. */
+function takeChunk<T>(results: T[], chunk: T[], limit: number | undefined): boolean {
+  if (limit === undefined) {
+    for (let i = 0; i < chunk.length; i++) results.push(chunk[i]);
+    return false;
+  }
+  for (let i = 0; i < chunk.length; i++) {
+    results.push(chunk[i]);
+    if (results.length >= limit) return true;
+  }
+  return false;
 }

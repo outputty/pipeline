@@ -117,7 +117,7 @@ function* cutChunk<T>(carry: T[], chunk: T[], size: number): Generator<T[], T[]>
  *
  * `MaybeAsyncChunks` is a SYNCHRONOUS iterable, so the number of cuts is not knowable up front once
  * the tail is pending. This works because every consumer of a chunk stream settles a chunk before
- * pulling the next one (`drainSync`, `drainSyncSettled`, `asyncItems` and this
+ * pulling the next one (`drainSync`, `drainSyncSettled`, `Pipeline.chunkStream()` and this
  * function itself all await or `chain` on the pending chunk first), so `state` is already current
  * when the generator decides whether to yield again.
  */
