@@ -416,7 +416,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * Builds a chain over `T`, with no data. `T` is the type it will be CALLED with.
    *
    * @param options - The caller's own context manager or factory (`PipelineOptions`), plus the
-   *   carried state a copy-on-write call threads through (`PipelineState`), which no caller writes.
+   *   carried state a copy-on-write call threads through (`PipelineState`). `PipelineState` exists
+   *   for those internal calls, and a caller is expected to reach its knobs through the methods that
+   *   own them - `.buffer(size)` for `chunkSize`, `.context()` for the manager, `.onError()` for the
+   *   run handler. It is not UNREACHABLE, though: this parameter's declared type is the
+   *   intersection, so `new Pipeline({ chunkSize: 3 })` typechecks, which is why `chunkSize` is
+   *   validated below rather than trusted (#179).
    */
   constructor(options?: PipelineConstructorOptions) {
     // A constructor that RETURNS a function is what makes an instance callable (#90). Two halves,

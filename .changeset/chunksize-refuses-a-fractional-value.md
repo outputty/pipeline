@@ -12,4 +12,9 @@ An unchecked fractional size made the engine disagree with itself rather than me
 a `Set` over the identical values cut into `[[1,2,3],[4,5,6],[7]]` - a `slice`-based cut truncates
 both of its bounds, where an accumulating cut breaks at `length >= size`.
 
+`chunkSize` belongs to `PipelineState`, the carried state a copy-on-write call threads through, and
+`.buffer(size)` is how a caller is meant to set it. The constructor's declared parameter is the
+intersection of that with `PipelineOptions`, so passing it directly typechecks and therefore reaches
+real callers - which is why it is validated rather than trusted.
+
 A caller passing a whole number, or passing no `chunkSize` at all, is unaffected.
