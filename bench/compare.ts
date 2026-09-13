@@ -118,6 +118,7 @@ function main(): void {
   printAxis("", "promisesPerRow", before, after);
   printAxis("", "gcCount", before, after);
   printAxis("", "gcCostMs", before, after);
+  printAxis("", "heldAtEndMB", before, after);
   printAxis("", "retainedMb", before, after);
   printAxis("", "nsPerRow", before, after);
 
