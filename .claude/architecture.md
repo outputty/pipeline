@@ -31,9 +31,11 @@ direction (#743, #745).
 
 Both boundaries are oxlint-enforced, not merely descriptive (#117): `.oxlintrc.json`'s
 `import/no-nodejs-modules` override fails any `node:` import added to a `src/**/*.ts` file other than
-`pipelines/http.ts`, `pipelines/cluster.ts` and `pipelines/eventemitter.ts` (the third dispatching
+`pipelines/http.ts`, `pipelines/cluster.ts`, `pipelines/eventemitter.ts` (the third dispatching
 file, added when #124 shipped `EventEmitterPipeline` after this diagram's own node: exception list was
-first written); a `no-restricted-imports` override fails any `@outputty/laygo` or `@outputty/laygo/**`
+first written) and `pipelines/client.ts` (the fourth, #179 - `HttpPipeline`'s own dispatch client,
+whose `node:http` default is what its seam exists to choose between); a `no-restricted-imports`
+override fails any `@outputty/laygo` or `@outputty/laygo/**`
 import from anywhere in `src/`. A reader no longer has to compare a new import against this diagram by
 hand - `bunx oxlint src/` does it on every run.
 
@@ -44,7 +46,7 @@ src/
   types.ts              PipelineFunction, IContextManager, InternalTransformer, every options
                           interface, plus DROP/RowErrorHandler/PipelineErrorHandler/RunScope (#78);
                           StageRegistries (a stage's chunkTransforms+reduceStages pair),
-                          Drainable<T> (the 4-field drain view PipelineResult/BranchOwner share),
+                          Drainable<T> (the 3-field drain view PipelineResult/BranchOwner share),
                           ReduceWork<T,U>, RouteVerb/StageRoute, Tagged<R> (#133)
   pipeline.ts            Pipeline: the chain, context, stages, Pipeline.drainable, createPipeline<U,
                           R>() + defer<U,R>() (each takes its own return type, letting a
@@ -75,6 +77,11 @@ src/
                              Response.json({error}) calls, buildReduceRequestBody()/
                              parseReduceFrames() split reduceWork()'s own dispatch generator,
                              nodeRequestToFetchRequest() is handleOverBridge's own request half (#133)
+    client.ts               PipelineClient - how a dispatched chunk travels, and the knob
+                             options.client replaces (#179). fetchClient is the global fetch;
+                             defaultClient() resolves node:http with a shared keep-alive Agent once
+                             per process, both node: imports dynamic and inside one try so a runtime
+                             without them falls back rather than failing to load
     cluster.ts               ClusterPipeline - the WorkerSet class (register/claimIndex/lookup/
                              bootstrap/enter/kill/startWorkerServer) replaces 5 module-level mutable
                              bindings and 4 free functions with one per-process singleton (#133);
@@ -123,8 +130,9 @@ src/
                              Reducer takes an optional row handler (#78); Reducer.current() reads
                              the raw accumulator with no itemsSinceEmit gating (#88);
                              buildBufferGenerator/buildSyncBufferGenerator/recutSyncChunksWith are
-                             .buffer(fn)'s own engine, sizeReduceFunction/bufferReduceFunction the
-                             two adapters onto Reducer<T[], T> (#88)
+                             .buffer(fn)'s own engine, bufferReduceFunction the one adapter onto
+                             Reducer<T[], T> (#88; .buffer(size) left this engine in #179 and
+                             sizeReduceFunction went with it)
     ndjson.ts                readNdjsonLines/ndjsonFrame - the reduce wire's framing, shared by
                              the client (reduceWork) and the server (.fetch's /reduce/<n>)
   factories.ts             createTransformer - Transformer construction sugar, no chunk-size
@@ -166,29 +174,39 @@ instead of configuring the `Transformer`.
 
 ## buffer(fn) - a callback-driven chunk boundary - #88
 
-`.buffer(size)` and `.buffer(fn: BufferFunction<T>)` fold through the SAME engine - one
-`Reducer<T[], T>` (`src/utils/reduce.ts`, unchanged from what `Pipeline.reduce()` already uses),
-configured by one of two adapters: `sizeReduceFunction(size)` (identity, framework-side auto-flush
-at `pending.length >= size`) or `bufferReduceFunction(fn)` (adapts a caller's zero-arg `emit`/`flush`
-onto the reducer's own value-taking `emit`). `.buffer(size)`'s own three branches
-(deferred/sync/async) are unchanged in shape; only their innermost cutting call switched from
-`buildChunkGenerator`/`buildSyncChunkGenerator` to the shared engine - `recutSyncChunks`'s own
-index-based re-slice (the "a real stage already ran" sync sub-path) stays untouched, since it
-operates on already-cut arrays with no per-item decision to make.
+`.buffer(fn: BufferFunction<T>)` folds through one `Reducer<T[], T>` (`src/utils/reduce.ts`,
+unchanged from what `Pipeline.reduce()` already uses), configured by `bufferReduceFunction(fn)`,
+which adapts a caller's zero-arg `emit`/`flush` onto the reducer's own value-taking `emit`.
+
+⚠ `.buffer(size)` shared that engine until #179 and no longer does, though the chunk boundaries it
+produces are identical. It was configured with an identity `fn` and a framework-side auto-flush at
+`pending.length >= size`, through an adapter called `sizeReduceFunction` - deleted with the split. A
+fold engine buys a per-ITEM decision, which a count never makes, and charged a closure call plus an
+array-mutating accumulator per row for it: measured at N=10,000 over an async generator with output
+asserted identical, `.buffer(1000)` cost 7.006 promises per row through the fold and 4.005 cutting by
+count, which is `buildChunkGenerator`'s own floor and exactly what the same chain with NO `.buffer()`
+call at all reads. `bufferBySize()` now cuts by count on all three arms with the same cutters
+`fromSource()` uses, and `.buffer(size)` validates its size on the BOUND path too, where
+`sizeReduceFunction` used to be what refused a bad one (BREAKING: `.local((p) => p.buffer(2.5))`
+threw nothing before and now throws under `.buffer()`'s own name).
 
 ```text
 Pipeline.buffer(sizeOrFn)
-	sizeReduceFunction(size) | bufferReduceFunction(fn)     ONE ReduceFunction<T[], T>
 	isDeferred() ? record + replay : …
-	isSync() ?
-		_syncPreBufferItems !== null → buildSyncBufferGenerator(reduceFn, ctx)(items)
-		else (a real stage ran)      → typeof sizeOrFn === "number"
-		                                  ? recutSyncChunks(_syncChunks, size)      untouched
-		                                  : recutSyncChunksWith(_syncChunks, reduceFn, ctx)
-	: buildBufferGenerator(reduceFn, ctx)(items)            fully async arm
+	typeof sizeOrFn === "number" ?
+		bufferBySize(size)                                  cuts by COUNT, no fold
+			isSync() && _syncPreBufferItems  → buildSyncChunkGenerator(size)(items)
+			isSync()                         → recutSyncChunks(_syncChunks, size)
+			_syncPreBufferItems              → asAsyncChunks(buildSyncChunkGenerator(size)(items))
+			else                             → buildChunkGenerator(size)(items)
+	: bufferReduceFunction(fn)                              ONE ReduceFunction<T[], T>
+		isSync() ?
+			_syncPreBufferItems !== null → buildSyncBufferGenerator(reduceFn, ctx)(items)
+			else (a real stage ran)      → recutSyncChunksWith(_syncChunks, reduceFn, ctx)
+		: buildBufferGenerator(reduceFn, ctx)(items)        fully async arm
 ```
 
-Each `emit()` - `sizeReduceFunction`'s own auto-flush, or a caller's explicit `flush()` - IS a chunk
+Each `emit()` - a caller's explicit `flush()` - IS a chunk
 boundary, so `buildBufferGenerator`/`buildSyncBufferGenerator`/`recutSyncChunksWith` must never group
 more than one emit into a single downstream chunk, unlike `foldChunkStream`'s own reduce-shaped fold
 (there, everything one INPUT chunk emits collapses into one downstream value by design). The shared
@@ -431,19 +449,31 @@ engine, skips only the round trip: the bare `Pipeline` it builds still pays chun
 never 0, so the speedup a pinned region buys is the removed dispatch (a `stageWork()` call, an HTTP
 round trip, a cross-process hop), not the framework itself.
 
-That async-engine cost is itself reducible, though not eliminable while `sourcePolicy()` still pins
-Mode to `"async"` for dispatch purposes (#120's own follow-up spike, comment thread on #120): a
-dispatching class over a SYNC source paid a microtask per raw item twice over - once converting the
-source to an async iterable (`toAsyncIterable`, an `async function*` wrapping every yield in its
-own Promise) and again inside `.buffer()`'s own fold loop (`buildBufferGenerator`, a naked `await`
-per item even though the fold itself is synchronous). Fixed three ways: `toAsyncIterable` hand-rolls
-its iterator instead of using a generator (fewer Promise-wraps per pull, `.return()` still forwarded
-for an early `.first(n)`); `buildBufferGenerator` awaits only a genuinely-thenable fold result;
-`fromSource()` keeps the original sync view alive under a forced-async Mode so `.buffer()` can fold
-through it synchronously and cross the async boundary once per CHUNK rather than once per raw item.
-Together: `ConcurrentPipeline`'s pinned row moved from 535.34 ns/row to 278.43, `HttpPipeline`'s
-from 479.72 to 252.76, `ClusterPipeline`'s from 496.05 to 257.11 - roughly halved, still well above
-the sync floor, since a `.local()` region still runs the async engine, only a cheaper one.
+That async-engine cost is essentially GONE, and the reason it survived so long is a diagnosis this
+document had wrong. It read: reducible, though not eliminable while `sourcePolicy()` still pins Mode
+to `"async"`. Measured, the forced Mode costs nothing on its own - `ConcurrentPipeline` with zero
+stages, no `.buffer()` and no region reads 240.50 ns/row, and adding `.local((p) => p)` reads 236.88,
+a difference inside run-to-run noise. The cost was never the Mode; it was four ordinary things the
+async engine did per ROW for data that arrives per CHUNK (#179):
+
+1. Every async terminal flattened the chunk stream back to items, paying one `await` per row to
+   re-derive what the chunk view already held. All five now walk `chunks()` with a synchronous inner
+   loop, and the item view is deleted for having no reader left.
+2. `fromSource()` turned an ARRAY into an async iterator item by item, paying `toAsyncIterable`'s own
+   `Promise.resolve` per pull and then `buildChunkGenerator`'s `for await` on top. An array is now
+   cut with `slice` and handed over whole chunks.
+3. `.buffer(size)` folded every item through `Reducer<T[], T>` - a per-item closure call and an
+   array-mutating accumulator - for a cut that only counts. It now cuts by count on all three arms;
+   `.buffer(fn)` keeps the fold engine, which is what a per-item decision needs.
+4. `stageWork()` called the global `fetch` once per chunk, where `node:http` with a keep-alive agent
+   costs a fifth of it. `options.client` is the seam, and `node:http` the default on Node.
+
+Measured on `bench/overhead.ts`, median of five runs: `ConcurrentPipeline`'s pinned row moved from
+278.43 ns/row to 16.47, `HttpPipeline`'s from 252.76 to 18.06, `ClusterPipeline`'s from 257.11 to
+18.90. A bare `Pipeline` reads 16.79 on the same runs, so a `.local()` region now costs within about
+2 ns/row of running that region on a plain `Pipeline` - which is what pinning a region always claimed
+to mean. `bench/memory.ts` measures the same chains for allocation: `Concurrent .local() region` fell
+from 992 MB per 500,000 rows to 47, and its collections from 30 to 1.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
 createPipeline<U, R = AnyPipeline<U>>(chunks, options)` that calls `this.constructor` rather than a
@@ -697,13 +727,24 @@ one on identical code, and what preserves a stage's position - recording only a 
 instead applied it to the source cut, so a `.buffer()` written after a stage took effect before it.
 
 `Pipeline.drainable(input)` is the ONE seam between the two classes: it binds, then returns a
-`Drainable<T>` - `{ syncChunks, items, chunks, context }` (`types.ts`, #133; three independent
-re-spellings of this exact 4-field shape collapsed to the one type - `BranchOwner.drainable()` and
+`Drainable<T>` - `{ syncChunks, chunks, context }` (`types.ts`, #133; three independent
+re-spellings of this exact shape collapsed to the one type - `BranchOwner.drainable()` and
 `PipelineResult`'s own field each used to declare it inline). Each terminal calls it exactly once
 and threads what it got into its own async arm; calling it again there ran a user's `.local(build)`
 callback twice per call. `PipelineResult.forEach()`/`[Symbol.iterator]()` and `utils/cut.ts`'s
 `collectItems()` share one `dispatchSync(syncChunks, onSync, onAsync)` (`utils/drain.ts`, #133) for
 the "is there a sync chunk stream, or not" branch every one of them used to test inline.
+
+A fourth field, a flattened per-ITEM view, sat beside `chunks` until #179 (BREAKING: `Drainable<T>`
+is public, since `Pipeline.drainable(input)` is). Every async terminal read it, and flattening cost
+one `await` - one microtask - per ROW to re-derive items the chunk view already held. All five now
+walk `chunks()` and loop each chunk in process, `.branch()` collects through the same view, and
+nothing reads the item view, so it is deleted rather than kept. `forEach` settles its callback only
+when the return is genuinely thenable: a bare `await` on a plain value allocates a `Promise` too,
+once per row, so a synchronous callback on an async chain paid for asynchrony it never used.
+Measured on `ConcurrentPipeline` at N=10,000 over an async generator with `.buffer(1000)`, output
+asserted identical: `.toArray()` fell from 12.009 promises per row to 7.006 and `.forEach()` from
+14.009 to 7.008 - the same figure, which is the source's own floor.
 
 Two knobs that look alike are deliberately apart. `PipelineMode` (`"unset" | "sync" | "async"`) is a
 TYPE fact about what a chain produces; `_bound` is the RUNTIME fact of whether an input is attached.

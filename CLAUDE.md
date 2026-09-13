@@ -162,7 +162,13 @@ none of it survived the hand-trim (#745).
   at runtime, so no detection is attempted: an array or a `Set` re-drains correctly and a spent
   generator or stream reads empty. `Pipeline.drainable(input)` is the one seam between the two
   classes, and each terminal calls it exactly once. `.chunks()` drops empty chunks, which is what
-  makes the two engines agree on what a consumer sees.
+  makes the two engines agree on what a consumer sees. ⚠ Every ASYNC terminal walks that chunk view
+  and loops each chunk in process (#179) - `Drainable<T>` carried a flattened per-ITEM view until
+  then, and every terminal read it, paying one `await` per ROW to re-derive items the chunk view
+  already held. It is deleted for having no reader left, which is BREAKING: `Pipeline.drainable()` is
+  public, so `pipeline.drainable(src).items()` is now `items is not a function`; walk `chunks()` and
+  flatten it. `forEach` settles its callback only when the return is genuinely thenable, since a bare
+  `await` on a plain value allocates a `Promise` too, once per row.
 - **Mode** - whether a chain runs synchronously, carried in `Pipeline<T, M, In>`'s own type
   (#90). `PipelineMode` is `"unset" | "sync" | "async"`. `"unset"` is the ORDINARY state of a
   composed chain: nothing about it is async yet, and either an async callback or an async input
@@ -237,8 +243,14 @@ none of it survived the hand-trim (#745).
   stage between them, collapse to the last - only it is ever actually applied. An
   `InternalTransformer<In, Out>` processes one chunk at a time. `.buffer(fn: BufferFunction<T>)`
   (#88) decides the boundary per item instead of by count, folding through the SAME `Reducer<T[],
-  T>` class `Pipeline.reduce()` already uses - `.buffer(size)` is this same engine configured with
-  an identity `fn` and a framework-side auto-flush at `pending.length >= size`, one engine not two.
+  T>` class `Pipeline.reduce()` already uses. ⚠ `.buffer(size)` was that same engine configured with
+  an identity `fn` and a framework-side auto-flush at `pending.length >= size` - "one engine not two"
+  - until #179 split them: it cuts by COUNT now, on all three arms, through the same
+  `buildChunkGenerator`/`buildSyncChunkGenerator`/`recutSyncChunks` that cut every source, and
+  `sizeReduceFunction` is deleted. Boundaries are identical; a fold buys a per-item decision a count
+  never makes, and charged a closure call plus an array-mutating accumulator per row for it (7.006
+  promises per row through the fold against 4.005 by count, over an async generator at N=10,000).
+  Both forms validate the size on the deferred AND the bound path now, under `.buffer()`'s own name.
   `fn`'s own `emit()` takes no value: it flushes whatever is pending and resets it to `[]`; a
   `Promise`-returning `fn` widens Mode to `"async"`, two overloads ordered Promise-first. The dead
   `ChunkerFunction` type - unrelated to `.buffer()` since #39, zero consumers - is removed from the
@@ -279,6 +291,26 @@ none of it survived the hand-trim (#745).
   `HttpPipeline` overrides `stageWork()` alone to POST a chunk to another instance and adds
   a `.fetch` handler; `ClusterPipeline` adds the worker bootstrap, brought up lazily on the first
   chunk actually dispatched. Each level overrides ONE thing, and the chain is identical in all four.
+- **`options.client`** (#179) - how a dispatched chunk reaches another instance, on `HttpPipeline`
+  and therefore on `ClusterPipeline`. `PipelineClient` is `(url: string, init: RequestInit) =>
+  Promise<Response>` - the global `fetch` signature, so the default is a drop-in and so is a
+  caller's own - and it is carried through copy-on-write like every other knob. Named `client`,
+  never `fetch`, because `pipeline.fetch` is already this class's own SERVER handler and the two
+  would collide on one object. BOTH `stageWork()` and `reduceWork()` dispatch through it, for
+  different reasons the code states: `stageWork()` opens one request PER CHUNK and is where the
+  whole win is (1749-1828 ns/row on the global `fetch` against 306-349 on `node:http`, 200 chunks of
+  1000 rows, output asserted identical), while `reduceWork()` opens ONE request for the whole stream
+  so the same saving divides away (117-135 against 112-134, inside drift) and moves only so ONE
+  client serves the class. `defaultClient()` resolves once per process: `node:http` with a shared
+  keep-alive `Agent` for an `http:` url where `node:http` imports, the global `fetch` everywhere
+  else. Both `node:` imports are DYNAMIC and inside one `try`, so a runtime without them falls back
+  rather than failing to load; an `https:` url falls back too, since `node:http` speaks cleartext
+  only and reads a url's empty `port` as 80 - dispatching one through it sent the chunk JSON and any
+  auth header in the clear to whatever answered there. ⚠ A caller's own client must STREAM BOTH
+  DIRECTIONS: `/reduce/<n>` is a duplex NDJSON wire, so the `Response` must resolve on the response
+  HEADERS with its body still arriving. A client that collects the whole reply first loses no data
+  and passes every `/transform/<n>` case, then silently breaks the reduce route - verified by
+  sabotage, where exactly that one case failed and every other passed.
 - **Stage** - One `.apply()` call, and therefore one `.transform()` call, since `transform()` is
   `return this.apply(transformer)`. A stage's identity is its INDEX in
   `_chunkTransforms`, so a dispatching class sends a chunk plus an index and never a function.

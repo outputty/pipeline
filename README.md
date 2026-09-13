@@ -311,11 +311,23 @@ await new Promise<void>((resolve) => server.close(() => resolve()));
 
 - **`options.url`** - required. Where another `HttpPipeline`/`ClusterPipeline` instance's `.fetch`
   is mounted.
+- **`options.client`** - how a dispatched chunk travels. Takes the global `fetch` signature, so the
+  default is a drop-in and so is your own. Defaults to the fastest client this runtime offers,
+  resolved once per process: `node:http` with a shared keep-alive agent for an `http:` url on Node,
+  and the global `fetch` everywhere else - on Bun, Deno and Cloudflare Workers, and for an `https:`
+  url, which `node:http` cannot speak. Measured on a real loopback server over 200 chunks of 1000
+  rows with identical output, `/transform/<n>` cost 1749-1828 ns/row on the global `fetch` against
+  306-349 on `node:http`.
 - **`.fetch`** - a `(request: Request) => Promise<Response>` handler serving this pipeline's
   stages. Prefix-agnostic: it reads only its own trailing `/transform/<n>`/`/reduce/<n>` segment, so
   mounting it under any path is safe.
 - **`toNodeHandler(handler)`** - bridges a `.fetch` handler to `node:http`'s `(req, res)` callback
   shape; Node exposes `Request`/`Response`/`fetch` but serves no fetch handler natively.
+
+⚠ A client you supply yourself must stream both directions. `/reduce/<n>` is a duplex NDJSON wire, so
+its `Response` has to resolve on the response HEADERS with the body still arriving. A client that
+collects the whole reply first loses no data and passes every `/transform/<n>` call, then silently
+stops a reduce stage's emits reaching you until the request body closes.
 
 ### ClusterPipeline
 
