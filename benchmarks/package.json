@@ -7,7 +7,7 @@
     "report": "node src/report.mjs"
   },
   "dependencies": {
-    "@outputty/pipeline": "file:./outputty-pipeline-0.2.0.tgz",
+    "@outputty/pipeline": "file:./pipeline.tgz",
     "ix": "7.0.0",
     "streaming-iterables": "8.0.1",
     "effect": "3.22.2",

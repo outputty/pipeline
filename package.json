@@ -36,6 +36,7 @@
     "bench:memory": "node --expose-gc --import tsx bench/memory.ts",
     "bench:memory:record": "node --expose-gc --import tsx bench/memory.ts --record",
     "bench:compare": "node --import tsx bench/compare.ts",
+    "bench:cross-runtime:prep": "pnpm build && npm pack --pack-destination benchmarks/ && mv benchmarks/outputty-pipeline-*.tgz benchmarks/pipeline.tgz",
     "test": "vitest",
     "test:run": "vitest run --passWithNoTests",
     "test:coverage": "vitest run --coverage",
