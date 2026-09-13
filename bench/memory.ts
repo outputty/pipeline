@@ -46,6 +46,7 @@ import {
   HttpPipeline,
   ClusterPipeline,
   EventEmitterPipeline,
+  type Transformer,
 } from "../src";
 import {
   canonicalChain,
@@ -278,6 +279,48 @@ function branchBroadcastExpected(rows: number[]): MemoryIdentity {
   return { count, checksum };
 }
 
+/** The SAME chain and input for both `ordered:true`/`ordered:false` cases below (#180's own
+ * Done-when 11) - only `ConcurrentPipelineOptions.ordered` differs between them. Every EVEN chunk's
+ * own FIRST item pays a `REORDER_DELAY_MS` async delay; odd chunks resolve instantly. One item per
+ * chunk, not every row: `.map()`'s row callbacks resolve concurrently, so a single slow item delays
+ * the WHOLE chunk (`Transformer.process()` awaits every row before the chunk itself resolves)
+ * without multiplying the delay across every row in it. The chunk index comes from the item's own
+ * value (`canonicalInput`'s sequential rows, divided by `BUFFER_SIZE`), never a shared mutable
+ * counter - safe under `ConcurrentPipeline`'s own concurrent dispatch, where two chunks' rows run at
+ * once. `ordered: true` must hold each fast ODD chunk's own already-resolved result behind its
+ * slower EVEN neighbor (`fanOutOrdered`'s own arrival-order yield, `src/pipelines/concurrent.ts`) -
+ * the reorder buffer `ordered: true` pays for; `ordered: false` releases a chunk the instant it
+ * resolves (`fanOutUnordered`'s own completion-order yield), paying none of it. Output VALUES are
+ * unchanged from `canonicalChain`'s own `x * 2, x > 4` (the delay changes nothing about WHAT is
+ * produced, only when a chunk's result becomes available), so `handRolledFloor`'s own identity
+ * applies to both cases unchanged - `ordered: false` reorders chunks, not the rows a `count`/
+ * `checksum` identity reads.
+ *
+ * Measured (3 runs, `pnpm bench:memory --case "..."`), `heldAtEndMB`: `ordered:true` 14.3 on every
+ * run; `ordered:false` 16.5 on every run - stable, and the OPPOSITE of the prediction above.
+ * `ordered:false` reads higher, not lower: `fanOutUnordered`'s own `Promise.race()`-based bookkeeping
+ * (a `Map<number, Promise>` re-raced on every settle, `src/pipelines/concurrent.ts`) appears to cost
+ * more live-heap pressure than the "hold a fast chunk behind a slow one" effect this case set out to
+ * isolate - not verified further, since Done-when 11 asks for a measurement against the identical
+ * chain, not a specific direction. Recorded as measured in the docs layer, not re-tuned to chase the
+ * predicted direction.
+ */
+const REORDER_DELAY_MS = 1;
+
+function reorderProneChain(
+  t: Transformer<number, number, "sync" | "async">,
+): Transformer<number, number, "async"> {
+  return t
+    .map(async (x: number) => {
+      const chunkIndex = Math.floor(x / BUFFER_SIZE);
+      if (chunkIndex % 2 === 0 && x % BUFFER_SIZE === 0) {
+        await new Promise((resolve) => setTimeout(resolve, REORDER_DELAY_MS));
+      }
+      return x * 2;
+    })
+    .filter((x: number) => x > 4);
+}
+
 /** Every case this bench measures, sharing `canonical.ts`'s own chain and input with
  * `bench/overhead.ts` so the two benches never drift apart on what they run. */
 /** The two scales `#178`'s own competitive comparison runs at: large enough that the array-chain
@@ -476,6 +519,35 @@ function cases(): Case[] {
           });
         return seen;
       },
+      kept,
+      IN_PROCESS_ROWS,
+    ],
+    [
+      // #180's own Done-when 11 - `ordered: true`'s reorder buffer, measured on the `heldAtEndMB`
+      // axis rather than `retainedMb`: `retainedMb` reads what survives two FORCED collections after
+      // the run ends, a leak-shaped instrument, and a reorder buffer releases every chunk it ever
+      // held well before the run finishes (the ticket's own goal-line names "on bench/memory.ts's
+      // own axis" without picking one - asked and settled on `heldAtEndMB`, since it reads the PEAK
+      // mid-run, which is where a reorder buffer's own cost actually shows up).
+      "Concurrent ordered:true (reorder buffer)",
+      () =>
+        new ConcurrentPipeline<number>({ maxConcurrency: MAX_CONCURRENCY, ordered: true })
+          .buffer(BUFFER_SIZE)
+          .transform(reorderProneChain)(rows)
+          .toArray(),
+      kept,
+      IN_PROCESS_ROWS,
+    ],
+    [
+      // The identical chain and input as "Concurrent ordered:true (reorder buffer)" above, only
+      // `ordered: false` - `fanOutUnordered` releases each chunk the instant it resolves, so it
+      // never holds a fast chunk behind a slower one the way `ordered: true` does.
+      "Concurrent ordered:false (reorder buffer)",
+      () =>
+        new ConcurrentPipeline<number>({ maxConcurrency: MAX_CONCURRENCY, ordered: false })
+          .buffer(BUFFER_SIZE)
+          .transform(reorderProneChain)(rows)
+          .toArray(),
       kept,
       IN_PROCESS_ROWS,
     ],
