@@ -312,8 +312,10 @@ describe("async-engine tax spike (#120 follow-up) - a sync source on a forced-as
 // same way on .toArray(), on async iteration and on a .local() stage.
 
 // #88 - `.buffer()` accepts a `BufferFunction<T>` in place of a size, deciding the chunk boundary
-// per item instead of by count - `sizeReduceFunction`/`bufferReduceFunction` fold both forms
-// through the same `Reducer<T[], T>` engine (`src/utils/reduce.ts`). Done-when 5 (`ChunkerFunction`
+// per item instead of by count - `bufferReduceFunction` folds that form through the
+// `Reducer<T[], T>` engine (`src/utils/reduce.ts`). Both forms shared that engine until #179, when
+// the numeric form moved to the ordinary chunk cutters; the boundaries are unchanged either way,
+// which is what `__tests__/source-cut.e2e.test.ts` pins. Done-when 5 (`ChunkerFunction`
 // gone from the public export surface) and 6 (no file outside src/, __tests__/, .claude/ changed)
 // are structural checks, run via `rg`/`git diff` rather than a runtime case here.
 

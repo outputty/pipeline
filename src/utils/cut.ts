@@ -26,12 +26,13 @@ export function assertPositiveChunkSize(size: number): void {
   }
 }
 
-/** The `capacity`/`size` guard a NUMERIC knob shares across two call sites - `.buffer(size)`'s own
- * deferred-branch check and `.queue(capacity)` (#123) - labelled so each throws under its own name
- * rather than a generic one. Kept apart from `assertPositiveChunkSize` above: that one's own message
- * is asserted verbatim by `sync-mode.e2e.test.ts` and is never the wording a caller-facing knob like
- * `.buffer(fn)`'s `size` overload or `.queue()` owes its user - see `.buffer()`'s own deferred check
- * for the two-site duplication this replaces.
+/** The `capacity`/`size` guard every NUMERIC knob shares, labelled so each throws under its own name
+ * rather than a generic one. Four call sites: `.buffer(size)`'s deferred branch and its bound branch
+ * (#179 - the bound one used to validate through `sizeReduceFunction`, deleted with the fold engine's
+ * numeric arm), `.queue(capacity)` (#123), and the constructor's own `chunkSize` (#179).
+ *
+ * Kept apart from `assertPositiveChunkSize` above: that one's own message is asserted verbatim by
+ * `sync-mode.e2e.test.ts` and is never the wording a caller-facing knob owes its user.
  *
  * `assertWholeNumberAtLeastOne("queue capacity", 0)` throws `Error("queue capacity must be a whole
  * number of at least 1")`; `assertWholeNumberAtLeastOne("queue capacity", 3)` returns. */
@@ -136,6 +137,23 @@ export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenera
   for await (const chunk of chunks) {
     yield* chunk;
   }
+}
+
+/**
+ * Hands a synchronously-cut chunk stream to a consumer that needs an `AsyncIterable` (#179) - the
+ * seam between `buildSyncChunkGenerator` above and the two places a chain is on the async engine
+ * while its DATA is not: `fromSource()`'s own forced-async branch over an array, and `.buffer(size)`
+ * re-cutting a source a dispatching class pinned async.
+ *
+ * One `Promise` per CHUNK, where `buildChunkGenerator` over `toAsyncIterable(data)` pays one per
+ * ROW twice over - `toAsyncIterable`'s own `Promise.resolve` per pull, then the cutter's `for await`
+ * on top. Nothing here can be pending: `buildSyncChunkGenerator` yields real arrays, so no `await`
+ * on the yielded value is needed and none is written.
+ *
+ * `[...] = await Array.fromAsync(asAsyncChunks([[1, 2], [3]]))` → `[[1, 2], [3]]`.
+ */
+export async function* asAsyncChunks<T>(chunks: Iterable<T[]>): AsyncGenerator<T[]> {
+  yield* chunks;
 }
 
 /**

@@ -215,10 +215,14 @@ export type ChunkerFunction<T> = (data: AsyncIterable<T>) => AsyncGenerator<T[]>
  * owns and never hands to `fn`; `emit()` takes no value because there is nothing to pass - it flushes
  * whatever is currently pending and resets it to `[]`. Returning a value appends it to the
  * (possibly just-reset) pending array; returning `DROP` skips the item entirely, the same sentinel
- * `RowErrorHandler` already uses to mean "no row here." `.buffer(size)` is this same mechanism
- * configured with an identity `fn` and a framework-side auto-flush at `pending.length >= size` - see
- * `src/utils/reduce.ts`'s `sizeReduceFunction`/`bufferReduceFunction`, the two adapters onto the
- * `Reducer<T[], T>` class `Pipeline.reduce()` already uses.
+ * `RowErrorHandler` already uses to mean "no row here." `bufferReduceFunction`
+ * (`src/utils/reduce.ts`) is the adapter from this type onto the `Reducer<T[], T>` class
+ * `Pipeline.reduce()` already uses.
+ *
+ * ⚠ `.buffer(size)` is NOT this mechanism, since #179. It ran on the same fold engine, configured
+ * with an identity `fn` and a framework-side auto-flush at `pending.length >= size`, and now cuts by
+ * count through the ordinary chunk cutters instead: a fold engine buys a per-item decision, which a
+ * count never makes, and charged a per-item closure call plus an array-mutating accumulator for it.
  *
  * `(item, ctx, emit) => (item.ts - windowStart >= FIVE_MINUTES ? (emit(), windowStart = item.ts, item)
  * : item)` cuts a chunk boundary every time an item's own timestamp crosses a five-minute window,

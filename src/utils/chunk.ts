@@ -14,6 +14,7 @@ export {
   buildChunkGenerator,
   normalize,
   flattenChunks,
+  asAsyncChunks,
   buildSyncChunkGenerator,
   share,
   collectItems,
