@@ -17,6 +17,7 @@ import { checkGate, LEG_TOLERANCE, type OverheadReport } from "../bench/gate";
 import { pipelineMatchesFloor } from "../bench/legs/pipeline";
 import { concurrentMatchesFloor, countingConcurrentPipeline } from "../bench/legs/concurrent";
 import { httpMatchesFloor, measureHttpPipeline } from "../bench/legs/http";
+import { branchMatchesFloor } from "../bench/legs/branch";
 import { withLoopbackServer, countingHandler } from "../bench/utils/loopbackServer";
 import { HttpPipeline } from "../src";
 import {
@@ -55,6 +56,10 @@ describe("#120 Done-when 2 - each class's hand-rolled floor matches its Pipeline
     },
     FIXTURE_TIMEOUT,
   );
+
+  it("Branch: identical record at a small N (#180)", () => {
+    expect(branchMatchesFloor(50)).toBe(true);
+  });
 });
 
 describe("#120 Done-when 3 - .local() correctness per dispatching class", () => {
@@ -135,6 +140,7 @@ describe("#120 Done-when 1 - pnpm bench:overhead prints all four legs' rows", ()
           "ConcurrentPipeline",
           "HttpPipeline",
           "ClusterPipeline",
+          "Branch",
         ]);
         expect(result.ConcurrentPipeline.local).toBeDefined();
         expect(result.HttpPipeline.local).toBeDefined();
@@ -207,6 +213,7 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
       ratio: 57.1,
       local: { nsPerRow: 265, workerPidsWhilePinned: [] },
     },
+    Branch: { pipelineNsPerRow: 28, floorNsPerRow: 12, ratio: 2.33 },
   };
 
   it("passes when the report matches the baseline exactly", () => {
