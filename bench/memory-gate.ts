@@ -12,6 +12,16 @@
  * healthy chain, and a percentage tolerance over a near-zero baseline flags noise as a leak while
  * letting a real 50 MB leak through if the baseline happened to read 0.02.
  *
+ * `heldAtEndMB` (#178) is DIFFERENT from `retainedMb`: it reads the PEAK a case's live set reached
+ * mid-run, off `GCProfiler`'s own collection events, where `retainedMb` reads what survives two
+ * FORCED ones at the very end. A streaming leg can hold almost nothing at the end (no leak) while
+ * still peaking at tens of MB mid-run, and a comparison-against-a-competitor benchmark needs the
+ * peak - `retainedMb` alone would read both `Pipeline .forEach()` and the array-chain leg as
+ * "clean," erasing the whole memory claim under test. Gated ratio-plus-slack like `gcCount`, not as
+ * an absolute ceiling like `retainedMb`, because a healthy value here spans orders of magnitude
+ * across legs (a fraction of an MB streaming, hundreds materializing) rather than sitting uniformly
+ * near zero.
+ *
  * ⚠ `nsPerRow` is REPORTED and never gated here, which is the opposite of `bench/gate.ts`, whose
  * whole job it is. Two reasons, the first measured: four runs of identical code read 37.3, 56.0,
  * 68.5 and 77.9 ns/row on the fastest case - a 2.1x spread - while the same runs' allocation read
@@ -27,6 +37,14 @@ export interface MemorySample {
   gcCostMs: number;
   allocatedMb: number;
   retainedMb: number;
+  /** Peak LIVE heap during the run, sampled off `v8.GCProfiler`'s own collection events rather than
+   * forced ones (#178) - `max(afterGC.heapStatistics.usedHeapSize)` across every collection the run
+   * triggered, minus the pre-run baseline. `afterGC` is what SURVIVED that collection, the same
+   * "what's actually reachable" reading `retainedMb` takes after two FORCED ones; this axis instead
+   * catches the biggest a chain's live set got mid-run, which is what a streaming-vs-materializing
+   * comparison is actually about. A case with zero collections (nothing large enough to trigger one)
+   * falls back to an immediate `getHeapStatistics()` read - see `bench/memory.ts`'s own `measureMemory`. */
+  heldAtEndMB: number;
   nsPerRow: number;
 }
 
@@ -54,6 +72,13 @@ export const MEMORY_TOLERANCE = {
   gcCostSlackMs: 1,
   /** An absolute MB ceiling, not a ratio - see this file's own header. */
   retainedMbCeiling: 1,
+  /** `heldAtEndMB` ratio tolerance plus an absolute MB slack, the same shape as `gcCount`'s: a
+   * streaming leg's baseline can read a fraction of an MB, where a pure ratio would flag ordinary
+   * scavenge noise as a regression. `bench/memory.ts`'s own committed baseline: `Pipeline .forEach()
+   * @10M` reads 0.2 MB, `Array.prototype .map().filter().forEach() @10M` reads 352.9 MB - the ratio
+   * alone has to absorb a run-to-run spread of roughly 20% on the materializing side. */
+  heldAtEndMB: 0.25,
+  heldAtEndSlackMB: 2,
 } as const;
 
 /**
@@ -75,6 +100,25 @@ export const MEMORY_TOLERANCE = {
 export const CASE_ALLOCATION_TOLERANCE: Record<string, number> = {
   "Http loopback": 0.6,
   "Cluster workers": 0.6,
+};
+
+/**
+ * `gcCount`/`gcCostMs` tolerance for a leg whose collection VOLUME puts it in a different regime
+ * from the in-process cases `MEMORY_TOLERANCE.gcCount`/`gcCostMs` were calibrated against (#178).
+ * Measured: three isolated single-case runs of `node:stream Readable.map().filter() @1M` (`--case`,
+ * one process each) read `gcCostMs` 48.0, 48.0, 48.2 - inside 1%, same as any in-process leg - but
+ * the SAME leg measured inside the full 20-case suite read 79.1, because `measureMemory`'s own
+ * header already discloses every case in one process "share[s] a warm heap": a leg allocating
+ * hundreds of MB per run (`async function* by hand`, `node:stream`) leaves heap fragmentation the
+ * next case's `settle()` does not fully clear. The global tolerance holds for the eight in-process
+ * legs it was measured against; these two foreign, hundreds-of-collections comparators need their
+ * own, the same reason `CASE_ALLOCATION_TOLERANCE` exists for a boundary-crossing case.
+ */
+export const CASE_GC_TOLERANCE: Record<string, { gcCount: number; gcCostMs: number }> = {
+  "async function* by hand @1M": { gcCount: 1, gcCostMs: 1 },
+  "async function* by hand @10M": { gcCount: 1, gcCostMs: 1 },
+  "node:stream Readable.map().filter() @1M": { gcCount: 1, gcCostMs: 1 },
+  "node:stream Readable.map().filter() @10M": { gcCount: 1, gcCostMs: 1 },
 };
 
 export interface MemoryGateResult {
@@ -130,15 +174,21 @@ function checkCase(
     unit: "/row",
   });
   // `nsPerRow` is deliberately absent - see this file's own header. `bench/gate.ts` gates speed.
+  const gcOverride = CASE_GC_TOLERANCE[label];
   ratioAxis(violations, label, "gcCount", current.gcCount, base.gcCount, {
-    tolerance: MEMORY_TOLERANCE.gcCount,
+    tolerance: gcOverride?.gcCount ?? MEMORY_TOLERANCE.gcCount,
     slack: MEMORY_TOLERANCE.gcCountSlack,
     unit: "",
   });
   ratioAxis(violations, label, "gcCostMs", current.gcCostMs, base.gcCostMs, {
-    tolerance: MEMORY_TOLERANCE.gcCostMs,
+    tolerance: gcOverride?.gcCostMs ?? MEMORY_TOLERANCE.gcCostMs,
     slack: MEMORY_TOLERANCE.gcCostSlackMs,
     unit: "ms",
+  });
+  ratioAxis(violations, label, "heldAtEndMB", current.heldAtEndMB, base.heldAtEndMB, {
+    tolerance: MEMORY_TOLERANCE.heldAtEndMB,
+    slack: MEMORY_TOLERANCE.heldAtEndSlackMB,
+    unit: "MB",
   });
 
   if (!Number.isFinite(current.retainedMb)) {
@@ -166,6 +216,15 @@ function ratioAxis(
 ): void {
   if (!Number.isFinite(currentValue)) {
     violations.push(`${label}: ${axis} is ${currentValue} - not a finite measurement`);
+    return;
+  }
+  // A baseline missing this axis entirely (an older bench/memory-baseline.json, pre-#178) reads as
+  // `undefined` here, and `undefined * (1 + tolerance)` is `NaN` - `currentValue > NaN` is always
+  // `false`, so an unguarded ceiling would silently pass every case rather than flag the comparison
+  // as impossible (code.md's "fail loud" rule; the same hazard `checkCase`'s own `retainedMb` guard
+  // and `bench/gate.ts`'s `pushIfOverCeiling` already close for their own axes).
+  if (!Number.isFinite(baseValue)) {
+    violations.push(`${label}: ${axis} baseline is ${baseValue} - not a finite measurement`);
     return;
   }
   const ceiling = baseValue * (1 + opts.tolerance) + opts.slack;

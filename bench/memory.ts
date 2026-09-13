@@ -39,6 +39,7 @@ import cluster from "node:cluster";
 import { createHook } from "node:async_hooks";
 import { getHeapStatistics, GCProfiler } from "node:v8";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { Readable } from "node:stream";
 import { Pipeline, ConcurrentPipeline, HttpPipeline, ClusterPipeline } from "../src";
 import {
   canonicalChain,
@@ -80,15 +81,25 @@ async function settle(): Promise<void> {
 
 const median = (xs: number[]): number => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
 
+/** One `v8.GCProfiler` collection event, the shape this file reads off `profiler.stop().statistics`
+ * (undocumented in `@types/node`, hence the local shape rather than an import). */
+interface GcStatEntry {
+  gcType: string;
+  cost: number;
+  beforeGC: { heapStatistics: { usedHeapSize: number } };
+  afterGC: { heapStatistics: { usedHeapSize: number } };
+}
+
 /**
  * Runs `run` `RUNS` times and reports the median of each axis. `expected` is asserted EVERY run, so
- * a number is never reported for a run that produced different output.
+ * a report is never printed for a run that produced different output.
  *
- * `measureMemory(() => chain(rows).toArray(), 499_997)` → one `MemorySample`.
+ * `measureMemory(() => chain(rows).toArray(), identityOf(handRolledFloor(rows)), rows.length)` → one
+ * `MemorySample`.
  */
 export async function measureMemory(
-  run: () => Promise<unknown>,
-  expected: number,
+  run: () => Promise<RunResult>,
+  expected: MemoryIdentity,
   rows: number,
 ): Promise<MemorySample> {
   // Warmed twice, so a first-run compile is never reported as an allocation or time regression.
@@ -97,6 +108,7 @@ export async function measureMemory(
 
   const allocated: number[] = [];
   const retained: number[] = [];
+  const held: number[] = [];
   const times: number[] = [];
   const promises: number[] = [];
   const gcCounts: number[] = [];
@@ -105,6 +117,7 @@ export async function measureMemory(
   for (let i = 0; i < RUNS; i++) {
     await settle();
     const heapBefore = process.memoryUsage().heapUsed;
+    const usedBefore = getHeapStatistics().used_heap_size;
 
     const profiler = new GCProfiler();
     profiler.start();
@@ -119,14 +132,21 @@ export async function measureMemory(
 
     const started = process.hrtime.bigint();
     hook.enable();
-    const out = (await run()) as unknown[];
+    const out = await run();
     hook.disable();
     const elapsedNs = Number(process.hrtime.bigint() - started);
     const allocAfter = getHeapStatistics().total_allocated_bytes;
-    const gc = profiler.stop() as unknown as { statistics?: { gcType: string; cost: number }[] };
+    // Sampled before `profiler.stop()` so a case with zero collections still has an immediate
+    // fallback reading - see this function's own `heldAtEndMB` comment below.
+    const usedRightAfter = getHeapStatistics().used_heap_size;
+    const gc = profiler.stop() as unknown as { statistics?: GcStatEntry[] };
 
-    if (out.length !== expected) {
-      throw new Error(`output changed: got ${out.length} rows, expected ${expected}`);
+    const identity = identityOf(out);
+    if (identity.count !== expected.count || identity.checksum !== expected.checksum) {
+      throw new Error(
+        `output changed: got {count: ${identity.count}, checksum: ${identity.checksum}}, ` +
+          `expected {count: ${expected.count}, checksum: ${expected.checksum}}`,
+      );
     }
 
     const stats = gc.statistics ?? [];
@@ -135,6 +155,16 @@ export async function measureMemory(
     promises.push(created / rows);
     gcCounts.push(stats.length);
     gcCosts.push(stats.reduce((sum, stat) => sum + stat.cost, 0) / 1000);
+    // `heldAtEndMB`: peak LIVE heap the run reached, read off the collector's own events rather than
+    // forced ones (`bench/memory-gate.ts`'s own header explains why this is not `retainedMb`). A
+    // case with zero collections never triggered one large enough to sample, so it falls back to an
+    // immediate read with no forced GC - the same instrument the ticket originally specified, safe
+    // here only because it is a FALLBACK for a small, already-near-baseline case, never the primary
+    // reading for a case that actually collects.
+    const peakAfterGc = stats.length
+      ? Math.max(...stats.map((stat) => stat.afterGC.heapStatistics.usedHeapSize))
+      : usedRightAfter;
+    held.push((peakAfterGc - usedBefore) / MB);
 
     await settle();
     retained.push((process.memoryUsage().heapUsed - heapBefore) / MB);
@@ -146,13 +176,37 @@ export async function measureMemory(
     gcCostMs: median(gcCosts),
     allocatedMb: median(allocated),
     retainedMb: median(retained),
+    heldAtEndMB: median(held),
     nsPerRow: median(times),
   };
 }
 
-/** One case: its label, the run to measure, the row count its output must have, and the row count
+/** A leg's own proof of correctness (#178): a count plus a running sum, so a STREAMING leg (a
+ * `.forEach()` counter) can prove it produced the right rows without retaining them to compare
+ * `.length` - retaining them would materialize the very output the leg exists to avoid holding. */
+export interface MemoryIdentity {
+  count: number;
+  checksum: number;
+}
+
+/** What a case's `run()` may hand back: the existing eight legs still return their `.toArray()`
+ * result unchanged, and `identityOf` below derives a `MemoryIdentity` from it OUTSIDE the timed and
+ * profiled region - a streaming leg returns a `MemoryIdentity` it already computed as it went. */
+type RunResult = number[] | MemoryIdentity;
+
+/** `identityOf([6, 8])` → `{ count: 2, checksum: 14 }`. `identityOf({ count: 2, checksum: 14 })` →
+ * the same object, unchanged - a leg that already tracked its own identity while streaming never
+ * pays for a second pass over data it deliberately never kept. */
+function identityOf(result: RunResult): MemoryIdentity {
+  if (!Array.isArray(result)) return result;
+  let checksum = 0;
+  for (const value of result) checksum += value;
+  return { count: result.length, checksum };
+}
+
+/** One case: its label, the run to measure, the identity its output must match, and the row count
  * its per-row axes divide by. */
-type Case = [label: string, run: () => Promise<unknown>, expected: number, rows: number];
+type Case = [label: string, run: () => Promise<RunResult>, expected: MemoryIdentity, rows: number];
 
 /** The "another instance" side of the `HttpPipeline` case - an empty-source pipeline holding the
  * SAME stage definitions, so its `.fetch` can serve them. `bench/legs/http.ts`'s own `worker()`. */
@@ -162,11 +216,140 @@ function httpWorker(): HttpPipeline<number> {
 
 /** Every case this bench measures, sharing `canonical.ts`'s own chain and input with
  * `bench/overhead.ts` so the two benches never drift apart on what they run. */
+/** The two scales `#178`'s own competitive comparison runs at: large enough that the array-chain
+ * leg's own materialization genuinely costs it cache pressure and major collections, per the
+ * ticket's own finding that the crossover between "this package is slower" and "this package is
+ * faster" is real between 1,000,000 and 10,000,000 rows. */
+const COMPARISON_SCALES = [1_000_000, 10_000_000] as const;
+
+/**
+ * The six legs `#178`'s own memory claim compares against, at ONE scale - `cases()` calls this once
+ * per `COMPARISON_SCALES` entry. Every leg shares ONE pre-built input array (the ticket's own
+ * Constraint: materialization sits outside every timed region) and ONE identity, derived once from
+ * `handRolledFloor`, so a leg that computes something else is a failed run, not a fast one.
+ *
+ * `comparisonCases(5)[0]` times a real `Pipeline .forEach()` over `[0,1,2,3,4]`, asserting `{count:
+ * 2, checksum: 14}` - `0,1,2` double to `0,2,4`, none `> 4`, dropped; `3,4` double to `6,8`, both
+ * kept - matching `handRolledFloor([0,1,2,3,4])`'s own `[6, 8]`.
+ */
+function comparisonCases(scaleRows: number): Case[] {
+  const rows = canonicalInput(scaleRows);
+  const expected = identityOf(handRolledFloor(rows));
+  const scale = scaleRows >= 1_000_000 ? `${scaleRows / 1_000_000}M` : `${scaleRows}`;
+
+  async function* handRolledAsyncGenerator(): AsyncGenerator<number> {
+    for (const item of rows) {
+      const doubled = item * 2;
+      if (doubled > 4) yield doubled;
+    }
+  }
+
+  return [
+    [
+      `Pipeline .forEach() @${scale}`,
+      async () => {
+        let count = 0;
+        let checksum = 0;
+        await new Pipeline<number>()
+          .transform(canonicalChain)(rows)
+          .forEach((x: number) => {
+            count++;
+            checksum += x;
+          });
+        return { count, checksum };
+      },
+      expected,
+      scaleRows,
+    ],
+    [
+      // Materializes by definition - the ticket's own Constraint requires showing BOTH sides, since
+      // `.toArray()` retaining every output row is not this package's failure to stream, it is the
+      // terminal the caller chose.
+      `Pipeline .toArray() @${scale}`,
+      () => Promise.resolve(new Pipeline<number>().transform(canonicalChain)(rows).toArray()),
+      expected,
+      scaleRows,
+    ],
+    [
+      `Array.prototype .map().filter().forEach() @${scale}`,
+      async () => {
+        let count = 0;
+        let checksum = 0;
+        rows
+          .map((x) => x * 2)
+          .filter((x) => x > 4)
+          .forEach((x) => {
+            count++;
+            checksum += x;
+          });
+        return { count, checksum };
+      },
+      expected,
+      scaleRows,
+    ],
+    [
+      // The real floor (#120's own planning, reused here for the same reason): no intermediate
+      // array, no `Transformer` machinery, the quickest in-process code producing the same rows in
+      // the same order. Deliberately NOT `handRolledFloor` - that function materializes an array to
+      // serve as this suite's own identity oracle, where this leg's whole point is holding nothing.
+      `fused for loop @${scale}`,
+      async () => {
+        let count = 0;
+        let checksum = 0;
+        for (const item of rows) {
+          const doubled = item * 2;
+          if (doubled > 4) {
+            count++;
+            checksum += doubled;
+          }
+        }
+        return { count, checksum };
+      },
+      expected,
+      scaleRows,
+    ],
+    [
+      `async function* by hand @${scale}`,
+      async () => {
+        let count = 0;
+        let checksum = 0;
+        for await (const value of handRolledAsyncGenerator()) {
+          count++;
+          checksum += value;
+        }
+        return { count, checksum };
+      },
+      expected,
+      scaleRows,
+    ],
+    [
+      // `Readable.prototype.map`/`.filter`/`.forEach` are all present on Node 26.5.0, no flag -
+      // verified before writing this leg. `{ concurrency: 1 }` keeps it a straight sequential drain,
+      // the same shape every other leg here runs.
+      `node:stream Readable.map().filter() @${scale}`,
+      async () => {
+        let count = 0;
+        let checksum = 0;
+        await Readable.from(rows)
+          .map((x: number) => x * 2, { concurrency: 1 })
+          .filter((x: number) => x > 4, { concurrency: 1 })
+          .forEach((x: number) => {
+            count++;
+            checksum += x;
+          });
+        return { count, checksum };
+      },
+      expected,
+      scaleRows,
+    ],
+  ];
+}
+
 function cases(): Case[] {
   const rows = canonicalInput(IN_PROCESS_ROWS);
-  const kept = handRolledFloor(rows).length;
+  const kept = identityOf(handRolledFloor(rows));
   const dispatchRows = canonicalInput(DISPATCH_ROWS);
-  const dispatchKept = handRolledFloor(dispatchRows).length;
+  const dispatchKept = identityOf(handRolledFloor(dispatchRows));
   const clusterPipeline = new ClusterPipeline<number>({
     workers: CLUSTER_WORKERS,
     maxConcurrency: MAX_CONCURRENCY,
@@ -260,19 +443,33 @@ function cases(): Case[] {
       dispatchKept,
       DISPATCH_ROWS,
     ],
+    ...COMPARISON_SCALES.flatMap((scaleRows) => comparisonCases(scaleRows)),
   ];
 }
 
+/** Widest label this file's own `cases()` produces, computed rather than hand-counted - the longest
+ * comparison-leg label (#178) is 46 characters, well past the eight original legs' own widest
+ * ("Concurrent .local() region", 27), and a fixed `padEnd(30)` misaligns every row past it. */
+const LABEL_WIDTH = 46;
+
 const HEADER =
-  "case                           promises/row   GC   GC ms   alloc MB  held MB    ns/row";
+  "case".padEnd(LABEL_WIDTH + 2) +
+  "promises/row".padStart(13) +
+  "GC".padStart(5) +
+  "GC ms".padStart(9) +
+  "alloc MB".padStart(11) +
+  "held MB".padStart(9) +
+  "leak MB".padStart(9) +
+  "ns/row".padStart(10);
 
 function formatRow(label: string, s: MemorySample): string {
   return (
-    label.padEnd(30) +
+    label.padEnd(LABEL_WIDTH + 2) +
     s.promisesPerRow.toFixed(3).padStart(13) +
     String(s.gcCount).padStart(5) +
     s.gcCostMs.toFixed(1).padStart(9) +
     s.allocatedMb.toFixed(1).padStart(11) +
+    s.heldAtEndMB.toFixed(1).padStart(9) +
     s.retainedMb.toFixed(2).padStart(9) +
     s.nsPerRow.toFixed(1).padStart(10)
   );
