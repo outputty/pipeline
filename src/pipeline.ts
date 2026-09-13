@@ -276,6 +276,9 @@ export interface PipelineState {
    * the chunk boundary `.buffer(size)` last declared, carried so a `.buffer()` called
    * BEFORE `.from()` still decides the source's own cut (#90). `.from()` read `DEFAULT_CHUNK_SIZE`
    * unconditionally before this existed, so that call was silently discarded.
+   *
+   * A whole number of at least 1, refused at the constructor otherwise (#179, BREAKING) - the same
+   * guard `.buffer(size)` has always applied, now on the other way in.
    */
   chunkSize?: number;
   /**
@@ -481,6 +484,16 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     self._chunks = (options?.chunks ?? emptyChunks<T>()) as AsyncIterable<T[]>;
     self._preBufferItems = (options?.preBufferItems ?? null) as AsyncIterable<T> | null;
     self._syncPreBufferItems = (options?.syncPreBufferItems ?? null) as Iterable<T> | null;
+    // Validated HERE, not at the drain (#179, BREAKING): `chunkSize` reaches this constructor from
+    // a caller as readily as `.buffer(size)` does, and `.buffer(size)` has always refused a
+    // fractional or sub-1 value for exactly this reason - `assertWholeNumberAtLeastOne`'s own
+    // docstring records the two-boundaries-over-one-dataset failure. Unvalidated here, `2.5` cut an
+    // array into `[[1,2],[3,4,5],[6,7]]` and a `Set` over the same values into `[[1,2,3],[4,5,6],
+    // [7]]`, silently. The message names `chunkSize`, so a caller reads which knob they set, rather
+    // than `.buffer()`'s own wording for a call they never made.
+    if (options?.chunkSize !== undefined) {
+      assertWholeNumberAtLeastOne("chunkSize", options.chunkSize);
+    }
     self._chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
     self._pendingStages = options?.pendingStages ?? [];
     self._bound = options?.bound ?? false;
