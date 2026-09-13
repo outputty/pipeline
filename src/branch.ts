@@ -25,14 +25,13 @@ import { chain, mapSettle } from "./utils/helpers";
 export type ArmPipeline<T> = Pipeline<T, "unset", T>;
 
 /** What `runBranch` needs of the pipeline it belongs to: the one drain seam, nothing else. Declared
- * structurally so this file never imports `Pipeline` at runtime. `Drainable<T>`'s own `chunks`
- * field goes unused here - `runBranch` (below) only ever needs the sync view, the item stream and
- * the run's own context - but `Pick` names the three it does read rather than re-spelling their
- * types (#133: this interface used to repeat `Drainable<T>`'s own three fields inline, one of three
- * independent readings of that shape - `pipeline.ts`'s own `drainable()` and `result.ts`'s own
- * private wrapper being the other two, both now typed `Drainable<T>` directly). */
+ * structurally so this file never imports `Pipeline` at runtime. `Pick` names the three fields it
+ * reads rather than re-spelling their types (#133: this interface used to repeat `Drainable<T>`'s
+ * own fields inline, one of three independent readings of that shape - `pipeline.ts`'s own
+ * `drainable()` and `result.ts`'s own private wrapper being the other two, both now typed
+ * `Drainable<T>` directly). */
 export interface BranchOwner<T, In> {
-  drainable(input: PipelineSource<In>): Pick<Drainable<T>, "syncChunks" | "items" | "context">;
+  drainable(input: PipelineSource<In>): Pick<Drainable<T>, "syncChunks" | "chunks" | "context">;
 }
 
 /** The record a builder's arms produce, read off the builder the caller's callback returned. */
@@ -280,8 +279,8 @@ export function runBranch<T, In>(
 
     // ONE bind for the whole branch: the parent chain runs, and the arms below share the context
     // that run created rather than the chain's own.
-    const { syncChunks, items: itemsOf, context } = owner.drainable(input);
-    const items = collectItems(syncChunks, itemsOf) as T[] | Promise<T[]>;
+    const { syncChunks, chunks: chunksOf, context } = owner.drainable(input);
+    const items = collectItems(syncChunks, chunksOf) as T[] | Promise<T[]>;
 
     // `chain` defers only at a real thenable, so a synchronous parent stays synchronous here.
     // `config` itself already satisfies `ArmDispatch<T>` (#133 review: rebuilding

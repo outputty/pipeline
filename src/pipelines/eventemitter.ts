@@ -268,11 +268,15 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   }
 
   /**
-   * Wraps `Pipeline.drainable()`'s own `items`/`chunks` thunks so `pipeline:end` fires once the
-   * wrapped stream is exhausted - once per TERMINAL CALL, matching `PipelineResult`'s own "every
-   * terminal re-drains" contract: calling `.first()` then `.toArray()` on the same result fires it
-   * twice (Done-when 10), since each terminal calls `drainable()` fresh. `syncChunks` is always
+   * Wraps `Pipeline.drainable()`'s own `chunks` thunk so `pipeline:end` fires once the wrapped
+   * stream is exhausted - once per TERMINAL CALL, matching `PipelineResult`'s own "every terminal
+   * re-drains" contract: calling `.first()` then `.toArray()` on the same result fires it twice
+   * (#124 Done-when 10), since each terminal calls `drainable()` fresh. `syncChunks` is always
    * `null` here - a dispatching class forces `"async"` Mode, so there is no sync stream to wrap.
+   *
+   * ONE thunk covers every terminal since #179: `toArray`/`first`/`forEach`/`consume` and both
+   * iteration protocols all read the chunk view now, where a flattened item view used to need its
+   * own identical wrap beside this one.
    */
   override drainable(input: PipelineSource<In>): Drainable<T> {
     const base = super.drainable(input);
@@ -285,7 +289,6 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     };
     return {
       ...base,
-      items: () => withEndSignal(base.items(), fireOnce),
       chunks: () => withEndSignal(base.chunks(), fireOnce),
     };
   }

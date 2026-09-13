@@ -367,19 +367,22 @@ export interface Tagged<R> {
 }
 
 /**
- * The four views a terminal op or a `.branch()` arm drains a bound chain through (#133) - unifies
+ * The three views a terminal op or a `.branch()` arm drains a bound chain through (#133) - unifies
  * `Pipeline.drainable()`'s own return shape (`pipeline.ts`), `PipelineResult`'s private re-spelling
- * of the same three fields cast through it (`result.ts`), and `BranchOwner`'s own three-field
- * structural subset (`branch.ts`). `items`/`chunks` are THUNKS, not the streams themselves - each
- * terminal calls `Pipeline.drainable()` exactly once and threads the thunk into its own sync/async
- * arm, so building the stream is deferred to whichever arm actually runs.
+ * of the same fields cast through it (`result.ts`), and `BranchOwner`'s own structural subset
+ * (`branch.ts`). `chunks` is a THUNK, not the stream itself - each terminal calls
+ * `Pipeline.drainable()` exactly once and threads the thunk into its own sync/async arm, so
+ * building the stream is deferred to whichever arm actually runs.
  *
- * `pipeline.drainable([1, 2, 3])` → `{ syncChunks: [[1, 2, 3]], items: () => …, chunks: () => …,
+ * A flattened per-ITEM view sat here too until #179. Every async terminal now walks `chunks` and
+ * runs its own synchronous inner loop, so nothing read it: flattening cost one `await`, and
+ * therefore one microtask, per row to re-derive items the chunk view already held.
+ *
+ * `pipeline.drainable([1, 2, 3])` → `{ syncChunks: [[1, 2, 3]], chunks: () => …,
  * context: <this run's manager> }` for a synchronous chain over an array.
  */
 export interface Drainable<T> {
   syncChunks: MaybeAsyncChunks<T> | null;
-  items: () => AsyncIterable<T>;
   chunks: () => AsyncIterable<T[]>;
   context: IContextManager;
 }

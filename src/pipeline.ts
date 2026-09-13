@@ -868,12 +868,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     return this._syncChunks!;
   }
 
-  /** This pipeline's items, as one stream, whichever engine it runs on (#90) - the seam the async
-   * terminal ops and `[Symbol.asyncIterator]` read, so neither has to branch on `_mode` itself. */
-  protected asyncItems(): AsyncIterable<T> {
-    return flattenChunks(this.chunkStream());
-  }
-
   // ===== Static Factory Methods =====
 
   /**
@@ -1486,18 +1480,17 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `toArray`/`first`/`consume`/`forEach` used to live here, which meant a chain could be drained
    * with no input at all: `new Pipeline().toArray()` compiled and resolved to `[]`. They belong to
    * a result, and a result exists only once an input has been given. This exposes the two views
-   * they need - the sync chunk stream where there is one, and the item stream otherwise - so
+   * they need - the sync chunk stream where there is one, and the async chunk stream otherwise - so
    * neither class has to reach into the other's fields.
    *
    * @example
    * A bound sync pipeline over `[1, 2, 3]` returns `{ syncChunks: <generator>, … }`; an async one
-   * returns `{ syncChunks: null, … }` and the caller reads `items()` instead.
+   * returns `{ syncChunks: null, … }` and the caller reads `chunks()` instead.
    */
   drainable(input: PipelineSource<In>): Drainable<T> {
     const bound = this.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
     return {
       syncChunks: bound.isSync() ? bound._syncChunks : null,
-      items: () => bound.asyncItems(),
       chunks: () => bound.chunkStream(),
       // THIS run's manager, which is a fresh one per call unless the caller named their own (#90).
       // `.branch()` reads it so an arm's own pipeline sees the writes the parent chain just made,

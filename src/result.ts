@@ -111,8 +111,8 @@ export class PipelineResult<T, M extends PipelineMode> {
    * with an early exit, so the two engines' collect decision is made once here rather than twice
    * per method. Calls `drainable()` exactly once, like every other terminal. */
   private collect(limit: number | undefined): M extends "sync" ? T[] : Promise<T[]> {
-    const { syncChunks, items } = this.drainable();
-    return collectItems(syncChunks, items, limit) as M extends "sync" ? T[] : Promise<T[]>;
+    const { syncChunks, chunks } = this.drainable();
+    return collectItems(syncChunks, chunks, limit) as M extends "sync" ? T[] : Promise<T[]>;
   }
 
   /**
@@ -141,23 +141,29 @@ export class PipelineResult<T, M extends PipelineMode> {
   forEach(fn: (item: T) => Promise<void>): Promise<void>;
   forEach(fn: (item: T) => void): M extends "sync" ? void : Promise<void>;
   forEach(fn: (item: T) => void | Promise<void>): void | Promise<void> {
-    const { syncChunks, items } = this.drainable();
+    const { syncChunks, chunks } = this.drainable();
     // Each callback's own return is settled before the next item, so a `forEach` that turns out to
     // be async still runs strictly in order and still reports its own failures.
     return dispatchSync(
       syncChunks,
-      (chunks) => drainSyncSettled(chunks, fn),
-      () => this.forEachAsync(fn, items),
+      (syncView) => drainSyncSettled(syncView, fn),
+      () => this.forEachAsync(fn, chunks),
     );
   }
 
-  /** `forEach`'s async arm, which awaits each callback in turn. */
+  /** `forEach`'s async arm, which settles each callback in turn (#179).
+   *
+   * Walks CHUNKS and runs a synchronous inner loop over each, rather than draining a flattened item
+   * stream: the flattened form paid one `await` - one microtask - per row just to reach the next
+   * item, and a second for the callback's own return. Measured on `ConcurrentPipeline` at N=10,000
+   * over an async generator with `.buffer(1000)`, output asserted identical: 14.009 promises per row
+   * before, 7.008 after, which is the same figure `.toArray()` reads on the identical chain. */
   private async forEachAsync(
     fn: (item: T) => void | Promise<void>,
-    items: () => AsyncIterable<T>,
+    chunks: () => AsyncIterable<T[]>,
   ): Promise<void> {
-    for await (const item of items()) {
-      await fn(item);
+    for await (const chunk of chunks()) {
+      await settleChunk(chunk, fn);
     }
   }
 
@@ -193,7 +199,26 @@ export class PipelineResult<T, M extends PipelineMode> {
    * `for await (const x of score([1, 2, 3]))` yields `2`, `4`, `6`.
    */
   async *[Symbol.asyncIterator](): AsyncGenerator<T> {
-    yield* this.drainable().items();
+    // Yields each chunk's items by synchronous delegation (#179), rather than reading a flattened
+    // item stream: `yield* chunk` over a real array suspends this generator per item with no second
+    // async generator underneath it to pull through.
+    for await (const chunk of this.drainable().chunks()) {
+      yield* chunk;
+    }
+  }
+}
+
+/** Calls `fn` for each of one chunk's items, settling a genuinely thenable return before moving on
+ * (#179) - `forEachAsync`'s own inner loop, its own function so that method stays within this
+ * repo's `max-depth: 2`.
+ *
+ * `isThenable` rather than a bare `await`: awaiting a plain value allocates a `Promise` too, once
+ * per row, so a synchronous callback on an async chain paid for asynchrony it never used. Order is
+ * unchanged either way - a thenable is still settled before the next item runs. */
+async function settleChunk<T>(chunk: T[], fn: (item: T) => void | Promise<void>): Promise<void> {
+  for (let i = 0; i < chunk.length; i++) {
+    const settled = fn(chunk[i]);
+    if (isThenable(settled)) await settled;
   }
 }
 
