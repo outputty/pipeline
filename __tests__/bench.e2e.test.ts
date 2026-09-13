@@ -13,7 +13,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { canonicalChain, canonicalInput, median, timeRounds } from "../bench/canonical";
-import { checkGate, LEG_TOLERANCE, type OverheadReport } from "../bench/gate";
+import { checkGate, checkLocalParity, LEG_TOLERANCE, type OverheadReport } from "../bench/gate";
 import { pipelineMatchesFloor } from "../bench/legs/pipeline";
 import { concurrentMatchesFloor, countingConcurrentPipeline } from "../bench/legs/concurrent";
 import { httpMatchesFloor, measureHttpPipeline } from "../bench/legs/http";
@@ -372,6 +372,93 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
     const result = checkGate(report, baseline);
     expect(result.ok).toBe(false);
     expect(result.violations[0]).toMatch(/ConcurrentPipeline: local is missing/);
+  });
+});
+
+describe("#180 checkLocalParity - every dispatching class's .local() against Pipeline, no baseline needed", () => {
+  const parityReport: OverheadReport = {
+    Pipeline: { pipelineNsPerRow: 17, floorNsPerRow: 12, ratio: 1.42 },
+    ConcurrentPipeline: {
+      pipelineNsPerRow: 18,
+      floorNsPerRow: 12,
+      ratio: 1.5,
+      local: { nsPerRow: 17.5, dispatchesWhilePinned: 0 }, // 17.5/17 = 1.029, under 1.15
+    },
+    HttpPipeline: {
+      pipelineNsPerRow: 320,
+      floorNsPerRow: 12,
+      ratio: 26.7,
+      local: { nsPerRow: 18, requestsWhilePinned: 0 }, // 18/17 = 1.059, under 1.15
+    },
+    ClusterPipeline: {
+      pipelineNsPerRow: 200,
+      floorNsPerRow: 12,
+      ratio: 16.7,
+      local: { nsPerRow: 19.5, workerPidsWhilePinned: [] }, // 19.5/17 = 1.147, under 1.35
+    },
+    Branch: { pipelineNsPerRow: 22, floorNsPerRow: 12, ratio: 1.83 },
+    EventEmitterPipeline: {
+      pipelineNsPerRow: 26,
+      floorNsPerRow: 12,
+      ratio: 2.17,
+      local: { nsPerRow: 24, workersWhilePinned: 0 }, // 24/17 = 1.412, under 1.65
+    },
+  };
+
+  it("passes when every dispatching class's own local.nsPerRow sits inside its parity ceiling", () => {
+    expect(checkLocalParity(parityReport)).toEqual({ ok: true, violations: [] });
+  });
+
+  it("fails when a class's local.nsPerRow drifts past its own parity ceiling against Pipeline", () => {
+    const report = {
+      ...parityReport,
+      ConcurrentPipeline: {
+        ...parityReport.ConcurrentPipeline,
+        local: { ...parityReport.ConcurrentPipeline.local!, nsPerRow: 21 }, // 21/17 = 1.235, over 1.15
+      },
+    };
+    const result = checkLocalParity(report);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/ConcurrentPipeline:.*parity ceiling/);
+  });
+
+  it("never fails for a class whose local.nsPerRow reads BELOW Pipeline's own pipelineNsPerRow - regression-only", () => {
+    const report = {
+      ...parityReport,
+      EventEmitterPipeline: {
+        ...parityReport.EventEmitterPipeline,
+        local: { ...parityReport.EventEmitterPipeline.local!, nsPerRow: 5 }, // far below Pipeline's 17
+      },
+    };
+    expect(checkLocalParity(report).ok).toBe(true);
+  });
+
+  it("fails loud when Pipeline.pipelineNsPerRow itself is missing - nothing to compare against", () => {
+    const { Pipeline: _omitted, ...report } = parityReport;
+    const result = checkLocalParity(report);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/Pipeline: pipelineNsPerRow is missing/);
+  });
+
+  it("fails when a dispatching class's local row itself is missing from the report", () => {
+    const { local: _omitted, ...httpWithoutLocal } = parityReport.HttpPipeline;
+    const report = { ...parityReport, HttpPipeline: httpWithoutLocal };
+    const result = checkLocalParity(report);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/HttpPipeline: local is missing/);
+  });
+
+  it("fails loud on a NaN local.nsPerRow rather than silently passing", () => {
+    const report = {
+      ...parityReport,
+      ClusterPipeline: {
+        ...parityReport.ClusterPipeline,
+        local: { ...parityReport.ClusterPipeline.local!, nsPerRow: NaN },
+      },
+    };
+    const result = checkLocalParity(report);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/ClusterPipeline: local\.nsPerRow is NaN/);
   });
 });
 

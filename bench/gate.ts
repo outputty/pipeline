@@ -187,3 +187,89 @@ function pushIfOverCeiling(
     );
   }
 }
+
+/** The four dispatching classes `checkLocalParity` compares against `Pipeline` (#180's own
+ * Done-when 8, 9) - every class with a `.local()` row. */
+export type DispatchingLegName = Exclude<LegName, "Pipeline" | "Branch">;
+
+/**
+ * How far a dispatching class's own `local.nsPerRow / Pipeline.pipelineNsPerRow` ratio may read
+ * before it is a parity violation - a CEILING on the ratio itself, not a baseline-relative percent
+ * like `LEG_TOLERANCE`, because `checkLocalParity` takes no baseline: a pinned region runs
+ * identical in-process code on every class (`architecture.md`'s own `.local()` section), so the
+ * ratio SHOULD read ~1.0 on every one of them, in the SAME report, with no external baseline
+ * needed to say so.
+ *
+ * Measured across five consecutive `pnpm bench:overhead` runs on an unchanged tree, not chosen:
+ *
+ * ```text
+ * ConcurrentPipeline    min 0.924  max 1.027
+ * HttpPipeline          min 1.015  max 1.073
+ * ClusterPipeline       min 0.992  max 1.161
+ * EventEmitterPipeline  min 1.305  max 1.474
+ * ```
+ *
+ * The residual spread is explained, not removed (#180's own Done-when 9): `Pipeline` is measured
+ * FIRST in `bench/overhead.ts`'s own run order, in its most favorable JIT/cache state. A swap probe
+ * (measuring `EventEmitterPipeline` FIRST instead of last, `Pipeline` second instead of first) held
+ * `EventEmitterPipeline`'s own ABSOLUTE `local.nsPerRow` stable either way (~22 ns/row), while
+ * `Pipeline.pipelineNsPerRow` itself moved from 16.89 to 27.09 depending on ITS OWN position - the
+ * spread is a measurement-ORDER artefact of what ran immediately before `Pipeline`'s own reading,
+ * not a real per-class execution cost `.local()` pays. Each ceiling below is the measured max plus
+ * one more spread's worth of headroom (the same "roughly double" spirit `LEG_TOLERANCE`'s own
+ * header uses), read directly off the real run order every `pnpm bench:overhead` invocation uses -
+ * not adjusted for the artefact, since that IS the shape a real run always measures.
+ */
+export const LOCAL_PARITY_CEILING: Record<DispatchingLegName, number> = {
+  ConcurrentPipeline: 1.15,
+  HttpPipeline: 1.15,
+  ClusterPipeline: 1.35,
+  EventEmitterPipeline: 1.65,
+};
+
+/**
+ * `checkLocalParity(report)` - every dispatching class's own `local.nsPerRow` against `Pipeline`'s
+ * `pipelineNsPerRow` FROM THE SAME REPORT (#180's own Done-when 8), never a committed baseline:
+ * `checkGate` already gates each leg's absolute drift against its own history, and this instead
+ * asks whether the four classes still agree with EACH OTHER on any one run - `checkGate` alone
+ * cannot see four `local.nsPerRow` rows drifting apart from each other while each stays inside its
+ * own tolerance against its own baseline. Regression-only, the same reason `checkGate` is: a ratio
+ * BELOW its ceiling (even below 1.0 - a pinned region running FASTER than a bare `Pipeline`) is
+ * never a violation.
+ *
+ * `checkLocalParity({ Pipeline: { pipelineNsPerRow: 17 }, ConcurrentPipeline: { local: { nsPerRow:
+ * 17.5 }, ... }, ... })` → `{ ok: true, violations: [] }` (`17.5 / 17 = 1.029`, under
+ * `ConcurrentPipeline`'s own `1.15` ceiling).
+ */
+export function checkLocalParity(report: Partial<OverheadReport>): GateResult {
+  const violations: string[] = [];
+  const pipelineNsPerRow = report.Pipeline?.pipelineNsPerRow;
+  if (pipelineNsPerRow === undefined || !Number.isFinite(pipelineNsPerRow)) {
+    violations.push(
+      "Pipeline: pipelineNsPerRow is missing or not finite - nothing to compare .local() rows against",
+    );
+    return { ok: false, violations };
+  }
+
+  for (const leg of Object.keys(LOCAL_PARITY_CEILING) as DispatchingLegName[]) {
+    const local = report[leg]?.local;
+    if (!local) {
+      violations.push(`${leg}: local is missing from the report - nothing to compare for parity`);
+      continue;
+    }
+    if (!Number.isFinite(local.nsPerRow)) {
+      violations.push(`${leg}: local.nsPerRow is ${local.nsPerRow} - not a finite measurement`);
+      continue;
+    }
+    const ratio = local.nsPerRow / pipelineNsPerRow;
+    const ceiling = LOCAL_PARITY_CEILING[leg];
+    if (ratio > ceiling) {
+      violations.push(
+        `${leg}: local.nsPerRow (${local.nsPerRow.toFixed(1)}) / Pipeline.pipelineNsPerRow ` +
+          `(${pipelineNsPerRow.toFixed(1)}) is ${ratio.toFixed(3)}x, past the ${ceiling}x parity ceiling`,
+      );
+    }
+  }
+
+  return { ok: violations.length === 0, violations };
+}
