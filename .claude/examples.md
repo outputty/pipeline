@@ -120,16 +120,40 @@ Across machines instead of processes, the same chain takes a url and mounts its 
 ```ts
 import { HttpPipeline } from "@outputty/pipeline";
 
-const pipeline = new HttpPipeline([1, 2, 3, 4, 5], { url: process.env.SELF_URL! })
+const pipeline = new HttpPipeline<number>({ url: process.env.SELF_URL! })
   .buffer(2)
   .transform((t) => t.map((x: number) => x * 2))
   .local((p) => p.transform((t) => t.filter((x: number) => x > 4)));
 
 app.mount("/pipeline", pipeline.fetch);
+
+const data = await pipeline([1, 2, 3, 4, 5]).toArray();
 ```
 
 ```json
 [6, 8, 10]
+```
+
+How a dispatched chunk travels is a knob, and left alone it picks the fastest client the runtime
+offers. Supply one to add an auth header, a proxy or a retry:
+
+<!-- illustrative -->
+
+```ts
+import { HttpPipeline, type PipelineClient } from "@outputty/pipeline";
+
+const authorised: PipelineClient = (url, init) =>
+  fetch(url, {
+    ...init,
+    headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${token}` },
+  });
+
+const pipeline = new HttpPipeline<number>({ url: process.env.SELF_URL!, client: authorised })
+  .transform((t) => t.map((x: number) => x * 2));
+```
+
+```json
+[2, 4, 6, 8, 10]
 ```
 
 ## Case 4 - branching

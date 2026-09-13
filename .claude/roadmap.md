@@ -64,6 +64,38 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **The per-row costs the async engine was paying for chunk-shaped data** (#179, `perf`) - six fixes,
+  each located by measurement rather than by reading, and the largest of them nowhere this document
+  had been looking. `buildSyncChunkGenerator` cuts an array with `slice`; `settleRows` keeps one
+  output array on its armed sync arm; every async terminal on `PipelineResult` walks `chunks()` in a
+  synchronous inner loop and the flattened item view is deleted; `fromSource()` slices an array on
+  the forced-async branch too; `.buffer(size)` cuts by count instead of folding every item through
+  `Reducer<T[], T>`; and `HttpPipeline` dispatches through `options.client`, defaulting to
+  `node:http` with a keep-alive agent on Node.
+
+  Measured on `bench/overhead.ts`, median of five runs: `ConcurrentPipeline`'s gated `.local()` row
+  278.43 ns/row to 16.47, `HttpPipeline`'s 252.76 to 18.06, `ClusterPipeline`'s 257.11 to 18.90, a
+  bare `Pipeline` 27.46 to 16.79 - so a pinned region now costs within about 2 ns/row of a plain
+  `Pipeline`. On `bench/memory.ts`, allocation per 500,000 rows fell 41% to 96% on every case and
+  collections fell from 23-47 to 1 on the in-process ones, with nothing retained.
+
+  Three things it also changed, each priced on its own: the constructor refuses a fractional
+  `chunkSize` (BREAKING - it silently made an array and a `Set` cut differently), `.buffer(size)`
+  validates on the bound path as well (BREAKING), and `Drainable<T>` drops its item view (BREAKING -
+  `Pipeline.drainable()` is public). The `.local()` sync-region design an earlier draft of this
+  ticket proposed is under **Killed**: measured, the region was already free.
+
+- **A memory and scheduling benchmark suite, gated like the speed one** (#179, `perf`) -
+  `bench/memory.ts` measures allocation, garbage collections, promises per row and retained heap for
+  all four runner classes; `bench/memory-gate.ts` gates them against a committed baseline,
+  regression-only; `bench/compare.ts` measures any git ref against the working tree in one command,
+  which is what a build runs before its first edit and again before its docs layer. The instruments
+  were chosen by comparing candidates on a real chain: a `heapUsed` delta called a 2x allocation CUT
+  a 2.7x regression, and `PerformanceObserver` on `gc` reported zero collections for a run with 13,
+  so allocation reads `v8.getHeapStatistics().total_allocated_bytes` and GC reads `v8.GCProfiler`.
+  Both gates now carry per-leg, measured tolerances - one 20% number sat inside `ClusterPipeline`'s
+  own 18.9% run-to-run spread while being three times looser than `ConcurrentPipeline` needed.
+
 - **A benchmark harness for the package's own internal overhead, and closing the gap it finds**
   (#120, `perf`, PR #166/#167/#169/#170/#175/#176) - `bench/overhead.ts` measures one leg per
   pipeline runner class (`Pipeline`, `ConcurrentPipeline`, `HttpPipeline`, `ClusterPipeline`)
@@ -127,7 +159,11 @@ The two older candidates, still not filed:
   items through the SAME `Reducer<T[], T>` class `Pipeline.reduce()` already uses -
   `sizeReduceFunction`/`bufferReduceFunction` (`src/utils/reduce.ts`) adapt a size or a caller's own
   function onto it, one engine, not two; `.buffer(size)`'s own three branches keep their shape,
-  their innermost cutting call swapped for the shared one. A `Promise`-returning `fn` widens the
+  their innermost cutting call swapped for the shared one. ⚠ The "one engine" half is undone by #179,
+  which put `.buffer(size)` back on the ordinary chunk cutters and deleted `sizeReduceFunction`: a
+  fold buys a per-ITEM decision that a count never makes, and charged a closure call plus an
+  array-mutating accumulator per row for it. Chunk boundaries are identical either way, and
+  `.buffer(fn)` keeps this engine. A `Promise`-returning `fn` widens the
   chain's Mode to `"async"`, two overloads ordered Promise-first, mirroring `.reduce()`'s own split.
   `ChunkerFunction` drops from the public export surface (dead since #39, zero consumers);
   `BufferFunction` takes its place. Code review found and fixed two real defects before merge: a
@@ -404,6 +440,21 @@ The two older candidates, still not filed:
 
 ## Killed
 
+- **A synchronous `.local()` region on a dispatching class** (#179's own first draft) - the design
+  was to let a pinned region run the sync engine, on the premise that `sourcePolicy()` forcing Mode
+  to `"async"` is what a region pays for. Killed on measurement, not deferred: the region was already
+  free. `ConcurrentPipeline` with zero stages, no `.buffer()` and no region reads 240.50 ns/row, and
+  the same chain with `.local((p) => p)` reads 236.88 - a difference inside run-to-run noise. The
+  real costs were four per-ROW habits the async engine had over chunk-shaped data, all listed under
+  **Built**, and none of them needed Mode to change. `architecture.md` had carried the wrong
+  diagnosis ("reducible, though not eliminable while `sourcePolicy()` still pins Mode") since #120.
+
+- **Gating `nsPerRow` in the memory suite** (#179) - built, then removed on its own second run.
+  Measured, four runs of identical code read 37.3, 56.0, 68.5 and 77.9 ns/row on the fastest case, a
+  2.1x spread, while the same runs' allocation read 45.7, 45.7 and 45.9 MB. `bench/overhead.ts`
+  already gates speed on a harness built for it; a second gate on the same number only adds a second
+  flake source. `bench/memory.ts` reports the figure and gates the memory axes.
+
 - **Fusing adjacent sync `map`/`filter` links into one loop** (#120's O2, spiked in
   `tmp/spike-o2-fusion.ts`, deleted) - measured through the real shape (a full `Pipeline` run with
   chunking, N=1,000,000, matching `measurePipeline()`), not the isolated `.runnable()` call an
@@ -615,6 +666,12 @@ Every row below was spiked and run while planning #17, not argued.
   at HTTP 200). Atomic deployment is documented instead.
 - **`node:http` with a keep-alive agent as the client** (#17) - 94 us/chunk against `fetch`'s 467, in
   7/7 paired rounds. Killed for runtime neutrality: one code path on Node, Bun, Deno and Cloudflare.
+  ⚠ REVIVED by #179, because the trade it was killed on was a false choice: `options.client` is a
+  seam, so `node:http` is the DEFAULT on Node without being the only path anywhere. Bun, Deno and
+  Cloudflare keep the global `fetch`, both `node:` imports are dynamic inside one `try` so a runtime
+  without them falls back rather than failing to load, and an `https:` url falls back too - `node:http`
+  speaks cleartext only. Re-measured on the shipped path, 200 chunks of 1000 rows, output asserted
+  identical: `/transform/<n>` 1749-1828 ns/row on `fetch` against 306-349 on `node:http`.
 - **Patterns 2-4 of the multicore research** (#17) - a data-URL worker cannot import workspace modules;
   `SharedArrayBuffer` and transferable objects copy objects and strings anyway, and this package's
   chunks are objects.

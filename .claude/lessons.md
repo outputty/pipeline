@@ -792,3 +792,30 @@ pass affordable was `tmp/run-migration.sh` - reset to a fixed base commit, then 
 so a fix cost one command rather than a redo of the four passes before it. Produced
 `~/.claude/rules/code.md`'s "drive a bulk mechanical migration from a fixed base through one
 re-runnable script" (2026-09-09).
+
+## 2026-09-13 An instrument reported a regression that did not exist
+
+`#179`'s own required memory pass measured `Pipeline` over an async generator at 13.9 MB before the
+stack and 37.3 after, and that number reached the user as a divergence needing their decision. It was
+backwards: `process.memoryUsage().heapUsed` deltas measure what the collector has not reached yet,
+and the stack had cut collections from 30 to 13, so a larger share of a much smaller total was still
+uncollected at the sample point. `v8.getHeapStatistics().total_allocated_bytes` - a cumulative
+counter - showed allocation had HALVED, 973 MB to 454. Two of the instrument's own signals had
+already said it was broken and were under-read: the same case read 13.9 in one harness and 19.8 in
+another, and `PerformanceObserver` on `gc` reported ZERO collections for a run `--trace-gc` counts
+133 of. The fix was not a number but a suite: `bench/memory.ts` and `bench/memory-gate.ts`, whose
+headers record both rejected instruments with the readings that disqualified them. Produced
+`~/.claude/rules/code.md`'s "validate a measurement instrument against a known-good reference before
+reporting any number from it" (2026-09-13).
+
+## 2026-09-13 A per-request saving carried to a route that pays it once per stream
+
+The `node:http` client was measured at 5.6x the global `fetch` on one-shot POSTs, and that figure was
+about to justify building a duplex adapter for `/reduce/<n>` - until the user said "Wait, measure the
+duplex stream impact". Measured on the real wire, it buys nothing there: that route opens ONE request
+for the whole stream, so the per-request saving divides across every chunk in it - 117-135 ns/row on
+`fetch` against 112-134 on `node:http`, inside run-to-run drift, where `/transform/<n>` reads
+1749-1828 against 306-349. The adapter shipped anyway, but as a correctness requirement so one seam
+serves the whole class, and both call sites now state their own reason. Sharpened
+`~/.claude/rules/code.md`'s per-unit line with "never carry a per-unit figure to a call path that
+pays it a different number of times" (2026-09-13).
