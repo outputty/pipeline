@@ -221,7 +221,7 @@ function classifyItems<T>(
         () => grouped,
       ),
     () => classifyAsyncChunks(grouped, chunks, arms, broadcast),
-  ) as Map<string, T[]> | Promise<Map<string, T[]>>;
+  );
 }
 
 /** `classifyItems`'s async arm, its own function so the caller above stays one expression per engine

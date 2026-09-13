@@ -17,7 +17,11 @@ export interface BranchRecord {
 
 /** `.when("evens", ...).otherwise("odds")` - the canonical branch every leg here measures, matching
  * `Pipeline.branch()`'s own docstring example: a router with no arm `build`, so matched items pass
- * through unchanged and the record is exactly what the hand-rolled floor below also produces. */
+ * through unchanged and the record is exactly what the hand-rolled floor below also produces.
+ *
+ * `new Pipeline<number>().branch(canonicalBranch)([0, 1, 2, 3])` → `{ evens: [0, 2], odds: [1, 3] }`
+ * (`handRolledBranchFloor`'s own example, below, produces the identical record).
+ */
 export function canonicalBranch(b: BranchBuilder<number>) {
   return b.when("evens", (x: number) => x % 2 === 0).otherwise("odds");
 }
@@ -44,7 +48,11 @@ export function handRolledBranchFloor(items: number[]): BranchRecord {
 /** Real, timed `pipelineNsPerRow`/`ratio` at `ROWS.Branch` rows, `rounds` rounds. No `.local()` row -
  * see this file's own header. `floorNsPerRow` is measured ONCE by the caller
  * (`bench/overhead.ts`) and passed in, the same reason every other leg takes it as a parameter
- * (`bench/legs/pipeline.ts`'s own docstring). */
+ * (`bench/legs/pipeline.ts`'s own docstring).
+ *
+ * `measureBranch(11.4, 5)` → `{ pipelineNsPerRow: 21.66, floorNsPerRow: 11.4, ratio: 1.9 }` (no
+ * `local` field - see this file's own header).
+ */
 export async function measureBranch(floorNsPerRow: number, rounds?: number): Promise<LegReport> {
   const items = canonicalInput(ROWS.Branch);
   const pipeline = new Pipeline<number>().branch(canonicalBranch);

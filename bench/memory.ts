@@ -247,21 +247,6 @@ function branchThreeWay(
   }>;
 }
 
-/** Combines every arm's own output into one `MemoryIdentity`, the way `identityOf` does for a plain
- * array - `.branch()`'s own record has no single array to hand `identityOf`, so this is that
- * function's record-shaped sibling. */
-function sumArms(record: Record<string, number[]>): MemoryIdentity {
-  let count = 0;
-  let checksum = 0;
-  for (const arm of Object.values(record)) {
-    for (const value of arm) {
-      count++;
-      checksum += value;
-    }
-  }
-  return { count, checksum };
-}
-
 /** The identity a real `branchThreeWay(rows, true)` run produces, computed independently rather
  * than run twice: `evens`/`big` overlap on a row that is both, and the catch-all takes EVERY row
  * under broadcast (`branch.ts`'s own "under broadcast the catch-all takes every item" rule) - the
@@ -496,7 +481,15 @@ function cases(): Case[] {
       // regardless of class (architecture.md's "Branching" section), so this measures the memory
       // cost of classifying+joining on a class that COULD dispatch, not a dispatch itself.
       "Branch router",
-      async () => sumArms(await branchThreeWay(rows, false)),
+      // Returns the combined arm output as a plain array, same as every other case here - the
+      // checksum/count tally happens in `identityOf`, AFTER this run is timed and profiled
+      // (code-review finding: an earlier revision tallied inside the timed closure via a separate
+      // `sumArms` helper, inflating this case's own ns/row and promises/row past what its sibling
+      // cases pay for the identical kind of work).
+      async () => {
+        const record = await branchThreeWay(rows, false);
+        return [...record.evens, ...record.big, ...record.rest];
+      },
       // router covers every row exactly once (no arm `build` - matched items pass through
       // unchanged), so the union's own count/checksum is identical to `rows` itself.
       rowsIdentity,
@@ -509,7 +502,10 @@ function cases(): Case[] {
       // item" rule). `branchBroadcastExpected` computes the identical sum a real broadcast run
       // produces, the same way `comparisonCases` precomputes its own `expected`.
       "Branch broadcast",
-      async () => sumArms(await branchThreeWay(rows, true)),
+      async () => {
+        const record = await branchThreeWay(rows, true);
+        return [...record.evens, ...record.big, ...record.rest];
+      },
       branchBroadcastExpected(rows),
       IN_PROCESS_ROWS,
     ],
