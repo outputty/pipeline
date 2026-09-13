@@ -26,12 +26,13 @@ export function assertPositiveChunkSize(size: number): void {
   }
 }
 
-/** The `capacity`/`size` guard a NUMERIC knob shares across two call sites - `.buffer(size)`'s own
- * deferred-branch check and `.queue(capacity)` (#123) - labelled so each throws under its own name
- * rather than a generic one. Kept apart from `assertPositiveChunkSize` above: that one's own message
- * is asserted verbatim by `sync-mode.e2e.test.ts` and is never the wording a caller-facing knob like
- * `.buffer(fn)`'s `size` overload or `.queue()` owes its user - see `.buffer()`'s own deferred check
- * for the two-site duplication this replaces.
+/** The `capacity`/`size` guard every NUMERIC knob shares, labelled so each throws under its own name
+ * rather than a generic one. Four call sites: `.buffer(size)`'s deferred branch and its bound branch
+ * (#179 - the bound one used to validate through `sizeReduceFunction`, deleted with the fold engine's
+ * numeric arm), `.queue(capacity)` (#123), and the constructor's own `chunkSize` (#179).
+ *
+ * Kept apart from `assertPositiveChunkSize` above: that one's own message is asserted verbatim by
+ * `sync-mode.e2e.test.ts` and is never the wording a caller-facing knob owes its user.
  *
  * `assertWholeNumberAtLeastOne("queue capacity", 0)` throws `Error("queue capacity must be a whole
  * number of at least 1")`; `assertWholeNumberAtLeastOne("queue capacity", 3)` returns. */

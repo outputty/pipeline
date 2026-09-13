@@ -1094,9 +1094,15 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `fn: BufferFunction<T>` (#88) decides the boundary per item instead - a `T[]` pending array the
    * framework owns, folded through it item by item. `fn`'s own `emit()` takes no value: it flushes
    * whatever is pending and resets it to `[]`; returning a value appends it to the (possibly
-   * just-reset) pending array, returning `DROP` skips the item entirely. `.buffer(size)` is this
-   * same engine configured with an identity `fn` and a framework-side auto-flush at
-   * `pending.length >= size` - one engine, not two.
+   * just-reset) pending array, returning `DROP` skips the item entirely.
+   *
+   * The two forms run on DIFFERENT engines since #179, and the boundaries they produce are
+   * unchanged by that. `fn` folds item by item through the `Reducer<T[], T>` class
+   * `Pipeline.reduce()` uses, which is what a per-item decision needs; `size` cuts by count through
+   * the ordinary chunk cutters (`bufferBySize`, below), which need neither the per-item closure call
+   * nor the array-mutating accumulator that fold charges for a decision it never makes. `size` ran
+   * on the fold engine until #179, configured with an identity `fn` and a framework-side auto-flush
+   * at `pending.length >= size`, and cost 3.001 promises per row over an async source for it.
    *
    * Recuts from `_preBufferItems` (the raw item stream) when it is still set - nothing has
    * consumed `_chunks` since the last cut, so a run of `.buffer()` calls with nothing between them

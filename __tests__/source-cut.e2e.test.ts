@@ -141,4 +141,27 @@ describe("#179 .buffer(size) cuts by count on all three arms (Done-when 5)", () 
 
     expect(await chunksOf(out)).toEqual([[1, 2], [3, 4, 5], [6]]);
   });
+
+  it("validates the size on the BOUND path too, under .buffer()'s own name", () => {
+    // A chain is already bound inside `.local(build)`, so `p.buffer(n)` there takes the bound
+    // branch, not the deferred one. That branch used to validate through `sizeReduceFunction`, which
+    // checked only `size < 1` and named the internal knob - measured before this layer,
+    // `.local((p) => p.buffer(2.5))` did not throw at all and `.buffer(0)` threw
+    // `chunkSize must be at least 1`. BREAKING, and its own changeset says so.
+    expect(() =>
+      new Pipeline<number>()
+        .local((p) => p.buffer(2.5))([1, 2, 3, 4, 5, 6, 7])
+        .toArray(),
+    ).toThrow("buffer size must be a whole number of at least 1");
+    expect(() =>
+      new Pipeline<number>()
+        .local((p) => p.buffer(0))([1, 2, 3])
+        .toArray(),
+    ).toThrow("buffer size must be a whole number of at least 1");
+    expect(() =>
+      new Pipeline<number>()
+        .local((p) => p.buffer(3))([1, 2, 3, 4, 5, 6, 7])
+        .toArray(),
+    ).not.toThrow();
+  });
 });
