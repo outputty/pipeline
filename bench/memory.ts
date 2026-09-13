@@ -37,25 +37,17 @@
 
 import { createHook } from "node:async_hooks";
 import { getHeapStatistics, GCProfiler } from "node:v8";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Pipeline } from "../src";
 import { ConcurrentPipeline } from "../src";
 import { canonicalChain, canonicalInput, handRolledFloor } from "./canonical";
+import { checkMemoryGate, type MemoryReport, type MemorySample } from "./memory-gate";
 
 const MB = 1024 * 1024;
 /** Large enough that a collection genuinely happens inside a run - at 50,000 rows no case collected
  * at all, so the GC axis measured nothing. */
 const ROWS = 500_000;
 const RUNS = 5;
-
-/** What one case costs, each field on its own instrument. */
-export interface MemorySample {
-  promisesPerRow: number;
-  gcCount: number;
-  gcCostMs: number;
-  allocatedMb: number;
-  retainedMb: number;
-  nsPerRow: number;
-}
 
 function forceGc(): void {
   const gc = (globalThis as { gc?: () => void }).gc;
@@ -208,30 +200,86 @@ function cases(): [string, () => Promise<unknown>, number][] {
 const HEADER =
   "case                           promises/row   GC   GC ms   alloc MB  held MB    ns/row";
 
-function printRow(label: string, s: MemorySample): void {
-  console.log(
+function formatRow(label: string, s: MemorySample): string {
+  return (
     label.padEnd(30) +
-      s.promisesPerRow.toFixed(3).padStart(13) +
-      String(s.gcCount).padStart(5) +
-      s.gcCostMs.toFixed(1).padStart(9) +
-      s.allocatedMb.toFixed(1).padStart(11) +
-      s.retainedMb.toFixed(2).padStart(9) +
-      s.nsPerRow.toFixed(1).padStart(10),
+    s.promisesPerRow.toFixed(3).padStart(13) +
+    String(s.gcCount).padStart(5) +
+    s.gcCostMs.toFixed(1).padStart(9) +
+    s.allocatedMb.toFixed(1).padStart(11) +
+    s.retainedMb.toFixed(2).padStart(9) +
+    s.nsPerRow.toFixed(1).padStart(10)
   );
 }
 
-async function main(): Promise<void> {
+/** Every case, measured. Exported so `bench/compare.ts` can run the suite inside a checked-out ref
+ * without re-declaring what the suite IS. */
+export async function runMemorySuite(only?: string): Promise<MemoryReport> {
   const all = cases();
-  const wanted = process.argv[2];
-  const selected = wanted ? all.filter(([label]) => label === wanted) : all;
+  const selected = only ? all.filter(([label]) => label === only) : all;
   if (selected.length === 0) {
-    throw new Error(`unknown case ${wanted}; known: ${all.map(([label]) => label).join(" | ")}`);
+    throw new Error(`unknown case ${only}; known: ${all.map(([label]) => label).join(" | ")}`);
   }
 
-  console.log(HEADER);
+  const report: MemoryReport = {};
   for (const [label, run, expected] of selected) {
-    printRow(label, await measureMemory(run, expected));
+    report[label] = await measureMemory(run, expected);
   }
+  return report;
+}
+
+export const MEMORY_BASELINE_PATH = new URL("./memory-baseline.json", import.meta.url);
+
+function printReport(report: MemoryReport): void {
+  console.log(HEADER);
+  for (const [label, sample] of Object.entries(report)) console.log(formatRow(label, sample));
+}
+
+/**
+ * `pnpm bench:memory` runs every case and gates it against `bench/memory-baseline.json`, exiting
+ * non-zero on a regression. `--record` rewrites that baseline instead. `--json` prints the report as
+ * JSON and gates nothing, which is what `bench/compare.ts` reads. `--case "<name>"` narrows to one
+ * case, which is the supported way to compare two commits: a `heapUsed` reading moves with whatever
+ * ran before it in the same process.
+ */
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  const only = argv.includes("--case") ? argv[argv.indexOf("--case") + 1] : undefined;
+  const report = await runMemorySuite(only);
+
+  if (argv.includes("--json")) {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  printReport(report);
+
+  if (argv.includes("--record")) {
+    writeFileSync(MEMORY_BASELINE_PATH, `${JSON.stringify(report, null, 2)}\n`);
+    console.log(`\nrecorded ${Object.keys(report).length} cases to bench/memory-baseline.json`);
+    return;
+  }
+
+  if (!existsSync(MEMORY_BASELINE_PATH)) {
+    console.log(
+      "\nno bench/memory-baseline.json yet - run `pnpm bench:memory:record` to create it",
+    );
+    return;
+  }
+
+  const baseline = JSON.parse(readFileSync(MEMORY_BASELINE_PATH, "utf8")) as MemoryReport;
+  // Gated against the cases actually measured, so `--case` narrows the gate with it rather than
+  // failing every case it did not run.
+  const scoped: Partial<MemoryReport> = only ? { [only]: baseline[only] } : baseline;
+  const result = checkMemoryGate(report, scoped);
+
+  if (result.ok) {
+    console.log("\nno regression against bench/memory-baseline.json");
+    return;
+  }
+  console.error(`\n${result.violations.length} regression(s) against bench/memory-baseline.json:`);
+  for (const violation of result.violations) console.error(`  - ${violation}`);
+  process.exitCode = 1;
 }
 
 main().catch((error: unknown) => {

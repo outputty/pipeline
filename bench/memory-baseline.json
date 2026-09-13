@@ -1,0 +1,50 @@
+{
+  "Pipeline array": {
+    "promisesPerRow": 0.000004,
+    "gcCount": 1,
+    "gcCostMs": 0.45925,
+    "allocatedMb": 45.712310791015625,
+    "retainedMb": 0.00844573974609375,
+    "nsPerRow": 55.957082
+  },
+  "Pipeline async source": {
+    "promisesPerRow": 4.01202,
+    "gcCount": 13,
+    "gcCostMs": 2.5715850000000002,
+    "allocatedMb": 453.8025588989258,
+    "retainedMb": 0.00197601318359375,
+    "nsPerRow": 313.52475
+  },
+  "Pipeline .buffer(1000) async": {
+    "promisesPerRow": 4.01202,
+    "gcCount": 13,
+    "gcCostMs": 2.5165,
+    "allocatedMb": 453.5238494873047,
+    "retainedMb": 0.00202178955078125,
+    "nsPerRow": 321.44775
+  },
+  "Concurrent array": {
+    "promisesPerRow": 0.012018,
+    "gcCount": 1,
+    "gcCostMs": 0.511208,
+    "allocatedMb": 47.03850555419922,
+    "retainedMb": 0.00080108642578125,
+    "nsPerRow": 40.89675
+  },
+  "Concurrent .local() region": {
+    "promisesPerRow": 0.013022,
+    "gcCount": 1,
+    "gcCostMs": 0.483708,
+    "allocatedMb": 47.16254425048828,
+    "retainedMb": 0.00106048583984375,
+    "nsPerRow": 46.2445
+  },
+  "Concurrent .forEach()": {
+    "promisesPerRow": 0.014022,
+    "gcCount": 1,
+    "gcCostMs": 0.595916,
+    "allocatedMb": 47.13592529296875,
+    "retainedMb": 0.0029449462890625,
+    "nsPerRow": 54.3585
+  }
+}
