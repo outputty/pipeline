@@ -47,12 +47,29 @@ describe("#179 buildSyncChunkGenerator - the array arm and the per-item arm agre
   });
 
   it("keeps a string on the per-item arm - `Array.isArray` is the test, never `length`", () => {
-    // A string is iterable AND length-bearing, so a `length`-based fast path would cut it into
-    // characters here. The per-item arm is what a `Pipeline<string>` over a string source must keep
-    // reaching, unchanged by this ticket.
+    // A string is iterable AND length-bearing, so a `length`-plus-`slice` fast path would hand back
+    // STRINGS here rather than arrays - `"abcde".slice(0, 2)` is `"ab"`, not `["a", "b"]`. The
+    // per-item arm rejects nothing; it cuts a string into its characters, which is the shipped
+    // behaviour and is what this case pins.
     const cut = buildSyncChunkGenerator<string>(2);
 
     expect([...cut("abcde")]).toEqual([["a", "b"], ["c", "d"], ["e"]]);
+  });
+
+  it("keeps a fractional size off the array arm, so both arms still agree", () => {
+    // `slice(i, i + 2.5)` TRUNCATES both bounds where the per-item arm cuts at `length >= 2.5`, so
+    // an unguarded array arm cut `[[1,2],[3,4,5],[6,7]]` against a `Set`'s own `[[1,2,3],[4,5,6],
+    // [7]]` - one knob, two chunkings, the engine disagreeing with itself (review-caught, #179 L3).
+    // `Pipeline`'s constructor refuses a fractional `chunkSize` outright, but this function is also
+    // reached from `recut.ts` and `.buffer()`, so the arm carries its own `Number.isInteger` guard.
+    const cut = buildSyncChunkGenerator<number>(2.5);
+    const rows = [1, 2, 3, 4, 5, 6, 7];
+
+    const fromArray = [...cut(rows)];
+    const fromSet = [...cut(new Set(rows))];
+
+    expect(fromArray).toEqual([[1, 2, 3], [4, 5, 6], [7]]);
+    expect(fromArray).toEqual(fromSet);
   });
 });
 

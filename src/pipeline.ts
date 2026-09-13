@@ -841,7 +841,8 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
 
   /** This pipeline's CHUNKS as an async stream, whichever engine it runs on (#90) - a `"sync"`
    * pipeline leaves `_chunks` empty and carries `_syncChunks` instead, so this is the one place
-   * that difference is resolved. `asyncItems()` and `PipelineResult.chunks()` both read it. */
+   * that difference is resolved. `drainable()`'s own `chunks` thunk reads it, and therefore every
+   * async terminal on `PipelineResult` (#179) plus `PipelineResult.chunks()`. */
   protected chunkStream(): AsyncIterable<T[]> {
     if (!this.isSync()) return this._chunks;
     const syncChunks = this._syncChunks!;

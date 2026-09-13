@@ -155,12 +155,23 @@ export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenera
  * 0.42, 0.36 for `slice`. `fromSource()` (`src/pipeline.ts`) hands this function the caller's own
  * array unwrapped, so an ordinary `new Pipeline<number>()(items)` takes this arm.
  *
- * ⚠ `Array.isArray` is the test, never a `length` check: a string is iterable AND length-bearing, so
- * a `length`-based guard would cut a `Pipeline<string>` over a string source into characters rather
- * than letting the per-item arm below reject it. Every other `Iterable` - a `Set`, a `Map`, a
+ * ⚠ `Array.isArray` is the test, never a `length` check. A string is iterable AND length-bearing,
+ * and a `length`-plus-`slice` guard would hand back STRINGS where every other source yields arrays:
+ * `slice` on a string returns a string, so a `Pipeline<string>` over `"abcd"` would produce `"ab"`
+ * rather than `["a", "b"]`. The per-item arm rejects nothing - it cuts a string into its characters,
+ * which is the shipped behaviour and stays so. Every other `Iterable` - a `Set`, a `Map`, a
  * generator, a caller's own iterable object - keeps the per-item arm, including its own early-stop
  * behaviour: the array arm never touches the iterator protocol at all, so a source's `finally` block
  * has nothing to run there and nothing to close.
+ *
+ * ⚠ `Number.isInteger` guards the arm too, and is not optional. `slice(i, i + chunkSize)` truncates
+ * both bounds where the per-item arm cuts at `length >= chunkSize`, so a fractional size made the
+ * two arms disagree on the SAME data: `chunkSize: 2.5` over `[1..7]` cut an array into
+ * `[[1,2],[3,4,5],[6,7]]` against a `Set`'s own `[[1,2,3],[4,5,6],[7]]` - one knob, two chunkings,
+ * the engine disagreeing with itself (review-caught). A fractional size is incoherent either way and
+ * the constructor refuses it now (`Pipeline`'s own `chunkSize` guard, the same one `.buffer(size)`
+ * has always had); this arm still checks, because this function is reached from `recut.ts` and from
+ * `.buffer()` as well, and an arm that silently re-cuts differently is worse than a slower one.
  *
  * `[...buildSyncChunkGenerator<number>(3)([1, 2, 3, 4, 5, 6, 7])]` → `[[1, 2, 3], [4, 5, 6], [7]]`,
  * by either arm.
@@ -171,7 +182,7 @@ export function buildSyncChunkGenerator<T>(
   assertPositiveChunkSize(chunkSize);
 
   return function* chunkGenerator(data: Iterable<T>): Generator<T[]> {
-    if (Array.isArray(data)) {
+    if (Array.isArray(data) && Number.isInteger(chunkSize)) {
       for (let i = 0; i < data.length; i += chunkSize) {
         yield (data as T[]).slice(i, i + chunkSize);
       }

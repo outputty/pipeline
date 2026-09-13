@@ -51,12 +51,12 @@ export class PipelineResult<T, M extends PipelineMode> {
 
   /** Binds the input to the chain and returns the views a terminal drains through. Runs ONCE per
    * terminal call - which is what makes every terminal re-drain, and equally what stops one from
-   * re-draining twice: each terminal destructures both halves here and threads `items` into its own
+   * re-draining twice: each terminal destructures both halves here and threads `chunks` into its own
    * async arm. Calling it again there ran a user's `.local(build)` callback twice per call.
    *
    * Typed `Drainable<T>` (#133) - the SAME shape `Pipeline.drainable()` itself returns, so this
    * wrapper needs only the cast from `Drainable<unknown>` (this result's own `_pipeline` is bound
-   * to `T = unknown`) to `Drainable<T>`, never a second, independent spelling of the four fields.
+   * to `T = unknown`) to `Drainable<T>`, never a second, independent spelling of its three fields.
    * `context` goes unread here - only `branch.ts`'s own `runBranch` needs it. */
   private drainable(): Drainable<T> {
     return this._pipeline.drainable(this._input) as Drainable<T>;
