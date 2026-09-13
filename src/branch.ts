@@ -18,7 +18,8 @@
 
 import type { AnyPipeline, Pipeline, PipelineSource } from "./pipeline";
 import type { Drainable, IContextManager, JoinMode, PipelineMode } from "./types";
-import { collectItems } from "./utils/chunk";
+import { drainSync, type MaybeAsyncChunks } from "./utils/chunk";
+import { dispatchSync } from "./utils/drain";
 import { chain, mapSettle } from "./utils/helpers";
 
 /** An arm's own pipeline, before its builder composes anything onto it. */
@@ -186,24 +187,58 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
 }
 
 /**
- * Groups one run's items by the arm each belongs to (#90) - `.branch()`'s demux.
+ * Classifies every item of one run into the arm(s) it belongs to (#90, #180) - `.branch()`'s demux,
+ * fused with its own collection walk rather than run as two passes.
  *
  * Runs in the ORCHESTRATING process by decision, never dispatched: a predicate decides WHICH arm an
  * item enters, so sending it out would cost every item two trips (one to be classified, one to be
  * worked on) and would stop a predicate closing over anything the caller holds.
  *
+ * Walks `syncChunks`/`chunks()` directly through the same `dispatchSync`/`drainSync` machinery every
+ * other synchronous drain in this package shares, classifying each item as it streams off the chunk
+ * view - never `collectItems()` into one flat array first and then a second loop over it (#180's own
+ * finding: that two-pass shape measured 2.27x a single-pass floor, and accounted for nearly the whole
+ * gap between `.branch()` and its hand-rolled floor - `bench/legs/branch.ts`'s own `ratio`).
+ *
  * @example
- * `demux(orders, [big, rest], false)` → `Map { "big" => [order 2, order 4], "rest" => [order 1] }`.
+ * `classifyItems(syncChunks, chunksOf, [big, rest], false)` → `Map { "big" => [order 2, order 4],
+ * "rest" => [order 1] }` (or a `Promise` of the same, over an async chunk stream).
  */
-function demux<T>(items: T[], arms: readonly BranchArm<T>[], broadcast: boolean): Map<string, T[]> {
+function classifyItems<T>(
+  syncChunks: MaybeAsyncChunks<T> | null,
+  chunks: () => AsyncIterable<T[]>,
+  arms: readonly BranchArm<T>[],
+  broadcast: boolean,
+): Map<string, T[]> | Promise<Map<string, T[]>> {
   const grouped = new Map<string, T[]>(arms.map((arm) => [arm.name, []]));
-  for (const item of items) {
-    claimItem(item, arms, grouped, broadcast);
+  return dispatchSync(
+    syncChunks,
+    (syncView) =>
+      chain(
+        drainSync(syncView, (item) => {
+          claimItem(item, arms, grouped, broadcast);
+        }),
+        () => grouped,
+      ),
+    () => classifyAsyncChunks(grouped, chunks, arms, broadcast),
+  ) as Map<string, T[]> | Promise<Map<string, T[]>>;
+}
+
+/** `classifyItems`'s async arm, its own function so the caller above stays one expression per engine
+ * - the same split `collectItems`/`collectAsyncChunks` (`utils/cut.ts`) already uses. */
+async function classifyAsyncChunks<T>(
+  grouped: Map<string, T[]>,
+  chunks: () => AsyncIterable<T[]>,
+  arms: readonly BranchArm<T>[],
+  broadcast: boolean,
+): Promise<Map<string, T[]>> {
+  for await (const chunk of chunks()) {
+    for (const item of chunk) claimItem(item, arms, grouped, broadcast);
   }
   return grouped;
 }
 
-/** One item's own routing pass, split out so `demux` stays within this repo's nesting limit. */
+/** One item's own routing pass, split out so `classifyItems` stays within this repo's nesting limit. */
 function claimItem<T>(
   item: T,
   arms: readonly BranchArm<T>[],
@@ -280,15 +315,14 @@ export function runBranch<T, In>(
     // ONE bind for the whole branch: the parent chain runs, and the arms below share the context
     // that run created rather than the chain's own.
     const { syncChunks, chunks: chunksOf, context } = owner.drainable(input);
-    const items = collectItems(syncChunks, chunksOf) as T[] | Promise<T[]>;
+    const grouped = classifyItems(syncChunks, chunksOf, arms, broadcast);
 
     // `chain` defers only at a real thenable, so a synchronous parent stays synchronous here.
     // `config` itself already satisfies `ArmDispatch<T>` (#133 review: rebuilding
     // `{ arms, branchIndex, makeArm }` here duplicated the object `ArmDispatch<T>` exists to let a
     // caller forward directly).
-    return chain(items, (settled: T[]) =>
-      joinArms(demux(settled, arms, broadcast), config, context),
-    ) as BranchResults | Promise<BranchResults>;
+    return chain(grouped, (g: Map<string, T[]>) => joinArms(g, config, context)) as
+      BranchResults | Promise<BranchResults>;
   };
 }
 
