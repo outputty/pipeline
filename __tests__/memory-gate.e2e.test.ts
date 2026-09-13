@@ -9,6 +9,7 @@ import {
   checkMemoryGate,
   MEMORY_TOLERANCE,
   CASE_ALLOCATION_TOLERANCE,
+  CASE_GC_TOLERANCE,
   type MemorySample,
 } from "../bench/memory-gate";
 
@@ -159,6 +160,23 @@ describe("#179 checkMemoryGate - a regression on any axis is a violation", () =>
     expect(result.violations[0]).toContain("heldAtEndMB baseline is undefined");
   });
 
+  it("gives a heavy foreign-comparator leg its own gcCount/gcCostMs tolerance", () => {
+    // node:stream Readable.map().filter() @1M's own real spread: three isolated single-case runs
+    // read gcCostMs 48.0, 48.0, 48.2 (inside 1%, like any in-process leg), but the SAME leg measured
+    // inside the full 20-case suite read 79.1 - the global tolerance (0.5 ratio + 1ms slack) would
+    // flag that as a regression; CASE_GC_TOLERANCE's override does not.
+    const heavy = { ...healthy, gcCount: 378, gcCostMs: 51.0 };
+    const noisyRun = { ...heavy, gcCostMs: 79.1 };
+    expect(
+      checkMemoryGate(
+        { "node:stream Readable.map().filter() @1M": noisyRun },
+        { "node:stream Readable.map().filter() @1M": heavy },
+      ).ok,
+    ).toBe(true);
+    // The SAME reading on a case with no override still fails - the override is per-case, not global.
+    expect(checkMemoryGate({ a: noisyRun }, { a: heavy }).ok).toBe(false);
+  });
+
   it("keeps its tolerances where the measurements put them", () => {
     // These are measured spreads, not preferences: allocation and promise counts held inside 1%
     // across repeated runs. A future edit that loosens one silently is what this case surfaces.
@@ -166,9 +184,13 @@ describe("#179 checkMemoryGate - a regression on any axis is a violation", () =>
     expect(MEMORY_TOLERANCE.promisesPerRow).toBe(0.1);
     expect(MEMORY_TOLERANCE.retainedMbCeiling).toBe(1);
     expect(MEMORY_TOLERANCE.heldAtEndMB).toBe(0.25);
-    expect(MEMORY_TOLERANCE.heldAtEndMbSlackMb).toBe(2);
+    expect(MEMORY_TOLERANCE.heldAtEndSlackMB).toBe(2);
     expect("nsPerRow" in MEMORY_TOLERANCE).toBe(false);
     expect(CASE_ALLOCATION_TOLERANCE["Http loopback"]).toBe(0.6);
     expect(CASE_ALLOCATION_TOLERANCE["Cluster workers"]).toBe(0.6);
+    expect(CASE_GC_TOLERANCE["node:stream Readable.map().filter() @1M"]).toEqual({
+      gcCount: 1,
+      gcCostMs: 1,
+    });
   });
 });

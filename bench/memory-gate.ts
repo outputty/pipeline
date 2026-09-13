@@ -74,11 +74,11 @@ export const MEMORY_TOLERANCE = {
   retainedMbCeiling: 1,
   /** `heldAtEndMB` ratio tolerance plus an absolute MB slack, the same shape as `gcCount`'s: a
    * streaming leg's baseline can read a fraction of an MB, where a pure ratio would flag ordinary
-   * scavenge noise as a regression. Measured across 3 runs of the real `Pipeline .forEach()` leg at
-   * 10,000,000 rows: 0.2-0.3 MB; the array-chain leg over the SAME input: 245.8-294.2 MB, a ~20%
-   * spread the ratio alone must absorb. */
+   * scavenge noise as a regression. `bench/memory.ts`'s own committed baseline: `Pipeline .forEach()
+   * @10M` reads 0.2 MB, `Array.prototype .map().filter().forEach() @10M` reads 352.9 MB - the ratio
+   * alone has to absorb a run-to-run spread of roughly 20% on the materializing side. */
   heldAtEndMB: 0.25,
-  heldAtEndMbSlackMb: 2,
+  heldAtEndSlackMB: 2,
 } as const;
 
 /**
@@ -100,6 +100,25 @@ export const MEMORY_TOLERANCE = {
 export const CASE_ALLOCATION_TOLERANCE: Record<string, number> = {
   "Http loopback": 0.6,
   "Cluster workers": 0.6,
+};
+
+/**
+ * `gcCount`/`gcCostMs` tolerance for a leg whose collection VOLUME puts it in a different regime
+ * from the in-process cases `MEMORY_TOLERANCE.gcCount`/`gcCostMs` were calibrated against (#178).
+ * Measured: three isolated single-case runs of `node:stream Readable.map().filter() @1M` (`--case`,
+ * one process each) read `gcCostMs` 48.0, 48.0, 48.2 - inside 1%, same as any in-process leg - but
+ * the SAME leg measured inside the full 20-case suite read 79.1, because `measureMemory`'s own
+ * header already discloses every case in one process "share[s] a warm heap": a leg allocating
+ * hundreds of MB per run (`async function* by hand`, `node:stream`) leaves heap fragmentation the
+ * next case's `settle()` does not fully clear. The global tolerance holds for the eight in-process
+ * legs it was measured against; these two foreign, hundreds-of-collections comparators need their
+ * own, the same reason `CASE_ALLOCATION_TOLERANCE` exists for a boundary-crossing case.
+ */
+export const CASE_GC_TOLERANCE: Record<string, { gcCount: number; gcCostMs: number }> = {
+  "async function* by hand @1M": { gcCount: 1, gcCostMs: 1 },
+  "async function* by hand @10M": { gcCount: 1, gcCostMs: 1 },
+  "node:stream Readable.map().filter() @1M": { gcCount: 1, gcCostMs: 1 },
+  "node:stream Readable.map().filter() @10M": { gcCount: 1, gcCostMs: 1 },
 };
 
 export interface MemoryGateResult {
@@ -155,19 +174,20 @@ function checkCase(
     unit: "/row",
   });
   // `nsPerRow` is deliberately absent - see this file's own header. `bench/gate.ts` gates speed.
+  const gcOverride = CASE_GC_TOLERANCE[label];
   ratioAxis(violations, label, "gcCount", current.gcCount, base.gcCount, {
-    tolerance: MEMORY_TOLERANCE.gcCount,
+    tolerance: gcOverride?.gcCount ?? MEMORY_TOLERANCE.gcCount,
     slack: MEMORY_TOLERANCE.gcCountSlack,
     unit: "",
   });
   ratioAxis(violations, label, "gcCostMs", current.gcCostMs, base.gcCostMs, {
-    tolerance: MEMORY_TOLERANCE.gcCostMs,
+    tolerance: gcOverride?.gcCostMs ?? MEMORY_TOLERANCE.gcCostMs,
     slack: MEMORY_TOLERANCE.gcCostSlackMs,
     unit: "ms",
   });
   ratioAxis(violations, label, "heldAtEndMB", current.heldAtEndMB, base.heldAtEndMB, {
     tolerance: MEMORY_TOLERANCE.heldAtEndMB,
-    slack: MEMORY_TOLERANCE.heldAtEndMbSlackMb,
+    slack: MEMORY_TOLERANCE.heldAtEndSlackMB,
     unit: "MB",
   });
 

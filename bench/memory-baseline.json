@@ -2,73 +2,181 @@
   "Pipeline array": {
     "promisesPerRow": 0.000004,
     "gcCount": 1,
-    "gcCostMs": 0.67225,
-    "allocatedMb": 45.67583465576172,
-    "retainedMb": 0.0086822509765625,
-    "heldAtEndMB": 4.503593444824219,
-    "nsPerRow": 38.7475
+    "gcCostMs": 0.851625,
+    "allocatedMb": 45.69004821777344,
+    "retainedMb": 0.0098876953125,
+    "heldAtEndMB": 4.5459136962890625,
+    "nsPerRow": 63.330582
   },
   "Pipeline async source": {
     "promisesPerRow": 4.01202,
     "gcCount": 13,
-    "gcCostMs": 2.5667509999999996,
-    "allocatedMb": 453.3311233520508,
-    "retainedMb": 0.0042266845703125,
-    "heldAtEndMB": 12.638648986816406,
-    "nsPerRow": 320.988332
+    "gcCostMs": 2.610043,
+    "allocatedMb": 453.61193084716797,
+    "retainedMb": 0.0039215087890625,
+    "heldAtEndMB": 12.618522644042969,
+    "nsPerRow": 299.54675
   },
   "Pipeline .buffer(1000) async": {
     "promisesPerRow": 4.01202,
     "gcCount": 13,
-    "gcCostMs": 2.6615409999999997,
-    "allocatedMb": 453.1605987548828,
-    "retainedMb": 0.0029449462890625,
-    "heldAtEndMB": 12.615036010742188,
-    "nsPerRow": 317.270084
+    "gcCostMs": 2.591165,
+    "allocatedMb": 453.5442428588867,
+    "retainedMb": 0.00189971923828125,
+    "heldAtEndMB": 12.612403869628906,
+    "nsPerRow": 295.6635
   },
   "Concurrent array": {
     "promisesPerRow": 0.012018,
     "gcCount": 1,
-    "gcCostMs": 0.51125,
-    "allocatedMb": 46.895790100097656,
-    "retainedMb": 0.00080108642578125,
-    "heldAtEndMB": 4.598747253417969,
-    "nsPerRow": 52.792834
+    "gcCostMs": 0.6036670000000001,
+    "allocatedMb": 46.917808532714844,
+    "retainedMb": 0.00400543212890625,
+    "heldAtEndMB": 4.598541259765625,
+    "nsPerRow": 49.489082
   },
   "Concurrent .local() region": {
     "promisesPerRow": 0.013022,
     "gcCount": 1,
-    "gcCostMs": 0.646083,
-    "allocatedMb": 47.012535095214844,
-    "retainedMb": 0.00447845458984375,
-    "heldAtEndMB": 4.5439910888671875,
-    "nsPerRow": 42.0755
+    "gcCostMs": 0.5462079999999999,
+    "allocatedMb": 47.183143615722656,
+    "retainedMb": 0.0016021728515625,
+    "heldAtEndMB": 4.54595947265625,
+    "nsPerRow": 27.2205
   },
   "Concurrent .forEach()": {
     "promisesPerRow": 0.014022,
     "gcCount": 1,
-    "gcCostMs": 0.40975,
-    "allocatedMb": 46.93403625488281,
-    "retainedMb": 0.000701904296875,
-    "heldAtEndMB": 4.567054748535156,
-    "nsPerRow": 21.08625
+    "gcCostMs": 0.564125,
+    "allocatedMb": 47.09986114501953,
+    "retainedMb": 0.0019683837890625,
+    "heldAtEndMB": 4.604576110839844,
+    "nsPerRow": 47.363084
   },
   "Http loopback": {
     "promisesPerRow": 0.07175,
     "gcCount": 0,
     "gcCostMs": 0,
-    "allocatedMb": 8.090896606445312,
-    "retainedMb": 0.0286712646484375,
-    "heldAtEndMB": 4.809577941894531,
-    "nsPerRow": 706.96665
+    "allocatedMb": 7.5297698974609375,
+    "retainedMb": 0.02637481689453125,
+    "heldAtEndMB": 4.806846618652344,
+    "nsPerRow": 1019.2521
   },
   "Cluster workers": {
     "promisesPerRow": 0.03855,
     "gcCount": 0,
     "gcCostMs": 0,
-    "allocatedMb": 3.0349884033203125,
-    "retainedMb": 0.01541900634765625,
-    "heldAtEndMB": 2.1607284545898438,
-    "nsPerRow": 289.18125
+    "allocatedMb": 2.6024017333984375,
+    "retainedMb": 0.01361083984375,
+    "heldAtEndMB": 2.160003662109375,
+    "nsPerRow": 983.88125
+  },
+  "Pipeline .forEach() @1M": {
+    "promisesPerRow": 0.000004,
+    "gcCount": 2,
+    "gcCostMs": 0.43608299999999994,
+    "allocatedMb": 78.79734802246094,
+    "retainedMb": 0.00023651123046875,
+    "heldAtEndMB": 0.1669769287109375,
+    "nsPerRow": 37.956959
+  },
+  "Pipeline .toArray() @1M": {
+    "promisesPerRow": 0.000002,
+    "gcCount": 2,
+    "gcCostMs": 1.562625,
+    "allocatedMb": 93.94580841064453,
+    "retainedMb": 0.0002593994140625,
+    "heldAtEndMB": 14.445167541503906,
+    "nsPerRow": 32.103541
+  },
+  "Array.prototype .map().filter().forEach() @1M": {
+    "promisesPerRow": 0.000002,
+    "gcCount": 0,
+    "gcCostMs": 0,
+    "allocatedMb": 52.35602569580078,
+    "retainedMb": 0.0002593994140625,
+    "heldAtEndMB": 52.05473327636719,
+    "nsPerRow": 25.9095
+  },
+  "fused for loop @1M": {
+    "promisesPerRow": 0.000002,
+    "gcCount": 1,
+    "gcCostMs": 0.167208,
+    "allocatedMb": 38.22657775878906,
+    "retainedMb": 0.0002593994140625,
+    "heldAtEndMB": 0.0602874755859375,
+    "nsPerRow": 10.719125
+  },
+  "async function* by hand @1M": {
+    "promisesPerRow": 3.999992,
+    "gcCount": 21,
+    "gcCostMs": 2.6766279999999996,
+    "allocatedMb": 701.912223815918,
+    "retainedMb": 0.00046539306640625,
+    "heldAtEndMB": 0.0969085693359375,
+    "nsPerRow": 264.3565
+  },
+  "node:stream Readable.map().filter() @1M": {
+    "promisesPerRow": 49.000009,
+    "gcCount": 378,
+    "gcCostMs": 50.997082000000006,
+    "allocatedMb": 12088.547309875488,
+    "retainedMb": 0.02283477783203125,
+    "heldAtEndMB": 0.42540740966796875,
+    "nsPerRow": 5754.127959
+  },
+  "Pipeline .forEach() @10M": {
+    "promisesPerRow": 4e-7,
+    "gcCount": 24,
+    "gcCostMs": 3.211126,
+    "allocatedMb": 789.4407501220703,
+    "retainedMb": 0.00106048583984375,
+    "heldAtEndMB": 0.16054534912109375,
+    "nsPerRow": 22.4937375
+  },
+  "Pipeline .toArray() @10M": {
+    "promisesPerRow": 2e-7,
+    "gcCount": 20,
+    "gcCostMs": 22.813302999999998,
+    "allocatedMb": 979.8964996337891,
+    "retainedMb": 0.0002593994140625,
+    "heldAtEndMB": 324.62096405029297,
+    "nsPerRow": 21.8671416
+  },
+  "Array.prototype .map().filter().forEach() @10M": {
+    "promisesPerRow": 2e-7,
+    "gcCount": 9,
+    "gcCostMs": 29.810048000000002,
+    "allocatedMb": 568.6775283813477,
+    "retainedMb": 0.00171661376953125,
+    "heldAtEndMB": 352.8891830444336,
+    "nsPerRow": 35.2317625
+  },
+  "fused for loop @10M": {
+    "promisesPerRow": 2e-7,
+    "gcCount": 0,
+    "gcCostMs": 0,
+    "allocatedMb": 0.24990081787109375,
+    "retainedMb": 0.0002593994140625,
+    "heldAtEndMB": 0.00494384765625,
+    "nsPerRow": 8.3138667
+  },
+  "async function* by hand @10M": {
+    "promisesPerRow": 3.9999992,
+    "gcCount": 881,
+    "gcCostMs": 50.333320999999955,
+    "allocatedMb": 7021.2840576171875,
+    "retainedMb": -1.3889694213867188,
+    "heldAtEndMB": 0.1061553955078125,
+    "nsPerRow": 249.2080542
+  },
+  "node:stream Readable.map().filter() @10M": {
+    "promisesPerRow": 49.0000009,
+    "gcCount": 4026,
+    "gcCostMs": 646.0488549999997,
+    "allocatedMb": 128595.2717666626,
+    "retainedMb": 0.8875350952148438,
+    "heldAtEndMB": 0.42446136474609375,
+    "nsPerRow": 5950.9271291
   }
 }
