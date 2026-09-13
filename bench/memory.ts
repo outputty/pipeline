@@ -40,7 +40,13 @@ import { createHook } from "node:async_hooks";
 import { getHeapStatistics, GCProfiler } from "node:v8";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Readable } from "node:stream";
-import { Pipeline, ConcurrentPipeline, HttpPipeline, ClusterPipeline } from "../src";
+import {
+  Pipeline,
+  ConcurrentPipeline,
+  HttpPipeline,
+  ClusterPipeline,
+  EventEmitterPipeline,
+} from "../src";
 import {
   canonicalChain,
   canonicalInput,
@@ -470,6 +476,33 @@ function cases(): Case[] {
           });
         return seen;
       },
+      kept,
+      IN_PROCESS_ROWS,
+    ],
+    [
+      // The fourth dispatching class (#124), skipped by every memory case until #180 - each chunk
+      // handed to the chain's own composed function, auto-registered as stage:0's first Worker, no
+      // HTTP/cluster boundary of its own. A fresh EventEmitterPipeline (and so a fresh default
+      // emitter) per case, matching this file's other dispatching-class cases.
+      "EventEmitter workers",
+      () =>
+        new EventEmitterPipeline<number>({ maxConcurrency: MAX_CONCURRENCY })
+          .buffer(BUFFER_SIZE)
+          .transform(canonicalChain)(rows)
+          .toArray(),
+      kept,
+      IN_PROCESS_ROWS,
+    ],
+    [
+      // .local() pins the SAME chain in-process - stageWork() never runs, so no Worker ever
+      // registers or fires (bench.e2e.test.ts's own "0 Workers registered or fired while pinned"
+      // proves this at the correctness level; this case measures its memory cost).
+      "EventEmitter .local()",
+      () =>
+        new EventEmitterPipeline<number>({ maxConcurrency: MAX_CONCURRENCY })
+          .buffer(BUFFER_SIZE)
+          .local((p) => p.transform(canonicalChain))(rows)
+          .toArray(),
       kept,
       IN_PROCESS_ROWS,
     ],
