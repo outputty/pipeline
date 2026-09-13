@@ -93,6 +93,30 @@ describe("#90 review - .buffer() refuses an invalid size at the call, not at the
     expect(() => new Pipeline<number>().buffer(2.5)).toThrow("whole number");
     expect(() => new Pipeline<number>().buffer(1)).not.toThrow();
   });
+
+  it("throws from the constructor's own chunkSize, the other way into the same knob", () => {
+    // #179, BREAKING: the constructor took `chunkSize` raw, so the value `.buffer()` refuses since
+    // #88 walked straight in beside it. Unguarded, `2.5` cut an array into `[[1,2],[3,4,5],[6,7]]`
+    // and a `Set` over the same values into `[[1,2,3],[4,5,6],[7]]` - one knob, two chunkings.
+    expect(() => new Pipeline<number>({ chunkSize: 2.5 })).toThrow(
+      "chunkSize must be a whole number of at least 1",
+    );
+    expect(() => new Pipeline<number>({ chunkSize: 0 })).toThrow("chunkSize must be");
+    expect(() => new Pipeline<number>({ chunkSize: -5 })).toThrow("chunkSize must be");
+    expect(() => new Pipeline<number>({ chunkSize: 1000 })).not.toThrow();
+    // Absent stays absent: `DEFAULT_CHUNK_SIZE` is applied, never validated as a caller's value.
+    expect(() => new Pipeline<number>()).not.toThrow();
+    expect(() => new Pipeline<number>({})).not.toThrow();
+  });
+
+  it("keeps a whole-number chunkSize cutting identically from every source shape", async () => {
+    const rows = [1, 2, 3, 4, 5, 6, 7];
+    const build = (): Pipeline<number, "unset", number> =>
+      new Pipeline<number>({ chunkSize: 3 }) as Pipeline<number, "unset", number>;
+
+    expect(await chunksOf(build()(rows))).toEqual([[1, 2, 3], [4, 5, 6], [7]]);
+    expect(await chunksOf(build()(new Set(rows)))).toEqual([[1, 2, 3], [4, 5, 6], [7]]);
+  });
 });
 
 describe("#39 two .buffer() calls back to back collapse to the last one (Done-when 3)", () => {
