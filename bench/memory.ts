@@ -183,7 +183,12 @@ export async function measureMemory(
 
 /** A leg's own proof of correctness (#178): a count plus a running sum, so a STREAMING leg (a
  * `.forEach()` counter) can prove it produced the right rows without retaining them to compare
- * `.length` - retaining them would materialize the very output the leg exists to avoid holding. */
+ * `.length` - retaining them would materialize the very output the leg exists to avoid holding.
+ * STRICTLY STRONGER than the check it replaces, not weaker: the pre-#178 identity was `out.length
+ * !== expected`, a bare count with no sum at all - a checksum still cannot catch a swap that
+ * preserves both count and sum, but that residual gap is smaller than the one it closed, never
+ * bigger. Full per-element equality is unavailable BY DEFINITION for a leg that never keeps its
+ * elements. */
 export interface MemoryIdentity {
   count: number;
   checksum: number;
