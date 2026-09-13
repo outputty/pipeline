@@ -46,3 +46,8 @@ dist
 .serena/
 
 tmp/
+
+# benchmarks/ - the packed tarball is a fresh build artifact each run (#178), never committed;
+# node_modules is installed inside the deps Docker image, never on the host
+benchmarks/*.tgz
+benchmarks/node_modules/

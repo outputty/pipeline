@@ -1,0 +1,33 @@
+# Six pinned runtimes (#178), one service each - `outputty-benchmarks-deps` (docker/deps.Dockerfile)
+# is NOT a service here: it installs every comparator once and is built standalone, first, so
+# `docker compose config` lists exactly these six.
+#
+#   docker build -f docker/deps.Dockerfile -t outputty-benchmarks-deps .
+#   docker compose build
+#   docker compose run --rm node26
+
+services:
+  node20:
+    build:
+      context: .
+      dockerfile: docker/node20.Dockerfile
+  node22:
+    build:
+      context: .
+      dockerfile: docker/node22.Dockerfile
+  node24:
+    build:
+      context: .
+      dockerfile: docker/node24.Dockerfile
+  node26:
+    build:
+      context: .
+      dockerfile: docker/node26.Dockerfile
+  bun:
+    build:
+      context: .
+      dockerfile: docker/bun.Dockerfile
+  deno:
+    build:
+      context: .
+      dockerfile: docker/deno.Dockerfile

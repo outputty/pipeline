@@ -1,0 +1,16 @@
+{
+  "name": "outputty-pipeline-benchmarks",
+  "private": true,
+  "type": "module",
+  "description": "Cross-runtime throughput comparison for @outputty/pipeline against ix, streaming-iterables, effect, rxjs and native alternatives, on six pinned runtimes in Docker.",
+  "scripts": {
+    "report": "node src/report.mjs"
+  },
+  "dependencies": {
+    "@outputty/pipeline": "file:./outputty-pipeline-0.2.0.tgz",
+    "ix": "7.0.0",
+    "streaming-iterables": "8.0.1",
+    "effect": "3.22.2",
+    "rxjs": "7.8.2"
+  }
+}
