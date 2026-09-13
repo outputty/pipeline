@@ -101,13 +101,26 @@ function buildNodeClient(
   request: typeof import("node:http").request,
   Readable: typeof import("node:stream").Readable,
 ): PipelineClient {
-  return (url, init) =>
-    new Promise<Response>((resolve, reject) => {
-      const target = new URL(url);
+  return (url, init) => {
+    const target = new URL(url);
+    // ⚠ `node:http` speaks CLEARTEXT ONLY, so anything but `http:` goes to `fetch` instead
+    // (review-caught, probed live). Dispatching an `https:` url here sent the chunk JSON and any
+    // auth header in the clear to port 80 - `new URL("https://example.com/…")` has `protocol`
+    // `"https:"` and an EMPTY `port`, and `node:http` reads that empty port as 80 - then failed as a
+    // misleading `HTTP 404` from whatever answered. `node:https` would need its own agent and its
+    // own TLS surface for a case where the per-request saving is dwarfed by a real network anyway;
+    // the global `fetch` is already correct there.
+    if (target.protocol !== "http:") {
+      return fetchClient(url, init);
+    }
+    return new Promise<Response>((resolve, reject) => {
       const req = request(
         {
           agent,
-          hostname: target.hostname,
+          // `URL.hostname` keeps the brackets on an IPv6 literal (`"[::1]"`), which `node:http`
+          // then hands to DNS verbatim and fails as `getaddrinfo ENOTFOUND [::1]` - undici strips
+          // them, so a url that worked on the global `fetch` must keep working here.
+          hostname: target.hostname.replace(/^\[|\]$/g, ""),
           port: target.port,
           path: `${target.pathname}${target.search}`,
           method: init.method ?? "GET",
@@ -118,6 +131,7 @@ function buildNodeClient(
       req.on("error", reject);
       writeBody(req, init.body, Readable);
     });
+  };
 }
 
 /** One `IncomingMessage` as a real `Response`, its body streaming rather than collected - its own
@@ -131,11 +145,20 @@ function toFetchResponse(
     if (value === undefined) continue;
     for (const v of Array.isArray(value) ? value : [value]) headers.append(key, v);
   }
-  // `204`/`304` forbid a body on the `Response` constructor; neither is a status this package's own
-  // `.fetch()` ever answers with, but a proxy in front of a worker can, and constructing one would
-  // throw a `TypeError` the caller could not act on.
-  const bodyless = res.statusCode === 204 || res.statusCode === 304;
-  return new Response(bodyless ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>), {
+  // `204`, `205` and `304` all forbid a body on the `Response` constructor - probed, each throws
+  // `Response constructor: Invalid response status code`. None is a status this package's own
+  // `.fetch()` answers with, but a proxy in front of a worker can, and constructing one would throw
+  // a `TypeError` the caller could not act on. 205 was missing from this list (review-caught), which
+  // left a proxy's `205` throwing the exact error the guard exists to prevent.
+  const bodyless = res.statusCode === 204 || res.statusCode === 205 || res.statusCode === 304;
+  if (bodyless) {
+    // Drained deliberately: Node returns a socket to the keep-alive agent only once its
+    // `IncomingMessage` emits `end`, so a reply nobody reads strands a pooled socket for the life of
+    // the process - the opposite of what this client exists for.
+    res.resume();
+    return new Response(null, { status: res.statusCode, headers });
+  }
+  return new Response(Readable.toWeb(res) as ReadableStream<Uint8Array>, {
     status: res.statusCode,
     headers,
   });
@@ -143,7 +166,16 @@ function toFetchResponse(
 
 /** Writes whatever `init.body` holds into `req`, streaming a `ReadableStream` rather than collecting
  * it - the duplex half of the adapter. A string closes the request immediately, which is what a
- * one-shot `/transform/<n>` POST wants; a stream keeps it open, which is what `/reduce/<n>` needs. */
+ * one-shot `/transform/<n>` POST wants; a stream keeps it open, which is what `/reduce/<n>` needs.
+ *
+ * ⚠ The streaming arm wires the source's failure onto `req` in BOTH directions, and a bare `.pipe()`
+ * does neither (review-caught, probed live on Node 26). `/reduce/<n>`'s own body pulls from the
+ * upstream chain (`buildReduceRequestBody`), so a failing stage errors that stream - and
+ * `Readable.fromWeb` then emitted `error` with no listener, which is an `Unhandled 'error' event`
+ * and a dead process, where the global `fetch` this replaced rejected the request and let
+ * `.onError()` see it. The reverse edge matters too: without it, `req` failing never destroys the
+ * source, so the web stream's own `cancel()` - and the `upstream.return?.()` it runs - never fires,
+ * leaking that partition's view of the shared chunk iterator. */
 function writeBody(
   req: import("node:http").ClientRequest,
   body: RequestInit["body"],
@@ -157,5 +189,10 @@ function writeBody(
     req.end(body);
     return;
   }
-  Readable.fromWeb(body as ReadableStream<Uint8Array>).pipe(req);
+  const source = Readable.fromWeb(body as ReadableStream<Uint8Array>);
+  // Not swallowed: `req`'s own `error` listener is what rejects the call, so routing the failure
+  // there is how it reaches the caller rather than the process.
+  source.on("error", (error: Error) => req.destroy(error));
+  req.on("close", () => source.destroy());
+  source.pipe(req);
 }

@@ -11,11 +11,17 @@ rather than `fetch` because `pipeline.fetch` is already that class's own server 
 new HttpPipeline(chain, { url, client: myClient });
 ```
 
-⚠ The DEFAULT changes on Node. A caller who names no client moves from the global `fetch` to
-`node:http` with one shared keep-alive agent, resolved once per process. Bun, Deno and Cloudflare
-Workers keep the global `fetch`, and so does any runtime where `node:http` does not import - the
-probe is a dynamic import inside a `try`, so a runtime without it falls back rather than failing to
-load. Output is unchanged on every runtime.
+⚠ The DEFAULT changes on Node, for an `http:` url only. A caller who names no client moves from the
+global `fetch` to `node:http` with one shared keep-alive agent, resolved once per process. Bun, Deno
+and Cloudflare Workers keep the global `fetch`, and so does any runtime where `node:http` does not
+import - the probe is a dynamic import inside a `try`, so a runtime without it falls back rather than
+failing to load.
+
+An `https:` url stays on the global `fetch` too, and that is a guard rather than an omission:
+`node:http` speaks cleartext only and reads a url's empty `port` as 80, so dispatching an `https:`
+url through it sends the chunk JSON and any auth header in the clear to whatever answers on port 80.
+`node:https` would need its own agent and TLS surface for a case where a per-request saving is
+dwarfed by a real network anyway. Output is unchanged on every runtime and every url scheme.
 
 Measured on a real loopback server, 200 chunks of 1000 rows, output asserted identical between the
 two clients:

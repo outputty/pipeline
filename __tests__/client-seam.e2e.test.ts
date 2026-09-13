@@ -130,3 +130,85 @@ describe("#179 HttpPipeline dispatches through options.client (Done-when 6)", ()
     expect(second).toBe(first);
   });
 });
+
+describe("#179 review - the default client's own failure modes", () => {
+  it("rejects a failing reduce body instead of killing the process", async () => {
+    // `/reduce/<n>`'s request body pulls from the upstream chain, so a failing stage errors that
+    // stream while the request is open. Probed before the fix: `Readable.fromWeb` emitted `error`
+    // with no listener - `Unhandled 'error' event`, process exit 1 - where the global `fetch` this
+    // client replaced rejected the request and let the failure propagate normally.
+    const worker = new HttpPipeline<number>({ url: "", maxConcurrency: 1 })
+      .buffer(1)
+      .reduce<number>((acc, item) => acc + item, 0);
+
+    async function* failingSource(): AsyncGenerator<number> {
+      yield 1;
+      yield 2;
+      throw new Error("source blew up mid-stream");
+    }
+
+    await withServer(worker.fetch, async (url) => {
+      const trigger = new HttpPipeline<number>(worker, { url, maxConcurrency: 1 });
+      await expect(trigger(failingSource()).toArray()).rejects.toThrow("source blew up mid-stream");
+    });
+  });
+
+  it("sends a non-http url through fetch rather than cleartext port 80", async () => {
+    // `node:http` speaks cleartext only and reads an empty `port` as 80, so an `https:` url
+    // dispatched here left the chunk JSON going in the clear to whatever answered on port 80.
+    // Probed before the fix: `status 404 remote 104.20.23.154 80` for `https://example.com`.
+    const calls: string[] = [];
+    const client: PipelineClient = async (url) => {
+      calls.push(url);
+      return new Response(JSON.stringify({ chunk: [] }), {
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    // The caller's own client is dispatched to verbatim, whatever the protocol - the guard being
+    // pinned here lives in the DEFAULT client, so this case pins the seam's contract and the case
+    // below pins the guard itself.
+    const worker = new HttpPipeline<number>({ url: "" }).transform((t) => t.map((x: number) => x));
+    await new HttpPipeline<number>(worker, { url: "https://example.invalid", client })([
+      1,
+    ]).toArray();
+    expect(calls).toEqual(["https://example.invalid/transform/0"]);
+  });
+
+  it("never speaks cleartext to an https url, inside the default client itself", async () => {
+    // Asserted against a REAL cleartext listener, not an unroutable host: an unreachable name fails
+    // on either path and proves nothing. Here the port genuinely answers plain HTTP, so an unguarded
+    // `node:http` client reaches it and the server records a hit - which is precisely the leak, the
+    // chunk JSON and any auth header going out in the clear. The guard must leave it at ZERO.
+    const client = await defaultClient();
+    const hits: string[] = [];
+
+    await withServer(
+      async (request) => {
+        hits.push(new URL(request.url).pathname);
+        return new Response(JSON.stringify({ chunk: [] }), {
+          headers: { "content-type": "application/json" },
+        });
+      },
+      async (url) => {
+        const asHttps = url.replace("http://", "https://");
+        await expect(client(`${asHttps}/transform/0`, { method: "POST" })).rejects.toThrow();
+      },
+    );
+
+    expect(hits).toEqual([]);
+  });
+
+  it("dispatches to an IPv6 loopback url, brackets and all", async () => {
+    // `URL.hostname` keeps the brackets on an IPv6 literal; `node:http` hands that to DNS verbatim
+    // and fails `getaddrinfo ENOTFOUND [::1]`, where undici strips them.
+    const worker = new HttpPipeline<number>({ url: "" }).transform((t) =>
+      t.map((x: number) => x * 3),
+    );
+    const out = await withServer(worker.fetch, async (url) => {
+      const port = new URL(url).port;
+      return new HttpPipeline<number>(worker, { url: `http://[::1]:${port}` })([1, 2]).toArray();
+    });
+    expect(out).toEqual([3, 6]);
+  });
+});
