@@ -139,6 +139,23 @@ export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenera
 }
 
 /**
+ * Hands a synchronously-cut chunk stream to a consumer that needs an `AsyncIterable` (#179) - the
+ * seam between `buildSyncChunkGenerator` above and the two places a chain is on the async engine
+ * while its DATA is not: `fromSource()`'s own forced-async branch over an array, and `.buffer(size)`
+ * re-cutting a source a dispatching class pinned async.
+ *
+ * One `Promise` per CHUNK, where `buildChunkGenerator` over `toAsyncIterable(data)` pays one per
+ * ROW twice over - `toAsyncIterable`'s own `Promise.resolve` per pull, then the cutter's `for await`
+ * on top. Nothing here can be pending: `buildSyncChunkGenerator` yields real arrays, so no `await`
+ * on the yielded value is needed and none is written.
+ *
+ * `[...] = await Array.fromAsync(asAsyncChunks([[1, 2], [3]]))` → `[[1, 2], [3]]`.
+ */
+export async function* asAsyncChunks<T>(chunks: Iterable<T[]>): AsyncGenerator<T[]> {
+  yield* chunks;
+}
+
+/**
  * `buildChunkGenerator`'s synchronous counterpart (#90) - identical cutting, over an `Iterable`
  * rather than an `AsyncIterable`, so an in-memory source never becomes an async iterator just to be
  * chunked. That per-item conversion, not the per-chunk `Promise.all`, is where most of the old
