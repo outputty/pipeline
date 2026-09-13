@@ -35,18 +35,30 @@
  *   0 for real async work too, passing vacuously.
  */
 
+import cluster from "node:cluster";
 import { createHook } from "node:async_hooks";
 import { getHeapStatistics, GCProfiler } from "node:v8";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { Pipeline } from "../src";
-import { ConcurrentPipeline } from "../src";
-import { canonicalChain, canonicalInput, handRolledFloor } from "./canonical";
+import { Pipeline, ConcurrentPipeline, HttpPipeline, ClusterPipeline } from "../src";
+import {
+  canonicalChain,
+  canonicalInput,
+  handRolledFloor,
+  BUFFER_SIZE,
+  MAX_CONCURRENCY,
+  CLUSTER_WORKERS,
+} from "./canonical";
+import { withLoopbackServer } from "./utils/loopbackServer";
 import { checkMemoryGate, type MemoryReport, type MemorySample } from "./memory-gate";
 
 const MB = 1024 * 1024;
-/** Large enough that a collection genuinely happens inside a run - at 50,000 rows no case collected
- * at all, so the GC axis measured nothing. */
-const ROWS = 500_000;
+/** Rows per case. The in-process classes run 500,000 - large enough that a collection genuinely
+ * happens inside a run, where at 50,000 no case collected at all and the GC axis measured nothing.
+ * The two DISPATCHING classes run `bench/canonical.ts`'s own 20,000, for its reason: each of their
+ * chunks crosses a real boundary, so a larger N measures the loopback socket rather than this
+ * package. Every axis below is per-row or per-run, so the two sizes stay comparable. */
+const IN_PROCESS_ROWS = 500_000;
+const DISPATCH_ROWS = 20_000;
 const RUNS = 5;
 
 function forceGc(): void {
@@ -77,6 +89,7 @@ const median = (xs: number[]): number => [...xs].sort((a, b) => a - b)[Math.floo
 export async function measureMemory(
   run: () => Promise<unknown>,
   expected: number,
+  rows: number,
 ): Promise<MemorySample> {
   // Warmed twice, so a first-run compile is never reported as an allocation or time regression.
   await run();
@@ -118,8 +131,8 @@ export async function measureMemory(
 
     const stats = gc.statistics ?? [];
     allocated.push((allocAfter - allocBefore) / MB);
-    times.push(elapsedNs / ROWS);
-    promises.push(created / ROWS);
+    times.push(elapsedNs / rows);
+    promises.push(created / rows);
     gcCounts.push(stats.length);
     gcCosts.push(stats.reduce((sum, stat) => sum + stat.cost, 0) / 1000);
 
@@ -137,14 +150,32 @@ export async function measureMemory(
   };
 }
 
+/** One case: its label, the run to measure, the row count its output must have, and the row count
+ * its per-row axes divide by. */
+type Case = [label: string, run: () => Promise<unknown>, expected: number, rows: number];
+
+/** The "another instance" side of the `HttpPipeline` case - an empty-source pipeline holding the
+ * SAME stage definitions, so its `.fetch` can serve them. `bench/legs/http.ts`'s own `worker()`. */
+function httpWorker(): HttpPipeline<number> {
+  return new HttpPipeline<number>({ url: "" }).transform(canonicalChain);
+}
+
 /** Every case this bench measures, sharing `canonical.ts`'s own chain and input with
  * `bench/overhead.ts` so the two benches never drift apart on what they run. */
-function cases(): [string, () => Promise<unknown>, number][] {
-  const rows = canonicalInput(ROWS);
+function cases(): Case[] {
+  const rows = canonicalInput(IN_PROCESS_ROWS);
   const kept = handRolledFloor(rows).length;
+  const dispatchRows = canonicalInput(DISPATCH_ROWS);
+  const dispatchKept = handRolledFloor(dispatchRows).length;
+  const clusterPipeline = new ClusterPipeline<number>({
+    workers: CLUSTER_WORKERS,
+    maxConcurrency: MAX_CONCURRENCY,
+  })
+    .buffer(BUFFER_SIZE)
+    .transform(canonicalChain);
 
   async function* asyncRows(): AsyncGenerator<number> {
-    for (let i = 0; i < ROWS; i++) yield i;
+    for (let i = 0; i < IN_PROCESS_ROWS; i++) yield i;
   }
 
   return [
@@ -152,40 +183,45 @@ function cases(): [string, () => Promise<unknown>, number][] {
       "Pipeline array",
       () => Promise.resolve(new Pipeline<number>().transform(canonicalChain)(rows).toArray()),
       kept,
+      IN_PROCESS_ROWS,
     ],
     [
       "Pipeline async source",
       () => new Pipeline<number>().transform(canonicalChain)(asyncRows()).toArray(),
       kept,
+      IN_PROCESS_ROWS,
     ],
     [
       "Pipeline .buffer(1000) async",
       () => new Pipeline<number>().buffer(1000).transform(canonicalChain)(asyncRows()).toArray(),
       kept,
+      IN_PROCESS_ROWS,
     ],
     [
       "Concurrent array",
       () =>
-        new ConcurrentPipeline<number>({ maxConcurrency: 4 })
+        new ConcurrentPipeline<number>({ maxConcurrency: MAX_CONCURRENCY })
           .transform(canonicalChain)(rows)
           .toArray(),
       kept,
+      IN_PROCESS_ROWS,
     ],
     [
       "Concurrent .local() region",
       () =>
-        new ConcurrentPipeline<number>({ maxConcurrency: 4 })
-          .buffer(1000)
+        new ConcurrentPipeline<number>({ maxConcurrency: MAX_CONCURRENCY })
+          .buffer(BUFFER_SIZE)
           .local((p) => p.transform(canonicalChain))(rows)
           .toArray(),
       kept,
+      IN_PROCESS_ROWS,
     ],
     [
       "Concurrent .forEach()",
       async () => {
         const seen: number[] = [];
-        await new ConcurrentPipeline<number>({ maxConcurrency: 4 })
-          .buffer(1000)
+        await new ConcurrentPipeline<number>({ maxConcurrency: MAX_CONCURRENCY })
+          .buffer(BUFFER_SIZE)
           .transform(canonicalChain)(rows)
           .forEach((x) => {
             seen.push(x);
@@ -193,6 +229,36 @@ function cases(): [string, () => Promise<unknown>, number][] {
         return seen;
       },
       kept,
+      IN_PROCESS_ROWS,
+    ],
+    [
+      // The server is stood up INSIDE the measured run, deliberately: a dispatching class's own cost
+      // includes what its wire makes the process allocate, and hoisting the server out would measure
+      // a chain whose counterparty nobody pays for. It is the same shape every run, so the constant
+      // it adds cancels in a before/after comparison.
+      "Http loopback",
+      () =>
+        withLoopbackServer(httpWorker().fetch, (url) =>
+          new HttpPipeline<number>({ url, maxConcurrency: MAX_CONCURRENCY })
+            .buffer(BUFFER_SIZE)
+            .transform(canonicalChain)(dispatchRows)
+            .toArray(),
+        ),
+      dispatchKept,
+      DISPATCH_ROWS,
+    ],
+    [
+      // ⚠ Constructed ONCE, outside the run, and that is load-bearing rather than tidy. A
+      // `ClusterPipeline`'s route carries the index of the pipeline DEFINITION it belongs to, and a
+      // forked worker re-executes this file to rebuild the same definitions in the same order. Built
+      // inside the run, the primary constructed one per measured round and asked for
+      // `/pipeline/5/transform/0` from a worker that had only built `/pipeline/0/...`:
+      // `stage 0 at http://localhost:64829 failed: unknown pipeline route /pipeline/5/transform/0`.
+      // `bench/overhead.ts` hoists its own for the same reason.
+      "Cluster workers",
+      () => clusterPipeline(dispatchRows).toArray(),
+      dispatchKept,
+      DISPATCH_ROWS,
     ],
   ];
 }
@@ -222,8 +288,8 @@ export async function runMemorySuite(only?: string): Promise<MemoryReport> {
   }
 
   const report: MemoryReport = {};
-  for (const [label, run, expected] of selected) {
-    report[label] = await measureMemory(run, expected);
+  for (const [label, run, expected, rows] of selected) {
+    report[label] = await measureMemory(run, expected, rows);
   }
   return report;
 }
@@ -243,6 +309,18 @@ function printReport(report: MemoryReport): void {
  * ran before it in the same process.
  */
 async function main(): Promise<void> {
+  // A forked `ClusterPipeline` worker re-executes THIS file (`cluster.fork()` re-execs
+  // `process.argv[1]`), so the measure-and-print path is gated on being the primary - exactly as
+  // `bench/overhead.ts` gates its own. The worker still constructs the same pipeline, because its
+  // stage registry has to line up with what the primary dispatches; it measures nothing.
+  if (!cluster.isPrimary) {
+    // `cases()` itself is what builds the `ClusterPipeline` definition, so calling it is the whole
+    // job here: the worker needs the same definitions in the same order as the primary, and must
+    // measure nothing.
+    cases();
+    return;
+  }
+
   const argv = process.argv.slice(2);
   const only = argv.includes("--case") ? argv[argv.indexOf("--case") + 1] : undefined;
   const report = await runMemorySuite(only);

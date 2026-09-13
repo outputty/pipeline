@@ -36,9 +36,10 @@ export type MemoryReport = Record<string, MemorySample>;
  * How far each axis may drift before it is a regression, measured across repeated suite runs on an
  * unchanged tree rather than chosen.
  *
- * - `allocatedMb` and `promisesPerRow` are counters, not timings: both held inside 1% across
- *   repeated runs, so 10% is already generous and still catches a real change - the smallest real
- *   allocation change this stack made was 41%.
+ * - `allocatedMb` and `promisesPerRow` are counters, not timings: on an IN-PROCESS case both held
+ *   inside 1% across repeated runs, so 10% is already generous and still catches a real change - the
+ *   smallest real allocation change this stack made was 41%. A case that crosses a real boundary
+ *   overrides the allocation figure - see `CASE_ALLOCATION_TOLERANCE`.
  * - `gcCount` and `gcCostMs` are small integers on the in-process cases (1 collection, under 1 ms),
  *   where a ratio is meaningless - one extra scavenge is +100%. Both take a ratio AND an absolute
  *   floor, so a case may always drift by `gcCountSlack` events or `gcCostSlackMs` before any ratio
@@ -54,6 +55,27 @@ export const MEMORY_TOLERANCE = {
   /** An absolute MB ceiling, not a ratio - see this file's own header. */
   retainedMbCeiling: 1,
 } as const;
+
+/**
+ * Allocation tolerance for the cases that cross a real boundary, where the in-process 10% does not
+ * hold. Measured over five runs each, on an unchanged tree:
+ *
+ * ```text
+ * Http loopback     7.6  7.7  8.6  9.0  9.8 MB   spread 29%
+ * Cluster workers   2.9  3.2  3.3  3.5  3.8 MB   spread 31%
+ * Pipeline array         45.7  45.8 MB            spread  1%
+ * Concurrent array       46.9  47.3 MB            spread  1%
+ * ```
+ *
+ * A loopback socket's own buffers are not deterministic the way an in-process array is, and these
+ * two cases allocate little enough that a few KB of socket churn is a large percentage. The generous
+ * value is what stops a false alarm; the small absolute totals are why it still catches anything
+ * real - the sabotage that doubled `Concurrent array` would read as +100% here too.
+ */
+export const CASE_ALLOCATION_TOLERANCE: Record<string, number> = {
+  "Http loopback": 0.6,
+  "Cluster workers": 0.6,
+};
 
 export interface MemoryGateResult {
   ok: boolean;
@@ -95,7 +117,7 @@ function checkCase(
   base: MemorySample,
 ): void {
   ratioAxis(violations, label, "allocatedMb", current.allocatedMb, base.allocatedMb, {
-    tolerance: MEMORY_TOLERANCE.allocatedMb,
+    tolerance: CASE_ALLOCATION_TOLERANCE[label] ?? MEMORY_TOLERANCE.allocatedMb,
     slack: 0,
     unit: "MB",
   });

@@ -44,7 +44,32 @@ export type LegName = "Pipeline" | "ConcurrentPipeline" | "HttpPipeline" | "Clus
 
 export type OverheadReport = Record<LegName, LegReport>;
 
-export const ABSOLUTE_TOLERANCE = 0.2;
+/**
+ * How far a leg's own gated field may drift before it is a regression, PER LEG (#179) - measured
+ * across five consecutive `pnpm bench:overhead` runs on an unchanged tree, not chosen:
+ *
+ * ```text
+ * Pipeline             pipelineNsPerRow   min 15.99  max 17.01  spread  6.4%
+ * ConcurrentPipeline   local.nsPerRow     min 16.16  max 16.91  spread  4.6%
+ * HttpPipeline         local.nsPerRow     min 17.61  max 19.29  spread  9.5%
+ * ClusterPipeline      local.nsPerRow     min 18.04  max 21.45  spread 18.9%
+ * ```
+ *
+ * One tolerance across all four is what the single `ABSOLUTE_TOLERANCE = 0.2` was, and those numbers
+ * are why it had to go: `ClusterPipeline`'s own natural spread is 18.9%, so a 20% ceiling sat inside
+ * the noise and that leg failed on run-to-run jitter with no regression to show - it is what made an
+ * earlier baseline regeneration look like a 25% `ClusterPipeline` regression nothing in the diff
+ * could reach. The same 20% is meanwhile three times looser than `ConcurrentPipeline` needs.
+ *
+ * Each value is roughly double its leg's measured spread, which leaves room for a slower machine
+ * while still catching a real regression - the smallest this stack actually made was 41%.
+ */
+export const LEG_TOLERANCE: Record<LegName, number> = {
+  Pipeline: 0.15,
+  ConcurrentPipeline: 0.15,
+  HttpPipeline: 0.2,
+  ClusterPipeline: 0.4,
+};
 
 /**
  * Builds one `LegReport`, `ratio` always `pipelineNsPerRow / floorNsPerRow` - the ONE place that
@@ -70,7 +95,7 @@ export interface GateResult {
 /**
  * `checkGate(report, baseline)` - the gated field (`pipelineNsPerRow` on `Pipeline`, `local.nsPerRow`
  * on a dispatching class - this file's own header) past `baseline`'s own value by more than
- * `ABSOLUTE_TOLERANCE`, WORSE (slower) is a violation; a leg that got faster never is. `.ratio` is
+ * that leg's own `LEG_TOLERANCE`, WORSE (slower) is a violation; a leg that got faster never is. `.ratio` is
  * read from the report but never gated. A leg the baseline has but `report` does NOT is a violation
  * too - a report that cannot even be compared has failed to prove no regression, the same as one
  * that measured a real one (`code.md`'s "fail loud", not a silent pass for a lookup that came up
@@ -139,11 +164,12 @@ function pushIfOverCeiling(
     violations.push(`${leg}: ${field} is ${currentValue} - not a finite measurement`);
     return;
   }
-  const ceiling = baseValue * (1 + ABSOLUTE_TOLERANCE);
+  const tolerance = LEG_TOLERANCE[leg];
+  const ceiling = baseValue * (1 + tolerance);
   if (currentValue > ceiling) {
     violations.push(
       `${leg}: ${field} ${currentValue.toFixed(1)} exceeds baseline ${baseValue.toFixed(1)} by ` +
-        `more than ${ABSOLUTE_TOLERANCE * 100}% (ceiling ${ceiling.toFixed(1)})`,
+        `more than ${tolerance * 100}% (ceiling ${ceiling.toFixed(1)})`,
     );
   }
 }

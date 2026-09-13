@@ -5,7 +5,12 @@
  * pasted into the PR is what proves the real numbers.
  */
 import { describe, it, expect } from "vitest";
-import { checkMemoryGate, MEMORY_TOLERANCE, type MemorySample } from "../bench/memory-gate";
+import {
+  checkMemoryGate,
+  MEMORY_TOLERANCE,
+  CASE_ALLOCATION_TOLERANCE,
+  type MemorySample,
+} from "../bench/memory-gate";
 
 /** A healthy in-process case, close to what `Concurrent array` really reads. */
 const healthy: MemorySample = {
@@ -104,6 +109,25 @@ describe("#179 checkMemoryGate - a regression on any axis is a violation", () =>
     expect(checkMemoryGate({ a: withAxis("nsPerRow", 10_000) }, { a: healthy }).ok).toBe(true);
   });
 
+  it("gives a boundary-crossing case its own allocation tolerance", () => {
+    // A loopback socket's buffers are not deterministic the way an in-process array is: measured
+    // over five runs each, `Http loopback` allocation spread 29% and `Cluster workers` 31%, where
+    // `Pipeline array` and `Concurrent array` both held 1%. One tolerance across all of them is a
+    // flake machine on the two dispatching cases.
+    const small: MemorySample = { ...healthy, allocatedMb: 7.6 };
+    const drifted = { ...small, allocatedMb: 9.8 };
+
+    expect(checkMemoryGate({ "Http loopback": drifted }, { "Http loopback": small }).ok).toBe(true);
+    expect(checkMemoryGate({ "Pipeline array": drifted }, { "Pipeline array": small }).ok).toBe(
+      false,
+    );
+    // Still catches a real one: the sabotage that doubled a case's allocation reads far past this.
+    const doubled = { ...small, allocatedMb: 15.2 };
+    expect(checkMemoryGate({ "Http loopback": doubled }, { "Http loopback": small }).ok).toBe(
+      false,
+    );
+  });
+
   it("keeps its tolerances where the measurements put them", () => {
     // These are measured spreads, not preferences: allocation and promise counts held inside 1%
     // across repeated runs. A future edit that loosens one silently is what this case surfaces.
@@ -111,5 +135,7 @@ describe("#179 checkMemoryGate - a regression on any axis is a violation", () =>
     expect(MEMORY_TOLERANCE.promisesPerRow).toBe(0.1);
     expect(MEMORY_TOLERANCE.retainedMbCeiling).toBe(1);
     expect("nsPerRow" in MEMORY_TOLERANCE).toBe(false);
+    expect(CASE_ALLOCATION_TOLERANCE["Http loopback"]).toBe(0.6);
+    expect(CASE_ALLOCATION_TOLERANCE["Cluster workers"]).toBe(0.6);
   });
 });
