@@ -44,7 +44,7 @@
     "format:check": "prettier --check .",
     "lint": "oxlint",
     "release": "changeset publish",
-    "check": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm typecheck:bench && pnpm test:run"
+    "check": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm typecheck:bench && pnpm test:run && pnpm bench:memory"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.1",
