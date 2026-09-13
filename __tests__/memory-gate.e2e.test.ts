@@ -19,6 +19,7 @@ const healthy: MemorySample = {
   gcCostMs: 0.7,
   allocatedMb: 47.9,
   retainedMb: 0.01,
+  heldAtEndMB: 47.1,
   nsPerRow: 67.5,
 };
 
@@ -45,6 +46,7 @@ describe("#179 checkMemoryGate - a regression on any axis is a violation", () =>
       gcCostMs: 0,
       allocatedMb: 1,
       retainedMb: 0,
+      heldAtEndMB: 0,
       nsPerRow: 1,
     };
     expect(checkMemoryGate({ a: better }, { a: healthy }).ok).toBe(true);
@@ -128,12 +130,43 @@ describe("#179 checkMemoryGate - a regression on any axis is a violation", () =>
     );
   });
 
+  it("flags heldAtEndMB growth past its ratio tolerance", () => {
+    const result = checkMemoryGate({ a: withAxis("heldAtEndMB", 65) }, { a: healthy });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toContain("heldAtEndMB");
+  });
+
+  it("gives a near-zero heldAtEndMB baseline absolute slack, the same shape as gcCount", () => {
+    // A streaming leg's own baseline can read a fraction of an MB (#178's own `Pipeline .forEach()`
+    // measurement: 0.2-0.3 MB at 10,000,000 rows) - a pure ratio there would flag ordinary scavenge
+    // noise as a regression on every run.
+    const streaming = { ...healthy, heldAtEndMB: 0.3 };
+    expect(checkMemoryGate({ a: { ...streaming, heldAtEndMB: 1.5 } }, { a: streaming }).ok).toBe(
+      true,
+    );
+    expect(checkMemoryGate({ a: { ...streaming, heldAtEndMB: 10 } }, { a: streaming }).ok).toBe(
+      false,
+    );
+  });
+
+  it("fails rather than silently passing when the baseline is missing heldAtEndMB (a pre-#178 baseline)", () => {
+    // `undefined * (1 + tolerance) + slack` is `NaN`, and an unguarded `currentValue > NaN` is
+    // always `false` - `ratioAxis`'s own baseValue finiteness guard is what turns that into a loud
+    // failure instead of a silent pass for an old, unregenerated baseline.
+    const { heldAtEndMB: _omitted, ...staleBaseline } = healthy;
+    const result = checkMemoryGate({ a: healthy }, { a: staleBaseline as MemorySample });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toContain("heldAtEndMB baseline is undefined");
+  });
+
   it("keeps its tolerances where the measurements put them", () => {
     // These are measured spreads, not preferences: allocation and promise counts held inside 1%
     // across repeated runs. A future edit that loosens one silently is what this case surfaces.
     expect(MEMORY_TOLERANCE.allocatedMb).toBe(0.1);
     expect(MEMORY_TOLERANCE.promisesPerRow).toBe(0.1);
     expect(MEMORY_TOLERANCE.retainedMbCeiling).toBe(1);
+    expect(MEMORY_TOLERANCE.heldAtEndMB).toBe(0.25);
+    expect(MEMORY_TOLERANCE.heldAtEndMbSlackMb).toBe(2);
     expect("nsPerRow" in MEMORY_TOLERANCE).toBe(false);
     expect(CASE_ALLOCATION_TOLERANCE["Http loopback"]).toBe(0.6);
     expect(CASE_ALLOCATION_TOLERANCE["Cluster workers"]).toBe(0.6);

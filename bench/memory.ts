@@ -86,9 +86,18 @@ const median = (xs: number[]): number => [...xs].sort((a, b) => a - b)[Math.floo
  *
  * `measureMemory(() => chain(rows).toArray(), 499_997)` → one `MemorySample`.
  */
+/** One `v8.GCProfiler` collection event, the shape this file reads off `profiler.stop().statistics`
+ * (undocumented in `@types/node`, hence the local shape rather than an import). */
+interface GcStatEntry {
+  gcType: string;
+  cost: number;
+  beforeGC: { heapStatistics: { usedHeapSize: number } };
+  afterGC: { heapStatistics: { usedHeapSize: number } };
+}
+
 export async function measureMemory(
-  run: () => Promise<unknown>,
-  expected: number,
+  run: () => Promise<RunResult>,
+  expected: MemoryIdentity,
   rows: number,
 ): Promise<MemorySample> {
   // Warmed twice, so a first-run compile is never reported as an allocation or time regression.
@@ -97,6 +106,7 @@ export async function measureMemory(
 
   const allocated: number[] = [];
   const retained: number[] = [];
+  const held: number[] = [];
   const times: number[] = [];
   const promises: number[] = [];
   const gcCounts: number[] = [];
@@ -105,6 +115,7 @@ export async function measureMemory(
   for (let i = 0; i < RUNS; i++) {
     await settle();
     const heapBefore = process.memoryUsage().heapUsed;
+    const usedBefore = getHeapStatistics().used_heap_size;
 
     const profiler = new GCProfiler();
     profiler.start();
@@ -119,14 +130,21 @@ export async function measureMemory(
 
     const started = process.hrtime.bigint();
     hook.enable();
-    const out = (await run()) as unknown[];
+    const out = await run();
     hook.disable();
     const elapsedNs = Number(process.hrtime.bigint() - started);
     const allocAfter = getHeapStatistics().total_allocated_bytes;
-    const gc = profiler.stop() as unknown as { statistics?: { gcType: string; cost: number }[] };
+    // Sampled before `profiler.stop()` so a case with zero collections still has an immediate
+    // fallback reading - see this function's own `heldAtEndMB` comment below.
+    const usedRightAfter = getHeapStatistics().used_heap_size;
+    const gc = profiler.stop() as unknown as { statistics?: GcStatEntry[] };
 
-    if (out.length !== expected) {
-      throw new Error(`output changed: got ${out.length} rows, expected ${expected}`);
+    const identity = identityOf(out);
+    if (identity.count !== expected.count || identity.checksum !== expected.checksum) {
+      throw new Error(
+        `output changed: got {count: ${identity.count}, checksum: ${identity.checksum}}, ` +
+          `expected {count: ${expected.count}, checksum: ${expected.checksum}}`,
+      );
     }
 
     const stats = gc.statistics ?? [];
@@ -135,6 +153,16 @@ export async function measureMemory(
     promises.push(created / rows);
     gcCounts.push(stats.length);
     gcCosts.push(stats.reduce((sum, stat) => sum + stat.cost, 0) / 1000);
+    // `heldAtEndMB`: peak LIVE heap the run reached, read off the collector's own events rather than
+    // forced ones (`bench/memory-gate.ts`'s own header explains why this is not `retainedMb`). A
+    // case with zero collections never triggered one large enough to sample, so it falls back to an
+    // immediate read with no forced GC - the same instrument the ticket originally specified, safe
+    // here only because it is a FALLBACK for a small, already-near-baseline case, never the primary
+    // reading for a case that actually collects.
+    const peakAfterGc = stats.length
+      ? Math.max(...stats.map((stat) => stat.afterGC.heapStatistics.usedHeapSize))
+      : usedRightAfter;
+    held.push((peakAfterGc - usedBefore) / MB);
 
     await settle();
     retained.push((process.memoryUsage().heapUsed - heapBefore) / MB);
@@ -146,13 +174,37 @@ export async function measureMemory(
     gcCostMs: median(gcCosts),
     allocatedMb: median(allocated),
     retainedMb: median(retained),
+    heldAtEndMB: median(held),
     nsPerRow: median(times),
   };
 }
 
 /** One case: its label, the run to measure, the row count its output must have, and the row count
  * its per-row axes divide by. */
-type Case = [label: string, run: () => Promise<unknown>, expected: number, rows: number];
+/** A leg's own proof of correctness (#178): a count plus a running sum, so a STREAMING leg (a
+ * `.forEach()` counter) can prove it produced the right rows without retaining them to compare
+ * `.length` - retaining them would materialize the very output the leg exists to avoid holding. */
+export interface MemoryIdentity {
+  count: number;
+  checksum: number;
+}
+
+/** What a case's `run()` may hand back: the existing eight legs still return their `.toArray()`
+ * result unchanged, and `identityOf` below derives a `MemoryIdentity` from it OUTSIDE the timed and
+ * profiled region - a streaming leg returns a `MemoryIdentity` it already computed as it went. */
+type RunResult = number[] | MemoryIdentity;
+
+/** `identityOf([6, 8])` → `{ count: 2, checksum: 14 }`. `identityOf({ count: 2, checksum: 14 })` →
+ * the same object, unchanged - a leg that already tracked its own identity while streaming never
+ * pays for a second pass over data it deliberately never kept. */
+function identityOf(result: RunResult): MemoryIdentity {
+  if (!Array.isArray(result)) return result;
+  let checksum = 0;
+  for (const value of result) checksum += value;
+  return { count: result.length, checksum };
+}
+
+type Case = [label: string, run: () => Promise<RunResult>, expected: MemoryIdentity, rows: number];
 
 /** The "another instance" side of the `HttpPipeline` case - an empty-source pipeline holding the
  * SAME stage definitions, so its `.fetch` can serve them. `bench/legs/http.ts`'s own `worker()`. */
@@ -164,9 +216,9 @@ function httpWorker(): HttpPipeline<number> {
  * `bench/overhead.ts` so the two benches never drift apart on what they run. */
 function cases(): Case[] {
   const rows = canonicalInput(IN_PROCESS_ROWS);
-  const kept = handRolledFloor(rows).length;
+  const kept = identityOf(handRolledFloor(rows));
   const dispatchRows = canonicalInput(DISPATCH_ROWS);
-  const dispatchKept = handRolledFloor(dispatchRows).length;
+  const dispatchKept = identityOf(handRolledFloor(dispatchRows));
   const clusterPipeline = new ClusterPipeline<number>({
     workers: CLUSTER_WORKERS,
     maxConcurrency: MAX_CONCURRENCY,
@@ -264,7 +316,7 @@ function cases(): Case[] {
 }
 
 const HEADER =
-  "case                           promises/row   GC   GC ms   alloc MB  held MB    ns/row";
+  "case                           promises/row   GC   GC ms   alloc MB  held MB  leak MB    ns/row";
 
 function formatRow(label: string, s: MemorySample): string {
   return (
@@ -273,6 +325,7 @@ function formatRow(label: string, s: MemorySample): string {
     String(s.gcCount).padStart(5) +
     s.gcCostMs.toFixed(1).padStart(9) +
     s.allocatedMb.toFixed(1).padStart(11) +
+    s.heldAtEndMB.toFixed(1).padStart(9) +
     s.retainedMb.toFixed(2).padStart(9) +
     s.nsPerRow.toFixed(1).padStart(10)
   );
