@@ -34,6 +34,7 @@ import { measureConcurrentPipeline } from "./legs/concurrent";
 import { measureHttpPipeline } from "./legs/http";
 import { measureClusterPipeline } from "./legs/cluster";
 import { measureBranch } from "./legs/branch";
+import { measureEventEmitterPipeline } from "./legs/eventemitter";
 import { checkGate, legReport, type OverheadReport } from "./gate";
 import { timeFloor } from "./canonical";
 
@@ -76,6 +77,7 @@ async function main(): Promise<void> {
     HttpPipeline: await measureHttpPipeline(floorNsPerRow, rounds()),
     ClusterPipeline: await measureClusterPipeline(floorNsPerRow, rounds()),
     Branch: await measureBranch(floorNsPerRow, rounds()),
+    EventEmitterPipeline: await measureEventEmitterPipeline(floorNsPerRow, rounds()),
   };
 
   if (process.env.BENCH_SYNTHETIC_REGRESSION === "1") {

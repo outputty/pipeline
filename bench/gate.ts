@@ -37,11 +37,20 @@ export interface LegReport {
     dispatchesWhilePinned?: number;
     requestsWhilePinned?: number;
     workerPidsWhilePinned?: number[];
+    /** `EventEmitterPipeline` alone (#180): a manually-registered extra Worker on `stage:0`,
+     * counted while a `.local()` chain runs - `stageWork()` never runs there, so the composed
+     * function never registers either, and this extra Worker is the whole of `listenerCount`. */
+    workersWhilePinned?: number;
   };
 }
 
 export type LegName =
-  "Pipeline" | "ConcurrentPipeline" | "HttpPipeline" | "ClusterPipeline" | "Branch";
+  | "Pipeline"
+  | "ConcurrentPipeline"
+  | "HttpPipeline"
+  | "ClusterPipeline"
+  | "Branch"
+  | "EventEmitterPipeline";
 
 export type OverheadReport = Record<LegName, LegReport>;
 
@@ -72,6 +81,9 @@ export const LEG_TOLERANCE: Record<LegName, number> = {
   HttpPipeline: 0.2,
   ClusterPipeline: 0.4,
   Branch: 0.15,
+  // Placeholder until bench/legs/eventemitter.ts exists and a real five-run spread is measured on
+  // the shipped code - the same two-commit sequence every other leg's own tolerance followed.
+  EventEmitterPipeline: 0.15,
 };
 
 /**

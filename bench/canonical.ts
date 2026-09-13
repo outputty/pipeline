@@ -54,6 +54,9 @@ export const ROWS = {
   // architecture.md's own "Branching" section) - the same reason it has no `.local()` row - so it
   // measures at `Pipeline`'s own row count, the nearest sibling that also never crosses a boundary.
   Branch: 1_000_000,
+  // A `ConcurrentPipeline` subclass with no network/IPC boundary of its own (#180) - the nearest
+  // sibling is `ConcurrentPipeline`'s own row count, not `Pipeline`'s.
+  EventEmitterPipeline: 200_000,
 } as const;
 
 /** The floor is measured at THIS row count once, by `bench/overhead.ts`, and the one result is

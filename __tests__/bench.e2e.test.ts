@@ -18,8 +18,9 @@ import { pipelineMatchesFloor } from "../bench/legs/pipeline";
 import { concurrentMatchesFloor, countingConcurrentPipeline } from "../bench/legs/concurrent";
 import { httpMatchesFloor, measureHttpPipeline } from "../bench/legs/http";
 import { branchMatchesFloor } from "../bench/legs/branch";
+import { eventEmitterMatchesFloor, measureEventEmitterPipeline } from "../bench/legs/eventemitter";
 import { withLoopbackServer, countingHandler } from "../bench/utils/loopbackServer";
-import { HttpPipeline } from "../src";
+import { HttpPipeline, EventEmitterPipeline } from "../src";
 import {
   FIXTURE_TIMEOUT,
   HTTP_TIMEOUT,
@@ -59,6 +60,10 @@ describe("#120 Done-when 2 - each class's hand-rolled floor matches its Pipeline
 
   it("Branch: identical record at a small N (#180)", () => {
     expect(branchMatchesFloor(50)).toBe(true);
+  });
+
+  it("EventEmitterPipeline: identical output at a small N (#180)", async () => {
+    expect(await eventEmitterMatchesFloor(50)).toBe(true);
   });
 });
 
@@ -120,6 +125,24 @@ describe("#120 Done-when 3 - .local() correctness per dispatching class", () => 
     },
     FIXTURE_TIMEOUT,
   );
+
+  it("EventEmitterPipeline: a stage OUTSIDE .local() DOES register and fire a Worker - negative control (#180)", async () => {
+    const pipeline = new EventEmitterPipeline<number>().transform(canonicalChain);
+    let calls = 0;
+    pipeline.emitter.on("stage:0", () => {
+      calls++;
+    });
+    await pipeline(canonicalInput(10)).toArray();
+    // The composed function is the FIRST registered Worker (auto-registered by stageWork()); this
+    // manual listener is the second, so it fires once alongside it - `calls > 0` is what a
+    // dispatched stage guarantees, matching every other class's own negative control here.
+    expect(calls).toBeGreaterThan(0);
+  });
+
+  it("EventEmitterPipeline: 0 Workers registered or fired while pinned (#180)", async () => {
+    const report = await measureEventEmitterPipeline(1, 2);
+    expect(report.local?.workersWhilePinned).toBe(0);
+  });
 });
 
 describe("#120 Done-when 1 - pnpm bench:overhead prints all four legs' rows", () => {
@@ -141,10 +164,12 @@ describe("#120 Done-when 1 - pnpm bench:overhead prints all four legs' rows", ()
           "HttpPipeline",
           "ClusterPipeline",
           "Branch",
+          "EventEmitterPipeline",
         ]);
         expect(result.ConcurrentPipeline.local).toBeDefined();
         expect(result.HttpPipeline.local).toBeDefined();
         expect(result.ClusterPipeline.local).toBeDefined();
+        expect(result.EventEmitterPipeline.local).toBeDefined();
       } finally {
         delete process.env.BENCH_ROUNDS;
         delete process.env.BENCH_SKIP_GATE;
@@ -214,6 +239,12 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
       local: { nsPerRow: 265, workerPidsWhilePinned: [] },
     },
     Branch: { pipelineNsPerRow: 28, floorNsPerRow: 12, ratio: 2.33 },
+    EventEmitterPipeline: {
+      pipelineNsPerRow: 20,
+      floorNsPerRow: 12,
+      ratio: 1.67,
+      local: { nsPerRow: 17, workersWhilePinned: 0 },
+    },
   };
 
   it("passes when the report matches the baseline exactly", () => {
