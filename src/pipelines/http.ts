@@ -29,6 +29,7 @@ import type {
   StageRoute,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
+import { defaultClient, type PipelineClient } from "@src/pipelines/client";
 import { ndjsonFrame, readNdjsonLines } from "@src/utils/ndjson";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
@@ -36,7 +37,22 @@ import { Readable } from "node:stream";
 /** Construction-time knobs for `HttpPipeline` and every class that extends it - the same pattern
  * `ClusterPipelineOptions` (`pipelines/cluster.ts`) already uses (#133: was spelled inline 3x here
  * as `{ url: string } & ConcurrentPipelineOptions`). */
-export type HttpPipelineOptions = { url: string } & ConcurrentPipelineOptions;
+export type HttpPipelineOptions = {
+  url: string;
+  /**
+   * How a dispatched chunk reaches the other instance (#179). Defaults to the fastest implementation
+   * this runtime offers, resolved ONCE per process: `node:http` with a shared keep-alive agent where
+   * `node:http` imports, the global `fetch` everywhere else.
+   *
+   * Named `client`, never `fetch`, because `pipeline.fetch` is already this class's own SERVER
+   * handler and the two would collide on one object.
+   *
+   * A caller's own client must stream both directions to serve `/reduce/<n>`, whose wire is a duplex
+   * NDJSON stream: the `Response` has to resolve on the response HEADERS, with its body still
+   * arriving, not after the whole reply is collected.
+   */
+  client?: PipelineClient;
+} & ConcurrentPipelineOptions;
 
 /** `HttpPipeline`'s real constructor parameter type - see `ConcurrentPipelineConstructorOptions`
  * (`pipelines/concurrent.ts`) for why the base `Pipeline` internals must be included here too. */
@@ -217,6 +233,10 @@ function parseRoute(pathname: string): StageRoute | null {
  */
 export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   protected _url: string;
+  /** The caller's own client, or `undefined` for the runtime default (#179). Kept as the caller's
+   * value rather than resolved to a function here, so `carriedKnobs()` below carries exactly what
+   * was passed and a copy never bakes in a default the caller did not choose. */
+  protected _client?: PipelineClient;
 
   /** Wraps a chain built elsewhere, dispatching its stages over HTTP (#90). This is what lets the
    * WORKER and the TRIGGER share one definition: the worker constructs the wrapper and mounts
@@ -231,6 +251,14 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const options = Pipeline.wrapping<HttpPipelineConstructorOptions>(first, second);
     super(options);
     this._url = options.url;
+    this._client = options.client;
+  }
+
+  /** The client this instance dispatches through: the caller's own, or the runtime default resolved
+   * once per process (#179). Read at DISPATCH time, never captured at construction - the same reason
+   * `stageWork()`'s own closure reads `this._url` fresh on every call. */
+  private clientFor(): PipelineClient | Promise<PipelineClient> {
+    return this._client ?? defaultClient();
   }
 
   /** Where this instance's `.fetch` is mounted - the url another `HttpPipeline`/`ClusterPipeline`
@@ -302,7 +330,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * field.
    */
   protected override carriedKnobs(): HttpPipelineOptions {
-    return { ...super.carriedKnobs(), url: this._url };
+    return { ...super.carriedKnobs(), url: this._url, client: this._client };
   }
 
   /**
@@ -459,7 +487,12 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     stageIndex: number,
   ): InternalTransformer<T, U> {
     return async (chunk, ctx) => {
-      const response = await fetch(`${this._url}${this.routePath("transform", stageIndex)}`, {
+      // `options.client`, never the global `fetch` directly (#179). This is the call site the whole
+      // knob exists for: it opens one request PER CHUNK, where `node:http` with a keep-alive agent
+      // measured 306-349 ns/row against the global `fetch`'s 1749-1828, on a real loopback server
+      // over 200 chunks of 1000 rows with the output asserted identical.
+      const client = await this.clientFor();
+      const response = await client(`${this._url}${this.routePath("transform", stageIndex)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ chunk, context: ctx.toDict() } satisfies StageRequestBody),
@@ -506,12 +539,25 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       // is genuinely duplex rather than the request finishing before the response starts.
       const requestBody = buildReduceRequestBody(chunks, ctx);
 
-      const response = await fetch(`${url}${path}`, {
+      // The SAME seam `stageWork()` dispatches through (#179), and for a different reason: this
+      // route opens ONE request for the whole stream, so a per-request saving divides across every
+      // chunk in it and vanishes - measured 117-135 ns/row on the global `fetch` against 112-134 on
+      // `node:http`, inside run-to-run drift. It moves so ONE client serves the whole class; a
+      // caller who supplies `options.client` must not find their reduce stages still on another.
+      //
+      // ⚠ Which is why the default client streams both directions rather than buffering: a client
+      // that collected this body and returned one settled `Response` would pass every
+      // `/transform/<n>` case unchanged and silently break THIS wire, whose emits must arrive while
+      // the request body is still open.
+      const client = await self.clientFor();
+      const response = await client(`${url}${path}`, {
         method: "POST",
         headers: { "content-type": "application/x-ndjson" },
         body: requestBody,
         // Required by Node's undici Request whenever a streaming body is passed - same reason
-        // `handleOverBridge` (`toNodeHandler`) sets it unconditionally on the server side.
+        // `handleOverBridge` (`toNodeHandler`) sets it unconditionally on the server side. Set here
+        // rather than left to the client, so a caller's own client sees the same `init` the global
+        // `fetch` needs; `fetchClient` sets it again harmlessly and `nodeClient` ignores it.
         duplex: "half",
       } as RequestInit);
 

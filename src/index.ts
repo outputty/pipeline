@@ -41,7 +41,10 @@ export { PipelineResult } from "./result";
 
 // Pipeline family (#17) — where a chain's chunks are processed
 export { ConcurrentPipeline, type ConcurrentPipelineOptions } from "./pipelines/concurrent";
-export { HttpPipeline, toNodeHandler } from "./pipelines/http";
+export { HttpPipeline, type HttpPipelineOptions, toNodeHandler } from "./pipelines/http";
+// How a dispatched chunk reaches another instance (#179) - `HttpPipelineOptions.client`'s own type,
+// exported so a caller can annotate their own client, plus the two shipped implementations.
+export { type PipelineClient, fetchClient, defaultClient } from "./pipelines/client";
 export { ClusterPipeline, type ClusterPipelineOptions } from "./pipelines/cluster";
 export {
   EventEmitterPipeline,
