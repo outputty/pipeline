@@ -13,7 +13,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { canonicalChain, canonicalInput, median, timeRounds } from "../bench/canonical";
-import { checkGate, type OverheadReport } from "../bench/gate";
+import { checkGate, LEG_TOLERANCE, type OverheadReport } from "../bench/gate";
 import { pipelineMatchesFloor } from "../bench/legs/pipeline";
 import { concurrentMatchesFloor, countingConcurrentPipeline } from "../bench/legs/concurrent";
 import { httpMatchesFloor, measureHttpPipeline } from "../bench/legs/http";
@@ -245,11 +245,43 @@ describe("#120 checkGate - regression-only, synthetic reports (no real timing)",
   });
 
   it("stays within tolerance at exactly the absolute boundary", () => {
+    // The boundary is that leg's OWN tolerance since #179, never one shared constant - computed
+    // here rather than hardcoded, so a measured retune of `LEG_TOLERANCE` moves this case with it
+    // instead of failing it.
+    const ceiling = baseline.Pipeline.pipelineNsPerRow * (1 + LEG_TOLERANCE.Pipeline);
     const report = {
       ...baseline,
-      Pipeline: { pipelineNsPerRow: 60, floorNsPerRow: 4.2, ratio: 14.3 },
+      Pipeline: { pipelineNsPerRow: ceiling, floorNsPerRow: 4.2, ratio: 14.3 },
     };
     expect(checkGate(report, baseline).ok).toBe(true);
+  });
+
+  it("gates each leg at its own measured tolerance, not one shared number", () => {
+    // Measured across five consecutive runs on an unchanged tree, the natural spread is 4.6% on
+    // `ConcurrentPipeline`'s gated row and 18.9% on `ClusterPipeline`'s - so one tolerance is either
+    // inside Cluster's noise or three times looser than Concurrent needs. A `local.nsPerRow` 30%
+    // over baseline is a real regression on one leg and ordinary jitter on the other.
+    const thirtyPercentOver = (base: number): number => base * 1.3;
+
+    const concurrentRegressed = {
+      ...baseline,
+      ConcurrentPipeline: {
+        ...baseline.ConcurrentPipeline,
+        local: { nsPerRow: thirtyPercentOver(300), dispatchesWhilePinned: 0 },
+      },
+    };
+    expect(checkGate(concurrentRegressed, baseline).ok).toBe(false);
+
+    const clusterSameMove = {
+      ...baseline,
+      ClusterPipeline: {
+        ...baseline.ClusterPipeline,
+        local: { nsPerRow: thirtyPercentOver(280), workerPidsWhilePinned: [] },
+      },
+    };
+    expect(checkGate(clusterSameMove, baseline).ok).toBe(true);
+
+    expect(LEG_TOLERANCE.ConcurrentPipeline).toBeLessThan(LEG_TOLERANCE.ClusterPipeline);
   });
 
   it("fails when a leg the baseline has is missing from the report, rather than silently skipping it", () => {
