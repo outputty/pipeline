@@ -209,16 +209,25 @@ export type DispatchingLegName = Exclude<LegName, "Pipeline" | "Branch">;
  * EventEmitterPipeline  min 1.305  max 1.474
  * ```
  *
- * The residual spread is explained, not removed (#180's own Done-when 9): `Pipeline` is measured
- * FIRST in `bench/overhead.ts`'s own run order, in its most favorable JIT/cache state. A swap probe
- * (measuring `EventEmitterPipeline` FIRST instead of last, `Pipeline` second instead of first) held
- * `EventEmitterPipeline`'s own ABSOLUTE `local.nsPerRow` stable either way (~22 ns/row), while
- * `Pipeline.pipelineNsPerRow` itself moved from 16.89 to 27.09 depending on ITS OWN position - the
- * spread is a measurement-ORDER artefact of what ran immediately before `Pipeline`'s own reading,
- * not a real per-class execution cost `.local()` pays. Each ceiling below is the measured max plus
- * one more spread's worth of headroom (the same "roughly double" spirit `LEG_TOLERANCE`'s own
- * header uses), read directly off the real run order every `pnpm bench:overhead` invocation uses -
- * not adjusted for the artefact, since that IS the shape a real run always measures.
+ * The spread is explained HALF, not removed (#180's own Done-when 9 - "explained or removed", and
+ * "half explained, half recorded" is the honest outcome here, not a full explanation). A swap probe
+ * (measuring `EventEmitterPipeline` FIRST instead of last, `Pipeline` second instead of first),
+ * spiked in `tmp/` and deleted, isolated TWO effects, not one:
+ *
+ * 1. `Pipeline.pipelineNsPerRow` itself is a measurement-ORDER artefact: it moved from 16.89 (read
+ *    first, its most favorable JIT/cache state) to 27.09 (read second) depending on ITS OWN
+ *    position in the run - nothing about `Pipeline`'s own code changed between the two probes.
+ * 2. `EventEmitterPipeline`'s own ABSOLUTE `local.nsPerRow` stayed stable at ~22-24 ns/row
+ *    regardless of position - roughly 30% above `Pipeline`'s own stable-when-first ~17. That
+ *    residual is NOT explained by position: it survived the swap unchanged, and no isolated cause
+ *    was probed (a candidate not yet tried: `EventEmitterPipeline.drainable()` wraps every drain in
+ *    `withEndSignal` unconditionally - `architecture.md`'s own EventEmitterPipeline section - timing
+ *    a pinned chain with that wrap stubbed out is the next probe if this is revisited).
+ *
+ * Each ceiling below bakes in both effects at once, read directly off the real, shipped run order
+ * every `pnpm bench:overhead` invocation uses (the same "roughly double" headroom spirit
+ * `LEG_TOLERANCE`'s own header uses) - not a claim that `.local()` costs the identical amount on
+ * every class, which effect 2 above contradicts.
  */
 export const LOCAL_PARITY_CEILING: Record<DispatchingLegName, number> = {
   ConcurrentPipeline: 1.15,

@@ -460,6 +460,46 @@ describe("#180 checkLocalParity - every dispatching class's .local() against Pip
     expect(result.ok).toBe(false);
     expect(result.violations[0]).toMatch(/ClusterPipeline: local\.nsPerRow is NaN/);
   });
+
+  it("passes AT ConcurrentPipeline's own 1.15 ceiling exactly - the check is strictly greater-than", () => {
+    const report = {
+      ...parityReport,
+      ConcurrentPipeline: {
+        ...parityReport.ConcurrentPipeline,
+        local: { ...parityReport.ConcurrentPipeline.local!, nsPerRow: 17 * 1.15 }, // ratio === 1.15
+      },
+    };
+    expect(checkLocalParity(report).ok).toBe(true);
+  });
+
+  // Every prior case above sits inside 1.15 (ConcurrentPipeline/HttpPipeline) or fails on
+  // ConcurrentPipeline - none of them prove the per-class LOOKUP is wired, since a gate that used
+  // 1.15 for every leg would pass and fail identically on all of them. These two pin
+  // EventEmitterPipeline's own 1.65 ceiling specifically: a ratio only ConcurrentPipeline's 1.15
+  // would reject.
+  it("passes at a ratio past ConcurrentPipeline's own 1.15 ceiling, under EventEmitterPipeline's own 1.65", () => {
+    const report = {
+      ...parityReport,
+      EventEmitterPipeline: {
+        ...parityReport.EventEmitterPipeline,
+        local: { ...parityReport.EventEmitterPipeline.local!, nsPerRow: 17 * 1.6 }, // 1.6x, over 1.15, under 1.65
+      },
+    };
+    expect(checkLocalParity(report).ok).toBe(true);
+  });
+
+  it("fails once past EventEmitterPipeline's own 1.65 ceiling", () => {
+    const report = {
+      ...parityReport,
+      EventEmitterPipeline: {
+        ...parityReport.EventEmitterPipeline,
+        local: { ...parityReport.EventEmitterPipeline.local!, nsPerRow: 17 * 1.7 }, // 1.7x, over 1.65
+      },
+    };
+    const result = checkLocalParity(report);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/EventEmitterPipeline:.*parity ceiling/);
+  });
 });
 
 describe("#120 median/timeRounds - fail loud rather than a silent NaN", () => {
