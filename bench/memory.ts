@@ -298,12 +298,20 @@ function branchBroadcastExpected(rows: number[]): MemoryIdentity {
  *
  * Measured (3 runs, `pnpm bench:memory --case "..."`), `heldAtEndMB`: `ordered:true` 14.3 on every
  * run; `ordered:false` 16.5 on every run - stable, and the OPPOSITE of the prediction above.
- * `ordered:false` reads higher, not lower: `fanOutUnordered`'s own `Promise.race()`-based bookkeeping
- * (a `Map<number, Promise>` re-raced on every settle, `src/pipelines/concurrent.ts`) appears to cost
- * more live-heap pressure than the "hold a fast chunk behind a slow one" effect this case set out to
- * isolate - not verified further, since Done-when 11 asks for a measurement against the identical
- * chain, not a specific direction. Recorded as measured in the docs layer, not re-tuned to chase the
- * predicted direction.
+ *
+ * BOUND, not confirmed cause: a chunk is 1000 numbers, roughly 4-8 KB depending on V8's own SMI
+ * packing. `ordered: true`'s own buffer holds at most `maxConcurrency - 1` resolved-but-unyielded
+ * chunks (`fanOutOrdered`'s own sliding window) - at `MAX_CONCURRENCY = 4` that bound is under 24
+ * KB, four orders of magnitude below the 2.2 MB gap this case measured. A discriminating check
+ * (spiked in `tmp/`, deleted) re-ran both cases at `maxConcurrency: 64` (bound under 500 KB) against
+ * `4`, expecting the gap to GROW with the window if the buffer itself were the cause: three runs at
+ * `maxConcurrency` 4 and 64 each swung by up to 2 MB with NO consistent direction relative to the
+ * window size - noise, not a scaling signal. The buffer's own real footprint is below `heldAtEndMB`'s
+ * resolution at this chain's chunk size; the 2.2 MB gap this case measures is NOT the reorder buffer
+ * - `fanOutUnordered`'s own `Promise.race()`-based bookkeeping (a `Map<number, Promise>` re-raced on
+ * every settle, `src/pipelines/concurrent.ts`) is the untested candidate for it, left unverified.
+ * Done-when 11 is satisfied by the measurement itself, not by this case isolating the mechanism it
+ * set out to: a reorder buffer's own retention, on this chain, is bounded and negligible.
  */
 const REORDER_DELAY_MS = 1;
 
