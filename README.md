@@ -137,6 +137,23 @@ default buffer of 1000 with `maxConcurrency: 3` holds 3000 callbacks in flight, 
 | 100             | 3                | 300             |
 | 1               | 16               | 16              |
 
+Buffer size dominates `maxConcurrency` on the canonical chain (`.map().filter()`, 200,000 rows,
+`ConcurrentPipeline`, median of 4 timed rounds):
+
+| `.buffer(size)` | `maxConcurrency: 1` | `maxConcurrency: 4` | `maxConcurrency: 16` |
+| --------------- | ------------------- | ------------------- | -------------------- |
+| 100             | 25.66 ns/row        | 20.35 ns/row        | 19.03 ns/row         |
+| 1000 (default)  | 15.22 ns/row        | 14.73 ns/row        | 18.04 ns/row         |
+| 10000           | 13.02 ns/row        | 11.92 ns/row        | 12.15 ns/row         |
+
+A larger buffer amortizes per-chunk overhead over more rows, and that dominates: every row of 10000
+beats every row of 100, whatever `maxConcurrency` is set to. `maxConcurrency` matters most at a
+SMALL buffer (100: 25.66 down to 19.03 as concurrency rises) and matters least at a large one (10000:
+flat within noise). At the default buffer (1000), pushing `maxConcurrency` past 4 stopped helping -
+16 read WORSE than 4 (18.04 against 14.73) on this chain, the fan-out's own scheduling overhead
+outweighing the parallelism gained. The defaults (`.buffer()` unset = 1000, `maxConcurrency` unset = 4) stay unchanged - they sit at a reasonable point on this chain, not the fastest cell in the grid,
+which trades a wider chunk for a smaller one a caller with a wide CPU-bound stage may prefer to widen.
+
 `.tap()` is the one exception, and it is deliberate. `Pipeline.tap(fn)` always runs in the
 orchestrating process, whichever class it is called on, so a `console.log` or a `ctx.set()` written
 at pipeline level lands where you can see it. The stages either side of it still dispatch:
@@ -581,6 +598,17 @@ console.log(JSON.stringify(data)); // [6,8,10]
 
 `.queue()` always widens the pipeline's Mode to `"async"`, even over an entirely synchronous chain -
 a queued chunk may not be ready yet.
+
+An async generator's own per-item cost (~4 promises/row at N=10,000, `for await`'s own resumption
+protocol) is a floor this package cannot lower: a hand-rolled consumer pulling the same generator
+with `.next()` directly, bypassing `for await` entirely, measures the identical cost (4.000 against
+4.001 promises/row) - the price is paid inside V8's own async generator machinery, once per `.next()`
+call, whoever calls it. `fromSource()` already sits within 0.3% of that floor (4.013 measured). The cost is specific to a
+`function*`/`async function*` source, not to asynchrony itself: a hand-rolled, non-generator
+`AsyncIterable` (a plain object whose `next()` returns `Promise.resolve({ value, done })`) measures
+2.001 promises/row over the identical `for await` consumption - half the generator's own floor.
+Prefer a plain `AsyncIterable` over a generator function when you control how a source is built and
+the extra 2 promises/row matter at your own scale.
 
 ## How a Transformer runs a chunk
 
