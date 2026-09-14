@@ -445,16 +445,22 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   ): Promise<void> {
     if (header.route === undefined) {
       socket.send(encodeErrorFrame(header.id, "request frame is missing a 'route'"));
+      this.frameQueues.delete(header.id);
       return;
     }
     const parsed = parseRoute(header.route);
     if (parsed === null) {
       socket.send(encodeErrorFrame(header.id, `unknown route ${header.route}`));
+      this.frameQueues.delete(header.id);
       return;
     }
     if (parsed.verb === "reduce") {
-      await this.handleReduceFrame(socket, header, parsed, payload);
-      if (header.inputDone === true) this.frameQueues.delete(header.id);
+      // `handleReduceFrame`'s own return says whether THIS id's session concluded - either the
+      // `inputDone` frame was reached, or the frame itself failed (an unknown route/stage, a decode
+      // error) - both of which must clear this id's queue entry, not only the inputDone case, or a
+      // failed reduce chunk leaks its entry for the life of this worker (review finding).
+      const ended = await this.handleReduceFrame(socket, header, parsed, payload);
+      if (ended) this.frameQueues.delete(header.id);
       return;
     }
     await this.handleTransformFrame(socket, header, parsed, payload);
@@ -503,16 +509,19 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * with whatever it emitted; `inputDone` flushes the trailing accumulator (`Reducer.final()`,
    * same "only if items were folded since the last emit" contract every reducer in the package
    * shares) and closes the session with a `done: true` frame. */
+  /** Returns whether THIS id's session concluded here - `inputDone` reached, or the frame itself
+   * failed (an unknown branch/stage, a decode/fold error) - so `handleParsedFrame` (caller) knows
+   * to clear `frameQueues` for it; an ordinary folded chunk with more to come returns `false`. */
   private async handleReduceFrame(
     socket: PipelineSocket,
     header: Frame,
     parsed: StageRoute,
     payload: Uint8Array,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const resolved = this.resolveRegistries(parsed.trail);
     if (resolved === null) {
       socket.send(encodeErrorFrame(header.id, `unknown branch route ${header.route}`));
-      return;
+      return true;
     }
     const stage = resolved.reduceStages.get(parsed.index);
     if (!stage) {
@@ -523,7 +532,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           `unknown reduce stage ${parsed.index}; this deployment serves ${known}`,
         ),
       );
-      return;
+      return true;
     }
 
     let reducer = this.reduceSessions.get(header.id);
@@ -536,18 +545,20 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     try {
       if (header.inputDone === true) {
         await this.flushReduceSession(socket, header.id, reducer);
-        return;
+        return true;
       }
       const chunk = (await this._codec.decode(payload)) as unknown[];
       const emitted = await foldChunk(reducer, chunk, ctx);
       if (emitted.length > 0) {
         socket.send(encodeFrame({ id: header.id }, await this._codec.encode(emitted)));
       }
+      return false;
     } catch (error) {
       socket.send(
         encodeErrorFrame(header.id, error instanceof Error ? error.message : String(error)),
       );
       this.reduceSessions.delete(header.id);
+      return true;
     }
   }
 
@@ -662,6 +673,15 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       const conn = getConnection(connectTarget);
       await conn.ready;
       const id = conn.nextId++;
+      // Same eviction race `stageWork()`'s own dispatch guards against, and the identical window:
+      // `getConnection()`'s `evictAndFail` rejects only requests already in `pending` at the moment
+      // it runs, so a session that opens here AFTER a close/error already fired would otherwise
+      // await `nextEmit()` forever with no rejection ever reaching it.
+      if (connections.get(connectTarget) !== conn) {
+        throw new Error(
+          `reduce stage ${stageIndex} at ${connectTarget} failed: connection closed before dispatch`,
+        );
+      }
 
       const emitQueue: U[][] = [];
       let waiter: (() => void) | null = null;

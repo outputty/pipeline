@@ -111,6 +111,10 @@ class WorkerSet {
   private bootstrapPromise: Promise<BootstrapResult> | undefined;
   private inFlight = 0;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
+  /** `cluster.Worker.id` of every worker THIS set forked - `kill()` (below) uses it to kill only
+   * its own workers out of `cluster.workers`, a registry `node:cluster` shares process-wide with
+   * every other `WorkerSet`/`WsWorkerSet` in the process. */
+  private readonly ownWorkerIds = new Set<number>();
 
   /** Claims the next pipeline index, registering `pipeline` at it so a routed request can find it
    * later - see `claimIndex()` for the unregistered, index-only case (`registries()`'s own replay,
@@ -145,6 +149,7 @@ class WorkerSet {
       let settled = false;
       for (let i = 0; i < count; i++) {
         const worker = cluster.fork();
+        this.ownWorkerIds.add(worker.id);
         worker.on("message", (message) => {
           if (!isReadyMessage(message)) return;
           sharedPort ??= message.port;
@@ -210,11 +215,19 @@ class WorkerSet {
 
   /** `worker.kill()` (not `.unref()`) - forked workers hold the event loop open through cluster's
    * shared `TCPServerWrap`, which no public API exposes to release (architecture.md's own
-   * constraint), so an idle process only exits once every worker is actually killed. */
+   * constraint), so an idle process only exits once every worker is actually killed.
+   *
+   * Kills only the workers THIS set forked (`ownWorkerIds`, above), by id against `cluster.workers`
+   * - that map is a single process-global registry `node:cluster` shares across every `WorkerSet`
+   * in the process (#201 review: a process using both this class and `WsWorkerSet` had one set's
+   * idle timer killing the other's still-in-flight workers, since both iterated the same global
+   * map unconditionally). */
   kill(): void {
-    for (const worker of Object.values(cluster.workers ?? {})) {
-      worker?.kill();
+    const workers = cluster.workers ?? {};
+    for (const id of this.ownWorkerIds) {
+      workers[id]?.kill();
     }
+    this.ownWorkerIds.clear();
     this.bootstrapPromise = undefined; // a later dispatch bootstraps a fresh set
   }
 
@@ -463,6 +476,11 @@ class WsWorkerSet {
   private inFlight = 0;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private nextWorkerIndex = 0;
+  /** `cluster.Worker.id` of every worker THIS set forked - `kill()` (below) uses it to kill only
+   * its own workers out of `cluster.workers`, a registry `node:cluster` shares process-wide with
+   * every other `WorkerSet`/`WsWorkerSet` in the process - same reason `WorkerSet.ownWorkerIds`
+   * exists (#201 review). */
+  private readonly ownWorkerIds = new Set<number>();
 
   register(pipeline: ClusterPipeline<unknown>): number {
     const index = this.nextPipelineIndex++;
@@ -491,6 +509,7 @@ class WsWorkerSet {
       let settled = false;
       for (let i = 0; i < count; i++) {
         const worker = cluster.fork();
+        this.ownWorkerIds.add(worker.id);
         worker.on("message", (message) => {
           if (!isWsReadyMessage(message)) return;
           paths.push(message.socketPath);
@@ -546,10 +565,16 @@ class WsWorkerSet {
     this.idleTimer.unref();
   }
 
+  /** Kills only the workers THIS set forked (`ownWorkerIds`, above), by id against
+   * `cluster.workers` - same reason `WorkerSet.kill()` does (#201 review: a process using both
+   * classes had one set's idle timer killing the other's still-in-flight workers, since both
+   * iterated the same global map unconditionally). */
   kill(): void {
-    for (const worker of Object.values(cluster.workers ?? {})) {
-      worker?.kill();
+    const workers = cluster.workers ?? {};
+    for (const id of this.ownWorkerIds) {
+      workers[id]?.kill();
     }
+    this.ownWorkerIds.clear();
     this.bootstrapPromise = undefined;
   }
 
