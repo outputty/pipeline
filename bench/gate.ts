@@ -37,11 +37,20 @@ export interface LegReport {
     dispatchesWhilePinned?: number;
     requestsWhilePinned?: number;
     workerPidsWhilePinned?: number[];
+    /** `EventEmitterPipeline` alone (#180): a manually-registered extra Worker on `stage:0`,
+     * counted while a `.local()` chain runs - `stageWork()` never runs there, so the composed
+     * function never registers either, and this extra Worker is the whole of `listenerCount`. */
+    workersWhilePinned?: number;
   };
 }
 
 export type LegName =
-  "Pipeline" | "ConcurrentPipeline" | "HttpPipeline" | "ClusterPipeline" | "Branch";
+  | "Pipeline"
+  | "ConcurrentPipeline"
+  | "HttpPipeline"
+  | "ClusterPipeline"
+  | "Branch"
+  | "EventEmitterPipeline";
 
 export type OverheadReport = Record<LegName, LegReport>;
 
@@ -55,6 +64,7 @@ export type OverheadReport = Record<LegName, LegReport>;
  * HttpPipeline         local.nsPerRow     min 17.61  max 19.29  spread  9.5%
  * ClusterPipeline      local.nsPerRow     min 18.04  max 21.45  spread 18.9%
  * Branch               pipelineNsPerRow   min 21.04  max 22.58  spread  7.4%   (#180)
+ * EventEmitterPipeline local.nsPerRow     min 22.74  max 24.92  spread  9.6%   (#180)
  * ```
  *
  * One tolerance across all four is what the single `ABSOLUTE_TOLERANCE = 0.2` was, and those numbers
@@ -72,6 +82,7 @@ export const LEG_TOLERANCE: Record<LegName, number> = {
   HttpPipeline: 0.2,
   ClusterPipeline: 0.4,
   Branch: 0.15,
+  EventEmitterPipeline: 0.2,
 };
 
 /**
