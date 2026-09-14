@@ -508,8 +508,9 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * (`HttpPipeline`'s own `Reducer`/`foldChunk` engine, `src/utils/reduce.ts`, unchanged), replying
    * with whatever it emitted; `inputDone` flushes the trailing accumulator (`Reducer.final()`,
    * same "only if items were folded since the last emit" contract every reducer in the package
-   * shares) and closes the session with a `done: true` frame. */
-  /** Returns whether THIS id's session concluded here - `inputDone` reached, or the frame itself
+   * shares) and closes the session with a `done: true` frame.
+   *
+   * Returns whether THIS id's session concluded here - `inputDone` reached, or the frame itself
    * failed (an unknown branch/stage, a decode/fold error) - so `handleParsedFrame` (caller) knows
    * to clear `frameQueues` for it; an ordinary folded chunk with more to come returns `false`. */
   private async handleReduceFrame(
@@ -643,22 +644,32 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
                 `stage ${stageIndex} at ${connectTarget} failed: connection closed before dispatch`,
               );
             }
-            conn.pending.set(id, {
-              onFrame: (_header, responsePayload) => {
-                conn.pending.delete(id);
-                release();
-                Promise.resolve(this._codec.decode(responsePayload)).then(
-                  (value) => resolve(value as U[]),
-                  reject,
-                );
-              },
-              onError: (message) => {
-                conn.pending.delete(id);
-                release();
-                reject(new Error(`stage ${stageIndex} at ${connectTarget} failed: ${message}`));
-              },
-            });
-            conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
+            try {
+              conn.pending.set(id, {
+                onFrame: (_header, responsePayload) => {
+                  conn.pending.delete(id);
+                  release();
+                  Promise.resolve(this._codec.decode(responsePayload)).then(
+                    (value) => resolve(value as U[]),
+                    reject,
+                  );
+                },
+                onError: (message) => {
+                  conn.pending.delete(id);
+                  release();
+                  reject(new Error(`stage ${stageIndex} at ${connectTarget} failed: ${message}`));
+                },
+              });
+              conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
+            } catch (sendError) {
+              // A `PipelineSocket.send()` that throws SYNCHRONOUSLY (a DOM-standard
+              // `WebSocket.send()` on a closed socket - unlike `ws`'s own wrapped send, which drops
+              // silently instead, #201 review) leaves the `onFrame`/`onError` just registered above
+              // with no reply ever coming; clean it up here rather than leaking it in `conn.pending`
+              // until the whole connection is eventually evicted.
+              conn.pending.delete(id);
+              throw sendError;
+            }
           } catch (error) {
             release();
             throw error;
@@ -688,18 +699,29 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       // `ClusterPipeline`'s round-robin resolves fresh per call rather than racing every concurrent
       // partition on one shared field.
       const { connect: connectTarget, release } = await self.resolveConnect();
-      const conn = getConnection(connectTarget);
-      await conn.ready;
-      const id = conn.nextId++;
-      // Same eviction race `stageWork()`'s own dispatch guards against, and the identical window:
-      // `getConnection()`'s `evictAndFail` rejects only requests already in `pending` at the moment
-      // it runs, so a session that opens here AFTER a close/error already fired would otherwise
-      // await `nextEmit()` forever with no rejection ever reaching it.
-      if (connections.get(connectTarget) !== conn) {
+      let conn: ClientConnection;
+      let id: number;
+      try {
+        conn = getConnection(connectTarget);
+        await conn.ready;
+        id = conn.nextId++;
+        // Same eviction race `stageWork()`'s own dispatch guards against, and the identical window:
+        // `getConnection()`'s `evictAndFail` rejects only requests already in `pending` at the
+        // moment it runs, so a session that opens here AFTER a close/error already fired would
+        // otherwise await `nextEmit()` forever with no rejection ever reaching it.
+        if (connections.get(connectTarget) !== conn) {
+          throw new Error(
+            `reduce stage ${stageIndex} at ${connectTarget} failed: connection closed before dispatch`,
+          );
+        }
+      } catch (error) {
+        // Nothing is registered in `conn.pending` yet at any of these failure points, so `release()`
+        // is the only cleanup owed - but it MUST run here: a rejected `conn.ready` used to sit
+        // outside this function's own try/finally entirely, so `release()` was never reached and
+        // `WsWorkerSet.inFlight` leaked forever, permanently blocking the idle-kill path for that
+        // count (#201 review; `stageWork()`'s own dispatch already wrapped this identical setup).
         release();
-        throw new Error(
-          `reduce stage ${stageIndex} at ${connectTarget} failed: connection closed before dispatch`,
-        );
+        throw error;
       }
 
       const emitQueue: U[][] = [];

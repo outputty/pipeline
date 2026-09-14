@@ -11,11 +11,17 @@
  * write picked - a bug this fixture's own sum assertion alone cannot detect, since a fold that
  * collapses onto one connection still sums correctly. `totalConnections` proves the partitions
  * actually spread across distinct workers, not just that their results add up.
+ *
+ * `workers: 2` is pinned explicitly (mirroring `websocket-cluster-connections.ts`'s own fixture),
+ * not left to default to `os.availableParallelism()`: a CPU-constrained host reporting 1 would
+ * round-robin both `maxConcurrency: 2` partitions onto the SAME single worker, reading
+ * `totalConnections: 1` for a reason unrelated to the round-robin fix this fixture exists to prove
+ * (code review).
  */
 import { ClusterPipeline } from "../../src";
 import { queryAllConnections } from "../helpers/cluster-connections";
 
-const sum = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+const sum = await new ClusterPipeline<number>({ workers: 2, maxConcurrency: 2 })
 
   .buffer(2)
   .reduce(
