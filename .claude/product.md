@@ -161,8 +161,8 @@ const data = await new Pipeline<number>()
 ### Where the work runs
 
 The class you construct decides where a chain's chunks are processed. The chain itself - the
-`map`/`filter`/`reduce` calls - is identical in all five, and so is the output. Only the class name
-changes.
+`map`/`filter`/`reduce` calls - is identical across all of them, and so is the output. Only the class
+name changes.
 
 > **`Pipeline`** - one chunk at a time, in this process. The default, and the base every other one
 > extends.
@@ -175,8 +175,18 @@ changes.
 > signature, so the default is a drop-in and so is a caller's own. The default is the fastest client
 > the runtime offers, resolved once per process; a caller supplies their own to add authentication, a
 > proxy, a retry or a different transport.
-> **`ClusterPipeline`** - each chunk dispatched to another process on the same machine. It brings up
-> its own workers on first run and every later pipeline in the process reuses them.
+> **`WebSocketPipeline`** - each chunk dispatched over one persistent, multiplexed WebSocket
+> connection instead of one request per chunk. The caller gives it `connect`, where to reach the
+> other instance (`ws://host:port` or `ws+unix:///path/to/socket`), and may give it a `codec`
+> deciding how a chunk is encoded on the wire (JSON by default). Chosen over `HttpPipeline` when the
+> per-request envelope, not the connection itself, is the remaining cost.
+> **`ClusterPipeline`** - each chunk dispatched to another process on the same machine, over a
+> `WebSocketPipeline` connection on a Unix domain socket by default - workers always share a host, so
+> there is no reason to pay for a network stack. It brings up its own workers on first run and every
+> later pipeline in the process reuses them.
+> **`ClusterHttpPipeline`** - the same worker bring-up as `ClusterPipeline`, dispatching over HTTP/TCP
+> loopback instead - for a caller who supplies their own `client` to `ClusterPipeline`'s old shape, or
+> wants no dependency on `ws`.
 > **`EventEmitterPipeline`** - each chunk handed to whichever Worker functions are registered on
 > `pipeline.emitter`, a `node:events` `EventEmitter`. The chain's own `.transform()` function
 > auto-registers as a stage's first Worker; any number of extra Workers may register afterward from

@@ -9,6 +9,19 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
+- **`WebSocketPipeline`, a fourth dispatch mode, and `ClusterPipeline` reparented onto it** (#201) -
+  `ClusterPipeline` reuses `HttpPipeline` wholesale, one HTTP POST per chunk over an already-persistent
+  `node:http` keep-alive connection; #180 measured the remaining per-request cost at 235-278 ns/row,
+  60-75% of the dispatched total, on a socket that no longer needs opening per chunk. A spike (four
+  transport arms, `bench/overhead.ts`'s own methodology) found a WebSocket over a Unix domain socket
+  cuts the raw dispatch cost by close to two fifths - composed against `ClusterPipeline`'s own
+  dispatched leg, an estimated third, not yet measured end to end. `ClusterPipeline` reparents onto the
+  new `WebSocketPipeline` class with `ws+unix://` as its default, no knob; the current HTTP/TCP-loopback
+  class survives renamed `ClusterHttpPipeline`. Folds in a separate `plan-codec-seam` session's own
+  research, once both independently converged on the same mechanism from different directions - its
+  `Codec` seam (`{encode, decode}` on `Uint8Array`) ships on `WebSocketPipeline` alone. `--blocked-by
+  #180` (its own L6 touches `concurrent.ts`, the class `WebSocketPipeline` extends, and its docs layer
+  is about to record the `bench/baseline.json` numbers this ticket changes).
 - **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
   `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
   change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results
