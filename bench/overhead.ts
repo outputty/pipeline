@@ -35,7 +35,7 @@ import { measureHttpPipeline } from "./legs/http";
 import { measureClusterPipeline } from "./legs/cluster";
 import { measureBranch } from "./legs/branch";
 import { measureEventEmitterPipeline } from "./legs/eventemitter";
-import { checkGate, legReport, type OverheadReport } from "./gate";
+import { checkGate, checkLocalParity, legReport, type OverheadReport } from "./gate";
 import { timeFloor } from "./canonical";
 
 const BASELINE_PATH = fileURLToPath(new URL("./baseline.json", import.meta.url));
@@ -111,6 +111,17 @@ async function main(): Promise<void> {
   if (!gate.ok) {
     console.error("bench:overhead GATE FAILED:");
     for (const violation of gate.violations) console.error(`  - ${violation}`);
+    process.exitCode = 1;
+  }
+
+  // A SEPARATE check from checkGate above (#180's own Done-when 8): checkGate compares each leg
+  // against its OWN baseline, so four .local() rows can drift apart from EACH OTHER indefinitely
+  // with no violation - this instead asks whether they still agree with Pipeline's own
+  // pipelineNsPerRow, from the SAME report, needing no baseline file at all.
+  const parity = checkLocalParity(report);
+  if (!parity.ok) {
+    console.error("bench:overhead LOCAL PARITY FAILED:");
+    for (const violation of parity.violations) console.error(`  - ${violation}`);
     process.exitCode = 1;
   }
 }
