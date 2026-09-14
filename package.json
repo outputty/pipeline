@@ -50,6 +50,7 @@
     "@changesets/cli": "^3.0.1",
     "@oxlint/plugins": "1.74.0",
     "@types/node": "^26.1.1",
+    "@types/ws": "^8.18.1",
     "oxlint": "^1.74.0",
     "prettier": "^3.9.5",
     "tsc-alias": "^1.9.2",
@@ -57,5 +58,8 @@
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
     "vitest": "^4.0.15"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
   }
 }
