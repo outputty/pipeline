@@ -38,7 +38,11 @@ import {
   peekFrame,
   sendUnknownRouteError,
 } from "@src/pipelines/websocket";
-import type { WebSocketPipelineOptions, PipelineSocket } from "@src/pipelines/websocket";
+import type {
+  WebSocketPipelineOptions,
+  PipelineSocket,
+  ResolvedConnect,
+} from "@src/pipelines/websocket";
 import { emptyChunks, Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
@@ -732,48 +736,20 @@ export class ClusterPipeline<T, In = T> extends WebSocketPipeline<T, In> {
     return `/pipeline/${this.pipelineIndex}${super.routePath(verb, index)}`;
   }
 
-  /** Bootstraps the shared WS worker set, points `this._connect` at the round-robin-chosen
-   * worker's own socket, marks one dispatch in flight, and returns its release - see
-   * `ClusterHttpPipeline.bootstrapAndSetUrl()`, identical role over `wsWorkerSet` instead of
-   * `workerSet`. */
-  protected async bootstrapAndSetConnect(): Promise<() => void> {
-    const { connect, release } = await wsWorkerSet.enter(this.workers);
-    this._connect = connect;
-    return release;
-  }
-
-  protected override stageWork<U>(
-    transformer: Transformer<T, U, "sync" | "async">,
-    stageIndex: number,
-  ): InternalTransformer<T, U> {
-    const dispatch = super.stageWork(transformer, stageIndex);
-    return async (chunk, ctx) => {
-      const release = await this.bootstrapAndSetConnect();
-      try {
-        return await dispatch(chunk, ctx);
-      } finally {
-        release();
-      }
-    };
-  }
-
-  /** `stageWork()`'s own bootstrap/`inFlight` wrap, but for the WHOLE reduce stream rather than
-   * once per chunk - see `ClusterHttpPipeline.reduceWork()`, identical role. */
-  protected override reduceWork<U>(
-    fn: ReduceFunction<U, T>,
-    initial: U,
-    stageIndex: number,
-  ): ReduceWork<T, U> {
-    const dispatch = super.reduceWork(fn, initial, stageIndex);
-    const self = this;
-    return async function* dispatchOnWorker(chunks, ctx) {
-      const release = await self.bootstrapAndSetConnect();
-      try {
-        yield* dispatch(chunks, ctx);
-      } finally {
-        release();
-      }
-    };
+  /**
+   * Bootstraps the shared WS worker set and round-robins to the NEXT worker's own socket - overrides
+   * `WebSocketPipeline.resolveConnect()` (#201 review) rather than wrapping `stageWork()`/
+   * `reduceWork()` to mutate `this._connect` before calling `super`'s: that shared, mutable field
+   * raced under concurrent dispatch (`ConcurrentPipeline.reduce()` launches every partition in one
+   * synchronous burst, so every partition's own round-robin write landed on the SAME field before
+   * any of them read it back) and every partition ended up on whichever worker the LAST write
+   * picked - found live, a `maxConcurrency: 2` reduce read ONE connection, not two. `resolveConnect()`
+   * is called fresh, once, by EACH dispatch (`WebSocketPipeline`'s own `stageWork()`/`reduceWork()`),
+   * so there is nothing shared left to race on; `wsWorkerSet.enter()`'s own `{ connect, release }`
+   * shape already matches `ResolvedConnect` exactly, no adapting needed.
+   */
+  protected override resolveConnect(): Promise<ResolvedConnect> {
+    return wsWorkerSet.enter(this.workers);
   }
 }
 

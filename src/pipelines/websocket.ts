@@ -594,6 +594,25 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   }
 
   /**
+   * The target THIS dispatch should use, resolved fresh per call, plus a matching `release` called
+   * once the dispatch settles - the base reads the constructed instance's own `_connect` (fixed,
+   * released is a no-op); `ClusterPipeline` (#201 L3, review) overrides it to round-robin across its
+   * bootstrapped worker set, ONE resolution per call.
+   *
+   * Deliberately NOT `this._connect` mutated then read back by a nested closure - that shared,
+   * mutable field raced under concurrent dispatch: `ConcurrentPipeline.reduce()` launches
+   * `maxConcurrency` partitions in one synchronous burst (`Array.from({length}, () => work(...))`),
+   * so every partition's own round-robin write landed on the SAME field before any of them read it
+   * back, and every partition ended up dispatching to whichever worker the LAST write picked - found
+   * live: a `maxConcurrency: 2` reduce read `totalConnections: 1`, not 2. Threading the resolved
+   * target as a genuine per-call return value closes that race structurally, with nothing shared to
+   * race on.
+   */
+  protected resolveConnect(): ResolvedConnect | Promise<ResolvedConnect> {
+    return { connect: this._connect, release: () => {} };
+  }
+
+  /**
    * POSTs (over the wire, sends) the chunk to this stage's own route and waits for the SAME-`id`
    * response frame - `ConcurrentPipeline`'s own `apply()` calls this for every stage; the fan-out
    * and the knob-violation check are otherwise unchanged, inherited as-is. `transformer` itself is
@@ -607,44 +626,43 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const route = this.routePath("transform", stageIndex);
     return (chunk, ctx) =>
       new Promise<U[]>((resolve, reject) => {
-        // Captured ONCE, here - never re-read as `this._connect` later in this closure.
-        // `ClusterPipeline`'s own round-robin (#201 L3) mutates `this._connect` on the SAME shared
-        // instance between concurrent dispatches (`maxConcurrency > 1`), so re-reading it after an
-        // `await` could compare THIS dispatch's own live connection against a DIFFERENT, later
-        // dispatch's own target and reject a perfectly healthy connection as "closed".
-        const connectTarget = this._connect;
-        const conn = getConnection(connectTarget);
         const dispatch = async (): Promise<void> => {
-          await conn.ready;
-          const id = conn.nextId++;
-          const payload = await this._codec.encode(chunk);
-          // The two awaits above are the window a close/error can race through: `getConnection()`'s
-          // own `evictAndFail` rejects only requests already in `pending` at the moment it runs, so
-          // an entry registered AFTER that moment would otherwise never settle. Checked here, with
-          // no further await before `pending.set()` below, so nothing can race between this check
-          // and the registration it guards.
-          if (connections.get(connectTarget) !== conn) {
-            reject(
-              new Error(
+          const { connect: connectTarget, release } = await this.resolveConnect();
+          try {
+            const conn = getConnection(connectTarget);
+            await conn.ready;
+            const id = conn.nextId++;
+            const payload = await this._codec.encode(chunk);
+            // The two awaits above are the window a close/error can race through: `getConnection()`'s
+            // own `evictAndFail` rejects only requests already in `pending` at the moment it runs, so
+            // an entry registered AFTER that moment would otherwise never settle. Checked here, with
+            // no further await before `pending.set()` below, so nothing can race between this check
+            // and the registration it guards.
+            if (connections.get(connectTarget) !== conn) {
+              throw new Error(
                 `stage ${stageIndex} at ${connectTarget} failed: connection closed before dispatch`,
-              ),
-            );
-            return;
-          }
-          conn.pending.set(id, {
-            onFrame: (_header, responsePayload) => {
-              conn.pending.delete(id);
-              Promise.resolve(this._codec.decode(responsePayload)).then(
-                (value) => resolve(value as U[]),
-                reject,
               );
-            },
-            onError: (message) => {
-              conn.pending.delete(id);
-              reject(new Error(`stage ${stageIndex} at ${connectTarget} failed: ${message}`));
-            },
-          });
-          conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
+            }
+            conn.pending.set(id, {
+              onFrame: (_header, responsePayload) => {
+                conn.pending.delete(id);
+                release();
+                Promise.resolve(this._codec.decode(responsePayload)).then(
+                  (value) => resolve(value as U[]),
+                  reject,
+                );
+              },
+              onError: (message) => {
+                conn.pending.delete(id);
+                release();
+                reject(new Error(`stage ${stageIndex} at ${connectTarget} failed: ${message}`));
+              },
+            });
+            conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
+          } catch (error) {
+            release();
+            throw error;
+          }
         };
         dispatch().catch(reject);
       });
@@ -666,10 +684,10 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const self = this;
 
     return async function* dispatchReduce(chunks, ctx) {
-      // Captured ONCE, here - same reason `stageWork()`'s own `connectTarget` is: `ClusterPipeline`'s
-      // round-robin (#201 L3) can reassign `self._connect` for a LATER, concurrent partition before
-      // this one's own error message reads it.
-      const connectTarget = self._connect;
+      // `resolveConnect()`, not `self._connect` - see its own docstring for the race this closes:
+      // `ClusterPipeline`'s round-robin resolves fresh per call rather than racing every concurrent
+      // partition on one shared field.
+      const { connect: connectTarget, release } = await self.resolveConnect();
       const conn = getConnection(connectTarget);
       await conn.ready;
       const id = conn.nextId++;
@@ -678,6 +696,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       // it runs, so a session that opens here AFTER a close/error already fired would otherwise
       // await `nextEmit()` forever with no rejection ever reaching it.
       if (connections.get(connectTarget) !== conn) {
+        release();
         throw new Error(
           `reduce stage ${stageIndex} at ${connectTarget} failed: connection closed before dispatch`,
         );
@@ -756,9 +775,17 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       } finally {
         conn.pending.delete(id);
         await pump;
+        release();
       }
     };
   }
+}
+
+/** `resolveConnect()`'s own return shape - the target a dispatch should use, plus a release to call
+ * exactly once the dispatch settles (a transform's response/error, or a reduce stream's own end). */
+export interface ResolvedConnect {
+  connect: string;
+  release: () => void;
 }
 
 /** `toNodeWebSocketHandler()`'s own parameter derivation - `ws`'s own `WebSocketServer.handleUpgrade`
