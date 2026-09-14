@@ -7,9 +7,9 @@
  *
  * Each chunk of a stage dispatched over a multiplexed WebSocket connection instead of one HTTP
  * request per chunk (`HttpPipeline`) - `ClusterPipeline` reparents onto this class,
- * `ws+unix://<worker socket>` its default `connect`, so a worker sharing this process's own machine
- * pays no HTTP request-line/header parsing per chunk (#180's own finding: 60-75% of `HttpPipeline`'s
- * dispatched cost).
+ * `ws+unix:<worker socket path>:/` its default `connect`, so a worker sharing this process's own
+ * machine pays no HTTP request-line/header parsing per chunk (#180's own finding: 60-75% of
+ * `HttpPipeline`'s dispatched cost).
  */
 
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
@@ -32,19 +32,25 @@ export interface Codec {
   contentType?: string;
 }
 
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
 /** The shipped, unchanged default codec - the same JSON shape `HttpPipeline`'s own wire already
- * sends, just over `Uint8Array` bytes instead of a JSON-typed HTTP body. */
+ * sends, just over `Uint8Array` bytes instead of a JSON-typed HTTP body. Both directions reuse one
+ * module-level `TextEncoder`/`TextDecoder` (both stateless) rather than allocating a fresh instance
+ * per call, since every dispatched chunk pays this on the hot path #180 measured. */
 export const jsonCodec: Codec = {
-  encode: (value) => new TextEncoder().encode(JSON.stringify(value)),
-  decode: (bytes) => JSON.parse(new TextDecoder().decode(bytes)) as unknown,
+  encode: (value) => textEncoder.encode(JSON.stringify(value)),
+  decode: (bytes) => JSON.parse(textDecoder.decode(bytes)) as unknown,
   contentType: "application/json",
 };
 
 /**
  * The bring-your-own-socket seam every runtime adapter targets (#201) - mirrors `PipelineEmitter`'s
  * own validated-at-construction interface (`eventemitter.ts`). A DOM-shaped `WebSocket` (Deno's
- * `Deno.upgradeWebSocket()`, Cloudflare's `WebSocketPair`) satisfies this directly; Node needs
- * `toNodeWebSocketHandler` to bridge `ws`'s own `WebSocketServer`.
+ * `Deno.upgradeWebSocket()`, Cloudflare's `WebSocketPair`) satisfies this directly; Node needs its
+ * own `ws`-backed adapter to bridge `ws`'s own `WebSocketServer` - not yet named or written (later
+ * layer of #201).
  */
 export interface PipelineSocket {
   send(data: string | Uint8Array): void;
@@ -55,8 +61,13 @@ export interface PipelineSocket {
 
 /** Construction-time knobs for `WebSocketPipeline`. */
 export type WebSocketPipelineOptions = {
-  /** Where to dial for a dispatched chunk - `"ws+unix:///tmp/worker.sock:/"` or `"ws://host:port"`.
-   * No default: unlike `HttpPipeline`'s `url`, a `WebSocketPipeline` built standalone (not through
+  /** Where to dial for a dispatched chunk - `"ws+unix:/tmp/worker.sock:/"` or `"ws://host:port"`.
+   * `ws`'s own `ws+unix:` scheme splits its path on the FIRST `:` - everything before it is the
+   * socket path, everything after (defaulting to `/`) is the URL path (verified against `ws`
+   * 8.21.3's own `initAsClient`, `lib/websocket.js`) - a caller who writes `ws+unix:///path:/`
+   * (an extra leading `//`, the URL-with-authority shape every other scheme here uses) dials the
+   * wrong socket path (`"/path"` prefixed with an empty authority segment `ws` does not strip). No
+   * default: unlike `HttpPipeline`'s `url`, a `WebSocketPipeline` built standalone (not through
    * `ClusterPipeline`) always names its own target. */
   connect: string;
   /** How a chunk is encoded on the wire. Defaults to `jsonCodec`. */
@@ -73,7 +84,7 @@ type WebSocketPipelineConstructorOptions = WebSocketPipelineOptions & PipelineCo
  * planning's own spike found this beats a connection pool sized to `maxConcurrency` on every run
  * (fewer sockets costs less kernel-side bookkeeping).
  *
- * `new WebSocketPipeline([1,2,3,4,5], { connect: "ws+unix:///tmp/w.sock:/" }).transform((t) =>
+ * `new WebSocketPipeline([1,2,3,4,5], { connect: "ws+unix:/tmp/w.sock:/" }).transform((t) =>
  * t.map((x) => x * 2)).toArray()` → `[2,4,6,8,10]`, across two real instances.
  */
 export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
