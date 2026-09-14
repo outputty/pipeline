@@ -588,14 +588,17 @@ class WsWorkerSet {
    * `process.pid` (guaranteed unique, no coordination needed to avoid a collision), reported back
    * over IPC once listening.
    *
-   * `connectionCount` counts `WebSocketServer`'s own `"connection"` event indirectly but exactly:
-   * `toNodeWebSocketHandler()` calls `pipeline.serve()` from inside its own `wss.on("connection",
-   * ...)` listener, once per accepted connection, so incrementing here IS counting that event -
-   * `#201`'s own Done-when 3. Answered over `cluster.fork()`'s own IPC channel
-   * (`"outputty-pipeline-query-connections"` in, `"outputty-pipeline-connections"` out) rather than
-   * exposed as a public API, since no caller-facing knob observes it. */
+   * `openConnections` counts `WebSocketServer`'s own live `"connection"` count - a `Set` of the
+   * connected sockets, not a lifetime total (#201 docs review: a plain incrementing counter read a
+   * transient reconnect on one worker as two, which a real ordered-frame reconnect can legitimately
+   * cause; a `Set` sized by `.size` only ever reports what's connected NOW). `toNodeWebSocketHandler()`
+   * calls `pipeline.serve()` from inside its own `wss.on("connection", ...)` listener, once per
+   * accepted connection, so tracking membership here IS counting that event - `#201`'s own Done-when
+   * 3. Answered over `cluster.fork()`'s own IPC channel (`"outputty-pipeline-query-connections"` in,
+   * `"outputty-pipeline-connections"` out) rather than exposed as a public API, since no caller-facing
+   * knob observes it. */
   startWorkerServer(): void {
-    let connectionCount = 0;
+    const openConnections = new Set<PipelineSocket>();
     // oxlint-disable-next-line anti-slop/no-unknown-parameters -- this IS the I/O boundary parser the rule's own message asks for; a worker's own "message" event is genuinely unparsed until this function runs, same reason isWsReadyMessage (above) narrows to unknown first
     process.on("message", (message: unknown) => {
       const isQuery =
@@ -604,7 +607,7 @@ class WsWorkerSet {
         "type" in message &&
         message.type === "outputty-pipeline-query-connections";
       if (!isQuery) return;
-      process.send?.({ type: "outputty-pipeline-connections", count: connectionCount });
+      process.send?.({ type: "outputty-pipeline-connections", count: openConnections.size });
     });
 
     const routeToRegisteredPipeline = (socket: PipelineSocket, data: Uint8Array): void => {
@@ -620,7 +623,8 @@ class WsWorkerSet {
 
     const handler = toNodeWebSocketHandler({
       serve(socket) {
-        connectionCount++;
+        openConnections.add(socket);
+        socket.onClose(() => openConnections.delete(socket));
         socket.onMessage((data) => {
           if (typeof data === "string") return;
           routeToRegisteredPipeline(socket, data);
