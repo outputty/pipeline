@@ -64,13 +64,19 @@ describe("#201 partitioned reduce over the redesigned WS reduce wire (Done-when 
   // even ready, so asserting an exact partition COUNT is asserting a race outcome. Total is not:
   // whatever split real hardware produces, the partitions' own results always sum to 15.
   it(
-    "one or more partitions, always summing to 15",
+    "one or more partitions, always summing to 15, spread across at least 2 workers",
     async () => {
-      const result = await runFixtureJson<{ sum: number[]; total: number }>(
-        "__tests__/fixtures/websocket-cluster-reduce.ts",
-      );
+      const result = await runFixtureJson<{
+        sum: number[];
+        total: number;
+        totalConnections: number;
+      }>("__tests__/fixtures/websocket-cluster-reduce.ts");
       expect(result.sum.length).toBeGreaterThanOrEqual(1);
       expect(result.total).toBe(15);
+      // The round-robin fix's own regression case (`resolveConnect()`, L3): before it, every
+      // partition's dispatch raced on one shared `_connect` field and all collapsed onto whichever
+      // worker the LAST write picked, so `totalConnections` read 1 even at `maxConcurrency: 2`.
+      expect(result.totalConnections).toBeGreaterThanOrEqual(2);
     },
     FIXTURE_TIMEOUT,
   );

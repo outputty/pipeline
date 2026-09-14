@@ -4,8 +4,16 @@
  * to 15 (`product.md`'s own partitioned-reduce example, split timing-dependent - a real run there
  * shows `[7, 8]`, not a fixed assertion to match). Mirrors `cluster-partitioned-reduce.ts` (#62),
  * imports swapped.
+ *
+ * Also queries the workers' own connection count (`queryAllConnections`, shared with
+ * `websocket-cluster-connections.ts`): the round-robin fix (L3, `resolveConnect()`) closed a race
+ * where every partition of a concurrent reduce landed on whichever worker the LAST partition's
+ * write picked - a bug this fixture's own sum assertion alone cannot detect, since a fold that
+ * collapses onto one connection still sums correctly. `totalConnections` proves the partitions
+ * actually spread across distinct workers, not just that their results add up.
  */
 import { ClusterPipeline } from "../../src";
+import { queryAllConnections } from "../helpers/cluster-connections";
 
 const sum = await new ClusterPipeline<number>({ maxConcurrency: 2 })
 
@@ -16,6 +24,8 @@ const sum = await new ClusterPipeline<number>({ maxConcurrency: 2 })
   )([1, 2, 3, 4, 5])
   .toArray();
 
+const { totalConnections } = await queryAllConnections();
+
 if (sum.length > 0) {
-  console.log(JSON.stringify({ sum, total: sum.reduce((a, b) => a + b, 0) }));
+  console.log(JSON.stringify({ sum, total: sum.reduce((a, b) => a + b, 0), totalConnections }));
 }
