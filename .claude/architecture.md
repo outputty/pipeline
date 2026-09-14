@@ -34,7 +34,11 @@ Both boundaries are oxlint-enforced, not merely descriptive (#117): `.oxlintrc.j
 `pipelines/http.ts`, `pipelines/cluster.ts`, `pipelines/eventemitter.ts` (the third dispatching
 file, added when #124 shipped `EventEmitterPipeline` after this diagram's own node: exception list was
 first written) and `pipelines/client.ts` (the fourth, #179 - `HttpPipeline`'s own dispatch client,
-whose `node:http` default is what its seam exists to choose between); a `no-restricted-imports`
+whose `node:http` default is what its seam exists to choose between). `pipelines/websocket.ts` (#201,
+the fourth dispatching FILE, a fifth class between `EventEmitterPipeline` and `client.ts`) needed no
+fifth exception added here - verified live (`bunx oxlint`) - its own Node bridge derives every type
+structurally off `ws`'s own exports rather than importing `node:http`/`node:stream` directly. A
+`no-restricted-imports`
 override fails any `@outputty/laygo` or `@outputty/laygo/**`
 import from anywhere in `src/`. A reader no longer has to compare a new import against this diagram by
 hand - `bunx oxlint src/` does it on every run.
@@ -84,11 +88,19 @@ src/
                              defaultClient() resolves node:http with a shared keep-alive Agent once
                              per process, both node: imports dynamic and inside one try so a runtime
                              without them falls back rather than failing to load
-    cluster.ts               ClusterPipeline - the WorkerSet class (register/claimIndex/lookup/
-                             bootstrap/enter/kill/startWorkerServer) replaces 5 module-level mutable
-                             bindings and 4 free functions with one per-process singleton (#133);
-                             bootstrapAndSetUrl() calls workerSet.enter() once, no longer bootstraps
-                             twice
+    cluster.ts               ClusterHttpPipeline (#17, renamed #201) - the WorkerSet class
+                             (register/claimIndex/lookup/bootstrap/enter/kill/startWorkerServer)
+                             replaces 5 module-level mutable bindings and 4 free functions with one
+                             per-process singleton (#133); bootstrapAndSetUrl() calls
+                             workerSet.enter() once, no longer bootstraps twice. ClusterPipeline
+                             (#201) - the SAME shape over WsWorkerSet, N distinct ws+unix: socket
+                             paths instead of one shared port, enter() round-robining across them
+    websocket.ts             WebSocketPipeline (#201) - encodeFrame/decodeFrame (the 4-byte
+                             length-prefixed binary framing), getConnection() (the per-connect-target
+                             memoized client), stageWork()/reduceWork()/serve()/receiveFrame(),
+                             toNodeWebSocketHandler (the Node upgrade bridge, its own types derived
+                             off ws's exports rather than a node: import), peekFrame()/
+                             sendUnknownRouteError() (ClusterPipeline's own shared-worker-server seam)
     eventemitter.ts           EventEmitterPipeline (#124) - stageWork() dispatches through
                              pipeline.emitter instead of HTTP/cluster; apply()/drainable() overridden
                              a second and third time for stage:<n>:end/pipeline:end; carriedKnobs()
@@ -426,7 +438,22 @@ Where a chain's chunks run is chosen by CONSTRUCTING A CLASS, not by configuring
 Pipeline                one chunk at a time, in process              src/pipeline.ts
   ConcurrentPipeline      N chunks in flight; owns the fan-out         src/pipelines/concurrent.ts
     HttpPipeline            a chunk POSTed to another instance         src/pipelines/http.ts
-      ClusterPipeline         a chunk sent to another local process    src/pipelines/cluster.ts
+      ClusterHttpPipeline     a chunk sent to another local process    src/pipelines/cluster.ts
+                               (#17) - the ORIGINAL cluster class, kept
+                               under this name for the unchanged HTTP
+                               transport (#201)
+    WebSocketPipeline        a chunk sent over one persistent,         src/pipelines/websocket.ts
+                               multiplexed ws connection (#201) -
+                               a SIBLING of HttpPipeline: it overrides
+                               stageWork()/reduceWork() the same way,
+                               but never POSTs
+      ClusterPipeline          a chunk sent to another local process    src/pipelines/cluster.ts
+                               over that SAME ws connection (#201) -
+                               the name every existing caller imports;
+                               each worker binds its own unique
+                               ws+unix: socket, dispatch round-robins
+                               across the set (never a shared port - a
+                               ws connection is persistent)
     EventEmitterPipeline    a chunk handed to Workers on an emitter    src/pipelines/eventemitter.ts
                              (#124) - a SIBLING of HttpPipeline, not a subclass: it
                              overrides stageWork() the same way, but never POSTs
@@ -434,10 +461,18 @@ Pipeline                one chunk at a time, in process              src/pipelin
 
 Each level overrides ONE thing. `ConcurrentPipeline` owns the fan-out window (`fanOutOrdered`/
 `fanOutUnordered`) and the default in-process `stageWork()`; `HttpPipeline` overrides `stageWork()`
-alone to POST instead, adds `.fetch()`/`stagePath()`/`toNodeHandler`; `ClusterPipeline` adds the
+alone to POST instead, adds `.fetch()`/`routePath()`/`toNodeHandler`; `ClusterHttpPipeline` adds the
 worker bootstrap, wraps `stageWork()` to lazily bootstrap on first dispatch, and overrides
-`stagePath()` to route several pipeline definitions through one shared worker server
-(`/pipeline/<i>/transform/<n>`, `<i>` a construction-order index reproduced identically by every worker).
+`routePath()` to route several pipeline definitions through one shared worker server
+(`/pipeline/<i>/transform/<n>`, `<i>` a construction-order index reproduced identically by every
+worker). `WebSocketPipeline` (#201) overrides `stageWork()`/`reduceWork()`/adds `serve()` the same
+seam-shape, dispatching one binary frame per request over a connection memoized per `connect` target
+instead of opening one per chunk; `ClusterPipeline` (#201) adds the SAME worker bootstrap pattern
+`ClusterHttpPipeline` uses, over N distinct `ws+unix:` socket paths (one per worker, round-robined)
+instead of one shared port - see "WebSocketPipeline - #201" below for the wire itself.
+`routePath()`/the registries-resolving helper both moved to `ConcurrentPipeline` (#201 review): one
+canonical implementation `HttpPipeline`/`WebSocketPipeline` inherit and `ClusterHttpPipeline`/
+`ClusterPipeline` each override the same way, rather than two independently maintained copies.
 `.local(build)` (#61) is the one way to keep a whole region in-process: it builds a bare `Pipeline`
 over `this._chunks`/`this._context` (never `this.constructor` - the region must never be able to
 dispatch, whatever class called it), runs `build` against that bare pipeline, and carries the built
@@ -539,7 +574,7 @@ protected carriedKnobs(): object {
 protected override carriedKnobs(): ConcurrentPipelineOptions {
   return { maxConcurrency: this.maxConcurrency, ordered: this.ordered };
 }
-// http.ts / cluster.ts / eventemitter.ts - each spreads its super, adds its own fields
+// http.ts / cluster.ts / eventemitter.ts / websocket.ts - each spreads its super, adds its own fields
 protected override carriedKnobs(): HttpPipelineOptions {
   return { ...super.carriedKnobs(), url: this._url };
 }
@@ -589,6 +624,103 @@ How that product is SPLIT is a throughput choice, not a parallelism one. Two pai
 once where `.buffer(1)` pays it per item. The gap closes when the callback dominates - the same pair
 over a 2 ms-per-item workload, N=160, ran 23 ms each. Prefer the widest chunk that fits the
 in-flight budget.
+
+## WebSocketPipeline - #201
+
+Each chunk of a stage dispatched over one persistent, multiplexed WebSocket connection instead of
+one HTTP request per chunk (`HttpPipeline`) - `#180`'s own finding put 60-75% of `HttpPipeline`'s
+dispatched cost in HTTP's own request-line/header parsing on an already-open socket, and a
+multiplexed connection pays that once per PROCESS LIFETIME rather than once per chunk. A planning
+spike (`#201`'s own first ticket comment) measured `ws+unix:` (WebSocket over a Unix domain socket)
+at roughly 40% below a minimal raw-HTTP/TCP floor, and one multiplexed connection beating a pool of
+four dedicated ones by 2.5-13.8% across three runs - both findings the shipped design follows.
+
+The wire, one BINARY frame per dispatch (`src/pipelines/websocket.ts`'s own `encodeFrame`/
+`decodeFrame`): a 4-byte big-endian header-length prefix, the JSON header, then the
+`codec`-encoded payload:
+
+```text
+-> { id: 0, route: "/transform/0", context: { multiplier: 10 } } + codec.encode([1, 2])
+<- { id: 0 }                                                     + codec.encode([2, 4])
+```
+
+`route` carries what a URL path carried before - `/transform/<n>`, `/reduce/<n>`,
+`/branch/<i>/<name>/transform/<n>` - unchanged trail, parsed by the file's own `parseRoute` (kept as
+its OWN copy of `HttpPipeline`'s identical regex, since the two parse different strings - a URL
+pathname there, a bare JSON field here). A failure is a separate TEXT frame, always fixed JSON
+regardless of `codec` - the WS opcode itself the discriminator: `{"id":0,"error":"…"}`.
+
+`getConnection(connect)` memoizes ONE `ClientConnection` per `connect` string, module-level, shared
+by every `WebSocketPipeline` dispatching to the same target - the spike's own "fewer sockets beats a
+pool" finding. Every `stageWork()`/`reduceWork()` dispatch correlates its own request/response by an
+`id` over that one shared socket; a closed or errored connection rejects every request still pending
+on it and evicts itself from the cache, so the next dispatch to that target dials fresh.
+
+⚠ `WebSocketPipeline.stageWork()`/`reduceWork()` capture their own dispatch target ONCE, into a local
+`connectTarget`, rather than re-reading `this._connect` later in the same closure - `ClusterPipeline`
+(below) mutates that shared field on every dispatch for its own round-robin, and with
+`maxConcurrency > 1` several dispatches are in flight at once. A LATER dispatch's own reassignment
+landing between an EARLIER one's `await`s made the earlier one's own liveness check compare its
+healthy connection against a stranger's target and reject it as closed - found live, a `workers: 2,
+maxConcurrency: 2` reduce fixture failing with "connection closed before dispatch" on a connection
+that had never closed.
+
+A reduce stage shares the connection like any other stage, correlated by the SAME `id` across every
+frame of its own stream: each upstream chunk is its own outgoing frame (`route`/`context` repeated
+on every frame - simpler than tracking "have I sent this id's context yet" server-side, and cheap
+next to a chunk's own payload), an `inputDone: true` frame (empty payload) signals no more chunks are
+coming, and the server's own `done: true` frame (empty payload) closes the id after its trailing
+`Reducer.final()` value, if any, has already been sent - the same `Reducer`/`foldChunk` engine
+`HttpPipeline`'s own `runReduceStage` folds through (`src/utils/reduce.ts`). Unpriced, named so it is
+not mistaken for load-bearing: this wire is NOT pull-driven the way the HTTP `ReadableStream` wire
+is - a partition's own chunk frames go out as fast as `chunks` yields them, so the fastest of
+`ConcurrentPipeline.reduce()`'s `share()`d partitions could in principle race ahead of a slow socket.
+
+`serve(socket)` is the SERVER side, the role `.fetch()` plays for HTTP - `receiveFrame(socket, data)`
+is its own body, exposed separately so `ClusterPipeline`'s own shared worker server can peek a
+frame's `/pipeline/<i>/` prefix (`peekFrame()`, reading only `id`/`route` without decoding the
+payload) and hand the SAME raw bytes to the RIGHT registered pipeline, mirroring `.fetch()`'s role
+for `ClusterHttpPipeline`. ⚠ Every incoming frame is queued per `id` (`frameQueues`, a
+`Map<number, Promise<void>>`) rather than dispatched concurrently - a reduce stream's own chunk frame
+and its `inputDone` frame arrive back to back over the wire, and `inputDone`'s path to
+`Reducer.final()` is shorter than a chunk's path to `foldChunk()`, so unordered dispatch let the
+trailing flush run BEFORE the chunk it was meant to flush had folded (found live: `[1,2,3,4,5]`
+summed to `[]` instead of `[15]`). `frameQueues` is cleared on every path an id's session can end -
+`inputDone` reached, or the frame itself failing (an unknown route/stage, a decode error) - not only
+the happy one, or a failed reduce chunk leaked its entry for the worker's whole life.
+
+`toNodeWebSocketHandler(pipeline)` bridges `ws`'s own `WebSocketServer({ noServer: true })`/
+`handleUpgrade` to `PipelineSocket` for Node, the same gap `toNodeHandler` bridges for `.fetch()`.
+Its own parameter/return types are derived structurally off `ws`'s `WebSocketServer.handleUpgrade`
+signature (`Parameters<InstanceType<typeof WebSocketServer>["handleUpgrade"]>`) rather than an
+explicit `node:http`/`node:stream` import - verified live (`bunx oxlint`) that this keeps the file
+carrying no `node:` import of its own, needing none of `.oxlintrc.json`'s per-file exceptions the
+other three dispatching files already have. `ws`'s own `ws+unix:` URL scheme splits its whole path on
+the FIRST `:` (verified against `ws` 8.21.3's own `initAsClient`, `lib/websocket.js`) -
+`ws+unix:/tmp/w.sock:/`, no leading `//`; the URL-with-authority shape every OTHER scheme here uses
+(`ws+unix:///tmp/w.sock:/`) dials the wrong path, an empty authority segment `ws` does not strip.
+
+`ClusterPipeline` (#201) reparents onto `WebSocketPipeline` - the class name every existing caller
+already imports (BREAKING, no deprecation period, no code change required); `ClusterHttpPipeline` is
+`ClusterPipeline`'s own pre-#201 identity, kept under that name unchanged for a caller who wants the
+old HTTP/TCP transport back. `WsWorkerSet` mirrors `WorkerSet`'s shape one seam apart: each worker
+binds its own UNIQUE `ws+unix:` socket path (never a shared port, the way HTTP's `listen(0)` shares
+one across every worker) - a WebSocket connection is persistent, so sharing one target across workers
+would mean only one worker is ever dialed, and `#201`'s own Done-when 3 needs one distinct connection
+per worker to count. Each worker computes its own path from its own `process.pid` (unique, no
+coordination needed) and reports it back over `cluster.fork()`'s IPC channel; `enter()` round-robins
+across the bootstrapped set instead of handing back the single shared value `WorkerSet.enter()` does.
+⚠ `WorkerSet.kill()` and `WsWorkerSet.kill()` both iterate `cluster.workers`, a registry `node:cluster`
+shares PROCESS-WIDE - before #201 review only one `WorkerSet` ever existed per process, so this never
+mattered; with two sibling classes now forking into the same shared registry, one class's idle timer
+could kill the OTHER's still-in-flight workers. Both now track `ownWorkerIds` and kill only their own.
+
+Measured live, `pnpm bench:overhead`'s `ClusterPipeline` row: 217.08 ns/row (HTTP-based, pre-#201) to
+75.5 ns/row (this ticket) - close to a 3x reduction, beating the spike's own composed ~33-35%
+estimate. `bench/baseline.json` itself stays the pre-#201 number (`bench/*.ts` is outside this
+ticket's own file scope, Done-when 8) - `checkGate`'s own regression-only design never flags a
+speedup, so the gate stays green with a now-stale ceiling; a future ticket updating the baseline for
+real would tighten it, not loosen anything.
 
 ## EventEmitterPipeline - #124
 
@@ -938,6 +1070,14 @@ rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed
 
 ## Constraints in dependencies
 
+- `ws` 8.21.3 (#201, this package's first runtime dependency - `bufferutil`/`utf-8-validate` are its
+  own optional peer dependencies for native-accelerated masking/UTF-8 validation, not required, and
+  stay absent from `package.json`) delivers every WS frame's payload - text or binary - as a
+  `Buffer` on `"message"`, with `isBinary` the only discriminator; it never auto-decodes a text frame
+  into a JS string. Its own `ws+unix:` scheme splits the WHOLE path on the FIRST `:` (`initAsClient`,
+  `lib/websocket.js`) - `ws+unix:/path:/urlpath`, no leading `//`. `tsup.config.ts`'s own `external`
+  array lists it explicitly, alongside what tsup already excludes by default for a real
+  `dependencies` entry - verified live, `grep -c "ws/lib" dist/index.js` prints `0`.
 - TypeScript removed `baseUrl` at 7.0; a tsconfig that sets it fails with `TS5102`.
 - A conditional type distributes only over a naked type parameter. `Ps[number] extends Pipeline<infer
   U> ? U : never` is an indexed access, so it compiles and evaluates to `never`; the deleted merge
@@ -999,17 +1139,22 @@ rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed
   passed ONE `this._context` to every concurrently in-flight chunk. #31 carries that pre-existing
   sharing across a process boundary; it neither introduces nor worsens it, and no fix landed in that
   ticket by explicit decision.
-- `WorkerSet`'s own `registry` field (`cluster.ts`, one per-process singleton since #133 - was 5
-  separate module-level bindings) never evicts an entry - every distinct `ClusterPipeline`
-  constructed in a process stays reachable for that process's life. Sound for the documented
-  construction pattern (one `ClusterPipeline` per logical chain, built once at module scope, the
-  same "no top-level side effects beyond registering transforms" rule above already assumes); a
-  caller constructing a fresh `ClusterPipeline` per request grows the registry unbounded.
-- The idle-kill window between a `ClusterPipeline`'s last dispatch and its workers being killed
-  (`cluster.ts`'s `IDLE_KILL_MS`) is `500`ms - a chosen value, not a tuned or caller-facing one. Long
-  enough that back-to-back dispatches in a real workload never trigger a re-fork (~50-60ms per the
-  measurement above); short enough that a script holding only the canonical `ClusterPipeline`
-  example exits on its own well inside a normal test timeout.
+- `WorkerSet`/`WsWorkerSet`'s own `registry` field (`cluster.ts`, one per-process singleton per
+  class since #133 - was 5 separate module-level bindings) never evicts an entry - every distinct
+  `ClusterHttpPipeline`/`ClusterPipeline` constructed in a process stays reachable for that process's
+  life. Sound for the documented construction pattern (one `ClusterHttpPipeline`/`ClusterPipeline`
+  per logical chain, built once at module scope, the same "no top-level side effects beyond
+  registering transforms" rule above already assumes); a caller constructing a fresh one per request
+  grows the registry unbounded.
+- The idle-kill window between a `ClusterHttpPipeline`/`ClusterPipeline`'s last dispatch and its
+  workers being killed (`cluster.ts`'s `IDLE_KILL_MS`, shared by both classes' own `kill()`) is
+  `500`ms - a chosen value, not a tuned or caller-facing one. Long enough that back-to-back
+  dispatches in a real workload never trigger a re-fork (~50-60ms per the measurement above); short
+  enough that a script holding only the canonical example exits on its own well inside a normal test
+  timeout. `WorkerSet.kill()`/`WsWorkerSet.kill()` each track their own forked worker ids
+  (`ownWorkerIds`, #201 review) and kill only those - both iterate `cluster.workers`, a registry
+  `node:cluster` shares PROCESS-WIDE, so before either tracked its own ids, a process using BOTH
+  classes had one's idle timer kill the other's still-in-flight workers.
 
 - Node's `fetch` IS full duplex against a `node:http` server, refuting the half-duplex reading of
   `duplex: "half"`. Measured on Node 26.5.0 (undici): response headers at +207ms with the request

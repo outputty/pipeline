@@ -64,6 +64,37 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`WebSocketPipeline`, a fourth dispatch mode, and `ClusterPipeline` reparented onto it** (#201,
+  `feat`, PR #203 (L1)/#204 (L2)/#206 (L3) and this docs PR) - each chunk of a stage dispatched over
+  one persistent, multiplexed `ws+unix:`/`ws://` connection instead of one HTTP request per chunk
+  (`HttpPipeline`), one binary frame per dispatch (a 4-byte length-prefixed JSON header, then the
+  `codec`-encoded payload; a JSON TEXT frame on failure). `ClusterPipeline` - the class name every
+  existing caller already imports (BREAKING, no deprecation period, no code change required) - now
+  dispatches over that wire; `ClusterHttpPipeline` is the class's own pre-#201 identity, kept under
+  that name unchanged for a caller who wants the old HTTP/TCP transport. Each worker binds its own
+  unique `ws+unix:` socket path (a WebSocket connection is persistent, so a shared port would leave
+  every worker but one un-dialed); dispatch round-robins across the bootstrapped set.
+
+  Measured live: `ClusterPipeline`'s own `pnpm bench:overhead` row moved from 217.08 ns/row
+  (HTTP-based, pre-#201) to 75.5 ns/row - close to a 3x reduction, beating the planning spike's own
+  composed ~33-35% estimate. Three findings, each caught by review and fixed before merge: (1) a
+  reduce stream's own chunk and `inputDone` frames, dispatched concurrently rather than queued per
+  `id`, could settle out of order - a `[1,2,3,4,5]` sum returned `[]` instead of `[15]` when the
+  trailing flush ran before the chunk it was meant to flush had folded. (2) `WorkerSet`/`WsWorkerSet`
+  both iterated `cluster.workers`, a registry `node:cluster` shares PROCESS-WIDE - a process
+  constructing both a `ClusterHttpPipeline` and a `ClusterPipeline` had one class's idle timer kill
+  the other's still-in-flight workers. (3) `ClusterPipeline`'s own round-robin mutates the shared
+  dispatch-target field between concurrent dispatches (`maxConcurrency > 1`); a later dispatch's own
+  reassignment could land inside an earlier one's `await`s and make it reject a perfectly healthy
+  connection as closed.
+
+  `ws` 8.21.3 is this package's first runtime dependency - `bufferutil`/`utf-8-validate` (its own
+  optional native-acceleration peers) stay absent from `package.json`, and `pnpm build && grep -c
+  "ws/lib" dist/index.js` prints `0`. `bench/baseline.json`'s own committed `ClusterPipeline` number
+  stays the pre-#201 figure (`bench/*.ts` sat outside this ticket's own file scope) -
+  `checkGate`'s regression-only design stays green regardless, but a future ticket updating the
+  baseline for real would tighten it, never loosen anything.
+
 - **A fifth benchmark leg, a fourth dispatching class's own legs, and five real findings** (#180,
   `perf`, PR #194/#195/#197/#198/#199/#<DOCS_PR>) - `bench/legs/branch.ts` measures `.branch()`
   against a hand-rolled floor producing the identical record, its own `LEG_TOLERANCE` (0.15) set from

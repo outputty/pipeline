@@ -118,10 +118,14 @@ const data = await new ConcurrentPipeline<string>({ maxConcurrency: 10 })
 console.log(JSON.stringify(data)); // ["A","B","C"]
 ```
 
-`HttpPipeline` dispatches each chunk to another instance over HTTP; `ClusterPipeline` dispatches to
-worker processes on the same machine, brought up automatically; `EventEmitterPipeline` hands each
-chunk to Worker functions registered on `pipeline.emitter`, in this same process. See
-[HttpPipeline](#httppipeline), [ClusterPipeline](#clusterpipeline) and
+`HttpPipeline` dispatches each chunk to another instance over HTTP; `WebSocketPipeline` dispatches
+over a persistent, multiplexed WebSocket connection instead - one connection per target, not one
+request per chunk; `ClusterPipeline` dispatches to worker processes on the same machine over that
+same WebSocket wire, brought up automatically (`ClusterHttpPipeline` is the same idea over the older
+HTTP transport, for a caller who wants it); `EventEmitterPipeline` hands each chunk to Worker
+functions registered on `pipeline.emitter`, in this same process. See
+[HttpPipeline](#httppipeline), [WebSocketPipeline](#websocketpipeline),
+[ClusterPipeline](#clusterpipeline), [ClusterHttpPipeline](#clusterhttppipeline) and
 [EventEmitterPipeline](#eventemitterpipeline) in the API Reference for their constructors and knobs.
 
 The chunk is the unit of concurrency, so a `ConcurrentPipeline`'s parallelism is its buffer size
@@ -208,9 +212,9 @@ two knobs and nothing else - everything a chain carries between calls is interna
   a manager that rejects an unknown key propagates that error instead of being bypassed.
 - **`.apply(transformer)`** - apply a pre-built transformer.
 - **`.transform(fn)`** - build and apply a transformer inline.
-- **`.local(build)`** - run a whole region of the chain in the orchestrating process; on
-  `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline`, nothing `build` does
-  can dispatch.
+- **`.local(build)`** - run a whole region of the chain in the orchestrating process; on any
+  dispatching class (`ConcurrentPipeline`, `HttpPipeline`, `WebSocketPipeline`, `ClusterHttpPipeline`,
+  `ClusterPipeline`, `EventEmitterPipeline`), nothing `build` does can dispatch.
 - **`.buffer(size)`** - collect items and re-chunk.
 - **`.buffer(fn)`** - decide the chunk boundary per item instead of by count. `fn`'s own `emit()`
   flushes whatever is pending and resets it to `[]`; returning a value appends it to the (possibly
@@ -259,8 +263,8 @@ One call's output. Every operation below re-drains the input, so a spent generat
   with all four arguments regardless of its own declared arity. See [Reducing](#reducing).
 - **`.tap(fn | transformer)`** - execute a side-effect without changing data. `fn` receives each item
   and the context; the `transformer` form receives the whole chunk. This one travels with its stage,
-  so on `HttpPipeline`/`ClusterPipeline` it runs in the worker. `Pipeline.tap(...)` is the same
-  observation point run in the orchestrating process instead - see [Where the work runs](#where-the-work-runs).
+  so on a dispatching class it runs in the worker. `Pipeline.tap(...)` is the same observation point
+  run in the orchestrating process instead - see [Where the work runs](#where-the-work-runs).
 - **`.onError(fn)`** - the row handler. `fn` receives the failing item, error and context; a
   returned value replaces the row, `DROP` removes it, throwing escalates to the pipeline. See
   [Error Handling](#error-handling).
@@ -326,8 +330,8 @@ console.log(JSON.stringify(data)); // [2,4,6,8,10]
 await new Promise<void>((resolve) => server.close(() => resolve()));
 ```
 
-- **`options.url`** - required. Where another `HttpPipeline`/`ClusterPipeline` instance's `.fetch`
-  is mounted.
+- **`options.url`** - required. Where another `HttpPipeline`/`ClusterHttpPipeline` instance's
+  `.fetch` is mounted.
 - **`options.client`** - how a dispatched chunk travels. Takes the global `fetch` signature, so the
   default is a drop-in and so is your own. Defaults to the fastest client this runtime offers,
   resolved once per process: `node:http` with a shared keep-alive agent for an `http:` url on Node,
@@ -346,17 +350,104 @@ its `Response` has to resolve on the response HEADERS with the body still arrivi
 collects the whole reply first loses no data and passes every `/transform/<n>` call, then silently
 stops a reduce stage's emits reaching you until the request body closes.
 
-### ClusterPipeline
+### ClusterHttpPipeline
 
-Extends `HttpPipeline`. Dispatches each chunk of a stage to another process on the same machine.
-Needs no server, port, url or fork in caller code - it brings its own workers up on the first
-dispatch and every later `ClusterPipeline` in the process reuses them.
+Extends `HttpPipeline`. Dispatches each chunk of a stage to another process on the same machine,
+over HTTP - the same mechanism `ClusterPipeline` used before it moved to WebSocket (below). Needs no
+server, port, url or fork in caller code - it brings its own workers up on the first dispatch and
+every later `ClusterHttpPipeline` in the process reuses them.
 
 Internally it reuses `HttpPipeline`'s own dispatch: on the first real dispatch it forks `workers`
 processes via `node:cluster`, each re-running this SAME entry module (so each registers the same
 stages), routed through one shared server - `listen(0)` inside `cluster` hands every worker the
 identical port. A worker with nothing left in flight is killed after 500ms idle, which is why the
 canonical example below exits on its own with no explicit teardown:
+
+<!-- compiles -->
+
+```typescript
+import { ClusterHttpPipeline } from "@outputty/pipeline";
+
+const data = await new ClusterHttpPipeline<number>()
+  .transform((t) => t.map((x: number) => x * 2))([1, 2, 3, 4, 5])
+  .toArray();
+
+// Last line only - every worker also re-executes this module, each printing its own empty result first.
+console.log(JSON.stringify(data)); // [2,4,6,8,10]
+```
+
+- **`options.workers`** - worker processes to bring up on first drain. Default
+  `os.availableParallelism()`.
+
+### WebSocketPipeline
+
+Extends `ConcurrentPipeline`. Dispatches each chunk of a stage over a persistent, multiplexed
+WebSocket connection to another instance running the same code - one connection per `connect`
+target, kept open across every dispatch, instead of `HttpPipeline`'s one request per chunk. A stage
+is still its POSITION in the chain: the client sends one binary frame per dispatch (a small header
+naming the route and an `id`, then the chunk's own encoded bytes) and correlates the reply by that
+same `id` over the shared connection.
+
+Spinning one up needs a real WebSocket upgrade instead of a plain HTTP mount - `toNodeWebSocketHandler`
+bridges `ws`'s own `WebSocketServer` for Node:
+
+<!-- compiles -->
+
+```typescript
+import { createServer } from "node:http";
+import { WebSocketPipeline, toNodeWebSocketHandler } from "@outputty/pipeline";
+
+// The "another instance" side: a source-less pipeline holding the SAME chain, so its
+// .serve() can answer for it.
+const worker = new WebSocketPipeline<number>({ connect: "" }).transform((t) =>
+  t.map((x: number) => x * 2),
+);
+
+const server = createServer();
+const handler = toNodeWebSocketHandler(worker);
+server.on("upgrade", (req, socket, head) => handler.upgrade(req, socket, head));
+await new Promise<void>((resolve) => server.listen("/tmp/outputty-example.sock", resolve));
+
+const data = await new WebSocketPipeline<number>({
+  connect: "ws+unix:/tmp/outputty-example.sock:/",
+})
+  .transform((t) => t.map((x: number) => x * 2))([1, 2, 3, 4, 5])
+  .toArray();
+
+console.log(JSON.stringify(data)); // [2,4,6,8,10]
+
+// The client's own connection is deliberately persistent (kept open across every call), so
+// server.close() alone would wait forever for it to end on its own - exit directly instead.
+process.exit(0);
+```
+
+- **`options.connect`** - required. Where to dial for a dispatched chunk -
+  `"ws+unix:/path/to/socket:/"` for a unix domain socket, or `"ws://host:port"` for TCP. `ws`'s own
+  `ws+unix:` scheme splits on the FIRST `:` after the scheme: everything before it is the socket
+  path, everything after is the URL path (default `/`) - write it with no leading `//`, unlike every
+  other scheme here.
+- **`options.codec`** - how a chunk is encoded on the wire. Defaults to JSON; supply your own
+  `{ encode, decode }` pair for a binary format.
+- **`.serve(socket)`** - registers this chain's stages on an already-open `PipelineSocket` - the
+  role `.fetch` plays for `HttpPipeline`.
+- **`toNodeWebSocketHandler(pipeline)`** - bridges a pipeline's own `.serve()` to `ws`'s
+  `WebSocketServer({ noServer: true })`/`handleUpgrade`, for a caller's own `"upgrade"` listener on a
+  real `http.Server`.
+
+### ClusterPipeline
+
+Extends `WebSocketPipeline`. Dispatches each chunk of a stage to another process on the same
+machine, over that same persistent WebSocket connection - the class every existing caller already
+imports; `ClusterHttpPipeline` (above) is the unchanged HTTP transport for a caller who wants it
+instead. Needs no server, socket path or fork in caller code - it brings its own workers up on the
+first dispatch and every later `ClusterPipeline` in the process reuses them, round-robining across
+the set.
+
+Internally, each worker binds its OWN unix socket path (never a shared one - a WebSocket connection
+is persistent, so sharing one target would mean only one worker is ever dialed) via `node:cluster`,
+each re-running this SAME entry module so every worker registers the same stages. A worker with
+nothing left in flight is killed after 500ms idle, which is why the canonical example below exits on
+its own with no explicit teardown:
 
 <!-- compiles -->
 
@@ -718,8 +809,9 @@ const data = await new Pipeline<number>()
 console.log(data); // [60, 90]
 ```
 
-On `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline`, `.reduce()`
-partitions the stream into `maxConcurrency` independent accumulators. Each partition's own result - an `emit()` mid-fold, or
+On any dispatching class (`ConcurrentPipeline`, `HttpPipeline`, `WebSocketPipeline`,
+`ClusterHttpPipeline`, `ClusterPipeline`, `EventEmitterPipeline`), `.reduce()` partitions the stream
+into `maxConcurrency` independent accumulators. Each partition's own result - an `emit()` mid-fold, or
 its trailing accumulator once its share of the stream ends - flows downstream as an ordinary value,
 the same way `emit()` output already does above: no forced merge, no thrown error.
 
