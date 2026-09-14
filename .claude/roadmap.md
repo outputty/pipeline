@@ -76,17 +76,31 @@ The two older candidates, still not filed:
   every worker but one un-dialed); dispatch round-robins across the bootstrapped set.
 
   Measured live: `ClusterPipeline`'s own `pnpm bench:overhead` row moved from 217.08 ns/row
-  (HTTP-based, pre-#201) to 75.5 ns/row - close to a 3x reduction, beating the planning spike's own
-  composed ~33-35% estimate. Three findings, each caught by review and fixed before merge: (1) a
+  (HTTP-based, pre-#201) to roughly 69-71 ns/row - a 3.0-3.2x reduction, beating the planning spike's
+  own composed ~33-35% estimate. Seven findings, each caught by review and fixed before merge: (1) a
   reduce stream's own chunk and `inputDone` frames, dispatched concurrently rather than queued per
   `id`, could settle out of order - a `[1,2,3,4,5]` sum returned `[]` instead of `[15]` when the
   trailing flush ran before the chunk it was meant to flush had folded. (2) `WorkerSet`/`WsWorkerSet`
   both iterated `cluster.workers`, a registry `node:cluster` shares PROCESS-WIDE - a process
   constructing both a `ClusterHttpPipeline` and a `ClusterPipeline` had one class's idle timer kill
-  the other's still-in-flight workers. (3) `ClusterPipeline`'s own round-robin mutates the shared
+  the other's still-in-flight workers. (3) `ClusterPipeline`'s own round-robin mutated a shared
   dispatch-target field between concurrent dispatches (`maxConcurrency > 1`); a later dispatch's own
   reassignment could land inside an earlier one's `await`s and make it reject a perfectly healthy
-  connection as closed.
+  connection as closed - fixed by capturing the target once per dispatch. (4) That capture stopped
+  the wrong REJECTION, but the same shared field still raced on the WRITE: every partition of a
+  `maxConcurrency: 2` reduce launches in one synchronous burst, so every partition's own round-robin
+  write landed on the field before any of them read it back, collapsing all partitions onto whichever
+  worker the LAST write picked - `resolveConnect()`, a hook called fresh per dispatch with nothing
+  shared to race on, replaced the field entirely; a `maxConcurrency: 2` reduce reading
+  `totalConnections: 1` now reads 2, asserted directly in `websocket-pipeline.e2e.test.ts`'s
+  Done-when 4 test. (5) The connection counter itself was a plain incrementing total with no
+  decrement, so a transient reconnect on one worker read as two connections - now a `Set` sized on
+  query, with the socket deleted on close. (6) `reduceWork()`'s own connection setup could throw
+  before entering the `try`/`finally` that releases it, leaking an in-flight count the idle-kill
+  timer waits on forever. (7) `stageWork()`'s own dispatch registered a pending request before a
+  synchronous `send()` could throw, leaking that entry on a socket adapter whose `send()` throws
+  rather than silently drops (`ws`'s own does not; the seam is public, and another `PipelineSocket`
+  implementation can).
 
   `ws` 8.21.3 is this package's first runtime dependency - `bufferutil`/`utf-8-validate` (its own
   optional native-acceleration peers) stay absent from `package.json`, and `pnpm build && grep -c

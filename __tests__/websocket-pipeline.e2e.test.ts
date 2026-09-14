@@ -6,9 +6,11 @@
  *
  * Done-when 1, 3 and 4 run as subprocess fixtures - a real `ClusterPipeline` forks real workers, and
  * `cluster.fork()` re-execs `process.argv[1]`, Vitest's own entry inside a worker
- * (`pipelines.e2e.test.ts`'s own header). Done-when 3's fixture is timeout-guarded
- * (`queryConnections`, `__tests__/fixtures/websocket-cluster-connections.ts`) so a missing IPC
- * reply reads as a wrong number rather than a hang.
+ * (`pipelines.e2e.test.ts`'s own header). Done-when 3 and 4 both query worker connection counts
+ * through the shared `queryAllConnections()` helper (`__tests__/helpers/cluster-connections.ts`) so
+ * a missing IPC reply reads as a wrong number rather than a hang; Done-when 4 asserts on it too, the
+ * regression case for the round-robin fix (`resolveConnect()`, L3) - a partitioned reduce that
+ * collapses onto one worker still sums correctly, so the sum alone never caught that bug.
  *
  * Done-when 5-8 (`pnpm bench:overhead`, `package.json`'s `ws` dependency, the `dist` grep, the
  * file-scope constraint) are repo-wide gates, verified once at the end of the docs layer, not here.

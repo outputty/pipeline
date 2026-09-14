@@ -657,13 +657,15 @@ pool" finding. Every `stageWork()`/`reduceWork()` dispatch correlates its own re
 on it and evicts itself from the cache, so the next dispatch to that target dials fresh.
 
 ⚠ `WebSocketPipeline.stageWork()`/`reduceWork()` capture their own dispatch target ONCE, into a local
-`connectTarget`, rather than re-reading `this._connect` later in the same closure - `ClusterPipeline`
-(below) mutates that shared field on every dispatch for its own round-robin, and with
-`maxConcurrency > 1` several dispatches are in flight at once. A LATER dispatch's own reassignment
-landing between an EARLIER one's `await`s made the earlier one's own liveness check compare its
-healthy connection against a stranger's target and reject it as closed - found live, a `workers: 2,
-maxConcurrency: 2` reduce fixture failing with "connection closed before dispatch" on a connection
-that had never closed.
+`connectTarget`, rather than re-reading `this._connect` later in the same closure - a mutable shared
+field read back after an `await` is exactly the shape `ClusterPipeline`'s own round-robin race
+(below, `resolveConnect()`) went on to hit one level up, on `_connect` itself rather than on
+`connectTarget`'s read of it. Found live: a `workers: 2, maxConcurrency: 2` reduce fixture failed
+with "connection closed before dispatch" on a connection that had never closed, because a LATER
+dispatch's own reassignment of `this._connect` landed between an EARLIER one's `await`s. Superseded
+below: `resolveConnect()` removed the shared field this capture was ever protecting against, so
+`connectTarget` today is derived from `resolveConnect()`'s own return, never a re-read of
+`this._connect` at all.
 
 A reduce stage shares the connection like any other stage, correlated by the SAME `id` across every
 frame of its own stream: each upstream chunk is its own outgoing frame (`route`/`context` repeated
@@ -715,12 +717,34 @@ shares PROCESS-WIDE - before #201 review only one `WorkerSet` ever existed per p
 mattered; with two sibling classes now forking into the same shared registry, one class's idle timer
 could kill the OTHER's still-in-flight workers. Both now track `ownWorkerIds` and kill only their own.
 
+⚠ `ClusterPipeline.resolveConnect()` is the ONE override on the class - `bootstrapAndSetConnect()`/
+`stageWork()`/`reduceWork()` overrides that used to wrap the round-robin around a SHARED
+`this._connect` field are deleted entirely. That field-based design raced under
+`maxConcurrency > 1`: `ConcurrentPipeline.reduce()` launches every partition in ONE synchronous burst
+(`Array.from({length}, () => work(...))`), so every partition's own round-robin write landed on
+`this._connect` before any partition read it back - all of them ended up dispatching to whichever
+worker the LAST write picked. Found live: a `maxConcurrency: 2` reduce read `totalConnections: 1`,
+not 2 (`websocket-cluster-reduce.ts`'s own regression case, now asserted in
+`websocket-pipeline.e2e.test.ts`'s Done-when 4 test). `resolveConnect()` is called fresh by each
+dispatch (`wsWorkerSet.enter(this.workers)`) with nothing shared to race on - the base
+`WebSocketPipeline.resolveConnect()` still reads `this._connect` unchanged, single-target, for every
+class that never overrides it. `WsWorkerSet.enter()`'s own round-robin index increments
+synchronously right after its `await bootstrap()`, with no further `await` before the increment -
+concurrent callers queue on that one `await` in registration order, so each gets a DISTINCT index
+even when several `enter()` calls land in the same synchronous burst.
+
+`WsWorkerSet.startWorkerServer()`'s connection counter (queried by `#201`'s own Done-when 3 IPC
+channel) is a `Set<PipelineSocket>` sized on query, not an incrementing total - a plain counter with
+no decrement read a transient reconnect on one worker as two open connections; `onClose` deletes the
+socket from the set, so `.size` always reads what is connected NOW.
+
 Measured live, `pnpm bench:overhead`'s `ClusterPipeline` row: 217.08 ns/row (HTTP-based, pre-#201) to
-75.5 ns/row (this ticket) - close to a 3x reduction, beating the spike's own composed ~33-35%
-estimate. `bench/baseline.json` itself stays the pre-#201 number (`bench/*.ts` is outside this
-ticket's own file scope, Done-when 8) - `checkGate`'s own regression-only design never flags a
-speedup, so the gate stays green with a now-stale ceiling; a future ticket updating the baseline for
-real would tighten it, not loosen anything.
+roughly 69-71 ns/row (this ticket, post-round-robin-fix - three consecutive runs read 71.25, 68.61,
+69.60) - a 3.0-3.2x reduction, beating the spike's own composed ~33-35% estimate. `bench/
+baseline.json` itself stays the pre-#201 number (`bench/*.ts` is outside this ticket's own file
+scope, Done-when 8) - `checkGate`'s own regression-only design never flags a speedup, so the gate
+stays green with a now-stale ceiling; a future ticket updating the baseline for real would tighten
+it, not loosen anything.
 
 ## EventEmitterPipeline - #124
 
