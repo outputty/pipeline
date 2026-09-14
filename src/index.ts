@@ -46,12 +46,10 @@ export { HttpPipeline, type HttpPipelineOptions, toNodeHandler } from "./pipelin
 // exported so a caller can annotate their own client, plus the two shipped implementations.
 export { type PipelineClient, fetchClient, defaultClient } from "./pipelines/client";
 export { ClusterHttpPipeline, type ClusterHttpPipelineOptions } from "./pipelines/cluster";
-// `ClusterPipeline` (#201) - reparented onto `WebSocketPipeline` at L3. Until then this name is a
-// plain alias of the untouched HTTP class, so `main` keeps its happy path at every merge.
-export {
-  ClusterHttpPipeline as ClusterPipeline,
-  type ClusterHttpPipelineOptions as ClusterPipelineOptions,
-} from "./pipelines/cluster";
+// `ClusterPipeline` (#201, BREAKING, no deprecation period) - reparented onto `WebSocketPipeline`,
+// `ws+unix:` its default transport; the name every existing caller already imports, unchanged.
+// `ClusterHttpPipeline` (above) is the untouched HTTP/TCP class for a caller who wants it instead.
+export { ClusterPipeline, type ClusterPipelineOptions } from "./pipelines/cluster";
 export {
   EventEmitterPipeline,
   type EventEmitterPipelineOptions,
