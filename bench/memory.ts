@@ -219,6 +219,59 @@ function httpWorker(): HttpPipeline<number> {
   return new HttpPipeline<number>({ url: "" }).transform(canonicalChain);
 }
 
+/** `.when("evens", ...).when("big", ...).otherwise("rest")` - the three-arm shape "Branch router"
+ * and "Branch broadcast" (below) both share, `.broadcast()` the only difference between them
+ * (#180's own Done-when 2, 3). No arm `build`, so a matched item passes through unchanged. Built on
+ * `ConcurrentPipeline({ maxConcurrency: MAX_CONCURRENCY })`, per the ticket's own Done-when 3 -
+ * `.branch()`'s matching and join never dispatch regardless of class (`architecture.md`'s
+ * "Branching" section), so this measures the memory cost of classifying+joining on a class that
+ * COULD dispatch, not a dispatch itself. */
+function branchThreeWay(
+  rows: number[],
+  broadcast: boolean,
+): Promise<{ evens: number[]; big: number[]; rest: number[] }> {
+  const half = rows.length / 2;
+  const runner = new ConcurrentPipeline<number>({ maxConcurrency: MAX_CONCURRENCY })
+    .buffer(BUFFER_SIZE)
+    .branch((b) => {
+      const withArms = b
+        .when("evens", (x: number) => x % 2 === 0)
+        .when("big", (x: number) => x > half)
+        .otherwise("rest");
+      return broadcast ? withArms.broadcast() : withArms;
+    });
+  return Promise.resolve(runner(rows)) as Promise<{
+    evens: number[];
+    big: number[];
+    rest: number[];
+  }>;
+}
+
+/** The identity a real `branchThreeWay(rows, true)` run produces, computed independently rather
+ * than run twice: `evens`/`big` overlap on a row that is both, and the catch-all takes EVERY row
+ * under broadcast (`branch.ts`'s own "under broadcast the catch-all takes every item" rule) - the
+ * same reason `comparisonCases` precomputes its own `expected` rather than deriving it from a
+ * second, unmeasured run. */
+function branchBroadcastExpected(rows: number[]): MemoryIdentity {
+  const half = rows.length / 2;
+  let count = 0;
+  let checksum = 0;
+  for (const x of rows) {
+    if (x % 2 === 0) {
+      count++;
+      checksum += x;
+    }
+    if (x > half) {
+      count++;
+      checksum += x;
+    }
+    // "rest" - the catch-all, taking every row under broadcast regardless of the other two arms.
+    count++;
+    checksum += x;
+  }
+  return { count, checksum };
+}
+
 /** Every case this bench measures, sharing `canonical.ts`'s own chain and input with
  * `bench/overhead.ts` so the two benches never drift apart on what they run. */
 /** The two scales `#178`'s own competitive comparison runs at: large enough that the array-chain
@@ -353,6 +406,7 @@ function comparisonCases(scaleRows: number): Case[] {
 function cases(): Case[] {
   const rows = canonicalInput(IN_PROCESS_ROWS);
   const kept = identityOf(handRolledFloor(rows));
+  const rowsIdentity = identityOf(rows);
   const dispatchRows = canonicalInput(DISPATCH_ROWS);
   const dispatchKept = identityOf(handRolledFloor(dispatchRows));
   const clusterPipeline = new ClusterPipeline<number>({
@@ -417,6 +471,42 @@ function cases(): Case[] {
         return seen;
       },
       kept,
+      IN_PROCESS_ROWS,
+    ],
+    [
+      // Router mode (the default): every item goes to exactly ONE of three mutually exclusive,
+      // exhaustive arms - no arm `build`, so matched items pass through unchanged and the union of
+      // every arm's own output is exactly `rows`, unreordered. `maxConcurrency: 4` on the PARENT
+      // class (#180's own Done-when 3) - `.branch()`'s own matching and join never dispatch
+      // regardless of class (architecture.md's "Branching" section), so this measures the memory
+      // cost of classifying+joining on a class that COULD dispatch, not a dispatch itself.
+      "Branch router",
+      // Returns the combined arm output as a plain array, same as every other case here - the
+      // checksum/count tally happens in `identityOf`, AFTER this run is timed and profiled
+      // (code-review finding: an earlier revision tallied inside the timed closure via a separate
+      // `sumArms` helper, inflating this case's own ns/row and promises/row past what its sibling
+      // cases pay for the identical kind of work).
+      async () => {
+        const record = await branchThreeWay(rows, false);
+        return [...record.evens, ...record.big, ...record.rest];
+      },
+      // router covers every row exactly once (no arm `build` - matched items pass through
+      // unchanged), so the union's own count/checksum is identical to `rows` itself.
+      rowsIdentity,
+      IN_PROCESS_ROWS,
+    ],
+    [
+      // `.broadcast()`: the SAME three-arm shape, but every matching arm takes the item rather than
+      // only the first - `evens` and `big` overlap on every row that is both, and the catch-all
+      // takes EVERY row under broadcast (branch.ts's own "under broadcast the catch-all takes every
+      // item" rule). `branchBroadcastExpected` computes the identical sum a real broadcast run
+      // produces, the same way `comparisonCases` precomputes its own `expected`.
+      "Branch broadcast",
+      async () => {
+        const record = await branchThreeWay(rows, true);
+        return [...record.evens, ...record.big, ...record.rest];
+      },
+      branchBroadcastExpected(rows),
       IN_PROCESS_ROWS,
     ],
     [
