@@ -119,7 +119,9 @@ const events = [
 ];
 
 const chunks: unknown[][] = [];
-for await (const chunk of new Pipeline(events).buffer(fiveMinuteWindow)(events).chunks()) {
+for await (const chunk of new Pipeline<{ id: number; ts: number }>()
+  .buffer(fiveMinuteWindow)(events)
+  .chunks()) {
   chunks.push(chunk);
 }
 ```
@@ -158,6 +160,12 @@ const data = await new Pipeline<number>()
 [6, 8, 10]
 ```
 
+A `function*`/`async function*` source carries its own protocol cost - about 4 promises per row at
+10,000 rows - paid once per `.next()` call regardless of who consumes it; this package's own
+consumption already sits within a fraction of a percent of that floor. A plain `AsyncIterable` built
+by hand, rather than a generator function, halves it: prefer one when you control how a source is
+built and the difference matters at your own scale.
+
 ### Where the work runs
 
 The class you construct decides where a chain's chunks are processed. The chain itself - the
@@ -185,7 +193,9 @@ changes.
 > chain, so a dispatching class sends a chunk and a stage index, never a function.
 > **`.local(build)`** - runs a whole region of the chain in the orchestrating process, on every
 > class the same way: builds a base `Pipeline` over the caller's own chunk stream, runs `build`
-> against it (nothing inside can dispatch), and resumes the caller's own class afterward.
+> against it (nothing inside can dispatch), and resumes the caller's own class afterward. Every
+> dispatching class's own `.local()` cost is gated to stay within a measured range of a bare
+> `Pipeline`'s own cost, so a pinned region cannot drift from what pinning is meant to buy.
 > **Items in flight** - the number of callbacks a chain runs at once: the buffer size times
 > `maxConcurrency`. `maxConcurrency` bounds CHUNKS; the items inside one chunk run together.
 
@@ -201,6 +211,14 @@ ran 27 ms and 63 ms, because a narrow chunk pays the per-chunk cost more often.
 | 100 | 3 | 300 |
 | 1 | 16 | 16 |
 
+Buffer size dominates `maxConcurrency` on the canonical `.map().filter()` chain, 200,000 rows on
+`ConcurrentPipeline`: every row of a 10,000-item buffer beats every row of a 100-item one, whatever
+`maxConcurrency` is set to (13.02, 11.92, 12.15 ns/row across `maxConcurrency` 1, 4, 16, against
+25.66, 20.35, 19.03 for a 100-item buffer). `maxConcurrency` matters most at a small buffer and least
+at a large one, and pushing it past 4 at the default buffer size (1000) stopped helping on this chain
+- 16 read worse than 4 (18.04 against 14.73 ns/row), the fan-out's own scheduling overhead
+outweighing the parallelism gained. The defaults - `.buffer()` unset at 1000, `maxConcurrency` unset
+at 4 - stay a reasonable point on this chain, not its fastest cell.
 
 ```ts
 import { ClusterPipeline } from "@outputty/pipeline";

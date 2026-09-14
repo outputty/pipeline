@@ -7,6 +7,39 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-14 Guessing proximity to a `/goal`'s own turn-cap and drafting an early handoff, twice
+
+Building #180, after L1 and again after L2, the session reasoned it was "probably close" to the
+`/goal`'s own 80-turn cap and prepared a status comment to hand the build off mid-layer, based on no
+observable count. `advisor()` reversed both: the cap either fires or doesn't, and commit granularity
+- not pacing against a guessed number - is what actually protects a mid-layer cutoff. Both times the
+session continued at full pace once corrected. `~/.claude/rules/code.md`'s "Prove it"-adjacent
+background-work section gained a new line naming the turn cap directly, since nothing previously
+addressed guessing at an exit condition a session cannot see from inside itself.
+
+## 2026-09-14 A background spike read 589 minutes deferred, CPU% alone read as reassurance
+
+Building #180's L6, a discriminating-check spike expected to run 5-10 minutes deferred for 589
+minutes; checking `ps aux` showed ~99% CPU and the session concluded "still computing, not stuck,"
+continuing to wait. The user had to say `kill the process and try again` directly. CPU activity
+proves a task is WORKING, never that it isn't also stuck on a pathological input - the signal that
+mattered was elapsed time against the task's own ~5-10 minute estimate, 60-100x over by then.
+`~/.claude/rules/code.md`'s existing "killed with `TaskStop` if stuck" line gained the missing
+criterion for "stuck": compare elapsed time to the task's own expected duration, not CPU% alone.
+
+## 2026-09-14 Three findings attributed a measured gap to a cause before bounding the cause's own maximum
+
+Building #180's L4/L5/L6, three separate findings (an EventEmitterPipeline parity spread, an HTTP
+encode/decode split, a reorder-buffer retention gap) named a specific mechanism as the cause of a
+measured cost and were written into a PR body or docstring before checking whether that mechanism
+could plausibly produce a gap that size. `advisor()` caught all three via one-line arithmetic:
+L6's named cause (a reorder buffer bounded under 24 KB) was four orders of magnitude below the 2.2
+MB gap credited to it; L5's two individually-measured sub-costs each exceeded their own combined
+reading; L4's "measurement-order artefact" explanation covered one of two effects a swap probe
+actually showed. `~/.claude/rules/code.md`'s "Prove it" section gained a line: bound a proposed
+cause's own maximum contribution, or sum sub-measurements against their combined reading, before
+naming a cause in a written finding.
+
 ## 2026-09-11 `.tap()`'s async overload narrowed `Promise<unknown>` to `Promise<void>`, silently matching the wrong overload
 
 Building #117's anti-slop cleanup, the same `unknown` → `void` swap that is safe at a bare return

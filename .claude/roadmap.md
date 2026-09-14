@@ -64,6 +64,38 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **A fifth benchmark leg, a fourth dispatching class's own legs, and five real findings** (#180,
+  `perf`, PR #194/#195/#197/#198/#199/#<DOCS_PR>) - `bench/legs/branch.ts` measures `.branch()`
+  against a hand-rolled floor producing the identical record, its own `LEG_TOLERANCE` (0.15) set from
+  a measured five-run spread; `bench/memory.ts` gains a router case and a broadcast case, both
+  committed to the baseline at `maxConcurrency: 4` on 2+ arms. `EventEmitterPipeline` (#124) gains a
+  leg in `bench/overhead.ts` and two cases (dispatched, `.local()`) in `bench/memory.ts`, its own
+  zero-Workers-while-pinned correctness assertion, and joins a new `checkLocalParity` gate
+  (`bench/gate.ts`) comparing every dispatching class's own `.local()` cost against a bare
+  `Pipeline`'s, from one report, no baseline file needed.
+
+  Five findings. (1) `runBranch`'s collect-then-walk cost 2.27x a single-pass floor - FIXED:
+  `classifyItems`/`classifyAsyncChunks` fuse collection and classification into one walk, reusing the
+  `dispatchSync`/`drainSync` primitives every other synchronous drain already shares. (2)
+  `EventEmitterPipeline`'s own `.local()` parity ratio reads 30% above its siblings - HALF explained:
+  a swap probe isolated a measurement-order artefact in `Pipeline`'s own reading, but
+  `EventEmitterPipeline`'s absolute cost stayed elevated regardless of position, unexplained further
+  (`architecture.md`'s own Internal overhead benchmarks section). (3) `HttpPipeline`'s dispatched cost
+  splits three ways by removing each part on the real path: round trip is 60-75% and already
+  optimized (#179); encode and decode do not decompose into separate numbers by removal on this path
+  - no fix lands, the round trip is the boundary itself. (4) `fromSource()`'s ~4 promises/row cost
+  over a genuine async generator source is the language's OWN protocol floor, confirmed by a
+  hand-rolled `.next()`-based consumer measuring identically to a plain `for await` drain (4.000
+  against 4.001) - unfixable, `fromSource()` already sits within 0.3% of it. (5) `ordered:true`'s
+  reorder buffer, measured on `heldAtEndMB` against `ordered:false` on the identical chain: the
+  buffer's own real bound (under `(maxConcurrency - 1)` chunks) is below this instrument's resolution
+  on the canonical chain - negligible, not the cause of the gap the case measures.
+
+  `.buffer(size)`/`maxConcurrency` tuning guidance, re-measured on the current tree (README.md,
+  `.claude/product.md`): buffer size dominates concurrency, and pushing `maxConcurrency` past 4 at
+  the default buffer stopped helping on the canonical chain. `DEFAULT_CHUNK_SIZE`/`maxConcurrency`'s
+  own defaults (1000/4) are unchanged.
+
 - **The per-row costs the async engine was paying for chunk-shaped data** (#179, `perf`) - six fixes,
   each located by measurement rather than by reading, and the largest of them nowhere this document
   had been looking. `buildSyncChunkGenerator` cuts an array with `slice`; `settleRows` keeps one
@@ -439,6 +471,18 @@ The two older candidates, still not filed:
   `In`/`Out` with no `transform`. PRs #7, #8, #10, #12.
 
 ## Killed
+
+- **Normalizing an async generator source through a hand-rolled iterator inside `fromSource()`**
+  (#180) - the premise was that `fromSource()`'s own consumption of a genuine async generator adds
+  avoidable cost on top of the source's own price. Killed on measurement: a hand-rolled consumer
+  pulling the SAME generator via `.next()` directly, bypassing `for await`'s own sugar entirely,
+  measured 4.000 promises/row against a plain `for await` drain's 4.001 at N=10,000 - no daylight
+  between them, and `fromSource()`'s own real path already reads 4.013, within 0.3% of that floor.
+  The cost is the async generator PROTOCOL's own resumption machinery (V8's), paid once per `.next()`
+  call regardless of who calls it - not reachable from any consuming shape. A hand-rolled,
+  non-generator `AsyncIterable` DOES halve the cost (2.001 promises/row, same `for await`
+  consumption) - the fix available to a caller who controls how their own source is built, not to
+  this package's own consumption of a generator it did not build.
 
 - **A synchronous `.local()` region on a dispatching class** (#179's own first draft) - the design
   was to let a pinned region run the sync engine, on the premise that `sourcePolicy()` forcing Mode

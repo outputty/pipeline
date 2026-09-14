@@ -451,6 +451,18 @@ engine, skips only the round trip: the bare `Pipeline` it builds still pays chun
 never 0, so the speedup a pinned region buys is the removed dispatch (a `stageWork()` call, an HTTP
 round trip, a cross-process hop), not the framework itself.
 
+`ordered: true`'s own reorder buffer (`fanOutOrdered`'s sliding window, above) holds at most
+`maxConcurrency - 1` resolved-but-unyielded chunks - under 24 KB at the default `maxConcurrency: 4`
+(#180's own Done-when 11). Measured on `bench/memory.ts`'s `heldAtEndMB` axis (the mid-run peak, not
+`retainedMb`'s post-two-forced-GC leak reading - a reorder buffer releases everything it ever held
+well before a run ends, so `retainedMb` reads near-zero regardless): `ordered:false` reads a stable
+16.5 MB against `ordered:true`'s stable 14.3 MB on a chain built to trigger holding, the opposite of
+the naive prediction. A discriminating check (re-run at `maxConcurrency: 64`, raising the buffer's
+own bound to under 500 KB) found no consistent gap-vs-window-size correlation across three runs -
+the buffer's own real footprint is below `heldAtEndMB`'s resolution on this chain; the measured gap
+is something else, unverified further (`fanOutUnordered`'s own `Promise.race()`-based bookkeeping,
+a `Map<number, Promise>` re-raced on every settle, is the untested candidate).
+
 That async-engine cost is essentially GONE, and the reason it survived so long is a diagnosis this
 document had wrong. It read: reducible, though not eliminable while `sourcePolicy()` still pins Mode
 to `"async"`. Measured, the forced Mode costs nothing on its own - `ConcurrentPipeline` with zero
@@ -476,6 +488,30 @@ Measured on `bench/overhead.ts`, median of five runs: `ConcurrentPipeline`'s pin
 2 ns/row of running that region on a plain `Pipeline` - which is what pinning a region always claimed
 to mean. `bench/memory.ts` measures the same chains for allocation: `Concurrent .local() region` fell
 from 992 MB per 500,000 rows to 47, and its collections from 30 to 1.
+
+`HttpPipeline`'s own DISPATCHED cost (`stageWork()`'s full round trip through `options.client`)
+splits three ways by REMOVING each part on the real dispatched path (#180, four real A/B runs on a
+loopback server, never isolated micro-timing - `.claude/rules/code.md`'s own rule): the round trip
+itself is 60-75% of the total (235-278 ns/row of ~350-371) and is the DOMINANT cost, real socket I/O
+over `node:http`'s own keep-alive `Agent`, already this fix's own target. Encode and decode (JSON
+`stringify`/`parse` on both sides) together bound under the remaining 93-115 ns/row - removing either
+ALONE changes the dispatch's own concurrency/queuing shape enough to swamp the measurement, so the
+two do not decompose into separate numbers on this path (a real A/B delta does not always compose by
+subtraction - `code.md`'s own 2026-09-12 entry). No fix lands: the round trip IS the boundary, already
+optimized by this section's own point 4, and JSON's own wire format is #172's finding, not
+re-litigated here.
+
+`fromSource()`'s own async-generator branch (point 2 above is the ARRAY-forced-async branch; a
+GENUINE async generator source keeps the general path, `toAsyncIterable` + `buildChunkGenerator`'s
+`for await`) reads ~4.0 promises per row at N=10,000 - `collectItems()`'s own docstring already
+named this "the source's own floor" (#179). #180 confirms it is truly unreachable, not merely
+unoptimized: a hand-rolled `.next()`-based consumer of the SAME generator, bypassing `for await`'s
+own sugar entirely, measured 4.000 promises/row against a plain `for await` drain's 4.001 - no
+daylight between them - while today's real `fromSource()` path measures 4.013, within 0.3% of that
+floor already. The cost is the async generator PROTOCOL's own resumption machinery, paid once per
+`.next()` call regardless of who calls it; no consumer shape, hand-rolled or otherwise, reaches below
+it. No fix lands, recorded as why rather than attempted: `fromSource()` is already within noise of
+the language's own floor.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
 createPipeline<U, R = AnyPipeline<U>>(chunks, options)` that calls `this.constructor` rather than a
@@ -762,8 +798,8 @@ ran every arm in the orchestrating process however the chain was built.
 ```text
 routed(orders)
 	parent chain drains          /transform/0                 worker
-	demux                                                     orchestrator
-		predicates, a plain loop   never dispatched
+	classifyItems                                             orchestrator
+		claimItem per row, one fused walk   never dispatched
 		one chunk in, one chunk PER ARM out
 	router
 		big  -> its own pipeline   /branch/0/big/transform/0    worker
@@ -783,11 +819,21 @@ can only buffer without bound, deadlock, or starve; measured on the shipped `sha
 view to completion gives it everything and the other `[]`. Owning the concurrency inside the join is
 what makes that unrepresentable.
 
-Nothing here is new machinery: the demux is `Transformer.reduce()`'s own shape - fold one chunk, keep
-no state between chunks - and the join is `settleMaybe` + `chain`. That reuse is what makes the Mode
-rule reachable rather than aspirational: every arm synchronous creates ZERO promises, and one
-asynchronous arm widens the whole record to a single `Promise` while its synchronous siblings are
-never wrapped.
+Nothing here is new machinery: `classifyItems`/`classifyAsyncChunks` share `claimItem` for the
+per-item classify step and `dispatchSync`/`drainSync` (`utils/drain.ts`, #133) for the sync/async
+split every other synchronous drain in the package already uses, and the join is `settleMaybe` +
+`chain`. That reuse is what makes the Mode rule reachable rather than aspirational: every arm
+synchronous creates ZERO promises, and one asynchronous arm widens the whole record to a single
+`Promise` while its synchronous siblings are never wrapped.
+
+⚠ `runBranch` used to `collectItems()` the whole parent chain into one array, THEN walk it a second
+time with a separate `demux()` - two full passes over every row, one to materialize, one to
+classify (#180's own finding, Done-when 4). Measured: the two-pass shape cost 2.27x a single-pass
+floor over the identical input, spiked and confirmed before the fix landed. Fixed, not Killed:
+`classifyItems`/`classifyAsyncChunks` classify WHILE draining, reusing the same `dispatchSync`/
+`drainSync` primitives `collectItems()` itself is built from, so no intermediate array is
+materialized at all - `runBranch`'s own body shrank from a collect call plus a `demux()` call to one
+`classifyItems()` call.
 
 An arm's stages address themselves under `/branch/<i>/<name>/`, the branch positional so two
 `.branch()` calls may each declare an arm called `rest`, the arm by name. Without the trail an arm's
@@ -844,19 +890,45 @@ the next, below stable measurement resolution (code-review finding). The floor c
 identical across every row for exactly this reason - one measurement, not four.
 
 Committed baseline (`bench/baseline.json`), one machine, `Array.prototype` kept as a reference row -
-it runs no `Pipeline` machinery at all, so it carries no ratio of its own:
+it runs no `Pipeline` machinery at all, so it carries no ratio of its own. Two legs joined after
+#120's own table below was first written - `Branch` (#180, never dispatches - `.branch()`'s own
+matching and join always run where the chain runs) and `EventEmitterPipeline` (#180, the fourth
+dispatching class, #124):
 
-| Class                | ns/row | floor ns/row | ratio  | `.local()` ns/row | `.local()` correctness      |
-| --------------------- | ------ | ------------ | ------ | ------------------ | ---------------------------- |
-| `Array.prototype`     | 16.40  | -            | -      | -                   | -                             |
-| `Pipeline`             | 27.46  | 11.15        | 2.46x  | -                   | (never dispatches)           |
-| `ConcurrentPipeline`   | 289.10 | 11.15        | 25.93x | 278.43              | 0 `stageWork()` calls         |
-| `HttpPipeline`         | 744.42 | 11.15        | 66.76x | 252.76              | 0 HTTP requests served        |
-| `ClusterPipeline`      | 656.83 | 11.15        | 58.91x | 257.11              | every item on the primary pid |
+| Class                  | ns/row | floor ns/row | ratio | `.local()` ns/row | `.local()` correctness                     |
+| ---------------------- | ------ | ------------ | ----- | ------------------ | -------------------------------------------- |
+| `Array.prototype`      | 16.40  | -            | -     | -                   | -                                             |
+| `Pipeline`              | 16.84  | 11.23        | 1.50x | -                   | (never dispatches)                           |
+| `ConcurrentPipeline`    | 17.20  | 11.23        | 1.53x | 15.86               | 0 `stageWork()` calls                        |
+| `HttpPipeline`          | 342.95 | 11.23        | 30.55x| 17.77               | 0 HTTP requests served                       |
+| `ClusterPipeline`       | 196.24 | 11.23        | 17.48x| 18.12               | every item on the primary pid                |
+| `Branch`                | 22.94  | 11.23        | 2.04x | -                   | (never dispatches)                           |
+| `EventEmitterPipeline`  | 24.80  | 11.23        | 2.21x | 22.85               | 0 Workers registered or fired while pinned   |
 
 `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`'s numbers above already carry the async-engine
-tax reduction (#120 follow-up, above): the committed pre-reduction baseline read 541.49 / 1103.72 /
-831.81 ns/row dispatched and 535.34 / 479.72 / 496.05 pinned - roughly double every figure here.
+tax reduction (#120 follow-up, above) and #179's own per-row-cost fixes: the ORIGINAL #120 baseline
+(before either) read 289.10 / 744.42 / 656.83 ns/row dispatched and 278.43 / 252.76 / 257.11 pinned -
+roughly 15-17x every dispatched figure here, 15-16x every pinned one.
+
+**`checkLocalParity` (`bench/gate.ts`, #180)** - `checkGate` above compares each leg to its OWN
+committed baseline, so the five `.local()` rows in the table could drift apart from EACH OTHER
+indefinitely with no violation. `checkLocalParity(report)` instead compares every dispatching
+class's own `local.nsPerRow` against `Pipeline`'s `pipelineNsPerRow` FROM THE SAME REPORT, no
+baseline file needed - regression-only, a ratio below its own ceiling (even below 1.0) is never a
+violation. `pnpm bench:overhead` runs both gates; either failing sets `process.exitCode = 1`.
+
+⚠ Finding (Done-when 9): `EventEmitterPipeline`'s own parity ratio reads consistently above its
+three siblings (1.3-1.47x across five runs, against 0.92-1.16x for the others) - a swap probe
+(measuring `EventEmitterPipeline` FIRST instead of last in the run order) isolated TWO effects, not
+one. `Pipeline.pipelineNsPerRow` itself is a measurement-order artefact - it moved from 16.89 (read
+first) to 27.09 (read second) with no code change. `EventEmitterPipeline`'s own absolute
+`local.nsPerRow` held stable at ~22-24 ns/row regardless of position - roughly 30% above `Pipeline`'s
+own stable-when-first ~17, a residual that survived the swap and stayed unexplained. Half explained,
+not fully: `LOCAL_PARITY_CEILING`'s own per-class values (`ConcurrentPipeline`/`HttpPipeline` 1.15,
+`ClusterPipeline` 1.35, `EventEmitterPipeline` 1.65) bake in both effects, read off the real, shipped
+run order - NOT a claim that `.local()` costs the identical amount on every class. Untested candidate
+for the residual: `EventEmitterPipeline.drainable()` wraps every drain in `withEndSignal`
+unconditionally (above), a cost the other three classes do not pay the same way.
 
 `Pipeline` has no `.local()` row: the base class never dispatches, so pinning it changes nothing to
 measure. O1 (#120) collapsed `Transformer.filter()`'s sync no-handler branch from three passes to
