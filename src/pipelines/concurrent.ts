@@ -18,6 +18,8 @@ import type {
   SourcePolicy,
   PipelineMode,
   ChunkTransform,
+  RouteVerb,
+  StageRegistries,
   Tagged,
   ReduceWork,
 } from "@src/types";
@@ -488,5 +490,25 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     // this method's return value drives - the same seam `apply()` (above) uses to populate this
     // pipeline's own `_chunkTransforms` entry.
     return transformer.runnable();
+  }
+
+  /**
+   * The outgoing route for `verb`/`index`, shared by every remote-addressed dispatching class
+   * (#201, review: `HttpPipeline` and `WebSocketPipeline` each carried an identical copy of this
+   * method - moved here so `ClusterPipeline`/`ClusterHttpPipeline` (each already overriding it to
+   * prefix `/pipeline/<pipelineIndex>`) override ONE canonical base implementation rather than two
+   * independently maintained ones). `EventEmitterPipeline` inherits it unused - it addresses
+   * Workers by plain event name, never a route - which costs nothing at runtime.
+   */
+  protected routePath(verb: RouteVerb, index: number): string {
+    return `${this._routeTrail}/${verb}/${index}`;
+  }
+
+  /** This pipeline's own stage registries, or an ARM's when `trail` names one - the one place
+   * `HttpPipeline.fetch()`/`WebSocketPipeline.serve()` both resolve a route's trail, rather than
+   * each spelling the same ternary over the base `Pipeline`'s own `registries()`/`registriesFor()`
+   * (#201, same reuse as `routePath()` above). */
+  protected resolveRegistries(trail: string | null): StageRegistries | null {
+    return trail === null ? this.registries() : this.registriesFor(trail);
   }
 }

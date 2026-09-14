@@ -22,7 +22,6 @@ import type {
   InternalTransformer,
   ReduceFunction,
   PipelineMode,
-  ChunkTransform,
   ReduceStage,
   ReduceWork,
   RouteVerb,
@@ -448,30 +447,6 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     runReduceStage(stage, request, this._context, writer).catch(() => writer.abort());
 
     return new Response(readable, { headers: { "content-type": "application/x-ndjson" } });
-  }
-
-  /** The outgoing path for `verb`/`index`, and (via `.fetch()`'s prefix-agnostic trailing-segment
-   * match) the incoming one too - one shared stage-index space for both `/transform/<n>` and
-   * `/reduce/<n>` (#45).
-   *
-   * The verb is `transform`, not `stage` (#90): a route now reads as the chain was BUILT rather
-   * than as a flat counter, so a reader can walk `/transform/1` back to the second `.transform()`
-   * call without counting dispatched stages. `.branch()`'s own arms extend the same scheme with a
-   * `/branch/<i>/<name>/` trail. `ClusterHttpPipeline`
-   * overrides this alone to route several pipeline definitions through one shared worker server
-   * (`/pipeline/<i>/<verb>/<n>`) without touching `stageWork()`/`reduceWork()`'s own dispatch logic
-   * or `.fetch()`'s parsing at all. */
-  protected routePath(verb: RouteVerb, index: number): string {
-    return `${this._routeTrail}/${verb}/${index}`;
-  }
-
-  /** This pipeline's own stage registries, or an ARM's when `trail` names one - `null` for a trail
-   * naming no arm this deployment holds. The one place `fetch()` and `serveReduceRequest()` both
-   * resolve, rather than each spelling the same ternary. */
-  private resolveRegistries(
-    trail: string | null,
-  ): { chunkTransforms: ChunkTransform[]; reduceStages: Map<number, ReduceStage> } | null {
-    return trail === null ? this.registries() : this.registriesFor(trail);
   }
 
   /**

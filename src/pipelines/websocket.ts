@@ -272,7 +272,11 @@ function getConnection(connect: string): ClientConnection {
   });
 
   const evictAndFail = (message: string): void => {
-    connections.delete(connect);
+    // Only evicts THIS connection, never whatever the cache currently holds - a socket typically
+    // fires both "error" and "close" for the same failure, and by the time the second one runs, a
+    // concurrent dispatch may already have registered a fresh, healthy connection under the same
+    // key. Deleting unconditionally would drop that live connection out of the cache for no reason.
+    if (connections.get(connect) === conn) connections.delete(connect);
     for (const request of pending.values()) request.onError(message);
     pending.clear();
   };
@@ -364,21 +368,6 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * `~/.claude/rules/typescript.md`) - same reason as `.local()` above. */
   override queue(capacity: number): WebSocketPipeline<T, In> {
     return super.queue(capacity) as unknown as WebSocketPipeline<T, In>;
-  }
-
-  /** The outgoing route for `verb`/`index` (and, via `parseRoute`'s identical grammar, the incoming
-   * one too) - mirrors `HttpPipeline.routePath()` exactly, so `ClusterPipeline` (#201 L3) overrides
-   * it the same way `ClusterHttpPipeline` overrides `HttpPipeline`'s: prefixing
-   * `/pipeline/<pipelineIndex>`. */
-  protected routePath(verb: RouteVerb, index: number): string {
-    return `${this._routeTrail}/${verb}/${index}`;
-  }
-
-  /** This pipeline's own stage registries, or an ARM's when `trail` names one - mirrors
-   * `HttpPipeline`'s own private helper of the same name (kept as its own copy: the two classes
-   * share no base method for this, only the base `registries()`/`registriesFor()` they both call). */
-  private resolveRegistries(trail: string | null) {
-    return trail === null ? this.registries() : this.registriesFor(trail);
   }
 
   /** Every `id`'s own tail promise - `serve()` chains each new frame for a given `id` onto the
@@ -575,6 +564,19 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           await conn.ready;
           const id = conn.nextId++;
           const payload = await this._codec.encode(chunk);
+          // The two awaits above are the window a close/error can race through: `getConnection()`'s
+          // own `evictAndFail` rejects only requests already in `pending` at the moment it runs, so
+          // an entry registered AFTER that moment would otherwise never settle. Checked here, with
+          // no further await before `pending.set()` below, so nothing can race between this check
+          // and the registration it guards.
+          if (connections.get(this._connect) !== conn) {
+            reject(
+              new Error(
+                `stage ${stageIndex} at ${this._connect} failed: connection closed before dispatch`,
+              ),
+            );
+            return;
+          }
           conn.pending.set(id, {
             onFrame: (_header, responsePayload) => {
               conn.pending.delete(id);
@@ -650,10 +652,18 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       // that consumes it" ordering `.claude/rules/code.md` names for a duplex probe.
       const pump = (async (): Promise<void> => {
         for await (const chunk of chunks) {
+          // The stream already failed or closed (this id's own `onError`/`done` fired) - `break`
+          // runs the async-iteration protocol's own `.return()` on `chunks`, releasing this
+          // partition's `share()` view rather than continuing to pull chunks a dead id can no
+          // longer use away from sibling partitions still folding for real.
+          if (streamDone) break;
           const payload = await self._codec.encode(chunk);
+          if (streamDone) break;
           conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
         }
-        conn.socket.send(encodeFrame({ id, route, inputDone: true }, new Uint8Array(0)));
+        if (!streamDone) {
+          conn.socket.send(encodeFrame({ id, route, inputDone: true }, new Uint8Array(0)));
+        }
         // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a rejected pump can carry anything JS can throw, the same catch-boundary contract toNodeHandler's own bridge (http.ts) already discloses
       })().catch((error: unknown) =>
         fail(error instanceof Error ? error : new Error(String(error))),
@@ -684,25 +694,14 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   }
 }
 
-/** The one Node-only bridge every `WebSocketPipeline` server needs (#201) - Node exposes no
- * upgrade-to-WebSocket handler natively, the same gap `toNodeHandler` (`http.ts`) bridges for
- * `.fetch()`. `wss` is `noServer`-mode, so it never listens itself; the caller's own `"upgrade"`
- * listener on a real `http.Server` (or the unix-socket-bound one `ClusterPipeline`'s own workers
- * run, #201 L3) calls `.upgrade()` with the raw request/socket/head Node hands it.
- *
- * Every accepted connection is wrapped once and handed to `pipeline.serve()` - one call site for
- * the `"connection"` event `#201`'s own Done-when 3 counts.
- *
- * Its own parameter/return types are derived from `ws`'s own `WebSocketServer.handleUpgrade`
- * signature (`Parameters<...>`) rather than importing `node:http`/`node:stream` directly - this
- * file carries no `node:` import of its own, so it needs none of `.oxlintrc.json`'s per-file
- * exceptions the other three dispatching files already have.
- *
- * `createServer((req, res) => { ... }).on("upgrade", (req, socket, head) =>
- * toNodeWebSocketHandler(pipeline).upgrade(req, socket, head))`.
- */
+/** `toNodeWebSocketHandler()`'s own parameter derivation - `ws`'s own `WebSocketServer.handleUpgrade`
+ * signature (`Parameters<...>`), rather than an explicit `node:http`/`node:stream` import: this file
+ * carries no `node:` import of its own this way, so it needs none of `.oxlintrc.json`'s per-file
+ * exceptions the other three dispatching files already have. */
 type HandleUpgradeParams = Parameters<InstanceType<typeof WebSocketServer>["handleUpgrade"]>;
 
+/** The shape `toNodeWebSocketHandler()` (below) returns - one method, taking the same raw
+ * request/socket/head Node's own `"upgrade"` event hands a listener. */
 export interface NodeWebSocketHandler {
   upgrade(
     request: HandleUpgradeParams[0],
@@ -711,6 +710,19 @@ export interface NodeWebSocketHandler {
   ): void;
 }
 
+/**
+ * The one Node-only bridge every `WebSocketPipeline` server needs (#201) - Node exposes no
+ * upgrade-to-WebSocket handler natively, the same gap `toNodeHandler` (`http.ts`) bridges for
+ * `.fetch()`. The returned `wss` is `noServer`-mode, so it never listens itself; the caller's own
+ * `"upgrade"` listener on a real `http.Server` (or the unix-socket-bound one `ClusterPipeline`'s
+ * own workers run, #201 L3) calls `.upgrade()` with the raw request/socket/head Node hands it.
+ *
+ * Every accepted connection is wrapped once and handed to `pipeline.serve()` - one call site for
+ * the `"connection"` event `#201`'s own Done-when 3 counts.
+ *
+ * `createServer((req, res) => { ... }).on("upgrade", (req, socket, head) =>
+ * toNodeWebSocketHandler(pipeline).upgrade(req, socket, head))`.
+ */
 export function toNodeWebSocketHandler(pipeline: {
   serve(socket: PipelineSocket): void;
 }): NodeWebSocketHandler {
