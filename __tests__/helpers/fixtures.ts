@@ -92,7 +92,7 @@ export function expectFixtureOk(result: FixtureResult): void {
   expect(result.code, `fixture exited ${result.code}; stderr:\n${result.stderr}`).toBe(0);
 }
 
-/** Parses a fixture's REAL result off its stdout's LAST line - a `ClusterPipeline` fixture's own
+/** Parses a fixture's REAL result off its stdout's LAST line - a `ClusterHttpPipeline` fixture's own
  * worker re-executes the entry module and prints its own empty placeholder first
  * (architecture.md's own documented constraint), so only the final line is the primary's own.
  * `strict` additionally asserts stdout is EXACTLY one line - the right choice for a fixture that

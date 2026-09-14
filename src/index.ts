@@ -45,13 +45,26 @@ export { HttpPipeline, type HttpPipelineOptions, toNodeHandler } from "./pipelin
 // How a dispatched chunk reaches another instance (#179) - `HttpPipelineOptions.client`'s own type,
 // exported so a caller can annotate their own client, plus the two shipped implementations.
 export { type PipelineClient, fetchClient, defaultClient } from "./pipelines/client";
-export { ClusterPipeline, type ClusterPipelineOptions } from "./pipelines/cluster";
+export { ClusterHttpPipeline, type ClusterHttpPipelineOptions } from "./pipelines/cluster";
+// `ClusterPipeline` (#201) - reparented onto `WebSocketPipeline` at L3. Until then this name is a
+// plain alias of the untouched HTTP class, so `main` keeps its happy path at every merge.
+export {
+  ClusterHttpPipeline as ClusterPipeline,
+  type ClusterHttpPipelineOptions as ClusterPipelineOptions,
+} from "./pipelines/cluster";
 export {
   EventEmitterPipeline,
   type EventEmitterPipelineOptions,
   type PipelineEmitter,
   type WorkEvent,
 } from "./pipelines/eventemitter";
+export {
+  WebSocketPipeline,
+  type WebSocketPipelineOptions,
+  type PipelineSocket,
+  type Codec,
+  jsonCodec,
+} from "./pipelines/websocket";
 
 // Factory functions
 export { createTransformer } from "./factories";

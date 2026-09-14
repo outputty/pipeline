@@ -3,9 +3,9 @@
  * server, no listen, no fork, no url, no explicit teardown. Case 3 asserts THIS script exits on
  * its own with code 0 - the unref'd idle timer (#17 L5) is what makes that true.
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src";
 
-const data = await new ClusterPipeline<number>()
+const data = await new ClusterHttpPipeline<number>()
 
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))([1, 2, 3, 4, 5])
   .toArray();
