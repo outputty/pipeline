@@ -50,6 +50,10 @@ export const ROWS = {
   ConcurrentPipeline: 200_000,
   HttpPipeline: 20_000,
   ClusterPipeline: 20_000,
+  // `.branch()` never dispatches (matching and the join both run on the orchestrator,
+  // architecture.md's own "Branching" section) - the same reason it has no `.local()` row - so it
+  // measures at `Pipeline`'s own row count, the nearest sibling that also never crosses a boundary.
+  Branch: 1_000_000,
 } as const;
 
 /** The floor is measured at THIS row count once, by `bench/overhead.ts`, and the one result is

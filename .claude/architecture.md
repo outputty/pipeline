@@ -61,9 +61,11 @@ src/
                           (the row handler, #78) and runnable() (the seam that carries it in); every
                           element-wise link (map/filter/flatMap/tap(fn)) shares one pipe() body (#133)
   branch.ts               BranchBuilder (.when/.otherwise), BranchOwner/BranchRunner/BranchArm,
-                          runBranch/joinArms(grouped, dispatch: ArmDispatch<T>, context)/demux - pushArm()
+                          runBranch/joinArms(grouped, dispatch: ArmDispatch<T>, context) - pushArm()
                           and findCatchAll() are BranchBuilder's own private helpers, replacing a
-                          repeated cast-and-push and a repeated find(isCatchAll) (#133)
+                          repeated cast-and-push and a repeated find(isCatchAll) (#133);
+                          classifyItems/classifyAsyncChunks/claimItem fuse the demux into ONE walk
+                          over the chunk stream instead of collectItems() then a second loop (#180)
   result.ts               PipelineResult - every terminal op; drainable() returns Drainable<T>
                           directly; forEach()/[Symbol.iterator]() share utils/drain.ts's own
                           dispatchSync() instead of each testing syncChunks separately (#133)

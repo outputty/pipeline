@@ -40,7 +40,8 @@ export interface LegReport {
   };
 }
 
-export type LegName = "Pipeline" | "ConcurrentPipeline" | "HttpPipeline" | "ClusterPipeline";
+export type LegName =
+  "Pipeline" | "ConcurrentPipeline" | "HttpPipeline" | "ClusterPipeline" | "Branch";
 
 export type OverheadReport = Record<LegName, LegReport>;
 
@@ -53,6 +54,7 @@ export type OverheadReport = Record<LegName, LegReport>;
  * ConcurrentPipeline   local.nsPerRow     min 16.16  max 16.91  spread  4.6%
  * HttpPipeline         local.nsPerRow     min 17.61  max 19.29  spread  9.5%
  * ClusterPipeline      local.nsPerRow     min 18.04  max 21.45  spread 18.9%
+ * Branch               pipelineNsPerRow   min 21.04  max 22.58  spread  7.4%   (#180)
  * ```
  *
  * One tolerance across all four is what the single `ABSOLUTE_TOLERANCE = 0.2` was, and those numbers
@@ -69,6 +71,7 @@ export const LEG_TOLERANCE: Record<LegName, number> = {
   ConcurrentPipeline: 0.15,
   HttpPipeline: 0.2,
   ClusterPipeline: 0.4,
+  Branch: 0.15,
 };
 
 /**
