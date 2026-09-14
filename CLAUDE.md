@@ -487,6 +487,33 @@ none of it survived the hand-trim (#745).
   notification contract is replaced, and whole-chunk REPLACEMENT goes unreplaced by decision - a
   chunk-level failure can only continue with that chunk dropped, or stop.
 
+- **WebSocketPipeline** - a fourth dispatch mode (#201, pending), sibling of `HttpPipeline`: each
+  chunk dispatched over ONE persistent, multiplexed WebSocket connection per remote instance, request-
+  id correlated, rather than one HTTP request per chunk. `WebSocketPipelineOptions.connect` (a
+  `ws://host:port` or `ws+unix:///path` string) replaces `HttpPipelineOptions.url`; `PipelineClient`
+  (`client.ts`) cannot serve this seam, since it returns one `Response` per call and a multiplexed
+  connection has no per-call `Response` - `WebSocketPipeline` is a class for exactly that reason, not
+  an `options.client` value. `ClusterPipeline` (below) reparents onto it; a caller reaching a
+  general remote instance (not a local cluster worker) constructs `WebSocketPipeline` directly.
+- **PipelineSocket** - the bring-your-own-socket seam `WebSocketPipeline` dispatches through
+  (#201, pending): `send`/`onMessage`/`onClose`/`close`, mirroring `PipelineEmitter`'s own
+  validated-at-construction pattern. Node's `ws` socket and a DOM-shaped `WebSocket` (Deno's
+  `Deno.upgradeWebSocket()`, Cloudflare's `WebSocketPair`) satisfy it directly; Bun's `ServerWebSocket`
+  does NOT - no `addEventListener`, messages arrive only through a per-server `Bun.serve({ websocket
+  })` callback - so a Bun adapter is unbuilt, named in #201's own Settle first.
+- **Codec** (#201, pending) - `WebSocketPipeline`'s own payload-encoding seam, orthogonal to
+  transport: `encode(value): Uint8Array | Promise<Uint8Array>`, `decode(bytes): unknown |
+  Promise<unknown>`, an optional `contentType`. `jsonCodec` is the shipped, unchanged default. Folded
+  in from a separate `plan-codec-seam` session's own research once both sessions converged on the
+  same WebSocket-transport mechanism from different directions; `HttpPipeline`/`ClusterHttpPipeline`
+  keep their JSON wire, untouched by this seam.
+- **ClusterHttpPipeline** (#201, pending) - the CURRENT `ClusterPipeline` (HTTP dispatch, TCP
+  loopback), renamed rather than deleted, once `ClusterPipeline` itself reparents onto
+  `WebSocketPipeline` and `ws+unix://` becomes its default. BREAKING, no deprecation period: an
+  existing `ClusterPipeline` import silently changes transport and gains a `ws` runtime dependency -
+  this package's first (`package.json` carries none today) - with no code change required; a caller
+  who wants the old, unchanged behavior imports `ClusterHttpPipeline` instead.
+
 ## Toolchain
 
 Run `pnpm check` as the gate: format → lint → build → typecheck → tests. It builds first, which is

@@ -693,6 +693,68 @@ cannot catch a throw after `await`), so Node's own once-unwrap machinery, which 
 composed function (`listenerCount` `2`) still fired on a SECOND, later chunk, `listenerCount`
 unchanged at `2` after both calls.
 
+## WebSocketPipeline and the ClusterPipeline reparent - pending #201
+
+A fifth dispatch mode, sibling of `HttpPipeline`: each chunk dispatched over ONE persistent,
+multiplexed WebSocket connection per remote instance instead of one HTTP request per chunk. Motivated
+by #180's own finding that `HttpPipeline`'s remaining dispatched cost (235-278 ns/row, 60-75% of the
+total) is per-REQUEST envelope parsing on a connection that is ALREADY persistent since #179's
+keep-alive default - a WebSocket attacks that envelope, not a connection that no longer reopens.
+
+`WebSocketPipelineOptions.connect` (a `ws://host:port` or `ws+unix:///path` string) replaces
+`HttpPipelineOptions.url`; `stageWork()`/`reduceWork()` send a JSON header
+`{ id, route, context? }` followed by `codec.encode(chunk)` bytes as ONE BINARY frame, correlating
+replies by `id` rather than opening a request per chunk - `route` carries what a URL path carried
+before (`transform/<n>`, `reduce/<n>`, a `.branch()` arm's own trail unchanged). A failure is a
+separate TEXT frame, `{ id, error }`, always fixed JSON regardless of `codec` - the WS opcode itself
+is the discriminator a codec-and-errors design would otherwise need a tag byte for. `PipelineClient`
+(`client.ts:32`) cannot serve this seam: it returns one `Response` per call, and a multiplexed
+connection has no per-call `Response` to hand back - which is why this ships as a class, not another
+`options.client` value.
+
+The server side is a small structural interface, `PipelineSocket` (`send`/`onMessage`/`onClose`/
+`close`), mirroring `PipelineEmitter`'s own validated-at-construction pattern (`eventemitter.ts:32`).
+Node's `ws` socket and a DOM-shaped `WebSocket` (Deno's `Deno.upgradeWebSocket()`, Cloudflare's
+`WebSocketPair`) satisfy it directly, no adapter. Bun's `ServerWebSocket` does NOT: confirmed live
+against `bun.sh/docs/api/websockets`, it has no `addEventListener`/`removeEventListener` at all -
+message delivery is exclusively through a per-SERVER `Bun.serve({ websocket: { message, open, close }
+})` callback, the reverse of `HttpPipeline`'s situation, where Node needed the bridge
+(`toNodeHandler`) and every other runtime shared `.fetch`'s shape. A Bun adapter (`toBunSocket`) is
+unbuilt - #201's own Settle first, no Bun install in this repo's CI (`benchmarks/`'s pinned-runtime
+list).
+
+`ClusterPipeline` (`cluster.ts:242`, currently `extends HttpPipeline`) reparents onto
+`WebSocketPipeline`, `ws+unix://<worker socket path>` its default `connect`, no caller-facing knob -
+workers always share a machine, so there is no case for keeping a network stack in the loop. This
+touches every method in `cluster.ts`, not only its client: `startWorkerServer()`
+(`cluster.ts:207`, `createServer(toNodeHandler(...))`) becomes a `ws` server via
+`WebSocketServer({ noServer: true })` + `handleUpgrade`; `bootstrapAndSetUrl()` reports a socket path
+over IPC instead of a port; `routePath()` (`cluster.ts:360`) has no URL path to prefix any more, since
+`/pipeline/<i>/` moves into the envelope's own `route` field alongside the stage route it already
+prefixes. The CURRENT class survives renamed `ClusterHttpPipeline` - unchanged behavior, HTTP over TCP
+loopback, for a caller who wants none of this or who already supplies `HttpPipeline`'s own `client`.
+
+A spike (four transport arms - raw HTTP/TCP, HTTP/UDS, WebSocket/TCP, WebSocket/UDS - reusing
+`bench/overhead.ts`'s own methodology) found two roughly independent, additive levers against a
+~170 ns/row minimal-dispatch baseline: a Unix domain socket over TCP loopback cut it 14-17%, WebSocket
+over plain HTTP cut it 24-28%, and both together 39-41%. A second spike found one multiplexed
+connection with request-id correlation beats N dedicated connections (one per `maxConcurrency` slot,
+no protocol) on every run - fewer sockets cost less kernel-side bookkeeping - which is why the design
+above is one connection per worker, not a pool. Composed against `ClusterPipeline`'s own dispatched
+leg (`bench/baseline.json`), the combined saving is an ESTIMATED third of the class's current cost,
+not yet measured end to end (#201's own Done-when 5 is that measurement). ⚠ This REVISES this
+document's own "Node's `fetch` IS full duplex..." finding below, which concluded a streaming reducer
+"needs no SSE, no long polling, no WebSocket" - still true for `HttpPipeline`'s own duplex NDJSON
+wire, which is unchanged; `/reduce/<n>`'s wire on `WebSocketPipeline` is a DIFFERENT, new design
+(native WS message framing replacing NDJSON's line-delimited framing), not a revival of a rejected
+one.
+
+`options.codec` (`{ encode, decode }` on `Uint8Array`, `jsonCodec` the shipped default) is
+`WebSocketPipeline`'s own knob alone, folded in from a separate `plan-codec-seam` planning session
+once both independently converged on the same WebSocket-transport mechanism from different
+directions (that session's own from `/reduce`'s payload-encoding angle). `HttpPipeline`/
+`ClusterHttpPipeline` keep their unchanged JSON wire.
+
 ## The chain and the run - `Pipeline` and `PipelineResult` (#90)
 
 A `Pipeline` declares the type it ACCEPTS, holds no data, and IS the function you call. Calling one
@@ -936,6 +998,19 @@ rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed
   enough that back-to-back dispatches in a real workload never trigger a re-fork (~50-60ms per the
   measurement above); short enough that a script holding only the canonical `ClusterPipeline`
   example exits on its own well inside a normal test timeout.
+- `node:http2` client sessions hang under concurrent multiplexed dispatch specifically over a Unix
+  domain socket, not over TCP, on Node 26.5.0 - considered and rejected as `ClusterPipeline`'s
+  transport (#201) for that reason, despite giving stream multiplexing natively with zero dependency.
+  Measured: `http2.connect({ path: socketPath })` (`{ socketPath }` alone silently falls through to a
+  TCP connect on `localhost:80` - that option name is `http.request`'s, `net.connect`'s is `path`),
+  4 concurrent `session.request()` streams dispatching real 1000-row JSON chunks, stalled
+  deterministically at request 6-7 of 20 with no error and no timeout, on 3 separate reproductions.
+  Bumping `SETTINGS_INITIAL_WINDOW_SIZE` to 8 MiB (the flow-control-exhaustion hypothesis) did not
+  move the stall point, ruling that cause out; the identical workload over plain TCP loopback
+  completed cleanly, isolating the defect to the UDS transport specifically. No matching upstream
+  `nodejs/node` issue found (searched, not found) - `nodejs/node#32326` covers a different symptom
+  (`:authority` over a UDS) on the same transport. `WebSocket`/UDS (#201's shipped design) has no
+  such defect at the same scale.
 
 - Node's `fetch` IS full duplex against a `node:http` server, refuting the half-duplex reading of
   `duplex: "half"`. Measured on Node 26.5.0 (undici): response headers at +207ms with the request
