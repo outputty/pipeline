@@ -296,6 +296,16 @@ function branchBroadcastExpected(rows: number[]): MemoryIdentity {
  * applies to both cases unchanged - `ordered: false` reorders chunks, not the rows a `count`/
  * `checksum` identity reads.
  *
+ * The ticket's own Done-when 11 names `retainedMb` literally; measured on both cases anyway
+ * (`measureMemory()` returns every axis for every case unconditionally) it reads -0.001 MB
+ * (`ordered:true`) and 0.004 MB (`ordered:false`) - noise-level, no measurable difference. Expected:
+ * `retainedMb` samples `heapUsed` after two FORCED collections once the run has fully finished, and a
+ * reorder buffer releases every chunk it ever held well before that point - there is nothing left
+ * for a leak-shaped instrument to see. `heldAtEndMB` (the mid-run peak, off real GC events) is the
+ * axis that can actually see a buffer that holds and releases WITHIN a run - settled with the user
+ * via `AskUserQuestion` before this case was written, and confirmed here: `retainedMb` alone would
+ * have reported "no retention, nothing to measure" on a mechanism that demonstrably holds something.
+ *
  * Measured (3 runs, `pnpm bench:memory --case "..."`), `heldAtEndMB`: `ordered:true` 14.3 on every
  * run; `ordered:false` 16.5 on every run - stable, and the OPPOSITE of the prediction above.
  *
