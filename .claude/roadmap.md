@@ -25,18 +25,18 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   day this was planned is exactly the kind of large, fast-moving change this gap lets through
   silently; `typedoc --validation.notDocumented` is proven this session to catch it for real
   (`Pipeline.local has an @param with name "wrongName", which was not used`).
-- **Cluster classes accept the knobs their parents already honour** (#208, ready) - `ClusterPipeline`
+- **Cluster classes accept the knobs their parents already honour** (#208) - `ClusterPipeline`
   refuses `codec` and `ClusterHttpPipeline` refuses `client` at the type level, though both constructors
   already pass them through: a spike ran a store-by-key codec across two real forked workers. Now,
   because it is two type widenings with the runtime already proven, and #209 needs it for its cluster
   example.
-- **A codec seam on every class that serializes a chunk** (#209, #210, #212, needs-planning) - one
+- **A codec seam on every class that serializes a chunk** (#209, #210, #212) - one
   planning session carried five lines of work at once and was split so each resumes on its own page.
   #209 ships `referenceCodec`, a codec that stores each message and sends only its key. #210 moves
   context and errors into `WebSocketPipeline`'s codec, reversing #201's plain-JSON error frame. #212,
   blocked by #210, gives `HttpPipeline`/`ClusterHttpPipeline` a codec, reversing #201's choice to keep
   them on JSON. `EventEmitterPipeline` stays out: it serializes nothing.
-- **The cross-process context model, and two context bugs** (#211, needs-planning) - replaces the
+- **The cross-process context model, and two context bugs** (#211) - replaces the
   Later item "A `ContextManager`'s write-back to the orchestrator". Planning measured an `HttpPipeline`
   reduce never seeing a context value written mid-run, and a forwarded snapshot overwriting a
   store-backed manager (16 and 10 of 20 increments kept, in two of four runs). Write-back, locking and

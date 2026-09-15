@@ -325,8 +325,9 @@ none of it survived the hand-trim (#745).
   sabotage, where exactly that one case failed and every other passed.
 - **`options.codec`** (#201; `ClusterPipeline` pending #208) - how a dispatched chunk becomes bytes:
   `Codec`, an untyped `{ encode(value): Uint8Array | Promise, decode(bytes): unknown | Promise,
-  contentType? }` pair, `jsonCodec` the default. On `WebSocketPipeline` and `ClusterPipeline` only
-  today; `HttpPipeline`/`ClusterHttpPipeline` stay on JSON until #212. The codec object never crosses
+  contentType? }` pair, `jsonCodec` the default. Type-accepted on `WebSocketPipeline` today;
+  `ClusterPipeline` passes it through at runtime, its type pending #208; `HttpPipeline`/
+  `ClusterHttpPipeline` stay on JSON until #212. The codec object never crosses
   a process: each worker builds its own by re-running the entry module, so a by-reference codec's
   store must be reachable from every worker. (no prior term)
 - **Stage** - One `.apply()` call, and therefore one `.transform()` call, since `transform()` is
