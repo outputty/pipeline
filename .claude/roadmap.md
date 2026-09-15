@@ -64,6 +64,13 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`ClusterPipeline` accepts `codec`, `ClusterHttpPipeline` accepts `client`** (#208, `feat`, PR
+  #214) - both classes already forwarded the field to `super` at runtime; only the exported options
+  types refused it, so every caller had to cast. `ClusterPipelineOptions` and
+  `ClusterHttpPipelineOptions` (`src/pipelines/cluster.ts`) now widen to include them, proven by two
+  subprocess fixtures: a file-backed codec that sends only a 36-byte key over the wire (each of 2
+  workers decodes only that key, never the real value) and a counting `client` that shows every
+  chunk dispatch from the primary goes through it.
 - **`WebSocketPipeline`, a fourth dispatch mode, and `ClusterPipeline` reparented onto it** (#201,
   `feat`, PR #203 (L1)/#204 (L2)/#206 (L3) and this docs PR) - each chunk of a stage dispatched over
   one persistent, multiplexed `ws+unix:`/`ws://` connection instead of one HTTP request per chunk

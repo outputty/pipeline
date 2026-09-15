@@ -32,6 +32,7 @@ import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler, errorResponse } from "@src/pipelines/http";
 import type { HttpPipelineOptions } from "@src/pipelines/http";
+import type { PipelineClient } from "@src/pipelines/client";
 import {
   WebSocketPipeline,
   toNodeWebSocketHandler,
@@ -42,6 +43,7 @@ import type {
   WebSocketPipelineOptions,
   PipelineSocket,
   ResolvedConnect,
+  Codec,
 } from "@src/pipelines/websocket";
 import { emptyChunks, Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
@@ -54,8 +56,13 @@ import type {
   RouteVerb,
 } from "@src/types";
 
-/** Construction-time knobs for `ClusterHttpPipeline`. */
-export type ClusterHttpPipelineOptions = { workers?: number } & ConcurrentPipelineOptions;
+/** Construction-time knobs for `ClusterHttpPipeline`. `client` is `HttpPipeline`'s own knob
+ * (#179), forwarded to `super` unchanged - each worker builds its own by re-running the entry
+ * module, the same as every other option here. */
+export type ClusterHttpPipelineOptions = {
+  workers?: number;
+  client?: PipelineClient;
+} & ConcurrentPipelineOptions;
 
 /** `ClusterHttpPipeline`'s real constructor parameter type - see `ConcurrentPipelineConstructorOptions`
  * (`pipelines/concurrent.ts`) for why the base `Pipeline` internals must be included here too.
@@ -757,8 +764,14 @@ export class ClusterPipeline<T, In = T> extends WebSocketPipeline<T, In> {
   }
 }
 
-/** Construction-time knobs for `ClusterPipeline`. */
-export type ClusterPipelineOptions = { workers?: number } & ConcurrentPipelineOptions;
+/** Construction-time knobs for `ClusterPipeline`. `codec` is `WebSocketPipeline`'s own knob,
+ * forwarded to `super` unchanged - it never crosses the process boundary itself, so each worker
+ * builds its own by re-running the entry module, and a store it writes to must be reachable from
+ * every worker (`process.env`, which `cluster.fork()` inherits). */
+export type ClusterPipelineOptions = {
+  workers?: number;
+  codec?: Codec;
+} & ConcurrentPipelineOptions;
 
 /** `ClusterPipeline`'s real constructor parameter type - see `ClusterHttpPipelineConstructorOptions`
  * for why the base `Pipeline` internals must be included here too. `pipelineIndex` is internal

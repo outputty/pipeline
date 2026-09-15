@@ -190,11 +190,14 @@ the class name changes.
 > **`ClusterHttpPipeline`** - each chunk dispatched to another process on the same machine, over
 > HTTP. It brings up its own workers on first run and every later pipeline in the process reuses
 > them. The class this package shipped first as `ClusterPipeline`, kept under this name for a caller
-> who wants the unchanged HTTP transport.
+> who wants the unchanged HTTP transport. `options.client` is `HttpPipeline`'s own knob, forwarded
+> to `super` unchanged.
 > **`ClusterPipeline`** - the same "each chunk to another process on the same machine" shape as
 > `ClusterHttpPipeline`, over `WebSocketPipeline`'s own persistent connection instead - the class
 > name every caller already imports. Each worker gets its own connection; dispatch spreads across
-> them automatically.
+> them automatically. `options.codec` is `WebSocketPipeline`'s own knob, forwarded to `super`
+> unchanged - it never crosses the process boundary itself, so a store it writes to must be
+> reachable from every worker (`process.env`, which `cluster.fork()` inherits).
 > **`EventEmitterPipeline`** - each chunk handed to whichever Worker functions are registered on
 > `pipeline.emitter`, a `node:events` `EventEmitter`. The chain's own `.transform()` function
 > auto-registers as a stage's first Worker; any number of extra Workers may register afterward from
