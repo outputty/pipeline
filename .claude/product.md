@@ -199,9 +199,10 @@ the class name changes.
 > unchanged - it never crosses the process boundary itself, so a store it writes to must be
 > reachable from every worker (`process.env`, which `cluster.fork()` inherits).
 > **`EventEmitterPipeline`** - each chunk handed to whichever Worker functions are registered on
-> `pipeline.emitter`, a `node:events` `EventEmitter`. The chain's own `.transform()` function
-> auto-registers as a stage's first Worker; any number of extra Workers may register afterward from
-> anywhere in the process, and every one of them runs on every chunk.
+> `pipeline.emitter`, a `node:events` `EventEmitter`, under the stage's route: `/transform/<n>`, or
+> `/branch/<i>/<name>/transform/<n>` inside a branch arm. The chain's own `.transform()` function
+> always answers its stage without registering on the emitter; any number of extra Workers may
+> register from anywhere in the process, and every one of them runs on every chunk.
 > **Stage** - one `.transform()` or `.apply()` call. A stage is identified by its position in the
 > chain, so a dispatching class sends a chunk and a stage index, never a function.
 > **`.local(build)`** - runs a whole region of the chain in the orchestrating process, on every
@@ -324,10 +325,9 @@ Two rules follow from a stage being a position rather than a name, and both are 
   runs once per worker, not once.
 
 `EventEmitterPipeline` needs none of what `HttpPipeline`/`ClusterPipeline` need to dispatch a
-chunk elsewhere - no server, no separate process, no url. A chain's own composed function already
-answers its own
-stage the moment the chain is built - registering an extra Worker is optional, for when other code
-in the same process wants to add capacity or take over the work entirely:
+chunk elsewhere - no server, no separate process, no url. A chain's own composed function answers
+its own stage on every run, without being a listener. Registering an extra Worker is optional, for
+when other code in the same process wants to add capacity:
 
 ```ts
 import { EventEmitterPipeline } from "@outputty/pipeline";
@@ -336,7 +336,7 @@ const pipeline = new EventEmitterPipeline<number>()
   .transform((t) => t.map((x: number) => x * 2));
 
 // Optional - from anywhere else in the process, runs alongside the chain's own function.
-pipeline.emitter.on("stage:0", ({ chunk, respond }) => respond(chunk.map((x: number) => x * 2)));
+pipeline.emitter.on("/transform/0", ({ chunk, respond }) => respond(chunk.map((x: number) => x * 2)));
 
 const data = await pipeline([1, 2, 3, 4, 5]).toArray();
 ```
@@ -346,10 +346,12 @@ const data = await pipeline([1, 2, 3, 4, 5]).toArray();
 ```
 
 Every Worker registered on a stage runs on every chunk that reaches it; whichever settles first -
-answers with `respond(value)` or fails with `reject(error)` - decides that chunk. Lifecycle events
-(`stage:<n>:dispatched`/`:done`/`:error`/`:end`, `pipeline:end`) let other code watch a run without
-becoming a Worker itself, as long as it listens on one of those names rather than the bare
-`stage:<n>` channel.
+answers with `respond(value)` or fails with `reject(error)` - decides that chunk. The composed
+function is always one of the contenders, so a Worker adds capacity and never takes a stage over.
+Lifecycle events (`/transform/<n>:dispatched`/`:done`/`:error`/`:end`, and `:end` once per drain)
+let other code watch a run without becoming a Worker itself, as long as it listens on one of those
+names rather than the bare `/transform/<n>` channel. A branch arm's events carry the arm's own
+route in front: `/branch/0/evens/transform/0:done`, `/branch/0/evens:end`.
 
 ### Context
 

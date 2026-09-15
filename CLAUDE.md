@@ -412,6 +412,12 @@ none of it survived the hand-trim (#745).
   the wrong transform under a number that exists in both versions. An arm name must survive a URL
   path, so `BranchBuilder` refuses one that would not: `.when("big orders", …)` dispatched
   `/branch/0/big%20orders/…` and 404'd.
+- **Event name** (pending #221, replaces: `stage:<n>`, `pipeline:end`) - how `EventEmitterPipeline`
+  addresses a stage on its emitter: the stage's route, `/transform/<n>` or
+  `/branch/<i>/<name>/transform/<n>`, with `:dispatched`/`:done`/`:error`/`:end` appended for
+  lifecycle events and `<trail>:end` once per drain. The composed function is never a listener on
+  it; dispatch runs it directly beside every registered Worker. The entry below describes the
+  pre-#221 names and registration until the docs layer rewrites it.
 - **EventEmitterPipeline / Worker** (#124) - the fourth `Pipeline` family member: dispatches a
   stage's chunk through a `node:events`-shaped `EventEmitter` (`pipeline.emitter`, the minimal
   `PipelineEmitter` interface) instead of HTTP or `node:cluster`. `.transform()`'s own composed
