@@ -517,6 +517,23 @@ The two older candidates, still not filed:
 
 ## Killed
 
+- **`HttpPipeline.reduceWork()` dispatched as multiple POSTs instead of one duplex connection**
+  (#201, add-on scope) - the premise was that a client-carried accumulator (`{acc, chunk, context}`
+  out, `{acc, emitted, pending}` back, `pending` derived from `Reducer.itemsSinceEmit` and simply
+  overwritten per response - provably equivalent to the single-Reducer design's own trailing-flush
+  decision) would let any worker serve any chunk, dropping the session-id/affinity machinery a
+  multi-request reduce would otherwise need. Killed on measurement, not built: N=10,000,
+  `.buffer(100)` (100 chunks), `maxConcurrency: 1` - a scalar accumulator (`acc + x`) went from
+  ~24-25ms to ~185-197ms (~8x), an array accumulator (`acc.push(x)`) from ~7-10ms to ~228-244ms
+  (~25-30x). The array case is the one that generalizes: today's accumulator never crosses the wire
+  at all (it lives in worker memory for the connection's life); under this design every POST resends
+  the WHOLE accumulated-so-far value, so total wire bytes grow roughly with N²/bufferSize for any
+  non-scalar accumulator, on top of the per-request overhead `stageWork()` already pays per chunk
+  (`http.ts:518-522`'s own measured reason `reduceWork()` uses one connection today). Shown the
+  numbers, the user chose to keep the duplex design. Untested middle ground, if revisited: batch K
+  chunks per POST instead of 1, amortizing the per-request cost while keeping the array-payload cost
+  - traded a new knob (a reduce batch size) for a smaller regression, never priced.
+
 - **Normalizing an async generator source through a hand-rolled iterator inside `fromSource()`**
   (#180) - the premise was that `fromSource()`'s own consumption of a genuine async generator adds
   avoidable cost on top of the source's own price. Killed on measurement: a hand-rolled consumer
