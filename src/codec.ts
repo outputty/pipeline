@@ -32,6 +32,7 @@ const textDecoder = new TextDecoder();
 export class JsonCodec implements Codec {
   readonly contentType = "application/json";
 
+  // oxlint-disable-next-line anti-slop/no-unknown-parameters -- see Codec.encode above
   encode(value: unknown): Uint8Array {
     return textEncoder.encode(JSON.stringify(value));
   }
