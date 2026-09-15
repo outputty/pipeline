@@ -104,7 +104,7 @@ describe("#209 a dispatched reduce forwards encoded chunks too (Done-when 4)", (
     const worker = makeWorker((t) => {
       const reduced = t
         .transform((tr) => tr.map((x: number) => x * 2))
-        .reduce((acc: number, x: number) => acc + x, 0) as unknown as WebSocketPipeline<number, any>;
+        .reduce((acc: number, x: number) => acc + x, 0);
       return reduced.transform((tr) => tr.map((x: number) => x + 1));
     });
     await withWebSocketServer(worker, async (connect) => {
@@ -112,7 +112,7 @@ describe("#209 a dispatched reduce forwards encoded chunks too (Done-when 4)", (
       const chain = new WebSocketPipeline<number>({ connect, codec, maxConcurrency: 1 })
         .buffer(1)
         .transform((t) => t.map((x: number) => x * 2))
-        .reduce((acc: number, x: number) => acc + x, 0) as unknown as WebSocketPipeline<number, any>;
+        .reduce((acc: number, x: number) => acc + x, 0);
       const out = await chain
         .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
         .toArray();
