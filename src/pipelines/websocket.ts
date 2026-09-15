@@ -52,32 +52,13 @@ import type {
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
 import { WebSocket as WSWebSocket, WebSocketServer } from "ws";
+import type { Codec } from "@src/codec";
+import { JsonCodec } from "@src/codec";
 
-/**
- * The payload-encoding seam (#201, folded in from the `plan-codec-seam` session) - orthogonal to
- * transport. `WebSocketPipeline`'s own knob alone: `HttpPipeline`/`ClusterHttpPipeline` keep their
- * unchanged JSON wire.
- */
-export interface Codec {
-  // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a codec encodes ANY chunk value, one handler for every item type a chain has ever carried; narrowing would break that contract, the same reason RowErrorHandler's `item` stays unknown (types.ts)
-  encode(value: unknown): Uint8Array | Promise<Uint8Array>;
-  // oxlint-disable-next-line anti-slop/no-unknown-returns -- the decoded value is unknown until a caller's own stage parses it at its own boundary, the same contract Context's IContextManager.get() already discloses
-  decode(bytes: Uint8Array): unknown | Promise<unknown>;
-  contentType?: string;
-}
-
+/** The frame HEADER's own JSON encoding - separate from `Codec`, which only ever touches the
+ * payload bytes after it. */
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
-
-/** The shipped, unchanged default codec - the same JSON shape `HttpPipeline`'s own wire already
- * sends, just over `Uint8Array` bytes instead of a JSON-typed HTTP body. Both directions reuse one
- * module-level `TextEncoder`/`TextDecoder` (both stateless) rather than allocating a fresh instance
- * per call, since every dispatched chunk pays this on the hot path #180 measured. */
-export const jsonCodec: Codec = {
-  encode: (value) => textEncoder.encode(JSON.stringify(value)),
-  decode: (bytes) => JSON.parse(textDecoder.decode(bytes)) as unknown,
-  contentType: "application/json",
-};
 
 /**
  * The bring-your-own-socket seam every runtime adapter targets (#201) - mirrors `PipelineEmitter`'s
@@ -103,7 +84,7 @@ export type WebSocketPipelineOptions = {
    * default: unlike `HttpPipeline`'s `url`, a `WebSocketPipeline` built standalone (not through
    * `ClusterPipeline`) always names its own target. */
   connect: string;
-  /** How a chunk is encoded on the wire. Defaults to `jsonCodec`. */
+  /** How a chunk is encoded on the wire. Defaults to `new JsonCodec()`. */
   codec?: Codec;
 } & ConcurrentPipelineOptions;
 
@@ -343,7 +324,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const options = Pipeline.wrapping<WebSocketPipelineConstructorOptions>(first, second);
     super(options);
     this._connect = options.connect;
-    this._codec = options.codec ?? jsonCodec;
+    this._codec = options.codec ?? new JsonCodec();
   }
 
   /** The target this instance dials for a dispatched chunk. */
