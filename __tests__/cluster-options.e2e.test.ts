@@ -6,12 +6,12 @@
  * `process.argv[1]`, Vitest's own entry inside a worker (`pipelines.e2e.test.ts`'s own header).
  */
 import { describe, it, expect } from "vitest";
-import { ClusterPipeline, ClusterHttpPipeline, jsonCodec, fetchClient } from "../src";
+import { ClusterPipeline, ClusterHttpPipeline, JsonCodec, fetchClient } from "../src";
 import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
 
 describe("#208 ClusterPipeline/ClusterHttpPipeline accept codec/client with no cast (Done-when 1)", () => {
   it("constructs both classes exactly as the ticket's own Interface example", () => {
-    const a = new ClusterPipeline<number>({ workers: 2, maxConcurrency: 2, codec: jsonCodec })
+    const a = new ClusterPipeline<number>({ workers: 2, maxConcurrency: 2, codec: new JsonCodec() })
       .buffer(1)
       .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4));
     const b = new ClusterHttpPipeline<number>({ workers: 2, client: fetchClient })
