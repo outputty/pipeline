@@ -54,7 +54,7 @@ import { Reducer, foldChunk } from "@src/utils/reduce";
 import { WebSocket as WSWebSocket, WebSocketServer } from "ws";
 import type { Codec } from "@src/codec";
 import { JsonCodec } from "@src/codec";
-import { encodedChunk, encodeOrForward, isEncodedChunk } from "@src/utils/encoded-chunk";
+import { encodedChunk, encodeOrForward, isEmptyEncodedChunk } from "@src/utils/encoded-chunk";
 
 /** The frame HEADER's own JSON encoding - separate from `Codec`, which only ever touches the
  * payload bytes after it. */
@@ -796,7 +796,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           // skips the identical case for a plain transform; folding zero rows changes nothing in
           // `Reducer` state, so this trades one network round trip for one property read that
           // never encodes to answer it.
-          if (isEncodedChunk(chunk) && chunk.rows === 0) continue;
+          if (isEmptyEncodedChunk(chunk)) continue;
           // Verbatim when `chunk` is already an encoded chunk on THIS SAME codec instance
           // (#209) - `stageWork()`'s own dispatch shares `encodeOrForward`'s identical shape.
           const payload = await encodeOrForward(chunk, self._codec);

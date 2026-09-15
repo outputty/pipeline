@@ -157,6 +157,33 @@ describe("#209 review: an emptied chunk is never sent to a dispatched reduce eit
   });
 });
 
+describe("#209 review: the empty-chunk skip survives past one hop", () => {
+  // The skip's own return value used to be a fresh `[]`, losing the encoded-chunk tag - the SECOND
+  // dispatched stage's identical check no longer recognized it and dispatched a chunk already known
+  // to be empty. Three dispatched stages here, only the first ever seeing real rows.
+  it("the server decodes only 8 items across THREE dispatched stages, not 24", async () => {
+    const serverCodec = new CountingCodec(new JsonCodec());
+    const worker = makeWorker(
+      (t) =>
+        t
+          .transform((tr) => tr.filter((x: number) => x > 100))
+          .transform((tr) => tr.map((x: number) => x + 1))
+          .transform((tr) => tr.map((x: number) => x + 1)),
+      serverCodec,
+    );
+    await withWebSocketServer(worker, async (connect) => {
+      const out = await new WebSocketPipeline<number>({ connect })
+        .buffer(1)
+        .transform((t) => t.filter((x: number) => x > 100))
+        .transform((t) => t.map((x: number) => x + 1))
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
+        .toArray();
+      expect(out).toEqual([]);
+      expect(serverCodec.decodes).toBe(8);
+    });
+  });
+});
+
 describe("#209 tap/local/buffer recut and branch keep base's own output (Done-when 5)", () => {
   it("routes and taps identically whether chunks travel encoded or not", async () => {
     // The worker's own `.tap()`/`.local()` calls are otherwise no-ops here, but they must still be
