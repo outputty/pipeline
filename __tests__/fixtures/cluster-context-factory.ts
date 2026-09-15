@@ -1,5 +1,5 @@
 /**
- * #31 Done-when 5 — a `ClusterPipeline` worker builds the CALLER'S OWN `IContextManager` class in
+ * #31 Done-when 5 — a `ClusterHttpPipeline` worker builds the CALLER'S OWN `IContextManager` class in
  * its own process, via `contextFactory`, and the value a stage's own `.context()` call sets
  * (`multiplier`) still crosses the wire onto that same worker-built instance. The orchestrator
  * process, given an explicit `context` instance instead, never invokes `contextFactory` at all -
@@ -7,7 +7,7 @@
  * process.
  */
 import cluster from "node:cluster";
-import { ClusterPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src";
 import { SimpleContextManager } from "../../src";
 
 let factoryCalls = 0;
@@ -33,7 +33,7 @@ const workers = 3;
 // to every worker at all.
 const items = Array.from({ length: 30 }, (_, i) => i);
 
-const pipeline = new ClusterPipeline<number>({
+const pipeline = new ClusterHttpPipeline<number>({
   workers,
   maxConcurrency: workers,
   context: orchestratorInstance,

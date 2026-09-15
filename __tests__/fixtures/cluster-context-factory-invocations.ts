@@ -5,7 +5,7 @@
  * serve - `factoryCalls` here is a per-process counter, read live at serve time, so a rebuild
  * anywhere in that process would show up as a HIGHER max than 1 for that worker's pid.
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src";
 import { SimpleContextManager } from "../../src";
 
 let factoryCalls = 0;
@@ -18,7 +18,7 @@ const workers = 2;
 const chunkCount = 20;
 const items = Array.from({ length: chunkCount }, (_, i) => i);
 
-const pipeline = new ClusterPipeline<number>({
+const pipeline = new ClusterHttpPipeline<number>({
   workers,
   maxConcurrency: workers,
   contextFactory: () => {

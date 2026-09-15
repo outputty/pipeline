@@ -243,7 +243,7 @@ describe("#45 case 1 returns [150] on every Pipeline class (Done-when 6)", () =>
 
   // Cluster-context.ts's own pid-tagging technique - real subprocess fixture, see its own docstring.
   test(
-    "ClusterPipeline, dispatched to a real worker process",
+    "ClusterHttpPipeline, dispatched to a real worker process",
     async () => {
       const result = await runFixtureJson<{ sum: number; dispatchedToWorker: boolean }>(
         "__tests__/fixtures/cluster-reduce.ts",
@@ -366,7 +366,7 @@ describe("#62 an input chunk's emits stay together as one output chunk", () => {
   });
 });
 
-describe("#62 the same chains behave identically over HttpPipeline and ClusterPipeline", () => {
+describe("#62 the same chains behave identically over HttpPipeline and ClusterHttpPipeline", () => {
   test(
     "HttpPipeline - sum and count both flow through as N values, no throw",
     async () => {
@@ -427,7 +427,7 @@ describe("#62 the same chains behave identically over HttpPipeline and ClusterPi
   );
 
   test(
-    "ClusterPipeline - sum and count both flow through as N values; .local() still merges to one",
+    "ClusterHttpPipeline - sum and count both flow through as N values; .local() still merges to one",
     async () => {
       const result = await runFixtureJson<{
         sumTotal: number;

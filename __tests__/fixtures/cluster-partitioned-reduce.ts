@@ -1,13 +1,13 @@
 /**
  * #62 — the ticket's own two canonical chains (sum, and the count case whose fold would give a
- * different total if reused as its own merge) over a real `ClusterPipeline`, dispatched to real
+ * different total if reused as its own merge) over a real `ClusterHttpPipeline`, dispatched to real
  * forked workers. No combine step: each partition's own result flows downstream as an ordinary
  * value, same as `emit()` already does on a non-partitioned reduce. `merged` demonstrates the
  * optional, hand-written second reduce a caller writes when they want ONE final value.
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src";
 
-const sum = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+const sum = await new ClusterHttpPipeline<number>({ maxConcurrency: 2 })
 
   .buffer(2)
   .reduce(
@@ -16,7 +16,7 @@ const sum = await new ClusterPipeline<number>({ maxConcurrency: 2 })
   )([1, 2, 3, 4, 5])
   .toArray();
 
-const count = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+const count = await new ClusterHttpPipeline<number>({ maxConcurrency: 2 })
 
   .buffer(2)
   .reduce(
@@ -25,7 +25,7 @@ const count = await new ClusterPipeline<number>({ maxConcurrency: 2 })
   )([1, 2, 3, 4, 5])
   .toArray();
 
-const merged = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+const merged = await new ClusterHttpPipeline<number>({ maxConcurrency: 2 })
 
   .buffer(2)
   .reduce((acc: number, x: number) => acc + x, 0)
@@ -34,7 +34,7 @@ const merged = await new ClusterPipeline<number>({ maxConcurrency: 2 })
 
 // The count case merged, too - proves .local() isn't just adding numbers back together, it runs
 // the CALLER's own merge function, which here still sums (partial counts), not counts-of-counts.
-const countMerged = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+const countMerged = await new ClusterHttpPipeline<number>({ maxConcurrency: 2 })
 
   .buffer(2)
   .reduce((acc: number, _x: number) => acc + 1, 0)

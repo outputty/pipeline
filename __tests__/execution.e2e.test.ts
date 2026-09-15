@@ -4,7 +4,7 @@
  * isolation.
  *
  * Concurrency used to be a `Transformer`-level pluggable seam here, before #17 deleted it - a
- * caller now wraps the chain in `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline`
+ * caller now wraps the chain in `ConcurrentPipeline`/`HttpPipeline`/`ClusterHttpPipeline`
  * (`__tests__/pipelines.e2e.test.ts`) instead of configuring the `Transformer` that drives it.
  */
 import { describe, it, expect } from "vitest";

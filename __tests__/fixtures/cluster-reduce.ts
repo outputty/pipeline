@@ -1,8 +1,8 @@
 /**
- * #45 Done-when 6 — case 1 over a real `ClusterPipeline`. Each fold step appends `process.pid` to
+ * #45 Done-when 6 — case 1 over a real `ClusterHttpPipeline`. Each fold step appends `process.pid` to
  * the accumulator, so the primary's own script can tell whether the fold actually ran inside a
  * forked worker: the primary process never nulls its own `_chunks` (only a worker does,
- * `ClusterPipeline`'s constructor), so a `.reduce()` that silently fell back to the base
+ * `ClusterHttpPipeline`'s constructor), so a `.reduce()` that silently fell back to the base
  * `Pipeline`'s in-process fold would print the right sum with every pid the primary's own - this
  * catches that.
  *
@@ -17,7 +17,7 @@
  * the way `cluster-basic.ts` does would be flaky here; skipping the print entirely means only the
  * PRIMARY ever writes a line, so `lastJsonLine` has nothing to race against).
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src";
 
 interface Tagged {
   sum: number;
@@ -26,7 +26,7 @@ interface Tagged {
 
 const primaryPid = process.pid;
 
-const [folded] = await new ClusterPipeline<number>()
+const [folded] = await new ClusterHttpPipeline<number>()
 
   .reduce(
     (acc: Tagged, x: number): Tagged => ({ sum: acc.sum + x, pids: [...acc.pids, process.pid] }),

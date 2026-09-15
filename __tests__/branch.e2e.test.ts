@@ -381,9 +381,9 @@ describe("L11 review findings, each reproduced before it was fixed", () => {
   );
 
   it(
-    "branches on a ClusterPipeline without an arm clobbering its own parent",
+    "branches on a ClusterHttpPipeline without an arm clobbering its own parent",
     async () => {
-      // An arm's pipeline carried the parent's `pipelineIndex`, and every ClusterPipeline
+      // An arm's pipeline carried the parent's `pipelineIndex`, and every ClusterHttpPipeline
       // constructor claims that registry slot - so a worker's own `.branch()` call overwrote
       // `registry.get(0)` with a stage-less arm clone at module load, and the primary's
       // `/pipeline/0/transform/0` was then served the arm's stage table. Measured before the fix:

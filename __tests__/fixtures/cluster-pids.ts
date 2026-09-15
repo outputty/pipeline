@@ -4,12 +4,12 @@
  * primary to round-robin a NEW connection to every worker (node-parallelism skill, T3: a reused
  * keep-alive connection stays pinned to one worker for its life).
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src";
 
 const workers = 3;
 const items = Array.from({ length: 30 }, (_, i) => i);
 
-const pids = await new ClusterPipeline<number>({ workers, maxConcurrency: workers })
+const pids = await new ClusterHttpPipeline<number>({ workers, maxConcurrency: workers })
 
   .buffer(1)
   .transform((t) => t.map((_x: number) => process.pid))(items)

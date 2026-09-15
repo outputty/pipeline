@@ -21,7 +21,7 @@ import { DROP } from "@src/types";
 import { buildSyncChunkGenerator } from "@src/utils/chunk";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
-import { ClusterPipeline } from "@src/pipelines/cluster";
+import { ClusterHttpPipeline } from "@src/pipelines/cluster";
 import { countPromises, parseStrict } from "./helpers/sequences";
 
 describe("#90 - a synchronous chain never creates a Promise", () => {
@@ -252,7 +252,7 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
     // below are the assertion; each fails to compile if its class's Mode came out "sync".
     const concurrent = new ConcurrentPipeline<number>();
     const http = new HttpPipeline<number>({ url: "http://127.0.0.1:1" });
-    const cluster = new ClusterPipeline<number>();
+    const cluster = new ClusterHttpPipeline<number>();
 
     const concurrentOut: Promise<number[]> = concurrent([1, 2, 3]).toArray();
     const httpOut: Promise<number[]> = http([1, 2, 3]).toArray();
@@ -260,7 +260,7 @@ describe("#90 - a synchronous chain never creates a Promise", () => {
 
     expect(concurrent).toBeInstanceOf(ConcurrentPipeline);
     expect(http).toBeInstanceOf(HttpPipeline);
-    expect(cluster).toBeInstanceOf(ClusterPipeline);
+    expect(cluster).toBeInstanceOf(ClusterHttpPipeline);
     expect(typeof httpOut.then).toBe("function");
     expect(typeof clusterOut.then).toBe("function");
     expect(await concurrentOut).toEqual([1, 2, 3]);
@@ -368,7 +368,7 @@ describe("#90 - the Mode a chain reports and the engine it runs on never disagre
     expect(typeof doubled(new HttpPipeline<number>({ url: "http://127.0.0.1:1" })).fetch).toBe(
       "function",
     );
-    expect(doubled(new ClusterPipeline<number>()).constructor.name).toBe("ClusterPipeline");
+    expect(doubled(new ClusterHttpPipeline<number>()).constructor.name).toBe("ClusterHttpPipeline");
   });
 
   it("Transformer.loop takes a synchronous body inside an async chain", async () => {

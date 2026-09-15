@@ -1,14 +1,14 @@
 /**
- * #61 Done-when 2 — the ticket's own canonical program over a real `ClusterPipeline`: the reduce
+ * #61 Done-when 2 — the ticket's own canonical program over a real `ClusterHttpPipeline`: the reduce
  * folds inside `.local(build)`, so it must run in the PRIMARY process, never a forked worker - the
  * accumulator carries `process.pid` alongside the sum, the same technique `cluster-reduce.ts` uses,
  * so the primary's own script can tell a region that silently dispatched from one that stayed put.
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src";
 
 const primaryPid = process.pid;
 
-const [folded] = await new ClusterPipeline<number>({ maxConcurrency: 2 })
+const [folded] = await new ClusterHttpPipeline<number>({ maxConcurrency: 2 })
 
   .buffer(2)
   .local((p) =>

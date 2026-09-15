@@ -1,8 +1,8 @@
 /**
  * #120's own Done-when cases, proven against the real `bench/` harness - no mocks, real `Pipeline`
- * family instances, a real loopback server (HttpPipeline) and a real forked worker (ClusterPipeline,
+ * family instances, a real loopback server (HttpPipeline) and a real forked worker (ClusterHttpPipeline,
  * run as a subprocess fixture - `pipelines.e2e.test.ts`'s own header explains why a
- * `ClusterPipeline` is never constructed directly inside a Vitest worker).
+ * `ClusterHttpPipeline` is never constructed directly inside a Vitest worker).
  *
  * No case here asserts against `bench/baseline.json`'s own numbers or wall-clock timing at all -
  * that would fail on any machine slower or faster than the one the baseline was measured on: the
@@ -48,7 +48,7 @@ describe("#120 Done-when 2 - each class's hand-rolled floor matches its Pipeline
   );
 
   it(
-    "ClusterPipeline: identical output at a small N (subprocess fixture)",
+    "ClusterHttpPipeline: identical output at a small N (subprocess fixture)",
     async () => {
       const result = await runFixtureJson<{ matches: boolean }>(
         "__tests__/fixtures/bench-cluster-floor.ts",
@@ -112,7 +112,7 @@ describe("#120 Done-when 3 - .local() correctness per dispatching class", () => 
   );
 
   it(
-    "ClusterPipeline: every item's stage runs on the primary's own pid (subprocess fixture)",
+    "ClusterHttpPipeline: every item's stage runs on the primary's own pid (subprocess fixture)",
     async () => {
       const result = await runFixtureJson<{
         processedCount: number;

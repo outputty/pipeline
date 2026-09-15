@@ -4,7 +4,7 @@
  *
  * Cluster cases (1-4, 14-cluster) run as SUBPROCESS FIXTURES (`__tests__/fixtures/*.ts`), spawned
  * via `execFile(process.execPath, ["--import", "tsx", path])` - `cluster.fork()` re-execs
- * `process.argv[1]`, which inside a Vitest worker is Vitest's OWN entry, so a `ClusterPipeline`
+ * `process.argv[1]`, which inside a Vitest worker is Vitest's OWN entry, so a `ClusterHttpPipeline`
  * built in-process here would fork Vitest itself. HTTP and in-process cases run directly.
  *
  * Every case that names a class or behavior #17 has not yet built is `it.fails` - a case that
@@ -12,7 +12,13 @@
  * layer lands, its cases flip from `it.fails` to `it`.
  */
 import { describe, it, expect } from "vitest";
-import { Pipeline, Transformer, ConcurrentPipeline, HttpPipeline, ClusterPipeline } from "../src";
+import {
+  Pipeline,
+  Transformer,
+  ConcurrentPipeline,
+  HttpPipeline,
+  ClusterHttpPipeline,
+} from "../src";
 import {
   FIXTURE_TIMEOUT,
   HTTP_TIMEOUT,
@@ -35,7 +41,7 @@ function makeWorker<U>(
   return builder(new HttpPipeline<number>({ url: "" }));
 }
 
-describe("#17 ClusterPipeline canonical program (Done-when 1, 3)", () => {
+describe("#17 ClusterHttpPipeline canonical program (Done-when 1, 3)", () => {
   it(
     "prints [6,8,10] with no server/listen/fork/url in caller code, and exits on its own",
     async () => {
@@ -52,7 +58,7 @@ describe("#17 ClusterPipeline canonical program (Done-when 1, 3)", () => {
   );
 });
 
-describe("#17 ClusterPipeline dispatches to real worker processes (Done-when 2)", () => {
+describe("#17 ClusterHttpPipeline dispatches to real worker processes (Done-when 2)", () => {
   it(
     "distinct process.pid values serve stage 0, count matches workers",
     async () => {
@@ -65,7 +71,7 @@ describe("#17 ClusterPipeline dispatches to real worker processes (Done-when 2)"
   );
 });
 
-describe("#17 three ClusterPipelines share one port and worker set (Done-when 4)", () => {
+describe("#17 three ClusterHttpPipelines share one port and worker set (Done-when 4)", () => {
   it(
     "every pipeline's url is identical",
     async () => {
@@ -138,7 +144,7 @@ describe("#61 .local(build) prints the ticket's own canonical program on every c
   });
 
   it(
-    "the same chain over a real ClusterPipeline prints [15], folded in the primary process",
+    "the same chain over a real ClusterHttpPipeline prints [15], folded in the primary process",
     async () => {
       const result = await runFixtureJson<{ sum: number; stayedInPrimary: boolean }>(
         "__tests__/fixtures/cluster-local.ts",
@@ -226,12 +232,12 @@ describe("#17 .constructor.name is the leaf class after two .transform() calls (
     expect(p.constructor.name).toBe("HttpPipeline");
   });
 
-  it("a ClusterPipeline stays ClusterPipeline (constructed only - never drained, never forks)", () => {
-    const p = new ClusterPipeline<number>()
+  it("a ClusterHttpPipeline stays ClusterHttpPipeline (constructed only - never drained, never forks)", () => {
+    const p = new ClusterHttpPipeline<number>()
 
       .transform((t) => t.map((x: number) => x))
       .transform((t) => t.map((x: number) => x));
-    expect(p.constructor.name).toBe("ClusterPipeline");
+    expect(p.constructor.name).toBe("ClusterHttpPipeline");
   });
 });
 
@@ -255,9 +261,9 @@ describe("#17 .context()/.buffer() carry a subclass's own knobs forward (createP
     expect(p.url).toBe("http://example.test");
   });
 
-  it("ClusterPipeline keeps workers through .context()", () => {
-    const p = new ClusterPipeline<number>({ workers: 3 }).context({ k: 1 });
-    expect(p.constructor.name).toBe("ClusterPipeline");
+  it("ClusterHttpPipeline keeps workers through .context()", () => {
+    const p = new ClusterHttpPipeline<number>({ workers: 3 }).context({ k: 1 });
+    expect(p.constructor.name).toBe("ClusterHttpPipeline");
     expect(p.workers).toBe(3);
   });
 
@@ -544,13 +550,13 @@ describe("#17 .context() propagates through the wire (Done-when 14)", () => {
   );
 
   it(
-    "prints [10,20,30,40,50] through ClusterPipeline, still a ClusterPipeline after .context()",
+    "prints [10,20,30,40,50] through ClusterHttpPipeline, still a ClusterHttpPipeline after .context()",
     async () => {
       const result = await runFixtureJson<{ out: number[]; ctorNameAfterContext: string }>(
         "__tests__/fixtures/cluster-context.ts",
       );
       expect(result.out).toEqual([10, 20, 30, 40, 50]);
-      expect(result.ctorNameAfterContext).toBe("ClusterPipeline");
+      expect(result.ctorNameAfterContext).toBe("ClusterHttpPipeline");
     },
     FIXTURE_TIMEOUT,
   );
@@ -607,7 +613,7 @@ describe("#17 a stage's HTTP 500 throws from the terminal op (Done-when 15)", ()
   );
 });
 
-describe("#31 a ClusterPipeline worker builds the caller's own class via contextFactory (Done-when 5)", () => {
+describe("#31 a ClusterHttpPipeline worker builds the caller's own class via contextFactory (Done-when 5)", () => {
   it(
     "each worker builds its own PoolContext once, and forward context still crosses the wire",
     async () => {

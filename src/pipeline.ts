@@ -205,7 +205,7 @@ export interface PipelineOptions {
    * Invoked at most ONCE per process - in the constructor, only when `context` is absent - and the
    * built instance is then carried forward through every copy-on-write call
    * (`.context()`/`.transform()`/`.buffer()`) the same way an explicit `context` would be, so a
-   * `ClusterPipeline` worker's own `.fetch()` (`src/pipelines/http.ts`) serves every request off
+   * `ClusterHttpPipeline` worker's own `.fetch()` (`src/pipelines/http.ts`) serves every request off
    * the SAME instance the constructor built, never a second one (#31). `context` and
    * `contextFactory` together is not an error: the instance serves this process, the factory
    * serves every other one.

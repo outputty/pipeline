@@ -1,6 +1,6 @@
 /**
  * A chain says WHAT to do; a wrapping class says WHERE it runs (#90). `ConcurrentPipeline`,
- * `HttpPipeline` and `ClusterPipeline` take `(pipeline, options)` and are callable themselves, so
+ * `HttpPipeline` and `ClusterHttpPipeline` take `(pipeline, options)` and are callable themselves, so
  * one definition serves a local run, a concurrent one and a dispatched one.
  *
  * Covers #90's Done-when 5 and 15. `.branch()`'s own cases (Done-when 13, 14, 18-24) moved to
@@ -12,7 +12,7 @@ import { describe, it, expect } from "vitest";
 import { Pipeline } from "@src/pipeline";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
-import { ClusterPipeline } from "@src/pipelines/cluster";
+import { ClusterHttpPipeline } from "@src/pipelines/cluster";
 import { withServer, withTrackedServer, HTTP_TIMEOUT } from "./helpers/fixtures";
 import { ordersA, ordersB, withVat } from "./helpers/domain";
 
@@ -100,14 +100,14 @@ describe("the HTTP pair shares one definition, with no placeholder source (Done-
   });
 });
 
-describe("a ClusterPipeline wraps a chain too", () => {
+describe("a ClusterHttpPipeline wraps a chain too", () => {
   it("adopts a chain and keeps its own class and knobs", () => {
-    const wrapped = new ClusterPipeline(withVat, { workers: 2, maxConcurrency: 3 });
-    expect(wrapped).toBeInstanceOf(ClusterPipeline);
+    const wrapped = new ClusterHttpPipeline(withVat, { workers: 2, maxConcurrency: 3 });
+    expect(wrapped).toBeInstanceOf(ClusterHttpPipeline);
     expect(wrapped.workers).toBe(2);
     expect(wrapped.maxConcurrency).toBe(3);
     // Built and never drained, so it never forks - the same property the class always had.
-    expect(wrapped.transform((t) => t.map((o) => o.total))).toBeInstanceOf(ClusterPipeline);
+    expect(wrapped.transform((t) => t.map((o) => o.total))).toBeInstanceOf(ClusterHttpPipeline);
   });
 });
 

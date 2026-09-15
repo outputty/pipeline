@@ -1,13 +1,13 @@
 /**
- * #90 L11 review, finding 1 - `.branch()` on a `ClusterPipeline`.
+ * #90 L11 review, finding 1 - `.branch()` on a `ClusterHttpPipeline`.
  *
  * A branch arm's own pipeline used to carry the parent's `pipelineIndex`, and every
- * `ClusterPipeline` constructor claims that registry slot. A worker re-runs the entry module, so
+ * `ClusterHttpPipeline` constructor claims that registry slot. A worker re-runs the entry module, so
  * its own `.branch()` call built the arm clones at load and overwrote `registry.get(0)` with a
  * stage-less one - after which the primary's `/pipeline/0/transform/0` was served by the ARM's
  * stage table. Measured before the fix: `{"rest":["REST:undefined","REST:undefined"]}`.
  */
-import { Pipeline, ClusterPipeline } from "../../src";
+import { Pipeline, ClusterHttpPipeline } from "../../src";
 
 type Order = { id: number; total: number };
 
@@ -15,7 +15,7 @@ const withVat = new Pipeline<Order>().transform((t) =>
   t.map((o: Order) => ({ ...o, total: Math.round(o.total * 1.2) })),
 );
 
-const routed = new ClusterPipeline(withVat, { workers: 2 }).branch((b) =>
+const routed = new ClusterHttpPipeline(withVat, { workers: 2 }).branch((b) =>
   b
     .when(
       "big",

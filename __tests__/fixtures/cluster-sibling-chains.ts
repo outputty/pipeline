@@ -1,5 +1,5 @@
 /**
- * #113 finding 2 - two sibling chains built off ONE `ClusterPipeline` base.
+ * #113 finding 2 - two sibling chains built off ONE `ClusterHttpPipeline` base.
  *
  * `createPipeline()` forwarded `pipelineIndex`, and every constructor claimed that key, so both
  * siblings registered at the base's index and the second overwrote the first - on the primary AND
@@ -7,9 +7,9 @@
  * `/pipeline/0/transform/0`, the worker resolved `registry[0]` to the SECOND chain, and the run
  * returned that chain's output with no error. Measured before the fix: `{"doubled":[100,200]}`.
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src";
 
-const base = new ClusterPipeline<number>({ workers: 2 });
+const base = new ClusterHttpPipeline<number>({ workers: 2 });
 const doubled = base.transform((t) => t.map((x: number) => x * 2));
 const hundredfold = base.transform((t) => t.map((x: number) => x * 100));
 

@@ -35,7 +35,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 
 /** Construction-time knobs for `HttpPipeline` and every class that extends it - the same pattern
- * `ClusterPipelineOptions` (`pipelines/cluster.ts`) already uses (#133: was spelled inline 3x here
+ * `ClusterHttpPipelineOptions` (`pipelines/cluster.ts`) already uses (#133: was spelled inline 3x here
  * as `{ url: string } & ConcurrentPipelineOptions`). */
 export type HttpPipelineOptions = {
   url: string;
@@ -204,11 +204,12 @@ async function flushTrailing(
 
 /**
  * Reads back the route grammar `HttpPipeline.routePath()` builds (#90): `/transform/<n>`,
- * `/reduce/<n>`, and either prefixed by a `/branch/<i>/<name>` trail, with `ClusterPipeline`'s own
- * `/pipeline/<i>` ahead of all of it. Written and parsed in one file so the two cannot drift.
+ * `/reduce/<n>`, and either prefixed by a `/branch/<i>/<name>` trail, with `ClusterHttpPipeline`'s
+ * own `/pipeline/<i>` ahead of all of it. Written and parsed in one file so the two cannot drift.
  *
- * Deliberately NOT anchored at the start: `ClusterPipeline`'s shared worker server hands the whole
- * pathname through after looking the pipeline up by index, so the prefix it added is still on it.
+ * Deliberately NOT anchored at the start: `ClusterHttpPipeline`'s shared worker server hands the
+ * whole pathname through after looking the pipeline up by index, so the prefix it added is still on
+ * it.
  *
  * `parseRoute("/pipeline/0/branch/1/big/transform/2")` →
  * `{ trail: "/branch/1/big", verb: "transform", index: 2 }`.
@@ -261,8 +262,8 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     return this._client ?? defaultClient();
   }
 
-  /** Where this instance's `.fetch` is mounted - the url another `HttpPipeline`/`ClusterPipeline`
-   * POSTs a stage's chunk to. Set at construction; `ClusterPipeline` rewrites it once its
+  /** Where this instance's `.fetch` is mounted - the url another `HttpPipeline`/`ClusterHttpPipeline`
+   * POSTs a stage's chunk to. Set at construction; `ClusterHttpPipeline` rewrites it once its
    * lazily-bootstrapped worker set picks a real port. */
   get url(): string {
     return this._url;
@@ -456,7 +457,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * The verb is `transform`, not `stage` (#90): a route now reads as the chain was BUILT rather
    * than as a flat counter, so a reader can walk `/transform/1` back to the second `.transform()`
    * call without counting dispatched stages. `.branch()`'s own arms extend the same scheme with a
-   * `/branch/<i>/<name>/` trail. `ClusterPipeline`
+   * `/branch/<i>/<name>/` trail. `ClusterHttpPipeline`
    * overrides this alone to route several pipeline definitions through one shared worker server
    * (`/pipeline/<i>/<verb>/<n>`) without touching `stageWork()`/`reduceWork()`'s own dispatch logic
    * or `.fetch()`'s parsing at all. */
@@ -527,7 +528,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
 
     return async function* dispatchReduce(chunks, ctx) {
       // `self._url`/`routePath()` are read HERE, at dispatch time, not captured before this
-      // function returns - `ClusterPipeline.reduceWork()`'s own wrap (below) sets `self._url` to
+      // function returns - `ClusterHttpPipeline.reduceWork()`'s own wrap (below) sets `self._url` to
       // the bootstrapped port AFTER this method returns but BEFORE this generator actually runs
       // (same reason `HttpPipeline.stageWork()`'s own returned closure reads `this._url` fresh
       // each call, never captured at construction time).
