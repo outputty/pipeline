@@ -116,6 +116,13 @@ interface Frame {
   rows?: number;
 }
 
+/** The row-count guard `stageWork()`'s and `reduceWork()`'s own `onFrame` handlers both apply to a
+ * reply, worded identically but for the label (simplification review, #209: the two handlers used
+ * to build this message inline, `"stage N at ..."` and `"reduce stage N at ..."`). */
+function noRowCountError(label: string): Error {
+  return new Error(`${label}: reply carried no row count`);
+}
+
 /** The one TEXT-frame shape either side sends on failure - fixed JSON regardless of `codec`. */
 interface ErrorFrame {
   id: number;
@@ -659,11 +666,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
                   // once `isEncodedChunk(chunk)` is true, and would silently drop a later dispatched
                   // stage's real data instead of forwarding it.
                   if (header.rows === undefined) {
-                    reject(
-                      new Error(
-                        `stage ${stageIndex} at ${connectTarget}: reply carried no row count`,
-                      ),
-                    );
+                    reject(noRowCountError(`stage ${stageIndex} at ${connectTarget}`));
                     return;
                   }
                   resolve(
@@ -767,11 +770,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           // it there instead. Same reason as `stageWork()`'s own `onFrame` for the guard below: a
           // reply with no `rows` cannot become an encoded chunk without lying about its own count.
           if (header.rows === undefined) {
-            fail(
-              new Error(
-                `reduce stage ${stageIndex} at ${connectTarget}: reply carried no row count`,
-              ),
-            );
+            fail(noRowCountError(`reduce stage ${stageIndex} at ${connectTarget}`));
             return;
           }
           emitQueue.push(encodedChunk(responsePayload, header.rows, self._codec) as unknown as U[]);
