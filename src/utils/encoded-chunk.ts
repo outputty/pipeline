@@ -78,8 +78,9 @@ export async function materialize<T>(chunk: T[]): Promise<T[]> {
  * `await encodeOrForward([1, 2], codec)` → `codec.encode([1, 2])`'s own result. `await
  * encodeOrForward(encodedChunk(bytes, 2, codec), codec)` → `bytes`, unchanged, no encode call. */
 export async function encodeOrForward<T>(chunk: T[], codec: Codec): Promise<Uint8Array> {
-  if (isEncodedChunk(chunk) && chunk.codec === codec) return chunk.payload;
-  return codec.encode(await materialize(chunk));
+  const encoded = isEncodedChunk(chunk);
+  if (encoded && chunk.codec === codec) return chunk.payload;
+  return codec.encode(encoded ? await materialize(chunk) : chunk);
 }
 
 /** `materialize()` over a whole chunk STREAM, one chunk at a time - `Pipeline.local()`'s own seed
