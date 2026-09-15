@@ -272,6 +272,38 @@ open for the whole stream and sends results back along it while chunks are still
 client that waits for the complete reply before returning it stops those results arriving until the
 last chunk has been sent. Everything still completes, and nothing arrives early.
 
+How a chunk is encoded on a WebSocket connection is the caller's to change too. `options.codec` on
+`WebSocketPipeline` and `ClusterPipeline` takes an `{ encode, decode }` pair, `jsonCodec` by default.
+`referenceCodec(store)` keeps large chunks off the wire: it writes each message into the caller's
+store and sends only a key. Between two dispatched stages the orchestrating process passes a reply
+on still encoded, so it reads rows only where it needs them - a `.tap()`, a `.local()` region, a
+`.buffer()` recut, a `.branch()`, or a terminal that returns items. `.consume()` reads none. A chunk
+that a stage emptied is not dispatched to the next one.
+
+> **`Codec`** - how a chunk becomes bytes on a WebSocket connection: `encode(value)` and
+> `decode(bytes)`. Every process builds its own by running the same entry module.
+> **`referenceCodec(store, { inner? })`** - a codec that stores each message and sends its key.
+> `store` is `{ put(key, bytes), get(key) }`, reachable from every process; `inner` encodes the
+> message before it is stored, `jsonCodec` by default. A key the store no longer holds fails the
+> chunk with an error naming the key. It deletes nothing: the store's own expiry, a separate
+> cleanup job, or a codec that wraps it removes old messages.
+
+```ts
+import { ClusterPipeline, referenceCodec } from "@outputty/pipeline";
+
+const codec = referenceCodec({ put: (key, bytes) => store.put(key, bytes), get: (key) => store.get(key) });
+
+const data = await new ClusterPipeline<number>({ workers: 2, maxConcurrency: 2, codec })
+  .buffer(1)
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+  .transform((t) => t.map((x: number) => x + 1))
+  ([1, 2, 3, 4, 5, 6, 7, 8]).toArray();
+```
+
+```json
+[7, 9, 11, 13, 15, 17]
+```
+
 Two rules follow from a stage being a position rather than a name, and both are the caller's to keep:
 
 - Every instance must run the same build. A rolling deploy that mixes versions can run a chunk through

@@ -25,6 +25,13 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   day this was planned is exactly the kind of large, fast-moving change this gap lets through
   silently; `typedoc --validation.notDocumented` is proven this session to catch it for real
   (`Pipeline.local has an @param with name "wrongName", which was not used`).
+- **`referenceCodec`, and dispatched replies stay encoded in the primary** (#209) - a caller who
+  keeps large chunks in an external store writes the by-reference wrapper by hand today
+  (`__tests__/fixtures/cluster-file-codec.ts`), and the primary still decodes every reply and
+  re-encodes it for the next dispatched stage: a store `get` and `put` per chunk per hop, even under
+  `.consume()`. Now, because #208 made `codec` reachable on `ClusterPipeline`, and #212 waits on the
+  `src/codec.ts` module this ticket creates.
+
 ### Later - not yet filed
 
 - **A distributed event emitter solution layer for `EventEmitterPipeline`** (#124's own planning) -
@@ -523,6 +530,20 @@ The two older candidates, still not filed:
   `In`/`Out` with no `transform`. PRs #7, #8, #10, #12.
 
 ## Killed
+
+- **A by-reference codec alone, with the core unchanged** (#209 planning) - the codec returned a
+  one-element `[{ ref }]` chunk so keys would flow between stages untouched. Killed on a spike: a
+  `.buffer()` recut packed two handles into one chunk and dispatch threw, `.tap()` saw handles
+  instead of rows, and an emptied chunk could not be detected. A plain handle object instead of the
+  array returned `[]` without an error at the terminal. The core now carries an encoded chunk and
+  decodes only where items are read.
+- **Fusing consecutive dispatched stages into one hop** (#209 planning) - it removes the primary's
+  decode between stages only where stages sit back to back, while changing stage identity on the
+  wire. Killed in favour of the core-aware encoded chunk, which reaches the same hop and a dispatched
+  reduce without renumbering routes.
+- **A `delete` hook on `referenceCodec`** (#209 planning) - picked, then dropped by the user: cleanup
+  belongs to a secondary system or a caller's own codec wrapping `referenceCodec`, and a dispatch
+  that fails before decode leaves its object unread whatever the hook does.
 
 - **`HttpPipeline.reduceWork()` dispatched as multiple POSTs instead of one duplex connection**
   (#201, add-on scope) - the premise was that a client-carried accumulator (`{acc, chunk, context}`

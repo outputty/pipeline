@@ -461,6 +461,15 @@ none of it survived the hand-trim (#745).
   `stage:<n>` names (`emptyOfOwnClass()` carries the same `emitter`/registered-stages `Set` into the
   arm while resetting its stage index to 0) - real, but out of scope by the ticket's own Settle
   first: "an arm's own worker-channel naming is undesigned."
+- **`referenceCodec` / by-reference codec** (pending #209, no prior term) - a `Codec` that stores
+  each message in a caller's `ReferenceStore` (`{ put(key, bytes), get(key) }`) and sends only its
+  `crypto.randomUUID()` key; `inner` encodes the stored bytes, `jsonCodec` by default. It never
+  deletes. `Codec`/`jsonCodec`/`referenceCodec` live in `src/codec.ts`.
+- **Encoded chunk** (pending #209, no prior term) - a dispatched WebSocket reply the orchestrator
+  keeps as `{ payload, rows, codec }` instead of decoding; internal, typed `T[]` in the stream. A
+  later dispatched stage sends its payload verbatim; `materialize()` decodes it only where items
+  are read (`drainable()`, the `.local()` seed, `flattenChunks`). Its `rows` lets the fan-out skip
+  an emptied chunk and `.consume()` finish without decoding.
 - **Observation point / `.tap()`** - the ONE surface that watches data without changing it, at two
   levels with one meaning. `Transformer.tap(fn | transformer)` (`src/transformer.ts`) is a `pipe()`
   link: `fn` gets each item plus context via `Promise.all(chunk.map(...))`, the `transformer` form
