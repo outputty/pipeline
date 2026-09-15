@@ -60,11 +60,12 @@ export {
   WebSocketPipeline,
   type WebSocketPipelineOptions,
   type PipelineSocket,
-  type Codec,
-  jsonCodec,
   toNodeWebSocketHandler,
   type NodeWebSocketHandler,
 } from "./pipelines/websocket";
+// How a chunk is encoded on the wire (#209) - outside `pipelines/websocket.ts` so this barrel
+// doesn't need to load `ws` just to reach `Codec`/`JsonCodec`.
+export { type Codec, JsonCodec } from "./codec";
 
 // Factory functions
 export { createTransformer } from "./factories";

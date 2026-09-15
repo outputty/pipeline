@@ -3,7 +3,7 @@
  * mechanism lands, L3) - each flips live as its own layer lands. 5-6 already hold on base (5:
  * correctness is unaffected by the encoding mechanism; 6: the default codec's own bytes are
  * unchanged) and are live from here, the regression pins for the rest of the stack. 7 is a
- * compile-time probe added in L2, once `JsonCodec` exists.
+ * compile-time probe, live here in L2 now that `JsonCodec` exists and `jsonCodec` is deleted.
  *
  * Cases 2-6 dial a real `ws+unix:` connection in-process (`withWebSocketServer`,
  * `websocket-wire.e2e.test.ts`'s own two-instance shape: a client-side pipeline and a separate
@@ -12,7 +12,7 @@
  * `cluster-file-codec.ts`, #208).
  */
 import { describe, it, expect } from "vitest";
-import { WebSocketPipeline, jsonCodec, type Codec } from "../src";
+import { WebSocketPipeline, JsonCodec, type Codec } from "../src";
 import { withWebSocketServer } from "./helpers/websocket";
 import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
 
@@ -66,7 +66,7 @@ describe("#209 dispatched replies stay encoded between two stages (Done-when 2)"
       t.transform((tr) => tr.map((x: number) => x * 2)).transform((tr) => tr.map((x: number) => x + 1)),
     );
     await withWebSocketServer(worker, async (connect) => {
-      const codec = new CountingCodec(jsonCodec);
+      const codec = new CountingCodec(new JsonCodec());
       const out = await new WebSocketPipeline<number>({ connect, codec })
         .buffer(1)
         .transform((t) => t.map((x: number) => x * 2))
@@ -81,7 +81,7 @@ describe("#209 dispatched replies stay encoded between two stages (Done-when 2)"
 
 describe("#209 an emptied chunk is never re-dispatched to the next stage (Done-when 3)", () => {
   it.fails("output [], the server decodes only 8 items against base's own 16", async () => {
-    const serverCodec = new CountingCodec(jsonCodec);
+    const serverCodec = new CountingCodec(new JsonCodec());
     const worker = makeWorker(
       (t) =>
         t.transform((tr) => tr.filter((x: number) => x > 100)).transform((tr) => tr.map((x: number) => x + 1)),
@@ -108,7 +108,7 @@ describe("#209 a dispatched reduce forwards encoded chunks too (Done-when 4)", (
       return reduced.transform((tr) => tr.map((x: number) => x + 1));
     });
     await withWebSocketServer(worker, async (connect) => {
-      const codec = new CountingCodec(jsonCodec);
+      const codec = new CountingCodec(new JsonCodec());
       const chain = new WebSocketPipeline<number>({ connect, codec, maxConcurrency: 1 })
         .buffer(1)
         .transform((t) => t.map((x: number) => x * 2))
@@ -155,12 +155,13 @@ describe("#209 tap/local/buffer recut and branch keep base's own output (Done-wh
 
 describe("#209 a pipeline with no codec still encodes JSON (Done-when 6)", () => {
   it("wire payload bytes equal a plain TextEncoder/JSON.stringify of the chunk", async () => {
+    const inner = new JsonCodec();
     let captured: Uint8Array | undefined;
     const captureCodec: Codec = {
-      encode: (value) => jsonCodec.encode(value),
+      encode: (value) => inner.encode(value),
       decode: (bytes) => {
         captured = bytes;
-        return jsonCodec.decode(bytes);
+        return inner.decode(bytes);
       },
     };
     const worker = makeWorker((t) => t.transform((tr) => tr.map((x: number) => x)), captureCodec);
@@ -171,5 +172,18 @@ describe("#209 a pipeline with no codec still encodes JSON (Done-when 6)", () =>
         .toArray();
     });
     expect(captured).toEqual(new TextEncoder().encode(JSON.stringify([1, 2, 3])));
+  });
+});
+
+describe("#209 jsonCodec is deleted (Done-when 7)", () => {
+  it("importing it fails tsc with TS2305 - compile error", () => {
+    // Type-only: never executed. `tsc --noEmit` is the real assertion; `@ts-expect-error` itself
+    // fails (TS2578) if the import ever stopped erroring - the negative-case pattern
+    // `.claude/rules/typescript.md` calls for over trusting a "should fail" claim.
+    function typeOnlyCheck() {
+      // @ts-expect-error - jsonCodec is deleted (BREAKING, #209); tsc: TS2305 Module '"../src"' has no exported member 'jsonCodec'
+      type _JsonCodecGone = typeof import("../src").jsonCodec;
+    }
+    expect(typeof typeOnlyCheck).toBe("function");
   });
 });
