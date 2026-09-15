@@ -747,7 +747,7 @@ scope, Done-when 8) - `checkGate`'s own regression-only design never flags a spe
 stays green with a now-stale ceiling; a future ticket updating the baseline for real would tighten
 it, not loosen anything.
 
-## Codec and encoded chunks - pending #209
+## Codec and encoded chunks - #209
 
 A dispatched WebSocket reply stays encoded in the orchestrating process until a site reads its
 items. `Codec` (the interface) and `JsonCodec` (the default class) live in `src/codec.ts`, outside
@@ -773,6 +773,11 @@ AFTER   stage 0 reply -> encoded chunk { payload, rows, codec } ----------------
   dispatches unchanged. The source cut (`cut.ts`) and the terminal (`result.ts`) already drop empties.
 - The encoded chunk is internal and travels typed `T[]`. A site that reads items without decoding
   returns `[]` without an error, so each decoding site keeps its own e2e case.
+- `Pipeline.mayCarryEncodedChunks()` is the structural gate `.local()`'s seed and `drainable()` read
+  before wrapping a chunk stream in the materializing generator - `false` on the base, `true` only on
+  `WebSocketPipeline`. Wrapping unconditionally regressed `bench:memory` on every non-WebSocket chain
+  (one Promise per chunk for a mechanism it could never carry); this class-level override closes that
+  with no runtime flag.
 - ⚠ A `codec.decode()` failure no longer rejects at the dispatching stage: the primary keeps the
   reply encoded and only decodes at whichever site reads items first (`drainable()`, the `.local()`
   seed, `flattenChunks`), all outside `runStageChunk`'s own try/catch. `Pipeline.onError()`'s
@@ -780,10 +785,12 @@ AFTER   stage 0 reply -> encoded chunk { payload, rows, codec } ----------------
   out of the terminal (or `.local()` region) instead. `.consume()` never decodes at all, so a bad
   chunk there completes silently with nothing to report.
 
-Measured in planning (spike 2, `WebSocketPipeline`, `[1..8]`, `.buffer(1)`, two dispatched stages):
-the primary's decode/encode count fell from 16/16 to 8/8 with the JSON codec and with a
-by-reference codec alike, output unchanged. `.tap()`, `.local()`, a recut and `.branch()` between stages kept
-their base counts, since each reads rows.
+Measured (`__tests__/codec.e2e.test.ts`'s own Done-when cases, `WebSocketPipeline`, `[1..8]`,
+`.buffer(1)`, two dispatched stages): the primary's decode/encode count fell from 16/16 to 8/8 with
+the JSON codec, output unchanged; an emptied chunk cut the server's own decode count from 16 to 8; a
+dispatched reduce decoded only at the terminal `.toArray()`. `.tap()`, `.local()`, a recut and
+`.branch()` between stages kept their base counts, since each reads rows - matching planning's own
+spike 2 findings exactly.
 
 The package ships no storage codec. A caller's by-reference codec owns its store, its keys and its
 cleanup; a dispatch that fails before decode leaves that codec's stored object unread.
