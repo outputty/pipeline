@@ -438,11 +438,12 @@ process.exit(0);
   `WebSocketServer({ noServer: true })`/`handleUpgrade`, for a caller's own `"upgrade"` listener on a
   real `http.Server`.
 
-⚠ A codec's own `decode` failing rejects the whole call - it runs before any stage, so `.onError()`
-never sees it.
+⚠ A codec's own `decode` failing rejects the whole call - it runs outside a stage's own try/catch, at
+whichever site reads items first, so `.onError()` never sees it. `.consume()` never decodes at all,
+so a bad reply there completes silently with nothing to report.
 
 `Codec` is the interface: `encode(value: unknown): Uint8Array | Promise<Uint8Array>`,
-`decode(bytes: Uint8Array): unknown`, an optional `contentType`. Not generic - one instance serves
+`decode(bytes: Uint8Array): unknown | Promise<unknown>`, an optional `contentType`. Not generic - one instance serves
 every stage of a chain while the item type changes, so it sees `unknown` on both sides. `JsonCodec`
 is the default, a class: `JSON.stringify` to UTF-8 bytes and back - BREAKING: the `jsonCodec` object
 it replaces is deleted; construct `new JsonCodec()` instead.

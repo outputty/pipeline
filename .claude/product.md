@@ -317,8 +317,9 @@ const data = await new ClusterPipeline<number>({ workers: 2, maxConcurrency: 2, 
 ```
 
 ⚠ A codec's own `decode` failing rejects the whole call, whatever `.onError()` is set to. `.onError()`
-catches a stage's own row and chunk failures; a codec is read before any stage runs, so a bad reply
-never reaches it.
+catches a stage's own row and chunk failures; a codec is read outside a stage's own try/catch, at
+whichever site reads items first, so a bad reply never reaches it. `.consume()` never decodes at
+all, so a bad reply there completes silently with nothing to report.
 
 Two rules follow from a stage being a position rather than a name, and both are the caller's to keep:
 
