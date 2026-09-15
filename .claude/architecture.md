@@ -781,6 +781,16 @@ cleanup; a dispatch that fails before decode leaves that codec's stored object u
 
 ## EventEmitterPipeline - #124
 
+⚠ **pending #221** - every event name below changes, and the composed function stops registering on
+the emitter. Stage channels become `routePath("transform", n)` (`/transform/<n>`, or
+`/branch/<i>/<name>/transform/<n>` inside an arm), lifecycle events append `:dispatched`/`:done`/
+`:error`/`:end` to that route, and `pipeline:end` becomes `<trail>:end` (`:end` on a chain).
+`stageWork()` dispatches to `[composed function, ...emitter.listeners(route)]`, so the
+registered-name `Set`, the `registeredStages` option, the "no worker registered" rejection and the
+`off()` takeover all go, and `options.emitter` is validated on every construction. This fixes the
+two collision bullets at the end of this section: arms, forks and a shared emitter each run their
+own function. The docs layer rewrites the section once it ships.
+
 `stageWork()` is the only DISPATCH override, the same seam `HttpPipeline` overrides to POST -
 `apply()`'s own fan-out (`fanOutOrdered`/`fanOutUnordered`, `maxConcurrency`, `ordered`) is
 inherited UNCHANGED, and stays that way: no pool, no round-robin, no readiness tracking of its

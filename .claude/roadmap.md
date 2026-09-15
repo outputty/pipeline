@@ -32,6 +32,13 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   pays a store read and write per chunk per hop, even under `.consume()`. Now, because #208 made
   `codec` reachable on `ClusterPipeline`, and #212 waits on the `src/codec.ts` module this ticket
   creates.
+- **`EventEmitterPipeline` events read as routes, and the composed function is never a listener**
+  (#221) - every chain numbers its stages from 0 and the composed function registers once per event
+  name, so a `.branch()` arm, two sibling arms, two forks of one base and two pipelines on one shared
+  emitter each return another chain's output with no error. Events move to `/transform/<n>` and
+  `/branch/<i>/<name>/transform/<n>` with `:dispatched`/`:done`/`:error`/`:end` suffixes and a
+  `<trail>:end` per drain, and dispatch runs the chain's own function directly beside registered
+  Workers. Now, because #222 lands this class's branch tests as expected failures citing it.
 
 ### Later - not yet filed
 
@@ -532,6 +539,13 @@ The two older candidates, still not filed:
 
 ## Killed
 
+- **Colon-prefixed arm event names, `branch:<i>:<name>:stage:<n>`** (#221 planning) - spiked
+  working and non-breaking at top level. Killed by the user's pick of the route string HTTP already
+  dispatches to, so one address names a stage on every class.
+- **Renaming arm events alone, with the composed function still a registered listener** (#221
+  planning) - fixed every arm case, but two forks of one base still shared `/transform/1` and one
+  registration, returning `[20,30]` for both. Killed for the fork fix: no naming scheme separates
+  two forks, and running each chain's own function directly does.
 - **A by-reference codec alone, with the core unchanged** (#209 planning) - the codec returned a
   one-element `[{ ref }]` chunk so keys would flow between stages untouched. Killed on a spike: a
   `.buffer()` recut packed two handles into one chunk and dispatch threw, `.tap()` saw handles
