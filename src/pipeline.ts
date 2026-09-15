@@ -40,6 +40,7 @@ import {
 } from "./utils/chunk";
 import { assertWholeNumberAtLeastOne } from "./utils/cut";
 import { chain, isThenable, runStageChunk } from "./utils/helpers";
+import { materializeChunksIfNeeded } from "./utils/encoded-chunk";
 import { PipelineResult } from "./result";
 import { BranchBuilder, runBranch } from "./branch";
 import type {
@@ -1477,7 +1478,13 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // and `.local((p) => p.reduce(sum, 0))` over `[1..6]` returned the six items rather than `[21]`.
     const region = new Pipeline<T, "sync" | "async">({
       ...this.carriedOptions(),
-      chunks: this._chunks,
+      // Materialized (#209): the bare Pipeline this builds runs Transformer.process() directly
+      // over these chunks, which needs real items - an encoded chunk a dispatched stage upstream
+      // left behind is decoded here, the one seam .tap() (wrapped in .local()) goes through.
+      // `materializeChunksIfNeeded` skips the wrapper entirely when the flag is off, since nothing
+      // in `this._chunks` could be an encoded chunk then (measured: paying one Promise per chunk
+      // unconditionally regressed every non-WebSocket `.local()` region's own promises/row).
+      chunks: materializeChunksIfNeeded(this._chunks),
       pendingStages: [],
     });
     // `build`'s own declared parameter type is `Pipeline<T, M, any>` - cast straight to it rather
@@ -1590,12 +1597,22 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * @example
    * A bound sync pipeline over `[1, 2, 3]` returns `{ syncChunks: <generator>, … }`; an async one
    * returns `{ syncChunks: null, … }` and the caller reads `chunks()` instead.
+   *
+   * `materialize` (#209) - `true` (default) decodes an encoded chunk a dispatched stage upstream
+   * left behind before `chunks()` yields it; `.consume()` (`result.ts`) passes `false`, since it
+   * reads no item and so decodes nothing.
    */
-  drainable(input: PipelineSource<In>): Drainable<T> {
+  drainable(input: PipelineSource<In>, materialize = true): Drainable<T> {
     const bound = this.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
     return {
       syncChunks: bound.isSync() ? bound._syncChunks : null,
-      chunks: () => bound.chunkStream(),
+      // `.consume()` (`result.ts`) passes `materialize: false` - it reads no item, so it decodes
+      // nothing (#209). Every other terminal, and `.branch()`, keeps the default: `syncChunks`
+      // above needs no such split, since a sync chain never dispatches and therefore never carries
+      // an encoded chunk to begin with. `materializeChunksIfNeeded` skips the wrapper generator
+      // when the flag is off, since nothing in the stream could be encoded then.
+      chunks: () =>
+        materialize ? materializeChunksIfNeeded(bound.chunkStream()) : bound.chunkStream(),
       // THIS run's manager, which is a fresh one per call unless the caller named their own (#90).
       // `.branch()` reads it so an arm's own pipeline sees the writes the parent chain just made,
       // rather than the chain's manager, which holds the previous call's.

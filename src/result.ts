@@ -57,9 +57,13 @@ export class PipelineResult<T, M extends PipelineMode> {
    * Typed `Drainable<T>` (#133) - the SAME shape `Pipeline.drainable()` itself returns, so this
    * wrapper needs only the cast from `Drainable<unknown>` (this result's own `_pipeline` is bound
    * to `T = unknown`) to `Drainable<T>`, never a second, independent spelling of its three fields.
-   * `context` goes unread here - only `branch.ts`'s own `runBranch` needs it. */
-  private drainable(): Drainable<T> {
-    return this._pipeline.drainable(this._input) as Drainable<T>;
+   * `context` goes unread here - only `branch.ts`'s own `runBranch` needs it.
+   *
+   * `materialize` (#209) forwards to `Pipeline.drainable()`'s own knob - `.consume()` passes
+   * `false`, since it reads no item and therefore decodes nothing; every other terminal keeps the
+   * default. */
+  private drainable(materialize = true): Drainable<T> {
+    return this._pipeline.drainable(this._input, materialize) as Drainable<T>;
   }
 
   /**
@@ -116,16 +120,32 @@ export class PipelineResult<T, M extends PipelineMode> {
   }
 
   /**
-   * Run the chain for its side effects, collecting nothing.
-   *
-   * `forEach` with a no-op callback IS this, on both engines: it drains the same stream and settles
-   * nothing, since a no-op returns no thenable.
+   * Run the chain for its side effects, collecting nothing - and reading no item, so it decodes
+   * none (#209): every stage still runs, but a dispatched reply an upstream stage left encoded is
+   * never materialized, unlike `forEach(() => {})`, which drains through the materialized view.
    *
    * @example
    * `score([1, 2, 3]).consume()` → `undefined`, every stage having run.
    */
   consume(): M extends "sync" ? void : Promise<void> {
-    return this.forEach(() => {});
+    // Not `forEach(() => {})` (#209): that reads through the materialized view, so a no-op
+    // callback still paid every stage's own decode. `drainable(false)` skips it - `.consume()`
+    // reads no item, so it decodes nothing, whether or not an upstream stage left one encoded.
+    const { syncChunks, chunks } = this.drainable(false);
+    return dispatchSync(
+      syncChunks,
+      (syncView) => drainSyncSettled(syncView, () => {}),
+      () => this.consumeAsync(chunks),
+    ) as M extends "sync" ? void : Promise<void>;
+  }
+
+  /** `.consume()`'s own async arm - drains every CHUNK for its side effects, decoding none of
+   * them: a sync chain never dispatches and so never carries an encoded one, but the async arm
+   * genuinely can, and this is the one terminal that must never call `materialize()` on it. */
+  private async consumeAsync(chunks: () => AsyncIterable<T[]>): Promise<void> {
+    for await (const _chunk of chunks()) {
+      // Every stage already ran to produce this chunk; there is nothing left to do with it.
+    }
   }
 
   /**
