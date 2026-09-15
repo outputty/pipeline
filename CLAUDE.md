@@ -461,19 +461,22 @@ none of it survived the hand-trim (#745).
   `stage:<n>` names (`emptyOfOwnClass()` carries the same `emitter`/registered-stages `Set` into the
   arm while resetting its stage index to 0) - real, but out of scope by the ticket's own Settle
   first: "an arm's own worker-channel naming is undesigned."
-- **`Codec` / `JsonCodec`** (pending #209, replaces: `jsonCodec`) - `Codec` is the interface for how
+- **`Codec` / `JsonCodec`** (#209, BREAKING, replaces `jsonCodec`) - `Codec` is the interface for how
   a chunk becomes bytes on a WebSocket wire: `encode(value: unknown)`, `decode(bytes): unknown`,
   optional `contentType`. Deliberately not generic: one codec serves every stage while the item type
   changes, so `Pipeline<T>` carries the type hints. `JsonCodec` is the default class; the `jsonCodec`
-  object is deleted (BREAKING). Both live in `src/codec.ts`. A **by-reference codec** is a caller's
+  object is deleted. Both live in `src/codec.ts`. A **by-reference codec** is a caller's
   own `Codec` that stores each chunk elsewhere and sends a key; the package ships none.
-- **Encoded chunk** (pending #209, no prior term) - a dispatched WebSocket reply the orchestrator
+- **Encoded chunk** (#209) - a dispatched WebSocket reply the orchestrator
   keeps as `{ payload, rows, codec }` instead of decoding; internal, typed `T[]` in the stream. A
   later dispatched stage sends its payload verbatim; `materialize()` decodes it only where items
   are read (`drainable()`, the `.local()` seed, `flattenChunks`). Its `rows` lets the fan-out skip
   an emptied chunk and `.consume()` finish without decoding. ⚠ A decode failure therefore surfaces
   at the materializing site, not the dispatching one - outside `Pipeline.onError()`'s per-chunk
   drop-and-continue reach - and `.consume()` never decodes at all, so it never surfaces one.
+  `Pipeline.mayCarryEncodedChunks()` (`false` on the base, `true` only on `WebSocketPipeline`) is the
+  structural gate `.local()`'s seed and `drainable()` read before paying to unwrap one, so a class
+  that can never carry an encoded chunk pays nothing for the mechanism.
 - **Observation point / `.tap()`** - the ONE surface that watches data without changing it, at two
   levels with one meaning. `Transformer.tap(fn | transformer)` (`src/transformer.ts`) is a `pipe()`
   link: `fn` gets each item plus context via `Promise.all(chunk.map(...))`, the `transformer` form
