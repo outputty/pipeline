@@ -129,13 +129,14 @@ describe("#120 Done-when 3 - .local() correctness per dispatching class", () => 
   it("EventEmitterPipeline: a stage OUTSIDE .local() DOES register and fire a Worker - negative control (#180)", async () => {
     const pipeline = new EventEmitterPipeline<number>().transform(canonicalChain);
     let calls = 0;
-    pipeline.emitter.on("stage:0", () => {
+    pipeline.emitter.on("/transform/0", () => {
       calls++;
     });
     await pipeline(canonicalInput(10)).toArray();
-    // The composed function is the FIRST registered Worker (auto-registered by stageWork()); this
-    // manual listener is the second, so it fires once alongside it - `calls > 0` is what a
-    // dispatched stage guarantees, matching every other class's own negative control here.
+    // The composed function is called directly by stageWork(), never registered - this manual
+    // listener is the only thing on `emitter.listeners("/transform/0")`, and it still fires once
+    // per chunk since the stage genuinely dispatched - `calls > 0` is what a dispatched stage
+    // guarantees, matching every other class's own negative control here.
     expect(calls).toBeGreaterThan(0);
   });
 
