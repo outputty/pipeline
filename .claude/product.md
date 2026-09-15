@@ -285,7 +285,8 @@ process passes a reply on still encoded, so it reads rows only where it needs th
 > `decode(bytes)` and an optional `contentType`. Not generic: one codec serves every stage while the
 > item type changes, so it sees `unknown`. Every process builds its own by running the same entry
 > module, so any store it writes to must be reachable from every process.
-> **`JsonCodec`** - the default `Codec`, a class: `JSON.stringify` to UTF-8 bytes and back.
+> **`JsonCodec`** - the default `Codec`, a class: `JSON.stringify` to UTF-8 bytes and back. BREAKING:
+> replaces the deleted `jsonCodec` object - construct `new JsonCodec()` instead.
 
 ```ts
 import { ClusterPipeline, type Codec } from "@outputty/pipeline";
@@ -314,6 +315,10 @@ const data = await new ClusterPipeline<number>({ workers: 2, maxConcurrency: 2, 
 ```json
 [7, 9, 11, 13, 15, 17]
 ```
+
+⚠ A codec's own `decode` failing rejects the whole call, whatever `.onError()` is set to. `.onError()`
+catches a stage's own row and chunk failures; a codec is read before any stage runs, so a bad reply
+never reaches it.
 
 Two rules follow from a stage being a position rather than a name, and both are the caller's to keep:
 
