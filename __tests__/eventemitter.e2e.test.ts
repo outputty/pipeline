@@ -1,22 +1,26 @@
 /**
- * eventemitter.e2e.test.ts — #124's Done-when cases, each proven through a real
- * `EventEmitterPipeline` run over a real `node:events` `EventEmitter`. No mocks: every "worker" is
- * a real function registered on a real emitter, every race is a real `setTimeout`.
+ * eventemitter.e2e.test.ts — #124's own Done-when cases (unchanged below), plus #221's own
+ * (appended at the end, L1) - each proven through a real `EventEmitterPipeline` run over a real
+ * `node:events` `EventEmitter`. No mocks: every "worker" is a real function registered on a real
+ * emitter, every race is a real `setTimeout`.
  *
- * Done-when 6 (an async Worker throwing after its own `await` leaks no unhandled rejection) runs as
- * a subprocess fixture (`__tests__/fixtures/eventemitter-async-throw.ts`) for the same reason
- * `concurrent-unhandled.ts` (#17) does: Vitest installs its own `unhandledRejection` handler and
- * would report a leak as a test-runner error, never a value this file can observe directly.
+ * #124's own Done-when 6 (an async Worker throwing after its own `await` leaks no unhandled
+ * rejection) runs as a subprocess fixture (`__tests__/fixtures/eventemitter-async-throw.ts`) for
+ * the same reason `concurrent-unhandled.ts` (#17) does: Vitest installs its own
+ * `unhandledRejection` handler and would report a leak as a test-runner error, never a value this
+ * file can observe directly.
  *
- * Done-when 12 (`pnpm check` passes, no file outside the ticket's own Where) is a repo-wide gate,
- * not a per-case assertion - checked once at the end of the build, not here.
+ * #221's own Done-when 8 (the repo-wide `rg` sweep for the old spellings) and Done-when 12
+ * (`pnpm check`, including the memory-benchmark baseline) are repo-wide gates, not per-case
+ * assertions - checked once at the end of the build, not here.
  *
- * Every Done-when case ran as `it.fails` against L1's stub, then flipped live once L2's real
- * dispatch landed (`pipelines.e2e.test.ts`'s own convention, #17). The two "review round" describes
- * below are not Done-when cases - they are regression tests for review-found fixes, added after.
+ * #221's own new cases run `it.fails` here in L1, against this ticket's own unchanged stub -
+ * Done-when 10 (a missing `off()` throws) already holds on the unchanged code, so it runs live
+ * from L1 rather than xfail. Every `it.fails` case flips live once L2's real redesign lands.
  */
 import { describe, it, expect } from "vitest";
-import { EventEmitterPipeline, type WorkEvent } from "../src";
+import { EventEmitter } from "node:events";
+import { EventEmitterPipeline, type PipelineEmitter, type WorkEvent } from "../src";
 import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
 
 function delay(ms: number): Promise<void> {
@@ -293,4 +297,175 @@ describe("#124 review round 1/2 - a throwing lifecycle observer never absorbs or
     },
     FIXTURE_TIMEOUT,
   );
+});
+
+// #221's own Done-when cases - events read as routes, and the composed function is called
+// directly instead of registering on the emitter. Written against L1's own unchanged stub, so
+// every one of these is expected to fail until L2 lands the real redesign.
+describe("#221 the Interface program - events read as routes, the composed function never registers (Done-when 1, 6)", () => {
+  it.fails(
+    "returns {evens:[60,80,100],odds:[]} and records exactly the eight after-event names",
+    async () => {
+      const emitter = new EventEmitter();
+      const seen: string[] = [];
+      const emit = emitter.emit.bind(emitter);
+      emitter.emit = ((event: string, ...args: unknown[]) => {
+        seen.push(String(event));
+        return emit(event, ...args);
+      }) as typeof emitter.emit;
+
+      const split = new EventEmitterPipeline<number>({ emitter })
+        .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+        .branch((b) =>
+          b
+            .when(
+              "evens",
+              (x) => x % 2 === 0,
+              (q) => q.transform((t) => t.map((x) => x * 10)),
+            )
+            .otherwise("odds"),
+        );
+
+      const out = await split([1, 2, 3, 4, 5]);
+
+      expect(out).toEqual({ evens: [60, 80, 100], odds: [] });
+      expect(seen).toEqual([
+        "/transform/0:dispatched",
+        "/transform/0:done",
+        "/transform/0:end",
+        ":end",
+        "/branch/0/evens/transform/0:dispatched",
+        "/branch/0/evens/transform/0:done",
+        "/branch/0/evens/transform/0:end",
+        "/branch/0/evens:end",
+      ]);
+      expect(emitter.eventNames()).toEqual([]);
+    },
+  );
+});
+
+describe("#221 two sibling arms with a parent stage no longer collide on the same route (Done-when 2)", () => {
+  it.fails(
+    "returns {big:[40,50,60,70],rest:[-3]}, the record a plain Pipeline returns",
+    async () => {
+      const out = await new EventEmitterPipeline<number>()
+        .transform((t) => t.map((x: number) => x + 1))
+        .branch((b) =>
+          b
+            .when(
+              "big",
+              (x) => x > 3,
+              (q) => q.transform((t) => t.map((x) => x * 10)),
+            )
+            .otherwise("rest", (q) => q.transform((t) => t.map((x) => -x))),
+        )([2, 3, 4, 5, 6]);
+
+      expect(out).toEqual({ big: [40, 50, 60, 70], rest: [-3] });
+    },
+  );
+});
+
+describe("#221 two forks of one base chain each answer with their own output (Done-when 3)", () => {
+  it.fails(
+    "returns [20,30] and [-2,-3], not both collapsing to the first fork's result",
+    async () => {
+      const base = new EventEmitterPipeline<number>().transform((t) => t.map((x: number) => x + 1));
+
+      const a = await base
+        .transform((t) => t.map((v) => v * 10))([1, 2])
+        .toArray();
+      const b = await base
+        .transform((t) => t.map((v) => -v))([1, 2])
+        .toArray();
+
+      expect(a).toEqual([20, 30]);
+      expect(b).toEqual([-2, -3]);
+    },
+  );
+});
+
+describe("#221 two independently-constructed pipelines sharing one emitter each answer with their own output (Done-when 4)", () => {
+  it.fails("returns [10,20] and [-1,-2], not both collapsing to the first pipeline's", async () => {
+    const emitter = new EventEmitter();
+    const p1 = new EventEmitterPipeline<number>({ emitter }).transform((t) =>
+      t.map((x: number) => x * 10),
+    );
+    const p2 = new EventEmitterPipeline<number>({ emitter }).transform((t) =>
+      t.map((x: number) => -x),
+    );
+
+    const out1 = await p1([1, 2]).toArray();
+    const out2 = await p2([1, 2]).toArray();
+
+    expect(out1).toEqual([10, 20]);
+    expect(out2).toEqual([-1, -2]);
+  });
+});
+
+describe("#221 a Worker registered on an arm's own route name answers that arm (Done-when 5)", () => {
+  it.fails(
+    "returns {all:['W2','W3','W4']} from a Worker on /branch/0/all/transform/0",
+    async () => {
+      const emitter = new EventEmitter();
+      emitter.on("/branch/0/all/transform/0", ({ chunk, respond }: WorkEvent<number, string>) =>
+        respond(chunk.map((x: number) => "W" + x)),
+      );
+
+      const out = await new EventEmitterPipeline<number>({ emitter })
+        .transform((t) => t.map((x: number) => x + 1))
+        .branch((b) => b.otherwise("all", (q) => q.transform((t) => t.map((x) => -x))))([1, 2, 3]);
+
+      expect(out).toEqual({ all: ["W2", "W3", "W4"] });
+    },
+  );
+});
+
+describe("#221 .local() emits :dispatched only on the two dispatched stages (Done-when 7)", () => {
+  it.fails(
+    "dispatches on /transform/0 and /transform/2 only, skipping the pinned local stage",
+    async () => {
+      const emitter = new EventEmitter();
+      const dispatched: string[] = [];
+      emitter.on("/transform/0:dispatched", () => dispatched.push("/transform/0"));
+      emitter.on("/transform/1:dispatched", () => dispatched.push("/transform/1"));
+      emitter.on("/transform/2:dispatched", () => dispatched.push("/transform/2"));
+
+      const out = await new EventEmitterPipeline<number>({ emitter })
+        .transform((t) => t.map((x: number) => x * 2))
+        .local((p) => p.transform((t) => t.filter((x: number) => x > 2)))
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3])
+        .toArray();
+
+      expect(out).toEqual([5, 7]);
+      expect(dispatched).toEqual(["/transform/0", "/transform/2"]);
+    },
+  );
+});
+
+describe("#221 options.emitter missing off() throws on both constructor forms (Done-when 10)", () => {
+  // Missing exactly `off` - a trust-boundary value, so a real caller-supplied emitter this
+  // incomplete is exactly what assertPipelineEmitter() exists to catch at construction.
+  const withoutOff = {
+    on() {},
+    listeners() {
+      return [];
+    },
+    listenerCount() {
+      return 0;
+    },
+    emit() {},
+  } as unknown as PipelineEmitter;
+
+  it("throws on the options-only chain form", () => {
+    expect(() => new EventEmitterPipeline<number>({ emitter: withoutOff })).toThrow(
+      "options.emitter is missing 'off()' - it must satisfy PipelineEmitter",
+    );
+  });
+
+  it("throws on the wrapping (chain, options) form", () => {
+    const chain = new EventEmitterPipeline<number>().transform((t) => t.map((x: number) => x));
+    expect(() => new EventEmitterPipeline<number>(chain, { emitter: withoutOff })).toThrow(
+      "options.emitter is missing 'off()' - it must satisfy PipelineEmitter",
+    );
+  });
 });
