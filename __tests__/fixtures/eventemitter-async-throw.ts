@@ -27,7 +27,7 @@ async function main(): Promise<void> {
     }),
   );
 
-  pipeline.emitter.on("stage:0", async ({ chunk }: { chunk: number[] }) => {
+  pipeline.emitter.on("/transform/0", async ({ chunk }: { chunk: number[] }) => {
     await delay(5);
     // No explicit reject() call - the throw itself is the whole point of this fixture.
     throw new Error(`worker-threw-after-await-${chunk.join(",")}`);
