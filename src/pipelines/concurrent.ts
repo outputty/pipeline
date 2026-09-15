@@ -28,7 +28,7 @@ import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
 import { share } from "@src/utils/chunk";
 import { runStageChunk } from "@src/utils/helpers";
-import { isEncodedChunk } from "@src/utils/encoded-chunk";
+import { isEmptyEncodedChunk } from "@src/utils/encoded-chunk";
 
 /** Construction-time knobs for `ConcurrentPipeline` and every class that extends it. */
 export interface ConcurrentPipelineOptions {
@@ -331,13 +331,19 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
       // An encoded chunk a prior WebSocketPipeline/ClusterPipeline stage emptied is never
       // dispatched (#209) - the reply would come back empty regardless, so this trades one
       // network round trip for one property read that never decodes to answer it. Scoped to
-      // `isEncodedChunk`, not a global flag check: only a class that ever calls `encodedChunk()`
+      // `isEmptyEncodedChunk`, not a global flag check: only a class that ever calls `encodedChunk()`
       // (`websocket.ts`'s own `stageWork()`/`reduceWork()`) can produce one, so this never touches
       // a real, merely-empty chunk on `HttpPipeline`/`EventEmitterPipeline` - review-caught: an
       // earlier `encodedChunksEnabled()`-only gate skipped THEIR dispatch too whenever the flag
       // happened to be set anywhere in the process, an unrelated global toggle deciding an
       // unrelated class's own dispatch count.
-      if (isEncodedChunk(chunk) && chunk.rows === 0) return [] as U[];
+      //
+      // Returns `chunk` itself, not a fresh `[]` (review-caught): a plain empty array loses the
+      // tag, so the IDENTICAL check on the NEXT dispatched stage no longer recognizes it and
+      // dispatches a chunk already known to be empty. `chunk` is still `{ payload: bytes, rows: 0,
+      // codec }` - already the correct "this stage produced nothing" answer, with nothing to
+      // encode or decode to restate it.
+      if (isEmptyEncodedChunk(chunk)) return chunk as unknown as U[];
       return runStageChunk(rawWork, chunk, ctx, this._runHandler);
     };
     const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;

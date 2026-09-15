@@ -13,6 +13,9 @@ import type { Codec } from "@src/codec";
 
 const ENCODED_CHUNK: unique symbol = Symbol("encodedChunk");
 
+/** A dispatched WebSocket reply, kept as bytes plus a row count instead of decoding - the value
+ * `encodedChunk()` (below) builds and every other function in this file reads back. `[ENCODED_CHUNK]`
+ * is the tag `isEncodedChunk()` tests for; a caller never constructs or inspects one directly. */
 export interface EncodedChunk {
   readonly [ENCODED_CHUNK]: true;
   readonly payload: Uint8Array;
@@ -38,15 +41,31 @@ export function isEncodedChunk(chunk: unknown): chunk is EncodedChunk {
   return typeof chunk === "object" && chunk !== null && ENCODED_CHUNK in chunk;
 }
 
+/** Whether `chunk` is an encoded chunk a dispatched stage emptied - `ConcurrentPipeline.apply()`'s
+ * fan-out and `WebSocketPipeline.reduceWork()`'s own pump loop both skip dispatching one for the
+ * identical reason (#209 review, dedup: both spelled `isEncodedChunk(chunk) && chunk.rows === 0`
+ * inline before this).
+ *
+ * `isEmptyEncodedChunk([])` → `false` (a real, merely-empty array is not this). `isEmptyEncodedChunk(encodedChunk(bytes, 0, codec))` → `true`. */
+export function isEmptyEncodedChunk<T>(chunk: T[]): boolean {
+  return isEncodedChunk(chunk) && chunk.rows === 0;
+}
+
 /** Decodes a chunk that may or may not be encoded - a real array passes through UNCHANGED, so this
  * is safe to call at every site whether or not anything ever produced an encoded chunk. The one
  * place every item-reading site (`Pipeline.drainable()`, the `.local()` seed, `flattenChunks`)
- * undoes the encoded-chunk lie.
+ * undoes the encoded-chunk lie. A KNOWN-empty encoded chunk (`isEmptyEncodedChunk`) skips the
+ * decode call too - `rows` already answers "what does this payload decode to" without reading it,
+ * the same reason the fan-out never dispatches one further (#209 review: an empty chunk this
+ * function once decoded anyway, once the fan-out started forwarding it tagged instead of resetting
+ * it to a plain `[]`, cost a real decode call for a known answer).
  *
  * `await materialize([1, 2, 3])` → `[1, 2, 3]`, no decode call. `await
- * materialize(encodedChunk(bytes, 3, codec))` → `codec.decode(bytes)`'s own result. */
+ * materialize(encodedChunk(bytes, 3, codec))` → `codec.decode(bytes)`'s own result. `await
+ * materialize(encodedChunk(bytes, 0, codec))` → `[]`, no decode call either. */
 export async function materialize<T>(chunk: T[]): Promise<T[]> {
   if (!isEncodedChunk(chunk)) return chunk;
+  if (chunk.rows === 0) return [] as T[];
   return (await chunk.codec.decode(chunk.payload)) as T[];
 }
 
@@ -65,7 +84,10 @@ export async function encodeOrForward<T>(chunk: T[], codec: Codec): Promise<Uint
 
 /** `materialize()` over a whole chunk STREAM, one chunk at a time - `Pipeline.local()`'s own seed
  * (`pipeline.ts`) uses this, since the bare `Pipeline` it builds runs `Transformer.process()`
- * directly over the chunks it is handed and needs real items, never an encoded one. */
+ * directly over the chunks it is handed and needs real items, never an encoded one.
+ *
+ * `[...await Array.fromAsync(materializeChunks(chunksOf([[1, 2], encodedChunk(bytes, 1, codec)])))]`
+ * → `[[1, 2], codec.decode(bytes)'s own result]`. */
 export async function* materializeChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T[]> {
   for await (const chunk of chunks) {
     yield isEncodedChunk(chunk) ? await materialize(chunk) : chunk;
