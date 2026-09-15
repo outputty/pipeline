@@ -510,6 +510,11 @@ none of it survived the hand-trim (#745).
   `ChunkErrorHandler` and `ErrorHandler` are deleted from the export surface, `.onError()`'s #40
   notification contract is replaced, and whole-chunk REPLACEMENT goes unreplaced by decision - a
   chunk-level failure can only continue with that chunk dropped, or stop.
+- **Combination** (pending #222, no prior term; replaces: permutation, cell) - one behaviour on one
+  class with one set of option values, e.g. `queue | WebSocketPipeline mc4 unordered codec:file`.
+  A test proving it carries that exact title, in any file; a `pnpm check` step fails on each
+  combination no title names. Not a conformance suite: no shared case list, and classes may expect
+  different output under their own options.
 
 ## Toolchain
 

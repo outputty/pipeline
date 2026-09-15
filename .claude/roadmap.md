@@ -32,6 +32,16 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   pays a store read and write per chunk per hop, even under `.consume()`. Now, because #208 made
   `codec` reachable on `ClusterPipeline`, and #212 waits on the `src/codec.ts` module this ticket
   creates.
+- **Every behaviour tested on every class and option combination** (#222) - most behaviours are
+  tested on the base `Pipeline` only (`.consume()` nowhere else, `.queue()` only on
+  `ConcurrentPipeline`), and nothing lists which combinations are tested. A title per combination
+  plus a `pnpm check` step that fails on a missing one. Writing it surfaced a mismatched cluster
+  `workers` count being silently ignored, fixed in the same ticket by a construction-time throw.
+  After #209, because its codec is one of the option axes.
+- **An `EventEmitterPipeline` branch arm dispatches on its parent's stage event** (#221,
+  needs-planning) - an arm's `stage:0` is answered by the parent's `stage:0` Worker, so the arm
+  returns the parent stage's output. #222 lands those tests as expected failures until this is
+  designed.
 
 ### Later - not yet filed
 
@@ -636,18 +646,15 @@ The two older candidates, still not filed:
   for this context` on the first `new Pipeline()` under `node
   --disallow-code-generation-from-strings`, and the same on a CSP page or a Cloudflare Worker.
   `Pipeline.prototype` is reparented onto `Function.prototype` once instead.
-- **A conformance suite every `Pipeline` and Context class runs** (#37, closed COMPLETED, never
+- **A conformance suite every `Pipeline` and Context class runs** (#37, closed not planned, never
   built) - one set of behaviour cases, defined once in `__tests__/conformance/cases.ts`, run by thin
-  wrapper files, one per class; no such file exists in the repo. Planning found four separate
-  reasons a case could not run everywhere, and each turned out to be a defect rather than a
-  boundary the suite needed to encode: `.withHooks()` drops silently on a dispatched stage - `#30`,
-  the `EventEmitterPipeline` entry below, closed unbuilt; the capability itself shipped later as
-  `.tap()` (#72) - a custom chunker is refused there (#39), an error handler is refused there and
-  never sees the failing chunk (#40), and `merge` demotes to a plain `Pipeline` (#41). `#39`/`#40`/
-  `#41` fixed their defects directly; `#37` itself was never built to prove the rest, closing the
-  gap the suite would have only proven. Its
-  own Done-when 1 also named `EventEmitterPipeline` as a fifth wrapper class, which #72 later killed
-  outright - stale before the suite could ever be built as originally scoped.
+  wrapper files, one per class. Planning found four reasons a case could not run everywhere, and
+  each was a defect rather than a boundary: `.withHooks()` dropped silently (replaced by `.tap()`,
+  #72), a custom chunker was refused on a dispatched stage (#39), an error handler was refused there
+  (#40), and `merge` demoted to a plain `Pipeline` (#41). Killed by #222's planning: a shared case
+  harness is not the goal, every behaviour on every class and option combination is, in any test
+  file. Classes legitimately differ in output under their own options (a partitioned reduce, an
+  unordered stage), so one expected value per case does not hold.
 
 - **A `.catch()`-shaped per-row region** (#78, spiked) - a region combinator whose sub-chain runs row
   by row, the per-row sibling of `.catch()`. Killed by measurement: per-row execution changes what a

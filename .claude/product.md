@@ -169,8 +169,9 @@ built and the difference matters at your own scale.
 ### Where the work runs
 
 The class you construct decides where a chain's chunks are processed. The chain itself - the
-`map`/`filter`/`reduce` calls - is identical across every one of them, and so is the output. Only
-the class name changes.
+`map`/`filter`/`reduce` calls - is identical across every one of them, and so is the output, except
+where a class's own options change it. A `.reduce()` on a dispatching class returns one value per
+partition (see Reducing), and `ordered: false` returns items in completion order.
 
 > **`Pipeline`** - one chunk at a time, in this process. The default, and the base every other one
 > extends.
@@ -198,6 +199,9 @@ the class name changes.
 > them automatically. `options.codec` is `WebSocketPipeline`'s own knob, forwarded to `super`
 > unchanged - it never crosses the process boundary itself, so a store it writes to must be
 > reachable from every worker (`process.env`, which `cluster.fork()` inherits).
+> **`workers`** - how many worker processes a cluster class brings up, `os.availableParallelism()`
+> by default. Every pipeline of one cluster class in a process shares one worker set, so they all
+> use one count: constructing a second one with a different `workers` count throws.
 > **`EventEmitterPipeline`** - each chunk handed to whichever Worker functions are registered on
 > `pipeline.emitter`, a `node:events` `EventEmitter`. The chain's own `.transform()` function
 > auto-registers as a stage's first Worker; any number of extra Workers may register afterward from
