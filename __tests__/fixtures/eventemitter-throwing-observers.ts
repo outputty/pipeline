@@ -1,7 +1,8 @@
 /**
- * #124's own review rounds 1-2 - regression coverage for the throwing-observer fixes (`:dispatched`,
- * `:done`, `:end`, `pipeline:end`), per this repo's Tests rule ("what survives is the answer,
- * written into a real test in its proper home"). Runs as its own process for the same reason
+ * #124's own review rounds 1-2 - regression coverage for the throwing-observer fixes (a route's own
+ * `:dispatched`/`:done`/`:end`, and the drain's own trail-end event), per this repo's Tests rule
+ * ("what survives is the answer, written into a real test in its proper home"). Runs as its own
+ * process for the same reason
  * `eventemitter-async-throw.ts` does - `emitSafely()`'s own `queueMicrotask(() => { throw error })`
  * surfaces a throwing observer as a real `uncaughtException`, which Vitest's own process-wide
  * handler would report as a test-runner error rather than a value this script can observe.
@@ -20,8 +21,8 @@ import {
 captureUncaughtExceptions();
 
 /** A throwing lifecycle listener on `event` must never corrupt a normal chunk's own result -
- * `stage:0:dispatched` and `stage:0:done` share this identical shape: register a throwing listener,
- * run the pipeline, confirm the real dispatch settled fine regardless. */
+ * `/transform/0:dispatched` and `/transform/0:done` share this identical shape: register a throwing
+ * listener, run the pipeline, confirm the real dispatch settled fine regardless. */
 async function listenerThrows(
   event: string,
   throwMessage: string,
@@ -43,10 +44,10 @@ async function listenerThrows(
   return { out, rejection };
 }
 
-/** A throwing `stage:0:end`/`pipeline:end` listener used to REPLACE a real, already-propagating
- * chunk error with its own unrelated one (JS's finally-overrides-exception semantics), since the
- * throw happened inside `withEndSignal`'s own `finally` block - `apply()`'s own wrap (`stage:0:end`)
- * and `drainable()`'s own wrap (`pipeline:end`) are two separate call sites, both covered here. */
+/** A throwing `/transform/0:end`/`:end` listener used to REPLACE a real, already-propagating chunk
+ * error with its own unrelated one (JS's finally-overrides-exception semantics), since the throw
+ * happened inside `withEndSignal`'s own `finally` block - `apply()`'s own wrap (`/transform/0:end`)
+ * and `drainable()`'s own wrap (`:end`) are two separate call sites, both covered here. */
 async function endListenerThrowsOverRealFailure(): Promise<{ rejection: string | null }> {
   const pipeline = new EventEmitterPipeline<number>().buffer(1).transform((t) =>
     t.map((x: number) => {
@@ -54,10 +55,10 @@ async function endListenerThrowsOverRealFailure(): Promise<{ rejection: string |
       return x;
     }),
   );
-  pipeline.emitter.on("stage:0:end", () => {
+  pipeline.emitter.on("/transform/0:end", () => {
     throw new Error("observer-boom-on-end");
   });
-  pipeline.emitter.on("pipeline:end", () => {
+  pipeline.emitter.on(":end", () => {
     throw new Error("observer-boom-on-pipeline-end");
   });
 
@@ -71,8 +72,8 @@ async function endListenerThrowsOverRealFailure(): Promise<{ rejection: string |
 }
 
 async function main(): Promise<void> {
-  const dispatched = await listenerThrows("stage:0:dispatched", "observer-boom-on-dispatched");
-  const done = await listenerThrows("stage:0:done", "observer-boom-on-done");
+  const dispatched = await listenerThrows("/transform/0:dispatched", "observer-boom-on-dispatched");
+  const done = await listenerThrows("/transform/0:done", "observer-boom-on-done");
   const ended = await endListenerThrowsOverRealFailure();
   const unhandled = await drainUnhandledRejections(60);
   const uncaught = await drainUncaughtExceptions(60);

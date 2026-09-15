@@ -571,9 +571,9 @@ function cases(): Case[] {
     ],
     [
       // The fourth dispatching class (#124), skipped by every memory case until #180 - each chunk
-      // handed to the chain's own composed function, auto-registered as stage:0's first Worker, no
-      // HTTP/cluster boundary of its own. A fresh EventEmitterPipeline (and so a fresh default
-      // emitter) per case, matching this file's other dispatching-class cases.
+      // handed directly to the chain's own composed function (#221), never registered on the
+      // emitter, no HTTP/cluster boundary of its own. A fresh EventEmitterPipeline (and so a fresh
+      // default emitter) per case, matching this file's other dispatching-class cases.
       "EventEmitter workers",
       () =>
         new EventEmitterPipeline<number>({ maxConcurrency: MAX_CONCURRENCY })

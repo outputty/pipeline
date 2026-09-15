@@ -1,10 +1,18 @@
 /**
- * `EventEmitterPipeline` (#124) — a fourth `Pipeline` dispatch mode: each chunk of a stage handed to
- * whichever Worker functions are registered on `pipeline.emitter`, a `node:events`-shaped
- * `EventEmitter`, instead of POSTed over HTTP or sent to another process. `stageWork()` is the only
- * dispatch override - `ConcurrentPipeline.apply()`'s own fan-out (`fanOutOrdered`/`fanOutUnordered`,
- * `maxConcurrency`, `ordered`) is inherited UNCHANGED. `apply()` and `drainable()` are each
- * overridden a second time, on top of that, purely to emit `stage:<n>:end`/`pipeline:end`.
+ * `EventEmitterPipeline` (#124, events renamed to routes #221) — a fourth `Pipeline` dispatch mode:
+ * each chunk of a stage handed directly to the chain's own composed function, and to whichever extra
+ * Worker functions a caller registered on `pipeline.emitter`, instead of POSTed over HTTP or sent to
+ * another process. `stageWork()` is the only dispatch override - `ConcurrentPipeline.apply()`'s own
+ * fan-out (`fanOutOrdered`/`fanOutUnordered`, `maxConcurrency`, `ordered`) is inherited UNCHANGED.
+ * `apply()` and `drainable()` are each overridden a second time, on top of that, purely to emit
+ * `<route>:end`/`<trail>:end`.
+ *
+ * Every event is named after the route the chain was built along - `routePath("transform", n)`,
+ * the same `/transform/<n>`/`/branch/<i>/<name>/transform/<n>` grammar `HttpPipeline` dispatches to -
+ * and the composed function is called directly, never registered as a listener: two forks of one
+ * chain, two sibling `.branch()` arms, and two independently-constructed pipelines sharing one
+ * `emitter` each call their OWN composed function with nothing shared to race on, whatever their
+ * route happens to name (#221). `emitter.listeners(route)` only ever holds Workers a caller added.
  *
  * `new EventEmitterPipeline<number>().transform((t) => t.map((x) => x * 2))([1, 2, 3]).toArray()` →
  * `[2, 4, 6]`, the composed function alone a complete Worker.
@@ -33,8 +41,8 @@ export interface PipelineEmitter {
   on(event: string, listener: (...args: any[]) => void): void;
   off(event: string, listener: (...args: any[]) => void): void;
   listeners(event: string): Array<(...args: any[]) => void>;
-  /** Done-when 3's own check (`emitter.listenerCount("stage:0")`) reads this directly - `node:events`
-   * ships it natively, so declaring it here costs nothing for the shipped emitter. */
+  /** A caller's own way to inspect how many Workers are registered on a route - `node:events` ships
+   * this natively, so declaring it here costs nothing for the shipped emitter. */
   listenerCount(event: string): number;
   emit(event: string, ...args: unknown[]): void;
 }
@@ -42,7 +50,11 @@ export interface PipelineEmitter {
 /** `options.emitter` is a trust-boundary value - a caller's own compatible emitter, not necessarily
  * `node:events`' own - so a missing method fails HERE, at construction, naming what is missing,
  * rather than surfacing later as a generic `TypeError` deep inside `stageWork()`'s dispatch closure
- * (this repo's own Fail Loud rule: "External data missing an expected field fails at the parse"). */
+ * (this repo's own Fail Loud rule: "External data missing an expected field fails at the parse").
+ * Called on EVERY construction (#221) - a long chain's `.transform()`/`.buffer()`/`.context()` calls
+ * each re-validate the identical, unchanged `emitter` object, which costs nothing for a real one and
+ * is what makes a caller-supplied emitter's own `off()` gap fail loud at every layer, not only the
+ * first. */
 function assertPipelineEmitter(candidate: PipelineEmitter): void {
   const required = ["on", "off", "listeners", "listenerCount", "emit"] as const;
   for (const method of required) {
@@ -57,58 +69,40 @@ function assertPipelineEmitter(candidate: PipelineEmitter): void {
  * `EventEmitter` is built. */
 export type EventEmitterPipelineOptions = { emitter?: PipelineEmitter } & ConcurrentPipelineOptions;
 
-/** `EventEmitterPipeline`'s real constructor parameter type, plus the internal registered-stage
- * bookkeeping `createPipeline()` (below) carries forward BY REFERENCE - not part of the public
- * `EventEmitterPipelineOptions`, since a caller never sets it directly (#124 Done-when 3). */
-type EventEmitterPipelineConstructorOptions = EventEmitterPipelineOptions &
-  PipelineConstructorOptions & { registeredStages?: Set<string> };
-
 export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   readonly emitter: PipelineEmitter;
-  /** Event names already carrying the composed function's own registration - keyed by name, not by
-   * `emitter.listeners().length`, so a caller removing that listener between two calls does not
-   * cause a silent re-registration (#124 Done-when 3, 7). Carried forward BY REFERENCE through
-   * `createPipeline()` (below), never copied - the same object the ORIGINAL, unbound pipeline holds. */
-  protected _registeredStages: Set<string>;
 
   /** Wraps a chain built elsewhere, dispatching its stages through the emitter (#90's own
    * wrapping-constructor pattern, `HttpPipeline`/`ClusterPipeline` share it) - the WORKER and the
    * TRIGGER can then share one definition. */
   constructor(pipeline: WrappablePipeline<T, In>, options?: EventEmitterPipelineOptions);
-  constructor(options?: EventEmitterPipelineConstructorOptions);
+  constructor(options?: EventEmitterPipelineOptions & PipelineConstructorOptions);
   constructor(
-    first?: WrappablePipeline<T, In> | EventEmitterPipelineConstructorOptions,
+    first?: WrappablePipeline<T, In> | (EventEmitterPipelineOptions & PipelineConstructorOptions),
     second?: EventEmitterPipelineOptions,
   ) {
-    const options = Pipeline.wrapping<EventEmitterPipelineConstructorOptions>(first, second);
+    const options = Pipeline.wrapping<EventEmitterPipelineOptions & PipelineConstructorOptions>(
+      first,
+      second,
+    );
     super(options);
     this.emitter = options?.emitter ?? new EventEmitter();
-    // `registeredStages` is only ever set by `createPipeline()` (below), never by a caller - its
-    // presence is what tells apart a DERIVED instance (already validated once, at the ORIGINAL
-    // caller-facing construction this chain started from) from that original construction itself,
-    // so a long chain re-validates the identical, unchanged `emitter` object exactly once rather
-    // than once per `.transform()`/`.buffer()`/`.context()` call.
-    if (!options?.registeredStages) {
-      assertPipelineEmitter(this.emitter);
-    }
-    this._registeredStages = options?.registeredStages ?? new Set();
+    assertPipelineEmitter(this.emitter);
   }
 
   /**
-   * Carries `emitter`/`_registeredStages` into the NEXT instance a copy-on-write call builds, on
-   * top of what `ConcurrentPipeline.carriedKnobs()` already carries forward (#133) - same reason,
-   * two more fields. Both BY REFERENCE, never copied: the Set's own dedup (Done-when 3) and the
-   * `emitter`'s own identity (a caller-supplied one, or the one built above) must be the SAME object
-   * across every instance a `.transform()`/`.buffer()`/`.context()` call derives.
+   * Carries `emitter` into the NEXT instance a copy-on-write call builds, on top of what
+   * `ConcurrentPipeline.carriedKnobs()` already carries forward (#133) - same reason, one more
+   * field. BY REFERENCE, never copied: the `emitter`'s own identity (a caller-supplied one, or the
+   * one built above) must be the SAME object across every instance a
+   * `.transform()`/`.buffer()`/`.context()` call derives, and across every `.branch()` arm
+   * (`Pipeline.emptyOfOwnClass()`), which is what lets a Worker registered on the shared emitter
+   * answer an arm's own route.
    */
-  protected override carriedKnobs(): ConcurrentPipelineOptions & {
-    emitter: PipelineEmitter;
-    registeredStages: Set<string>;
-  } {
+  protected override carriedKnobs(): ConcurrentPipelineOptions & { emitter: PipelineEmitter } {
     return {
       ...super.carriedKnobs(),
       emitter: this.emitter,
-      registeredStages: this._registeredStages,
     };
   }
 
@@ -125,12 +119,13 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
 
   /**
    * Narrows the static return type, same as `transform()` above, AND wraps the dispatched stage's
-   * own output chunk stream so `stage:<n>:end` fires once, after every chunk that stage's fan-out
-   * produced has been yielded (Done-when 9, 10). `stageIndex` is read OFF THE RESULT
+   * own output chunk stream so `<route>:end` fires once, after every chunk that stage's fan-out
+   * produced has been yielded (Done-when 1). `stageIndex` is read OFF THE RESULT
    * (`dispatched._chunkTransforms.length - 1`, the slot `super.apply()` just appended), never
    * re-derived by independently repeating `ConcurrentPipeline.apply()`'s own internal computation -
    * so this stays correct even if that computation ever changes, with nothing to keep in sync by
-   * hand.
+   * hand. `dispatched.routePath(...)` (not `this.routePath(...)`) is what makes the route carry the
+   * `.branch()` arm's own trail when `dispatched` is an arm's pipeline, not the parent's.
    *
    * A still-deferred result (no source bound yet) is returned unwrapped: `super.apply()` itself
    * only RECORDED this call, to replay later against a bound instance - where this method runs
@@ -141,9 +136,9 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     if (dispatched.isDeferred()) return dispatched;
 
     const emitter = this.emitter;
-    const eventName = `stage:${dispatched._chunkTransforms.length - 1}`;
+    const route = dispatched.routePath("transform", dispatched._chunkTransforms.length - 1);
     const source = dispatched._chunks;
-    dispatched._chunks = withEndSignal(source, () => emitSafely(emitter, `${eventName}:end`));
+    dispatched._chunks = withEndSignal(source, () => emitSafely(emitter, `${route}:end`));
     return dispatched;
   }
 
@@ -177,45 +172,41 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   }
 
   /**
-   * Registers the composed function as `stage:<n>`'s own first Worker, once per stage index -
-   * `_registeredStages` (a `Set`, carried BY REFERENCE through `createPipeline()`) is what makes
-   * this a once-EVER registration rather than once per bound call, since `stageWork()` itself
-   * replays on every call (Done-when 3). Dispatch reads `emitter.listeners(eventName)` itself and
-   * calls each directly INSIDE a `try`, wrapped in `Promise.resolve(...).catch(...)`, never
-   * `emitter.emit()` - `emit()` cannot catch a Worker's throw after its own `await` (Done-when 6),
-   * and the `try` is what stops a Worker's SYNCHRONOUS throw aborting the loop before every later
-   * Worker has had its turn. Every registered Worker runs on every chunk; the first to SETTLE,
-   * `respond()` or `reject()`, decides it (Done-when 4) - a native `Promise`'s own idempotence makes
-   * every later settle on the same dispatch a no-op, guarded again here (`settled`) so the LIFECYCLE
-   * events stay exactly-once too. No listener at all rejects immediately, naming the stage
-   * (Done-when 7).
+   * Calls the chain's own composed function DIRECTLY - never registered as a listener (#221) - and
+   * every Worker a caller separately registered on `emitter`, addressed by the SAME route this
+   * stage dispatches under (`this.routePath("transform", stageIndex)`, `HttpPipeline`'s own
+   * grammar). Calling the composed function directly rather than through the emitter is what makes
+   * a fork, a sibling `.branch()` arm and a shared `emitter` each answer with their OWN output
+   * (#221 Done-when 2, 3, 4) - nothing about them is shared to race on any more, since neither ever
+   * touches the emitter at all.
+   *
+   * Dispatch reads `emitter.listeners(route)` itself and calls each directly INSIDE a `try`, wrapped
+   * in `Promise.resolve(...).catch(...)`, never `emitter.emit()` - `emit()` cannot catch a Worker's
+   * throw after its own `await` (Done-when 6 in #124, unchanged), and the `try` is what stops a
+   * Worker's SYNCHRONOUS throw aborting the loop before every later Worker has had its turn. Every
+   * Worker AND the composed function run on every chunk; the first to SETTLE, `respond()`/`reject()`
+   * or the composed function's own resolve/reject, decides it - a native `Promise`'s own idempotence
+   * makes every later settle on the same dispatch a no-op, guarded again here (`settled`) so the
+   * LIFECYCLE events stay exactly-once too. The composed function always answers, so there is no
+   * "no worker registered" case left to reject (#124's own rejection for it is deleted, #221
+   * Done-when 9).
    *
    * `stageWork(transformer, 0)` returns a function that, called with `([1,2], ctx)`, emits
-   * `stage:0:dispatched`, runs every registered Worker, and settles with whichever responds or
-   * rejects first.
+   * `/transform/0:dispatched`, runs the composed function and every registered Worker, and settles
+   * with whichever responds or rejects first.
    */
   protected override stageWork<U>(
     transformer: Transformer<T, U, "sync" | "async">,
     stageIndex: number,
   ): InternalTransformer<T, U> {
-    const eventName = `stage:${stageIndex}`;
-    if (!this._registeredStages.has(eventName)) {
-      const runnable = transformer.runnable();
-      // A synchronous throw here (no Transformer.onError() row handler registered) is caught by
-      // the dispatch loop's own try/catch below, the same as any external Worker's - this listener
-      // needs no guard of its own.
-      this.emitter.on(eventName, (event: WorkEvent<T, U>) => {
-        Promise.resolve(runnable(event.chunk, event.ctx)).then(event.respond, event.reject);
-      });
-      this._registeredStages.add(eventName);
-    }
-
+    const runnable = transformer.runnable();
     const emitter = this.emitter;
+    const route = this.routePath("transform", stageIndex);
     // Computed once per stage (not once per chunk) - stageWork() itself already replays on every
     // bound call, but the string never varies across a single such call's own dispatches.
-    const dispatchedEvent = `${eventName}:dispatched`;
-    const doneEvent = `${eventName}:done`;
-    const errorEvent = `${eventName}:error`;
+    const dispatchedEvent = `${route}:dispatched`;
+    const doneEvent = `${route}:done`;
+    const errorEvent = `${route}:error`;
     return (chunk, ctx) =>
       new Promise<U[]>((resolve, reject) => {
         // Every lifecycle emit, `:dispatched` included, goes through `emitSafely` - a throwing
@@ -246,15 +237,18 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
         // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a Worker may reject with anything, the same as a Promise; genuinely unknown, not a gap
         const doReject = (error: unknown): void => settle({ ok: false, error });
 
-        const listeners = emitter.listeners(eventName);
-        if (listeners.length === 0) {
-          doReject(new Error(`no worker registered on stage ${stageIndex} (${eventName})`));
-          return;
+        // The chain's own composed function - called directly, never through the emitter, so it
+        // never appears in `emitter.listeners(route)` or `emitter.eventNames()` (Done-when 6).
+        try {
+          Promise.resolve(runnable(chunk, ctx)).then(respond, doReject);
+        } catch (error) {
+          doReject(error);
         }
-        // One event object for every listener on this dispatch - none of its fields vary per
-        // listener, so building it once outside the loop saves a redundant allocation per Worker.
+
+        // One event object for every Worker on this dispatch - none of its fields vary per Worker,
+        // so building it once outside the loop saves a redundant allocation per one.
         const event: WorkEvent<T, U> = { chunk, ctx, respond, reject: doReject };
-        for (const fn of listeners) {
+        for (const fn of emitter.listeners(route)) {
           try {
             Promise.resolve((fn as (event: WorkEvent<T, U>) => void)(event)).catch(doReject);
           } catch (error) {
@@ -268,11 +262,14 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   }
 
   /**
-   * Wraps `Pipeline.drainable()`'s own `chunks` thunk so `pipeline:end` fires once the wrapped
+   * Wraps `Pipeline.drainable()`'s own `chunks` thunk so `<trail>:end` fires once the wrapped
    * stream is exhausted - once per TERMINAL CALL, matching `PipelineResult`'s own "every terminal
    * re-drains" contract: calling `.first()` then `.toArray()` on the same result fires it twice
    * (#124 Done-when 10), since each terminal calls `drainable()` fresh. `syncChunks` is always
    * `null` here - a dispatching class forces `"async"` Mode, so there is no sync stream to wrap.
+   * `this._routeTrail` is `""` for a chain, so the event reads `:end`; for a `.branch()` arm it
+   * reads `/branch/<i>/<name>:end` (#221) - the arm's own drain, distinct from any stage's own
+   * `<route>:end`.
    *
    * ONE thunk covers every terminal since #179: `toArray`/`first`/`forEach`/`consume` and both
    * iteration protocols all read the chunk view now, where a flattened item view used to need its
@@ -281,11 +278,12 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   override drainable(input: PipelineSource<In>): Drainable<T> {
     const base = super.drainable(input);
     const emitter = this.emitter;
+    const trailEnd = `${this._routeTrail}:end`;
     let fired = false;
     const fireOnce = (): void => {
       if (fired) return;
       fired = true;
-      emitSafely(emitter, "pipeline:end");
+      emitSafely(emitter, trailEnd);
     };
     return {
       ...base,
@@ -308,7 +306,7 @@ export interface WorkEvent<In, Out> {
 /** Wraps `source`, calling `onEnd` exactly once after the LAST value is yielded - whether the
  * consumer drains it to natural exhaustion or stops early (`.first(n)`'s own early return, which
  * calls the generator's `.return()` per the iterator protocol and runs this `finally`). Shared by
- * `apply()` (`stage:<n>:end`) and `drainable()` (`pipeline:end`) - the identical "fire once, on
+ * `apply()` (`<route>:end`) and `drainable()` (`<trail>:end`) - the identical "fire once, on
  * exit either way" shape, over two different streams. */
 async function* withEndSignal<V>(source: AsyncIterable<V>, onEnd: () => void): AsyncGenerator<V> {
   try {

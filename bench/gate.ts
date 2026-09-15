@@ -37,9 +37,9 @@ export interface LegReport {
     dispatchesWhilePinned?: number;
     requestsWhilePinned?: number;
     workerPidsWhilePinned?: number[];
-    /** `EventEmitterPipeline` alone (#180): a manually-registered extra Worker on `stage:0`,
-     * counted while a `.local()` chain runs - `stageWork()` never runs there, so the composed
-     * function never registers either, and this extra Worker is the whole of `listenerCount`. */
+    /** `EventEmitterPipeline` alone (#221): a manually-registered extra Worker on
+     * `/transform/0`, counted while a `.local()` chain runs - `stageWork()` never runs there, so
+     * this extra Worker never fires either. */
     workersWhilePinned?: number;
   };
 }
