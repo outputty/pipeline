@@ -215,6 +215,26 @@ describe("#209 tap/local/buffer recut and branch keep base's own output (Done-wh
   });
 });
 
+describe("#209 branch after one dispatched stage matches planning spike 2's own output (Done-when 5)", () => {
+  // The tap/local/buffer test above pins its own chain's output as a regression check, but its
+  // branch numbers ([11,13,15,17]/[3,5,7,9]) are downstream of a SECOND dispatched stage
+  // (map x+1) the ticket's own spike never ran before branching. Done-when 5 cites planning spike
+  // 2's real branch output as `{"big":[10,12,14,16],"rest":[2,4,6,8]}` - one dispatched stage
+  // (map x*2), then `.branch()` directly, predicate `x > 8`. This pins that exact shape.
+  it("routes {big:[10,12,14,16],rest:[2,4,6,8]}, matching the ticket's own cited spike output", async () => {
+    const worker = makeWorker((t) => t.transform((tr) => tr.map((x: number) => x * 2)));
+    await withWebSocketServer(worker, async (connect) => {
+      const routed = await new WebSocketPipeline<number>({ connect })
+        .buffer(1)
+        .transform((t) => t.map((x: number) => x * 2))
+        .branch((b) => b.when("big", (x: number) => x > 8).otherwise("rest"))([
+        1, 2, 3, 4, 5, 6, 7, 8,
+      ]);
+      expect(routed).toEqual({ big: [10, 12, 14, 16], rest: [2, 4, 6, 8] });
+    });
+  });
+});
+
 describe("#209 a pipeline with no codec still encodes JSON (Done-when 6)", () => {
   it("wire payload bytes equal a plain TextEncoder/JSON.stringify of the chunk", async () => {
     const inner = new JsonCodec();
