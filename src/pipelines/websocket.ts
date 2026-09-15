@@ -170,6 +170,32 @@ function encodeErrorFrame(id: number, error: string): string {
   return JSON.stringify({ id, error } satisfies ErrorFrame);
 }
 
+/** `peekFrame()`'s own return shape - a frame's `id`/`route` alone, read without decoding its
+ * payload. */
+export interface FramePreview {
+  id: number;
+  route: string | undefined;
+}
+
+/** A frame's own `id`/`route`, read WITHOUT decoding its payload - `ClusterPipeline`'s own shared
+ * worker server (`cluster.ts`, #201 L3) needs only these two fields to route a frame to the right
+ * registered pipeline by its `/pipeline/<i>/` prefix, before that pipeline's own `receiveFrame()`
+ * decodes the same bytes again in full. */
+export function peekFrame(data: Uint8Array): FramePreview {
+  const { header } = decodeFrame(data);
+  return { id: header.id, route: header.route };
+}
+
+/** Sends the one error shape `peekFrame()`'s own caller needs when a frame's route names no
+ * registered pipeline - the same TEXT-frame contract `encodeErrorFrame` (above) already uses. */
+export function sendUnknownRouteError(
+  socket: PipelineSocket,
+  id: number,
+  route: string | undefined,
+): void {
+  socket.send(encodeErrorFrame(id, `unknown pipeline route ${route ?? "(missing)"}`));
+}
+
 /**
  * Reads back the route grammar `WebSocketPipeline.routePath()` builds (#201, mirroring
  * `HttpPipeline`'s own `parseRoute` in `http.ts`, kept as its own copy since the two parse different
@@ -380,25 +406,36 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
 
   /**
    * Registers this chain's stages on an already-open socket - the SERVER side of the wire, the role
-   * `HttpPipeline.fetch` plays for HTTP. Every incoming frame is dispatched by its own `route`
-   * (present on every request frame, transform or reduce alike); a stray TEXT frame reaching the
-   * server (only ever sent client -> server as an error, never a request) is ignored rather than
-   * answered, since there is no `id` on the sending side left waiting for a reply to it.
+   * `HttpPipeline.fetch` plays for HTTP. Wires `receiveFrame()` (below) to every binary message; a
+   * stray TEXT frame reaching the server (only ever sent client -> server as an error, never a
+   * request) is ignored, since there is no `id` on the sending side left waiting for a reply to it.
    */
   serve(socket: PipelineSocket): void {
     socket.onMessage((data) => {
       if (typeof data === "string") return;
-      const { header, payload } = decodeFrame(data);
-      const prior = this.frameQueues.get(header.id) ?? Promise.resolve();
-      const next = prior.then(() => this.handleParsedFrame(socket, header, payload));
-      // A frame that fails is still a settled promise - the NEXT frame for this id must still run,
-      // so the queue's own tail catches here rather than leaving a rejected promise every later
-      // `.then()` on this id would otherwise inherit.
-      this.frameQueues.set(
-        header.id,
-        next.catch(() => {}),
-      );
+      this.receiveFrame(socket, data);
     });
+  }
+
+  /**
+   * Handles one already-decoded-once binary frame for THIS pipeline - the body `serve()`'s own
+   * `onMessage` calls directly, exposed separately so a shared multi-pipeline worker server
+   * (`ClusterPipeline`'s own bootstrap, `cluster.ts` #201 L3) can peek a frame's `/pipeline/<i>/`
+   * prefix with `peekFrame()` (below), look up the RIGHT registered instance by index, and hand it
+   * the SAME raw bytes - one socket, many pipeline definitions, exactly the role `.fetch()` plays
+   * for `ClusterHttpPipeline`'s own shared worker server.
+   */
+  receiveFrame(socket: PipelineSocket, data: Uint8Array): void {
+    const { header, payload } = decodeFrame(data);
+    const prior = this.frameQueues.get(header.id) ?? Promise.resolve();
+    const next = prior.then(() => this.handleParsedFrame(socket, header, payload));
+    // A frame that fails is still a settled promise - the NEXT frame for this id must still run,
+    // so the queue's own tail catches here rather than leaving a rejected promise every later
+    // `.then()` on this id would otherwise inherit.
+    this.frameQueues.set(
+      header.id,
+      next.catch(() => {}),
+    );
   }
 
   private async handleParsedFrame(
@@ -408,16 +445,22 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   ): Promise<void> {
     if (header.route === undefined) {
       socket.send(encodeErrorFrame(header.id, "request frame is missing a 'route'"));
+      this.frameQueues.delete(header.id);
       return;
     }
     const parsed = parseRoute(header.route);
     if (parsed === null) {
       socket.send(encodeErrorFrame(header.id, `unknown route ${header.route}`));
+      this.frameQueues.delete(header.id);
       return;
     }
     if (parsed.verb === "reduce") {
-      await this.handleReduceFrame(socket, header, parsed, payload);
-      if (header.inputDone === true) this.frameQueues.delete(header.id);
+      // `handleReduceFrame`'s own return says whether THIS id's session concluded - either the
+      // `inputDone` frame was reached, or the frame itself failed (an unknown route/stage, a decode
+      // error) - both of which must clear this id's queue entry, not only the inputDone case, or a
+      // failed reduce chunk leaks its entry for the life of this worker (review finding).
+      const ended = await this.handleReduceFrame(socket, header, parsed, payload);
+      if (ended) this.frameQueues.delete(header.id);
       return;
     }
     await this.handleTransformFrame(socket, header, parsed, payload);
@@ -465,17 +508,21 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * (`HttpPipeline`'s own `Reducer`/`foldChunk` engine, `src/utils/reduce.ts`, unchanged), replying
    * with whatever it emitted; `inputDone` flushes the trailing accumulator (`Reducer.final()`,
    * same "only if items were folded since the last emit" contract every reducer in the package
-   * shares) and closes the session with a `done: true` frame. */
+   * shares) and closes the session with a `done: true` frame.
+   *
+   * Returns whether THIS id's session concluded here - `inputDone` reached, or the frame itself
+   * failed (an unknown branch/stage, a decode/fold error) - so `handleParsedFrame` (caller) knows
+   * to clear `frameQueues` for it; an ordinary folded chunk with more to come returns `false`. */
   private async handleReduceFrame(
     socket: PipelineSocket,
     header: Frame,
     parsed: StageRoute,
     payload: Uint8Array,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const resolved = this.resolveRegistries(parsed.trail);
     if (resolved === null) {
       socket.send(encodeErrorFrame(header.id, `unknown branch route ${header.route}`));
-      return;
+      return true;
     }
     const stage = resolved.reduceStages.get(parsed.index);
     if (!stage) {
@@ -486,7 +533,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           `unknown reduce stage ${parsed.index}; this deployment serves ${known}`,
         ),
       );
-      return;
+      return true;
     }
 
     let reducer = this.reduceSessions.get(header.id);
@@ -499,18 +546,20 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     try {
       if (header.inputDone === true) {
         await this.flushReduceSession(socket, header.id, reducer);
-        return;
+        return true;
       }
       const chunk = (await this._codec.decode(payload)) as unknown[];
       const emitted = await foldChunk(reducer, chunk, ctx);
       if (emitted.length > 0) {
         socket.send(encodeFrame({ id: header.id }, await this._codec.encode(emitted)));
       }
+      return false;
     } catch (error) {
       socket.send(
         encodeErrorFrame(header.id, error instanceof Error ? error.message : String(error)),
       );
       this.reduceSessions.delete(header.id);
+      return true;
     }
   }
 
@@ -546,6 +595,25 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   }
 
   /**
+   * The target THIS dispatch should use, resolved fresh per call, plus a matching `release` called
+   * once the dispatch settles - the base reads the constructed instance's own `_connect` (fixed,
+   * released is a no-op); `ClusterPipeline` (#201 L3, review) overrides it to round-robin across its
+   * bootstrapped worker set, ONE resolution per call.
+   *
+   * Deliberately NOT `this._connect` mutated then read back by a nested closure - that shared,
+   * mutable field raced under concurrent dispatch: `ConcurrentPipeline.reduce()` launches
+   * `maxConcurrency` partitions in one synchronous burst (`Array.from({length}, () => work(...))`),
+   * so every partition's own round-robin write landed on the SAME field before any of them read it
+   * back, and every partition ended up dispatching to whichever worker the LAST write picked - found
+   * live: a `maxConcurrency: 2` reduce read `totalConnections: 1`, not 2. Threading the resolved
+   * target as a genuine per-call return value closes that race structurally, with nothing shared to
+   * race on.
+   */
+  protected resolveConnect(): ResolvedConnect | Promise<ResolvedConnect> {
+    return { connect: this._connect, release: () => {} };
+  }
+
+  /**
    * POSTs (over the wire, sends) the chunk to this stage's own route and waits for the SAME-`id`
    * response frame - `ConcurrentPipeline`'s own `apply()` calls this for every stage; the fan-out
    * and the knob-violation check are otherwise unchanged, inherited as-is. `transformer` itself is
@@ -559,38 +627,53 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const route = this.routePath("transform", stageIndex);
     return (chunk, ctx) =>
       new Promise<U[]>((resolve, reject) => {
-        const conn = getConnection(this._connect);
         const dispatch = async (): Promise<void> => {
-          await conn.ready;
-          const id = conn.nextId++;
-          const payload = await this._codec.encode(chunk);
-          // The two awaits above are the window a close/error can race through: `getConnection()`'s
-          // own `evictAndFail` rejects only requests already in `pending` at the moment it runs, so
-          // an entry registered AFTER that moment would otherwise never settle. Checked here, with
-          // no further await before `pending.set()` below, so nothing can race between this check
-          // and the registration it guards.
-          if (connections.get(this._connect) !== conn) {
-            reject(
-              new Error(
-                `stage ${stageIndex} at ${this._connect} failed: connection closed before dispatch`,
-              ),
-            );
-            return;
-          }
-          conn.pending.set(id, {
-            onFrame: (_header, responsePayload) => {
-              conn.pending.delete(id);
-              Promise.resolve(this._codec.decode(responsePayload)).then(
-                (value) => resolve(value as U[]),
-                reject,
+          const { connect: connectTarget, release } = await this.resolveConnect();
+          try {
+            const conn = getConnection(connectTarget);
+            await conn.ready;
+            const id = conn.nextId++;
+            const payload = await this._codec.encode(chunk);
+            // The two awaits above are the window a close/error can race through: `getConnection()`'s
+            // own `evictAndFail` rejects only requests already in `pending` at the moment it runs, so
+            // an entry registered AFTER that moment would otherwise never settle. Checked here, with
+            // no further await before `pending.set()` below, so nothing can race between this check
+            // and the registration it guards.
+            if (connections.get(connectTarget) !== conn) {
+              throw new Error(
+                `stage ${stageIndex} at ${connectTarget} failed: connection closed before dispatch`,
               );
-            },
-            onError: (message) => {
+            }
+            try {
+              conn.pending.set(id, {
+                onFrame: (_header, responsePayload) => {
+                  conn.pending.delete(id);
+                  release();
+                  Promise.resolve(this._codec.decode(responsePayload)).then(
+                    (value) => resolve(value as U[]),
+                    reject,
+                  );
+                },
+                onError: (message) => {
+                  conn.pending.delete(id);
+                  release();
+                  reject(new Error(`stage ${stageIndex} at ${connectTarget} failed: ${message}`));
+                },
+              });
+              conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
+            } catch (sendError) {
+              // A `PipelineSocket.send()` that throws SYNCHRONOUSLY (a DOM-standard
+              // `WebSocket.send()` on a closed socket - unlike `ws`'s own wrapped send, which drops
+              // silently instead, #201 review) leaves the `onFrame`/`onError` just registered above
+              // with no reply ever coming; clean it up here rather than leaking it in `conn.pending`
+              // until the whole connection is eventually evicted.
               conn.pending.delete(id);
-              reject(new Error(`stage ${stageIndex} at ${this._connect} failed: ${message}`));
-            },
-          });
-          conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
+              throw sendError;
+            }
+          } catch (error) {
+            release();
+            throw error;
+          }
         };
         dispatch().catch(reject);
       });
@@ -612,9 +695,34 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const self = this;
 
     return async function* dispatchReduce(chunks, ctx) {
-      const conn = getConnection(self._connect);
-      await conn.ready;
-      const id = conn.nextId++;
+      // `resolveConnect()`, not `self._connect` - see its own docstring for the race this closes:
+      // `ClusterPipeline`'s round-robin resolves fresh per call rather than racing every concurrent
+      // partition on one shared field.
+      const { connect: connectTarget, release } = await self.resolveConnect();
+      let conn: ClientConnection;
+      let id: number;
+      try {
+        conn = getConnection(connectTarget);
+        await conn.ready;
+        id = conn.nextId++;
+        // Same eviction race `stageWork()`'s own dispatch guards against, and the identical window:
+        // `getConnection()`'s `evictAndFail` rejects only requests already in `pending` at the
+        // moment it runs, so a session that opens here AFTER a close/error already fired would
+        // otherwise await `nextEmit()` forever with no rejection ever reaching it.
+        if (connections.get(connectTarget) !== conn) {
+          throw new Error(
+            `reduce stage ${stageIndex} at ${connectTarget} failed: connection closed before dispatch`,
+          );
+        }
+      } catch (error) {
+        // Nothing is registered in `conn.pending` yet at any of these failure points, so `release()`
+        // is the only cleanup owed - but it MUST run here: a rejected `conn.ready` used to sit
+        // outside this function's own try/finally entirely, so `release()` was never reached and
+        // `WsWorkerSet.inFlight` leaked forever, permanently blocking the idle-kill path for that
+        // count (#201 review; `stageWork()`'s own dispatch already wrapped this identical setup).
+        release();
+        throw error;
+      }
 
       const emitQueue: U[][] = [];
       let waiter: (() => void) | null = null;
@@ -644,7 +752,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           }, fail);
         },
         onError: (message) =>
-          fail(new Error(`reduce stage ${stageIndex} at ${self._connect} failed: ${message}`)),
+          fail(new Error(`reduce stage ${stageIndex} at ${connectTarget} failed: ${message}`)),
       });
 
       // Fed independently of the yield loop below, so an upstream that yields slowly never blocks
@@ -689,9 +797,17 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       } finally {
         conn.pending.delete(id);
         await pump;
+        release();
       }
     };
   }
+}
+
+/** `resolveConnect()`'s own return shape - the target a dispatch should use, plus a release to call
+ * exactly once the dispatch settles (a transform's response/error, or a reduce stream's own end). */
+export interface ResolvedConnect {
+  connect: string;
+  release: () => void;
 }
 
 /** `toNodeWebSocketHandler()`'s own parameter derivation - `ws`'s own `WebSocketServer.handleUpgrade`
