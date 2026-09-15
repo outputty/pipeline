@@ -717,6 +717,12 @@ shares PROCESS-WIDE - before #201 review only one `WorkerSet` ever existed per p
 mattered; with two sibling classes now forking into the same shared registry, one class's idle timer
 could kill the OTHER's still-in-flight workers. Both now track `ownWorkerIds` and kill only their own.
 
+Cluster options, pending #208: `ClusterPipelineOptions` gains `codec?: Codec` and
+`ClusterHttpPipelineOptions` gains `client?: PipelineClient`. No plumbing moves: both constructors
+already spread `options` into `super`, and each forked worker builds the same codec by re-running the
+entry module. A planning spike cast `codec` through and ran a temp-file store across two real workers,
+and both decoded only 36-byte keys. The codec object itself never crosses the process boundary.
+
 ⚠ `ClusterPipeline.resolveConnect()` is the ONE override on the class - `bootstrapAndSetConnect()`/
 `stageWork()`/`reduceWork()` overrides that used to wrap the round-robin around a SHARED
 `this._connect` field are deleted entirely. That field-based design raced under
@@ -1143,8 +1149,8 @@ rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed
   values onto it via `.set()`. A worker's `ctx.set()` mutates that instance for the rest of its
   process's life, but the mutation still never crosses back over the wire to the orchestrator.
   Measured (pre-#31): the orchestrator's context stayed `{"multiplier":10}` after three remote
-  `ctx.set()` calls - the write-back direction is unaffected by #31 and stays a roadmap item
-  (`.claude/roadmap.md`, "A `ContextManager`'s write-back to the orchestrator"), not fixed here.
+  `ctx.set()` calls - the write-back direction is unaffected by #31 and stays open in #211, the
+  cross-process context model (needs-planning), not fixed here.
   `.context()`'s own forward propagation (orchestrator → every stage) is unaffected.
 - WHICH manager a process uses is the caller's choice, and the caller's class alone decides whether
   state crosses a process (#31). `PipelineOptions.context` is an instance for THIS process, kept by

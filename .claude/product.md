@@ -187,14 +187,18 @@ the class name changes.
 > connection to another instance, instead of one HTTP request per chunk. The caller gives it
 > `connect` - where to dial (a unix socket path or a host:port) - and the receiving instance calls
 > `.serve(socket)` on an already-open connection to answer for it.
+> **`codec`** - how a dispatched chunk becomes bytes on the wire: an `{ encode, decode }` pair,
+> JSON by default. A caller supplies their own for a binary format, or for a store that sends only a
+> key. Every process builds its own copy by running the same code, so a store a codec writes to must
+> be reachable from all of them.
 > **`ClusterHttpPipeline`** - each chunk dispatched to another process on the same machine, over
 > HTTP. It brings up its own workers on first run and every later pipeline in the process reuses
-> them. The class this package shipped first as `ClusterPipeline`, kept under this name for a caller
-> who wants the unchanged HTTP transport.
+> them. It takes the same `client` as `HttpPipeline`. The class this package shipped first as
+> `ClusterPipeline`, kept under this name for a caller who wants the unchanged HTTP transport.
 > **`ClusterPipeline`** - the same "each chunk to another process on the same machine" shape as
 > `ClusterHttpPipeline`, over `WebSocketPipeline`'s own persistent connection instead - the class
-> name every caller already imports. Each worker gets its own connection; dispatch spreads across
-> them automatically.
+> name every caller already imports. It takes the same `codec` as `WebSocketPipeline`. Each worker
+> gets its own connection; dispatch spreads across them automatically.
 > **`EventEmitterPipeline`** - each chunk handed to whichever Worker functions are registered on
 > `pipeline.emitter`, a `node:events` `EventEmitter`. The chain's own `.transform()` function
 > auto-registers as a stage's first Worker; any number of extra Workers may register afterward from
