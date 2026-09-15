@@ -717,6 +717,16 @@ shares PROCESS-WIDE - before #201 review only one `WorkerSet` ever existed per p
 mattered; with two sibling classes now forking into the same shared registry, one class's idle timer
 could kill the OTHER's still-in-flight workers. Both now track `ownWorkerIds` and kill only their own.
 
+`workers` is one count per class per process (pending #222). `WorkerSet.bootstrap()` and
+`WsWorkerSet.bootstrap()` memoize with `bootstrapPromise ??=`, so the first dispatch's count wins
+until `kill()` resets it after `IDLE_KILL_MS`. Today a later pipeline asking for another count runs
+silently on the first set: `workers: 1` dispatched, then `workers: 2` over 40 items, read
+`{"twoDistinctPids":1,"live":1}` on both classes. After #222 the set records the first count it is
+constructed with, and `kill()` never clears it. A constructor passing a different count throws,
+naming both. A
+copy-on-write instance carries the same count, so `createPipeline()` never trips it. A construction
+check is deterministic; a dispatch check would throw or pass depending on the idle timer.
+
 ⚠ `ClusterPipeline.resolveConnect()` is the ONE override on the class - `bootstrapAndSetConnect()`/
 `stageWork()`/`reduceWork()` overrides that used to wrap the round-robin around a SHARED
 `this._connect` field are deleted entirely. That field-based design raced under
@@ -1124,6 +1134,26 @@ measure. O1 (#120) collapsed `Transformer.filter()`'s sync no-handler branch fro
 one, dropping `Pipeline`'s own ns/row from ~50 to ~30; O2 (fusing adjacent sync `map`/`filter` links)
 was spiked against this same baseline and killed - 1.36x end to end, priced against a `#45`-shaped
 rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed section.
+
+## Test coverage matrix - pending #222
+
+Every base-API behaviour is tested on every class and option combination, in any test file. A test
+proves one combination and carries its title in one fixed format; a `pnpm check` step reads
+`vitest list --json` and fails on each expected title no test carries.
+
+```text
+<behaviour> | <Class> [mc<n> <ordered|unordered>] [client:<default|custom> | codec:<json|file>] [w<n>]
+
+pipeline-reduce | Pipeline
+queue | WebSocketPipeline mc4 unordered codec:file
+consume | ClusterPipeline mc1 ordered codec:json w2
+```
+
+- Option values: `mc{1,4}` and `ordered{true,false}` on every dispatching class; `client{default,custom}` on `HttpPipeline` and `ClusterHttpPipeline`; `codec{json,file}` on `WebSocketPipeline` and `ClusterPipeline`; `w{1,2}` on both cluster classes.
+- A cluster combination runs in a subprocess fixture, one process per class and `workers` count, with every chain built before the first `await`.
+- Output that timing legitimately reorders compares sorted: an async `unordered` stage, and a dispatched reduce, whose partitions merge in completion order.
+- A title proves a test exists, not that it builds what it names.
+- `.branch()` on `EventEmitterPipeline` lands as `test.fails` until #221: an arm's `stage:0` is answered by the parent's `stage:0` Worker, so `.transform(x + 1).branch(otherwise -> -x)` over `[1,2,3]` returns `{"all":[3,4,5]}`.
 
 ## Constraints in dependencies
 
