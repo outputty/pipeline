@@ -64,6 +64,8 @@ export {
   type PipelineSocket,
   type Codec,
   jsonCodec,
+  toNodeWebSocketHandler,
+  type NodeWebSocketHandler,
 } from "./pipelines/websocket";
 
 // Factory functions
