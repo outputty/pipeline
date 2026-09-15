@@ -885,8 +885,8 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   }
 
   /** Whether this class's own `_chunks` could ever hold an `EncodedChunk` (#209) - `false` on the
-   * base, since only a class holding a `Codec` (`WebSocketPipeline`, below) ever calls
-   * `encodedChunk()`. `.local()`'s own seed and `drainable()` both read this to decide whether
+   * base, since only a class holding a `Codec` (`WebSocketPipeline`, `pipelines/websocket.ts`) ever
+   * calls `encodedChunk()`. `.local()`'s own seed and `drainable()` both read this to decide whether
    * `materializeChunksIfNeeded` needs to wrap the chunk stream at all - a structural check, so a
    * plain `Pipeline`/`ConcurrentPipeline`/`HttpPipeline`/`EventEmitterPipeline` chain pays nothing
    * for a mechanism it can never carry. */
