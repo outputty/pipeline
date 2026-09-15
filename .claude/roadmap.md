@@ -65,7 +65,7 @@ The two older candidates, still not filed:
 ## Built
 
 - **`ClusterPipeline` accepts `codec`, `ClusterHttpPipeline` accepts `client`** (#208, `feat`, PR
-  #TBD) - both classes already forwarded the field to `super` at runtime; only the exported options
+  #214) - both classes already forwarded the field to `super` at runtime; only the exported options
   types refused it, so every caller had to cast. `ClusterPipelineOptions` and
   `ClusterHttpPipelineOptions` (`src/pipelines/cluster.ts`) now widen to include them, proven by two
   subprocess fixtures: a file-backed codec that sends only a 36-byte key over the wire (each of 2
