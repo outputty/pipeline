@@ -378,6 +378,8 @@ console.log(JSON.stringify(data)); // [2,4,6,8,10]
 
 - **`options.workers`** - worker processes to bring up on first drain. Default
   `os.availableParallelism()`.
+- **`options.client`** - `HttpPipeline`'s own knob (above), forwarded to `super` unchanged - each
+  worker builds its own by re-running the entry module.
 
 ### WebSocketPipeline
 
@@ -464,6 +466,9 @@ console.log(JSON.stringify(data)); // [2,4,6,8,10]
 
 - **`options.workers`** - worker processes to bring up on first drain. Default
   `os.availableParallelism()`.
+- **`options.codec`** - `WebSocketPipeline`'s own knob (above), forwarded to `super` unchanged - it
+  never crosses the process boundary itself, so a store it writes to must be reachable from every
+  worker (`process.env`, which `cluster.fork()` inherits).
 
 ### EventEmitterPipeline
 
