@@ -273,25 +273,36 @@ client that waits for the complete reply before returning it stops those results
 last chunk has been sent. Everything still completes, and nothing arrives early.
 
 How a chunk is encoded on a WebSocket connection is the caller's to change too. `options.codec` on
-`WebSocketPipeline` and `ClusterPipeline` takes an `{ encode, decode }` pair, `jsonCodec` by default.
-`referenceCodec(store)` keeps large chunks off the wire: it writes each message into the caller's
-store and sends only a key. Between two dispatched stages the orchestrating process passes a reply
-on still encoded, so it reads rows only where it needs them - a `.tap()`, a `.local()` region, a
-`.buffer()` recut, a `.branch()`, or a terminal that returns items. `.consume()` reads none. A chunk
-that a stage emptied is not dispatched to the next one.
+`WebSocketPipeline` and `ClusterPipeline` takes any object implementing `Codec`, `new JsonCodec()` by
+default. A caller's own codec can change the format, or keep large chunks off the wire by storing
+each one elsewhere and sending only a key. How a chunk travels stays the codec's business: the chain
+keeps its item types whichever codec is used. Between two dispatched stages the orchestrating
+process passes a reply on still encoded, so it reads rows only where it needs them - a `.tap()`, a
+`.local()` region, a `.buffer()` recut, a `.branch()`, or a terminal that returns items.
+`.consume()` reads none. A chunk that a stage emptied is not dispatched to the next one.
 
-> **`Codec`** - how a chunk becomes bytes on a WebSocket connection: `encode(value)` and
-> `decode(bytes)`. Every process builds its own by running the same entry module.
-> **`referenceCodec(store, { inner? })`** - a codec that stores each message and sends its key.
-> `store` is `{ put(key, bytes), get(key) }`, reachable from every process; `inner` encodes the
-> message before it is stored, `jsonCodec` by default. A key the store no longer holds fails the
-> chunk with an error naming the key. It deletes nothing: the store's own expiry, a separate
-> cleanup job, or a codec that wraps it removes old messages.
+> **`Codec`** - how a chunk becomes bytes on a WebSocket connection: `encode(value)`,
+> `decode(bytes)` and an optional `contentType`. Not generic: one codec serves every stage while the
+> item type changes, so it sees `unknown`. Every process builds its own by running the same entry
+> module, so any store it writes to must be reachable from every process.
+> **`JsonCodec`** - the default `Codec`, a class: `JSON.stringify` to UTF-8 bytes and back.
 
 ```ts
-import { ClusterPipeline, referenceCodec } from "@outputty/pipeline";
+import { ClusterPipeline, type Codec } from "@outputty/pipeline";
 
-const codec = referenceCodec({ put: (key, bytes) => store.put(key, bytes), get: (key) => store.get(key) });
+class FileCodec implements Codec {
+  constructor(private dir: string) {}
+  encode(value: unknown) {
+    const key = randomUUID();
+    writeFileSync(join(this.dir, key), JSON.stringify(value));
+    return new TextEncoder().encode(key);
+  }
+  decode(bytes: Uint8Array) {
+    return JSON.parse(readFileSync(join(this.dir, new TextDecoder().decode(bytes)), "utf8"));
+  }
+}
+
+const codec = new FileCodec(process.env.STORE_DIR!);
 
 const data = await new ClusterPipeline<number>({ workers: 2, maxConcurrency: 2, codec })
   .buffer(1)

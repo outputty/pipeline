@@ -461,10 +461,12 @@ none of it survived the hand-trim (#745).
   `stage:<n>` names (`emptyOfOwnClass()` carries the same `emitter`/registered-stages `Set` into the
   arm while resetting its stage index to 0) - real, but out of scope by the ticket's own Settle
   first: "an arm's own worker-channel naming is undesigned."
-- **`referenceCodec` / by-reference codec** (pending #209, no prior term) - a `Codec` that stores
-  each message in a caller's `ReferenceStore` (`{ put(key, bytes), get(key) }`) and sends only its
-  `crypto.randomUUID()` key; `inner` encodes the stored bytes, `jsonCodec` by default. It never
-  deletes. `Codec`/`jsonCodec`/`referenceCodec` live in `src/codec.ts`.
+- **`Codec` / `JsonCodec`** (pending #209, replaces: `jsonCodec`) - `Codec` is the interface for how
+  a chunk becomes bytes on a WebSocket wire: `encode(value: unknown)`, `decode(bytes): unknown`,
+  optional `contentType`. Deliberately not generic: one codec serves every stage while the item type
+  changes, so `Pipeline<T>` carries the type hints. `JsonCodec` is the default class; the `jsonCodec`
+  object is deleted (BREAKING). Both live in `src/codec.ts`. A **by-reference codec** is a caller's
+  own `Codec` that stores each chunk elsewhere and sends a key; the package ships none.
 - **Encoded chunk** (pending #209, no prior term) - a dispatched WebSocket reply the orchestrator
   keeps as `{ payload, rows, codec }` instead of decoding; internal, typed `T[]` in the stream. A
   later dispatched stage sends its payload verbatim; `materialize()` decodes it only where items

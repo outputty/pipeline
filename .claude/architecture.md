@@ -746,11 +746,13 @@ scope, Done-when 8) - `checkGate`'s own regression-only design never flags a spe
 stays green with a now-stale ceiling; a future ticket updating the baseline for real would tighten
 it, not loosen anything.
 
-## Encoded chunks and referenceCodec - pending #209
+## Codec and encoded chunks - pending #209
 
 A dispatched WebSocket reply stays encoded in the orchestrating process until a site reads its
-items. `Codec`, `jsonCodec` and `referenceCodec` live in `src/codec.ts`, outside the file that loads
-`ws`, so a core chunk type can name `Codec` without a utils-to-pipelines import.
+items. `Codec` (the interface) and `JsonCodec` (the default class) live in `src/codec.ts`, outside
+the file that loads `ws`, so a core chunk type can name `Codec` without a utils-to-pipelines import.
+`Codec` is not generic: one instance serves every stage while the item type changes, so it sees
+`unknown`, and `Pipeline<T>` carries the type hints. The `jsonCodec` object is deleted (BREAKING).
 
 ```text
 BEFORE  stage 0 reply -> codec.decode (primary) -> rows -> codec.encode (primary) -> stage 1
@@ -770,14 +772,12 @@ AFTER   stage 0 reply -> encoded chunk { payload, rows, codec } ----------------
   returns `[]` without an error, so each decoding site keeps its own e2e case.
 
 Measured in planning (spike 2, `WebSocketPipeline`, `[1..8]`, `.buffer(1)`, two dispatched stages):
-the primary's decode/encode count fell from 16/16 to 8/8 with `jsonCodec` and with a by-reference
-codec alike, output unchanged. `.tap()`, `.local()`, a recut and `.branch()` between stages kept
+the primary's decode/encode count fell from 16/16 to 8/8 with the JSON codec and with a
+by-reference codec alike, output unchanged. `.tap()`, `.local()`, a recut and `.branch()` between stages kept
 their base counts, since each reads rows.
 
-`referenceCodec(store, { inner })` stores `inner.encode(value)` under a `crypto.randomUUID()` key and
-sends the key's bytes; `decode` throws when `store.get(key)` returns nothing. It has no delete hook:
-every dispatch leaves a request and a reply object, and a dispatch that fails before decode leaves
-its object unread, so cleanup belongs to the store or the caller.
+The package ships no storage codec. A caller's by-reference codec owns its store, its keys and its
+cleanup; a dispatch that fails before decode leaves that codec's stored object unread.
 
 ## EventEmitterPipeline - #124
 

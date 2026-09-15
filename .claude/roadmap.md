@@ -25,12 +25,13 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   day this was planned is exactly the kind of large, fast-moving change this gap lets through
   silently; `typedoc --validation.notDocumented` is proven this session to catch it for real
   (`Pipeline.local has an @param with name "wrongName", which was not used`).
-- **`referenceCodec`, and dispatched replies stay encoded in the primary** (#209) - a caller who
-  keeps large chunks in an external store writes the by-reference wrapper by hand today
-  (`__tests__/fixtures/cluster-file-codec.ts`), and the primary still decodes every reply and
-  re-encodes it for the next dispatched stage: a store `get` and `put` per chunk per hop, even under
-  `.consume()`. Now, because #208 made `codec` reachable on `ClusterPipeline`, and #212 waits on the
-  `src/codec.ts` module this ticket creates.
+- **A `Codec` interface with a `JsonCodec` class, and dispatched replies stay encoded in the
+  primary** (#209) - `Codec` sits inside `src/pipelines/websocket.ts` with a plain-object default,
+  and whatever codec a caller passes, the primary decodes every reply and re-encodes it for the next
+  dispatched stage. A caller's by-reference codec (`__tests__/fixtures/cluster-file-codec.ts`) then
+  pays a store read and write per chunk per hop, even under `.consume()`. Now, because #208 made
+  `codec` reachable on `ClusterPipeline`, and #212 waits on the `src/codec.ts` module this ticket
+  creates.
 
 ### Later - not yet filed
 
@@ -541,9 +542,12 @@ The two older candidates, still not filed:
   decode between stages only where stages sit back to back, while changing stage identity on the
   wire. Killed in favour of the core-aware encoded chunk, which reaches the same hop and a dispatched
   reduce without renumbering routes.
-- **A `delete` hook on `referenceCodec`** (#209 planning) - picked, then dropped by the user: cleanup
-  belongs to a secondary system or a caller's own codec wrapping `referenceCodec`, and a dispatch
-  that fails before decode leaves its object unread whatever the hook does.
+- **An exported `referenceCodec(store, { inner })` helper** (#209 planning, filed then withdrawn) -
+  a shipped by-reference codec over a `{ put, get }` store, with an `inner` codec for the format.
+  Killed by the user: a caller juggled two codecs, a function could not be extended, and storage is
+  a caller's own business. #209 ships the `Codec` interface and a `JsonCodec` class instead; a
+  by-reference codec is a caller's own class. A `delete` hook on it was dropped earlier for the same
+  reason: cleanup belongs to the caller's store.
 
 - **`HttpPipeline.reduceWork()` dispatched as multiple POSTs instead of one duplex connection**
   (#201, add-on scope) - the premise was that a client-carried accumulator (`{acc, chunk, context}`
