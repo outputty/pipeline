@@ -766,10 +766,18 @@ AFTER   stage 0 reply -> encoded chunk { payload, rows, codec } ----------------
 - Three sites decode: `drainable()` (every item-returning terminal and `.branch()`), the `.local()`
   seed (which covers `Pipeline.tap`) and `flattenChunks` (which covers a `.buffer()` recut).
   `.consume()` decodes nothing.
-- `ConcurrentPipeline`'s fan-out skips a chunk with 0 rows before `stageWork()`, on every
-  dispatching class. The source cut (`cut.ts`) and the terminal (`result.ts`) already drop empties.
+- `ConcurrentPipeline`'s fan-out skips a chunk with 0 rows before dispatch, and `reduceWork()`'s own
+  pump loop skips one too before sending it to a dispatched `.reduce()` - both scoped to
+  `isEncodedChunk`, so a real, merely-empty chunk on `HttpPipeline`/`EventEmitterPipeline` still
+  dispatches unchanged. The source cut (`cut.ts`) and the terminal (`result.ts`) already drop empties.
 - The encoded chunk is internal and travels typed `T[]`. A site that reads items without decoding
   returns `[]` without an error, so each decoding site keeps its own e2e case.
+- ⚠ A `codec.decode()` failure no longer rejects at the dispatching stage: the primary keeps the
+  reply encoded and only decodes at whichever site reads items first (`drainable()`, the `.local()`
+  seed, `flattenChunks`), all outside `runStageChunk`'s own try/catch. `Pipeline.onError()`'s
+  documented per-chunk drop-and-continue contract is not consulted for a decode failure - it throws
+  out of the terminal (or `.local()` region) instead. `.consume()` never decodes at all, so a bad
+  chunk there completes silently with nothing to report.
 
 Measured in planning (spike 2, `WebSocketPipeline`, `[1..8]`, `.buffer(1)`, two dispatched stages):
 the primary's decode/encode count fell from 16/16 to 8/8 with the JSON codec and with a

@@ -1,8 +1,7 @@
 /**
- * codec.e2e.test.ts - #209's Done-when cases. 1-4 are live here in L3, behind
- * `PIPELINE_ENCODED_CHUNKS=1` (`withEncodedChunks`, below) - the flag the enable layer deletes,
- * once every case runs live with no flag at all. 5-6 already held on base and stay live
- * unconditionally, the regression pins for the rest of the stack. 7 is a compile-time probe.
+ * codec.e2e.test.ts - #209's Done-when cases, every one live and unconditional now that `enable`
+ * has deleted the flag and the eager decode/re-encode path it used to guard. 7 is a compile-time
+ * probe.
  *
  * Cases 2-6 dial a real `ws+unix:` connection in-process (`withWebSocketServer`,
  * `websocket-wire.e2e.test.ts`'s own two-instance shape: a client-side pipeline and a separate
@@ -14,21 +13,10 @@ import { describe, it, expect } from "vitest";
 import { WebSocketPipeline, JsonCodec, type Codec, type PipelineSocket } from "../src";
 import { withWebSocketServer } from "./helpers/websocket";
 import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
-
-/** Sets `PIPELINE_ENCODED_CHUNKS=1` for the duration of `fn`, restoring whatever was there before
- * - the mechanism this stack lands behind a flag until its own enable layer deletes it (#209). A
- * subprocess fixture (Done-when 1) inherits this through `execFile`'s own default env passthrough,
- * since it is set in THIS process before the fixture is spawned. */
-async function withEncodedChunks<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = process.env.PIPELINE_ENCODED_CHUNKS;
-  process.env.PIPELINE_ENCODED_CHUNKS = "1";
-  try {
-    return await fn();
-  } finally {
-    if (previous === undefined) delete process.env.PIPELINE_ENCODED_CHUNKS;
-    else process.env.PIPELINE_ENCODED_CHUNKS = previous;
-  }
-}
+// Done-when 7's own compile-time probe (below): a real named import, not a `typeof import()`
+// namespace access, so its own `@ts-expect-error` pins the ACTUAL diagnostic that shape produces.
+// @ts-expect-error - jsonCodec is deleted (BREAKING, #209); tsc: TS2724 '"../src"' has no exported member named 'jsonCodec'. Did you mean 'JsonCodec'?
+import { jsonCodec as _jsonCodecDeleted } from "../src";
 
 /** The "another instance" side of a chain - an empty-source pipeline that only `serve()`s the SAME
  * stage definitions `builder` describes, mirroring `websocket-wire.e2e.test.ts`'s own `makeWorker`,
@@ -61,13 +49,11 @@ describe("#209 the Interface program's own after example, over a real ClusterPip
   it(
     "prints [7,9,11,13,15,17], primary write 8 read 6 for toArray, write 8 read 0 for consume",
     async () => {
-      const result = await withEncodedChunks(() =>
-        runFixtureJson<{
-          out: number[];
-          toArrayOps: { write: number; read: number };
-          consumeOps: { write: number; read: number };
-        }>("__tests__/fixtures/cluster-codec-class.ts"),
-      );
+      const result = await runFixtureJson<{
+        out: number[];
+        toArrayOps: { write: number; read: number };
+        consumeOps: { write: number; read: number };
+      }>("__tests__/fixtures/cluster-codec-class.ts");
       expect(result.out).toEqual([7, 9, 11, 13, 15, 17]);
       expect(result.toArrayOps).toEqual({ write: 8, read: 6 });
       expect(result.consumeOps).toEqual({ write: 8, read: 0 });
@@ -85,13 +71,11 @@ describe("#209 dispatched replies stay encoded between two stages (Done-when 2)"
     );
     await withWebSocketServer(worker, async (connect) => {
       const codec = new CountingCodec(new JsonCodec());
-      const out = await withEncodedChunks(() =>
-        new WebSocketPipeline<number>({ connect, codec })
-          .buffer(1)
-          .transform((t) => t.map((x: number) => x * 2))
-          .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
-          .toArray(),
-      );
+      const out = await new WebSocketPipeline<number>({ connect, codec })
+        .buffer(1)
+        .transform((t) => t.map((x: number) => x * 2))
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
+        .toArray();
       expect(out).toEqual([3, 5, 7, 9, 11, 13, 15, 17]);
       expect(codec.decodes).toBe(8);
       expect(codec.encodes).toBe(8);
@@ -110,13 +94,11 @@ describe("#209 an emptied chunk is never re-dispatched to the next stage (Done-w
       serverCodec,
     );
     await withWebSocketServer(worker, async (connect) => {
-      const out = await withEncodedChunks(() =>
-        new WebSocketPipeline<number>({ connect })
-          .buffer(1)
-          .transform((t) => t.filter((x: number) => x > 100))
-          .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
-          .toArray(),
-      );
+      const out = await new WebSocketPipeline<number>({ connect })
+        .buffer(1)
+        .transform((t) => t.filter((x: number) => x > 100))
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
+        .toArray();
       expect(out).toEqual([]);
       expect(serverCodec.decodes).toBe(8);
     });
@@ -133,17 +115,71 @@ describe("#209 a dispatched reduce forwards encoded chunks too (Done-when 4)", (
     });
     await withWebSocketServer(worker, async (connect) => {
       const codec = new CountingCodec(new JsonCodec());
-      const out = await withEncodedChunks(() => {
-        const chain = new WebSocketPipeline<number>({ connect, codec, maxConcurrency: 1 })
-          .buffer(1)
-          .transform((t) => t.map((x: number) => x * 2))
-          .reduce((acc: number, x: number) => acc + x, 0);
-        return chain
-          .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
-          .toArray();
-      });
+      const chain = new WebSocketPipeline<number>({ connect, codec, maxConcurrency: 1 })
+        .buffer(1)
+        .transform((t) => t.map((x: number) => x * 2))
+        .reduce((acc: number, x: number) => acc + x, 0);
+      const out = await chain
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
+        .toArray();
       expect(out).toEqual([73]);
       expect(codec.decodes).toBe(1);
+    });
+  });
+});
+
+describe("#209 review: an emptied chunk is never sent to a dispatched reduce either", () => {
+  // Same shape as "an emptied chunk is never re-dispatched to the next stage" (Done-when 3), but for
+  // the reduce pump specifically (`WebSocketPipeline.reduceWork()`'s own dispatch loop) - the
+  // `isEncodedChunk(chunk) && chunk.rows === 0` skip this review added there, mirroring
+  // `ConcurrentPipeline.apply()`'s existing one for a plain dispatched transform.
+  it("output [], the server decodes only 8 items - the empty chunk never reaches the fold", async () => {
+    const serverCodec = new CountingCodec(new JsonCodec());
+    const worker = makeWorker(
+      (t) =>
+        t
+          .transform((tr) => tr.filter((x: number) => x > 100))
+          .reduce((acc: number, x: number) => acc + x, 0),
+      serverCodec,
+    );
+    await withWebSocketServer(worker, async (connect) => {
+      const out = await new WebSocketPipeline<number>({ connect })
+        .buffer(1)
+        .transform((t) => t.filter((x: number) => x > 100))
+        .reduce(
+          (acc: number, x: number) => acc + x,
+          0,
+        )([1, 2, 3, 4, 5, 6, 7, 8])
+        .toArray();
+      expect(out).toEqual([]);
+      expect(serverCodec.decodes).toBe(8);
+    });
+  });
+});
+
+describe("#209 review: the empty-chunk skip survives past one hop", () => {
+  // The skip's own return value used to be a fresh `[]`, losing the encoded-chunk tag - the SECOND
+  // dispatched stage's identical check no longer recognized it and dispatched a chunk already known
+  // to be empty. Three dispatched stages here, only the first ever seeing real rows.
+  it("the server decodes only 8 items across THREE dispatched stages, not 24", async () => {
+    const serverCodec = new CountingCodec(new JsonCodec());
+    const worker = makeWorker(
+      (t) =>
+        t
+          .transform((tr) => tr.filter((x: number) => x > 100))
+          .transform((tr) => tr.map((x: number) => x + 1))
+          .transform((tr) => tr.map((x: number) => x + 1)),
+      serverCodec,
+    );
+    await withWebSocketServer(worker, async (connect) => {
+      const out = await new WebSocketPipeline<number>({ connect })
+        .buffer(1)
+        .transform((t) => t.filter((x: number) => x > 100))
+        .transform((t) => t.map((x: number) => x + 1))
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
+        .toArray();
+      expect(out).toEqual([]);
+      expect(serverCodec.decodes).toBe(8);
     });
   });
 });
@@ -179,6 +215,26 @@ describe("#209 tap/local/buffer recut and branch keep base's own output (Done-wh
   });
 });
 
+describe("#209 branch after one dispatched stage matches planning spike 2's own output (Done-when 5)", () => {
+  // The tap/local/buffer test above pins its own chain's output as a regression check, but its
+  // branch numbers ([11,13,15,17]/[3,5,7,9]) are downstream of a SECOND dispatched stage
+  // (map x+1) the ticket's own spike never ran before branching. Done-when 5 cites planning spike
+  // 2's real branch output as `{"big":[10,12,14,16],"rest":[2,4,6,8]}` - one dispatched stage
+  // (map x*2), then `.branch()` directly, predicate `x > 8`. This pins that exact shape.
+  it("routes {big:[10,12,14,16],rest:[2,4,6,8]}, matching the ticket's own cited spike output", async () => {
+    const worker = makeWorker((t) => t.transform((tr) => tr.map((x: number) => x * 2)));
+    await withWebSocketServer(worker, async (connect) => {
+      const routed = await new WebSocketPipeline<number>({ connect })
+        .buffer(1)
+        .transform((t) => t.map((x: number) => x * 2))
+        .branch((b) => b.when("big", (x: number) => x > 8).otherwise("rest"))([
+        1, 2, 3, 4, 5, 6, 7, 8,
+      ]);
+      expect(routed).toEqual({ big: [10, 12, 14, 16], rest: [2, 4, 6, 8] });
+    });
+  });
+});
+
 describe("#209 a pipeline with no codec still encodes JSON (Done-when 6)", () => {
   it("wire payload bytes equal a plain TextEncoder/JSON.stringify of the chunk", async () => {
     const inner = new JsonCodec();
@@ -201,12 +257,67 @@ describe("#209 a pipeline with no codec still encodes JSON (Done-when 6)", () =>
   });
 });
 
-describe("#209 a reply with no row count fails loud under the flag", () => {
+describe("#209 review: a codec decode failure bypasses Pipeline.onError() (pinning, not a Done-when)", () => {
+  // Pins current behavior, found in code review, not settled as the intended design: before #209,
+  // `stageWork()`'s onFrame decoded at dispatch time and a throwing `codec.decode()` rejected
+  // `runStageChunk`'s own promise, which `Pipeline.onError()`'s documented per-chunk drop-and-continue
+  // contract (Language, CLAUDE.md) caught like any other row failure. Now decode is deferred to
+  // `materialize()`, called outside `runStageChunk` (`drainable()`, `.local()`'s seed, `flattenChunks`),
+  // so `.onError()` is never consulted - the whole terminal rejects instead of dropping the one chunk.
+  it("a stage failure IS dropped by onError (control) - a decode failure is NOT", async () => {
+    const stageWorker = makeWorker((t) =>
+      t.transform((tr) =>
+        tr.map((x: number) => {
+          if (x === 6) throw new Error("stage boom");
+          return x;
+        }),
+      ),
+    );
+    await withWebSocketServer(stageWorker, async (connect) => {
+      const out = await new WebSocketPipeline<number>({ connect })
+        .buffer(1)
+        .onError(() => {})
+        .transform((t) =>
+          t.map((x: number) => {
+            if (x === 6) throw new Error("stage boom");
+            return x;
+          }),
+        )([1, 2, 3, 4, 5, 6, 7, 8])
+        .toArray();
+      expect(out).toEqual([1, 2, 3, 4, 5, 7, 8]);
+    });
+  });
+
+  it("a decode failure rejects the whole drain instead of dropping the one chunk", async () => {
+    const worker = makeWorker((t) => t.transform((tr) => tr.map((x: number) => x)));
+    const inner = new JsonCodec();
+    let decodes = 0;
+    const flakyCodec: Codec = {
+      encode: (v) => inner.encode(v),
+      decode: (bytes) => {
+        decodes++;
+        if (decodes === 3) throw new Error("boom: malformed reply");
+        return inner.decode(bytes);
+      },
+    };
+    await withWebSocketServer(worker, async (connect) => {
+      const chain = new WebSocketPipeline<number>({ connect, codec: flakyCodec })
+        .buffer(1)
+        .onError(() => {})
+        .transform((t) => t.map((x: number) => x));
+      await expect(chain([1, 2, 3, 4, 5, 6, 7, 8]).toArray()).rejects.toThrow(
+        /boom: malformed reply/,
+      );
+    });
+  });
+});
+
+describe("#209 a reply with no row count fails loud", () => {
   // A foreign or version-skewed server that replies with the pre-#209 wire shape (no `rows` on the
   // header) - `WebSocketPipeline.serve()` itself always sets `rows` now, so this hand-rolls the
   // exact framing the class's own docstring documents (a 4-byte big-endian header-length prefix,
   // the JSON header, then the payload) to reach the gap a real deployment could still hit.
-  function encodeRawFrame(header: object, payload: Uint8Array): Uint8Array {
+  function encodeRawFrame(header: { id: number }, payload: Uint8Array): Uint8Array {
     const headerBytes = new TextEncoder().encode(JSON.stringify(header));
     const frame = new Uint8Array(4 + headerBytes.length + payload.length);
     new DataView(frame.buffer).setUint32(0, headerBytes.length, false);
@@ -236,27 +347,26 @@ describe("#209 a reply with no row count fails loud under the flag", () => {
       },
     };
     await withWebSocketServer(rowsLessServer, async (connect) => {
-      await withEncodedChunks(async () => {
-        const pipeline = new WebSocketPipeline<number>({ connect, codec }).transform((t) =>
-          t.map((x: number) => x),
-        );
-        await expect(pipeline([1, 2]).toArray()).rejects.toThrow(
-          /stage 0.*reply carried no row count/,
-        );
-      });
+      const pipeline = new WebSocketPipeline<number>({ connect, codec }).transform((t) =>
+        t.map((x: number) => x),
+      );
+      await expect(pipeline([1, 2]).toArray()).rejects.toThrow(
+        /stage 0.*reply carried no row count/,
+      );
     });
   });
 });
 
 describe("#209 jsonCodec is deleted (Done-when 7)", () => {
-  it("importing it fails tsc with TS2305 - compile error", () => {
-    // Type-only: never executed. `tsc --noEmit` is the real assertion; `@ts-expect-error` itself
-    // fails (TS2578) if the import ever stopped erroring - the negative-case pattern
-    // `.claude/rules/typescript.md` calls for over trusting a "should fail" claim.
-    function typeOnlyCheck() {
-      // @ts-expect-error - jsonCodec is deleted (BREAKING, #209); tsc: TS2305 Module '"../src"' has no exported member 'jsonCodec'
-      type _JsonCodecGone = typeof import("../src").jsonCodec;
-    }
-    expect(typeof typeOnlyCheck).toBe("function");
+  it("importing it fails tsc - compile error", () => {
+    // Type-only: never executed, and never in doubt as `[import(0,0)] importing it fails tsc`'s
+    // own real assertion - `tsc --noEmit` is that assertion, on the real `@ts-expect-error` above
+    // this file's own imports. `TS2578: Unused '@ts-expect-error' directive` is the failure signal
+    // if the import ever stopped erroring, the negative-case pattern `.claude/rules/typescript.md`
+    // calls for over trusting a "should fail" claim - verified live: `import { jsonCodec } from
+    // "../src"` reports `TS2724`, not the `TS2305` a bare "no exported member" guess would suggest,
+    // because `JsonCodec` (the class) is close enough in spelling for tsc's own "did you mean"
+    // suggestion to upgrade the diagnostic.
+    expect(typeof _jsonCodecDeleted).toBe("undefined");
   });
 });
