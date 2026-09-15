@@ -483,7 +483,9 @@ none of it survived the hand-trim (#745).
   keeps as `{ payload, rows, codec }` instead of decoding; internal, typed `T[]` in the stream. A
   later dispatched stage sends its payload verbatim; `materialize()` decodes it only where items
   are read (`drainable()`, the `.local()` seed, `flattenChunks`). Its `rows` lets the fan-out skip
-  an emptied chunk and `.consume()` finish without decoding.
+  an emptied chunk and `.consume()` finish without decoding. ⚠ A decode failure therefore surfaces
+  at the materializing site, not the dispatching one - outside `Pipeline.onError()`'s per-chunk
+  drop-and-continue reach - and `.consume()` never decodes at all, so it never surfaces one.
 - **Observation point / `.tap()`** - the ONE surface that watches data without changing it, at two
   levels with one meaning. `Transformer.tap(fn | transformer)` (`src/transformer.ts`) is a `pipe()`
   link: `fn` gets each item plus context via `Promise.all(chunk.map(...))`, the `transformer` form

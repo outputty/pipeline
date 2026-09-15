@@ -54,7 +54,7 @@ import { Reducer, foldChunk } from "@src/utils/reduce";
 import { WebSocket as WSWebSocket, WebSocketServer } from "ws";
 import type { Codec } from "@src/codec";
 import { JsonCodec } from "@src/codec";
-import { encodedChunk, encodeOrForward } from "@src/utils/encoded-chunk";
+import { encodedChunk, encodeOrForward, isEncodedChunk } from "@src/utils/encoded-chunk";
 
 /** The frame HEADER's own JSON encoding - separate from `Codec`, which only ever touches the
  * payload bytes after it. */
@@ -666,7 +666,9 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
                     );
                     return;
                   }
-                  resolve(encodedChunk(responsePayload, header.rows, this._codec) as unknown as U[]);
+                  resolve(
+                    encodedChunk(responsePayload, header.rows, this._codec) as unknown as U[],
+                  );
                 },
                 onError: (message) => {
                   conn.pending.delete(id);
@@ -766,7 +768,9 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           // reply with no `rows` cannot become an encoded chunk without lying about its own count.
           if (header.rows === undefined) {
             fail(
-              new Error(`reduce stage ${stageIndex} at ${connectTarget}: reply carried no row count`),
+              new Error(
+                `reduce stage ${stageIndex} at ${connectTarget}: reply carried no row count`,
+              ),
             );
             return;
           }
@@ -787,6 +791,12 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           // partition's `share()` view rather than continuing to pull chunks a dead id can no
           // longer use away from sibling partitions still folding for real.
           if (streamDone) break;
+          // An encoded chunk a prior dispatched stage emptied is never sent to the fold either
+          // (#209 review) - `ConcurrentPipeline.apply()`'s own dispatch closure (`concurrent.ts`)
+          // skips the identical case for a plain transform; folding zero rows changes nothing in
+          // `Reducer` state, so this trades one network round trip for one property read that
+          // never encodes to answer it.
+          if (isEncodedChunk(chunk) && chunk.rows === 0) continue;
           // Verbatim when `chunk` is already an encoded chunk on THIS SAME codec instance
           // (#209) - `stageWork()`'s own dispatch shares `encodeOrForward`'s identical shape.
           const payload = await encodeOrForward(chunk, self._codec);
