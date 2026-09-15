@@ -28,7 +28,7 @@ import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
 import { share } from "@src/utils/chunk";
 import { runStageChunk } from "@src/utils/helpers";
-import { encodedChunksEnabled, rowsOf } from "@src/utils/encoded-chunk";
+import { isEncodedChunk } from "@src/utils/encoded-chunk";
 
 /** Construction-time knobs for `ConcurrentPipeline` and every class that extends it. */
 export interface ConcurrentPipelineOptions {
@@ -328,10 +328,16 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     // purpose: it turns a synchronous throw from a LOCAL `rawWork` into a rejection, which
     // `fanOutOrdered` needs to fail at the chunk's own ordered position.
     const work: InternalTransformer<T, U> = async (chunk, ctx) => {
-      // A chunk a prior stage emptied is never dispatched (#209, behind the flag) - the reply
-      // would come back empty regardless, so this trades one network round trip for one `rowsOf()`
-      // check that never decodes to answer it.
-      if (encodedChunksEnabled() && rowsOf(chunk) === 0) return [] as U[];
+      // An encoded chunk a prior WebSocketPipeline/ClusterPipeline stage emptied is never
+      // dispatched (#209) - the reply would come back empty regardless, so this trades one
+      // network round trip for one property read that never decodes to answer it. Scoped to
+      // `isEncodedChunk`, not a global flag check: only a class that ever calls `encodedChunk()`
+      // (`websocket.ts`'s own `stageWork()`/`reduceWork()`) can produce one, so this never touches
+      // a real, merely-empty chunk on `HttpPipeline`/`EventEmitterPipeline` - review-caught: an
+      // earlier `encodedChunksEnabled()`-only gate skipped THEIR dispatch too whenever the flag
+      // happened to be set anywhere in the process, an unrelated global toggle deciding an
+      // unrelated class's own dispatch count.
+      if (isEncodedChunk(chunk) && chunk.rows === 0) return [] as U[];
       return runStageChunk(rawWork, chunk, ctx, this._runHandler);
     };
     const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;
