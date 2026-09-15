@@ -54,7 +54,7 @@ import { Reducer, foldChunk } from "@src/utils/reduce";
 import { WebSocket as WSWebSocket, WebSocketServer } from "ws";
 import type { Codec } from "@src/codec";
 import { JsonCodec } from "@src/codec";
-import { encodedChunk, encodedChunksEnabled, encodeOrForward } from "@src/utils/encoded-chunk";
+import { encodedChunk, encodeOrForward } from "@src/utils/encoded-chunk";
 
 /** The frame HEADER's own JSON encoding - separate from `Codec`, which only ever touches the
  * payload bytes after it. */
@@ -111,7 +111,8 @@ interface Frame {
   done?: boolean;
   /** Server -> client only, on a reply that carries a payload (#209): the row count of the
    * decoded value the payload encodes, so the client can build an encoded chunk (`{ payload, rows,
-   * codec }`) without decoding to learn it - only read when `encodedChunksEnabled()`. */
+   * codec }`) without decoding to learn it. Always set by `serve()`; a reply missing it fails the
+   * dispatch loud rather than treating it as an empty chunk (`stageWork()`/`reduceWork()`). */
   rows?: number;
 }
 
@@ -344,6 +345,13 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    */
   protected override carriedKnobs(): WebSocketPipelineOptions {
     return { ...super.carriedKnobs(), connect: this._connect, codec: this._codec };
+  }
+
+  /** The one class that answers `true` (#209) - `stageWork()`/`reduceWork()` (below) are the only
+   * sites in the package that ever call `encodedChunk()`, so `.local()`'s seed and `drainable()`
+   * only pay to unwrap one on a chain that could actually carry it. */
+  protected override mayCarryEncodedChunks(): boolean {
+    return true;
   }
 
   /**
@@ -646,28 +654,19 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
                   // Stays encoded (#209): a later dispatched stage forwards `responsePayload`
                   // verbatim if it shares this codec, and a site that actually reads items
                   // (`drainable()`, the `.local()` seed, `flattenChunks`) decodes it there instead.
-                  if (encodedChunksEnabled()) {
-                    // A reply with no `rows` cannot become an encoded chunk without lying about its
-                    // own row count (#209) - `concurrent.ts`'s own zero-row skip reads `chunk.rows`
-                    // directly once `isEncodedChunk(chunk)` is true, and would silently drop a later
-                    // dispatched stage's real data instead of forwarding it.
-                    if (header.rows === undefined) {
-                      reject(
-                        new Error(
-                          `stage ${stageIndex} at ${connectTarget}: reply carried no row count under PIPELINE_ENCODED_CHUNKS=1`,
-                        ),
-                      );
-                      return;
-                    }
-                    resolve(
-                      encodedChunk(responsePayload, header.rows, this._codec) as unknown as U[],
+                  // A reply with no `rows` cannot become an encoded chunk without lying about its
+                  // own row count - `concurrent.ts`'s own zero-row skip reads `chunk.rows` directly
+                  // once `isEncodedChunk(chunk)` is true, and would silently drop a later dispatched
+                  // stage's real data instead of forwarding it.
+                  if (header.rows === undefined) {
+                    reject(
+                      new Error(
+                        `stage ${stageIndex} at ${connectTarget}: reply carried no row count`,
+                      ),
                     );
                     return;
                   }
-                  Promise.resolve(this._codec.decode(responsePayload)).then(
-                    (value) => resolve(value as U[]),
-                    reject,
-                  );
+                  resolve(encodedChunk(responsePayload, header.rows, this._codec) as unknown as U[]);
                 },
                 onError: (message) => {
                   conn.pending.delete(id);
@@ -763,28 +762,16 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           }
           // Stays encoded (#209), the same reason `stageWork()`'s own `onFrame` does: a later
           // dispatched stage forwards this payload verbatim, and a site that reads items decodes
-          // it there instead.
-          if (encodedChunksEnabled()) {
-            // Same reason as `stageWork()`'s own `onFrame` above: a reply with no `rows` cannot
-            // become an encoded chunk without lying about its own row count.
-            if (header.rows === undefined) {
-              fail(
-                new Error(
-                  `reduce stage ${stageIndex} at ${connectTarget}: reply carried no row count under PIPELINE_ENCODED_CHUNKS=1`,
-                ),
-              );
-              return;
-            }
-            emitQueue.push(
-              encodedChunk(responsePayload, header.rows, self._codec) as unknown as U[],
+          // it there instead. Same reason as `stageWork()`'s own `onFrame` for the guard below: a
+          // reply with no `rows` cannot become an encoded chunk without lying about its own count.
+          if (header.rows === undefined) {
+            fail(
+              new Error(`reduce stage ${stageIndex} at ${connectTarget}: reply carried no row count`),
             );
-            wake();
             return;
           }
-          Promise.resolve(self._codec.decode(responsePayload)).then((value) => {
-            emitQueue.push(value as U[]);
-            wake();
-          }, fail);
+          emitQueue.push(encodedChunk(responsePayload, header.rows, self._codec) as unknown as U[]);
+          wake();
         },
         onError: (message) =>
           fail(new Error(`reduce stage ${stageIndex} at ${connectTarget} failed: ${message}`)),

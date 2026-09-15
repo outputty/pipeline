@@ -1,8 +1,7 @@
 /**
- * codec.e2e.test.ts - #209's Done-when cases. 1-4 are live here in L3, behind
- * `PIPELINE_ENCODED_CHUNKS=1` (`withEncodedChunks`, below) - the flag the enable layer deletes,
- * once every case runs live with no flag at all. 5-6 already held on base and stay live
- * unconditionally, the regression pins for the rest of the stack. 7 is a compile-time probe.
+ * codec.e2e.test.ts - #209's Done-when cases, every one live and unconditional now that `enable`
+ * has deleted the flag and the eager decode/re-encode path it used to guard. 7 is a compile-time
+ * probe.
  *
  * Cases 2-6 dial a real `ws+unix:` connection in-process (`withWebSocketServer`,
  * `websocket-wire.e2e.test.ts`'s own two-instance shape: a client-side pipeline and a separate
@@ -14,21 +13,6 @@ import { describe, it, expect } from "vitest";
 import { WebSocketPipeline, JsonCodec, type Codec, type PipelineSocket } from "../src";
 import { withWebSocketServer } from "./helpers/websocket";
 import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
-
-/** Sets `PIPELINE_ENCODED_CHUNKS=1` for the duration of `fn`, restoring whatever was there before
- * - the mechanism this stack lands behind a flag until its own enable layer deletes it (#209). A
- * subprocess fixture (Done-when 1) inherits this through `execFile`'s own default env passthrough,
- * since it is set in THIS process before the fixture is spawned. */
-async function withEncodedChunks<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = process.env.PIPELINE_ENCODED_CHUNKS;
-  process.env.PIPELINE_ENCODED_CHUNKS = "1";
-  try {
-    return await fn();
-  } finally {
-    if (previous === undefined) delete process.env.PIPELINE_ENCODED_CHUNKS;
-    else process.env.PIPELINE_ENCODED_CHUNKS = previous;
-  }
-}
 
 /** The "another instance" side of a chain - an empty-source pipeline that only `serve()`s the SAME
  * stage definitions `builder` describes, mirroring `websocket-wire.e2e.test.ts`'s own `makeWorker`,
@@ -61,13 +45,11 @@ describe("#209 the Interface program's own after example, over a real ClusterPip
   it(
     "prints [7,9,11,13,15,17], primary write 8 read 6 for toArray, write 8 read 0 for consume",
     async () => {
-      const result = await withEncodedChunks(() =>
-        runFixtureJson<{
-          out: number[];
-          toArrayOps: { write: number; read: number };
-          consumeOps: { write: number; read: number };
-        }>("__tests__/fixtures/cluster-codec-class.ts"),
-      );
+      const result = await runFixtureJson<{
+        out: number[];
+        toArrayOps: { write: number; read: number };
+        consumeOps: { write: number; read: number };
+      }>("__tests__/fixtures/cluster-codec-class.ts");
       expect(result.out).toEqual([7, 9, 11, 13, 15, 17]);
       expect(result.toArrayOps).toEqual({ write: 8, read: 6 });
       expect(result.consumeOps).toEqual({ write: 8, read: 0 });
@@ -85,13 +67,11 @@ describe("#209 dispatched replies stay encoded between two stages (Done-when 2)"
     );
     await withWebSocketServer(worker, async (connect) => {
       const codec = new CountingCodec(new JsonCodec());
-      const out = await withEncodedChunks(() =>
-        new WebSocketPipeline<number>({ connect, codec })
-          .buffer(1)
-          .transform((t) => t.map((x: number) => x * 2))
-          .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
-          .toArray(),
-      );
+      const out = await new WebSocketPipeline<number>({ connect, codec })
+        .buffer(1)
+        .transform((t) => t.map((x: number) => x * 2))
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
+        .toArray();
       expect(out).toEqual([3, 5, 7, 9, 11, 13, 15, 17]);
       expect(codec.decodes).toBe(8);
       expect(codec.encodes).toBe(8);
@@ -110,13 +90,11 @@ describe("#209 an emptied chunk is never re-dispatched to the next stage (Done-w
       serverCodec,
     );
     await withWebSocketServer(worker, async (connect) => {
-      const out = await withEncodedChunks(() =>
-        new WebSocketPipeline<number>({ connect })
-          .buffer(1)
-          .transform((t) => t.filter((x: number) => x > 100))
-          .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
-          .toArray(),
-      );
+      const out = await new WebSocketPipeline<number>({ connect })
+        .buffer(1)
+        .transform((t) => t.filter((x: number) => x > 100))
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
+        .toArray();
       expect(out).toEqual([]);
       expect(serverCodec.decodes).toBe(8);
     });
@@ -133,15 +111,13 @@ describe("#209 a dispatched reduce forwards encoded chunks too (Done-when 4)", (
     });
     await withWebSocketServer(worker, async (connect) => {
       const codec = new CountingCodec(new JsonCodec());
-      const out = await withEncodedChunks(() => {
-        const chain = new WebSocketPipeline<number>({ connect, codec, maxConcurrency: 1 })
-          .buffer(1)
-          .transform((t) => t.map((x: number) => x * 2))
-          .reduce((acc: number, x: number) => acc + x, 0);
-        return chain
-          .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
-          .toArray();
-      });
+      const chain = new WebSocketPipeline<number>({ connect, codec, maxConcurrency: 1 })
+        .buffer(1)
+        .transform((t) => t.map((x: number) => x * 2))
+        .reduce((acc: number, x: number) => acc + x, 0);
+      const out = await chain
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8])
+        .toArray();
       expect(out).toEqual([73]);
       expect(codec.decodes).toBe(1);
     });
@@ -201,7 +177,7 @@ describe("#209 a pipeline with no codec still encodes JSON (Done-when 6)", () =>
   });
 });
 
-describe("#209 a reply with no row count fails loud under the flag", () => {
+describe("#209 a reply with no row count fails loud", () => {
   // A foreign or version-skewed server that replies with the pre-#209 wire shape (no `rows` on the
   // header) - `WebSocketPipeline.serve()` itself always sets `rows` now, so this hand-rolls the
   // exact framing the class's own docstring documents (a 4-byte big-endian header-length prefix,
@@ -236,14 +212,12 @@ describe("#209 a reply with no row count fails loud under the flag", () => {
       },
     };
     await withWebSocketServer(rowsLessServer, async (connect) => {
-      await withEncodedChunks(async () => {
-        const pipeline = new WebSocketPipeline<number>({ connect, codec }).transform((t) =>
-          t.map((x: number) => x),
-        );
-        await expect(pipeline([1, 2]).toArray()).rejects.toThrow(
-          /stage 0.*reply carried no row count/,
-        );
-      });
+      const pipeline = new WebSocketPipeline<number>({ connect, codec }).transform((t) =>
+        t.map((x: number) => x),
+      );
+      await expect(pipeline([1, 2]).toArray()).rejects.toThrow(
+        /stage 0.*reply carried no row count/,
+      );
     });
   });
 });
