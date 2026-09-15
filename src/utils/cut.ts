@@ -12,6 +12,7 @@
 import type { ChunkerFunction } from "@src/types";
 import { chain } from "@src/utils/helpers";
 import { drainSync, dispatchSync, type MaybeAsyncChunks } from "@src/utils/drain";
+import { materialize } from "@src/utils/encoded-chunk";
 
 /** The `chunkSize`/`size` guard `buildChunkGenerator`, `buildSyncChunkGenerator` and
  * `recut.ts`'s own `recutSyncChunks` each need before doing any real work (#133: was spelled
@@ -128,14 +129,15 @@ export async function* normalize<T>(stream: AsyncIterable<T | T[]>): AsyncGenera
 
 /**
  * Flattens a chunk stream into its items, in order (#39) - the one place a chunk becomes items
- * again, shared by `Pipeline`'s own terminal ops and `.buffer()`'s re-cut fallback.
+ * again for `.buffer()`'s re-cut fallback. Materializes each chunk first (#209): an encoded chunk
+ * a dispatched stage left behind is decoded here, since a re-cut needs real items to slice.
  *
  * @example
  * `[...flattenChunks([[1, 2], [3]])]` → `[1, 2, 3]`.
  */
 export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T> {
   for await (const chunk of chunks) {
-    yield* chunk;
+    yield* await materialize(chunk);
   }
 }
 

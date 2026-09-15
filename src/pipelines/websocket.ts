@@ -54,6 +54,12 @@ import { Reducer, foldChunk } from "@src/utils/reduce";
 import { WebSocket as WSWebSocket, WebSocketServer } from "ws";
 import type { Codec } from "@src/codec";
 import { JsonCodec } from "@src/codec";
+import {
+  encodedChunk,
+  encodedChunksEnabled,
+  isEncodedChunk,
+  materialize,
+} from "@src/utils/encoded-chunk";
 
 /** The frame HEADER's own JSON encoding - separate from `Codec`, which only ever touches the
  * payload bytes after it. */
@@ -108,6 +114,10 @@ interface Frame {
   /** Server -> client: no more reduce emits are coming for this `id`, sent after any trailing
    * `Reducer.final()` value. */
   done?: boolean;
+  /** Server -> client only, on a reply that carries a payload (#209): the row count of the
+   * decoded value the payload encodes, so the client can build an encoded chunk (`{ payload, rows,
+   * codec }`) without decoding to learn it - only read when `encodedChunksEnabled()`. */
+  rows?: number;
 }
 
 /** The one TEXT-frame shape either side sends on failure - fixed JSON regardless of `codec`. */
@@ -477,7 +487,9 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       const ctx = this.applyContext(header.context);
       const chunk = (await this._codec.decode(payload)) as unknown[];
       const result = await chunkTransforms[parsed.index](chunk, ctx);
-      socket.send(encodeFrame({ id: header.id }, await this._codec.encode(result)));
+      socket.send(
+        encodeFrame({ id: header.id, rows: result.length }, await this._codec.encode(result)),
+      );
     } catch (error) {
       socket.send(
         encodeErrorFrame(header.id, error instanceof Error ? error.message : String(error)),
@@ -532,7 +544,9 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       const chunk = (await this._codec.decode(payload)) as unknown[];
       const emitted = await foldChunk(reducer, chunk, ctx);
       if (emitted.length > 0) {
-        socket.send(encodeFrame({ id: header.id }, await this._codec.encode(emitted)));
+        socket.send(
+          encodeFrame({ id: header.id, rows: emitted.length }, await this._codec.encode(emitted)),
+        );
       }
       return false;
     } catch (error) {
@@ -555,7 +569,9 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   ): Promise<void> {
     const trailing = reducer.final();
     if (trailing.length > 0) {
-      socket.send(encodeFrame({ id }, await this._codec.encode(trailing)));
+      socket.send(
+        encodeFrame({ id, rows: trailing.length }, await this._codec.encode(trailing)),
+      );
     }
     socket.send(encodeFrame({ id, done: true }, new Uint8Array(0)));
     this.reduceSessions.delete(id);
@@ -614,7 +630,14 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
             const conn = getConnection(connectTarget);
             await conn.ready;
             const id = conn.nextId++;
-            const payload = await this._codec.encode(chunk);
+            // Verbatim when `chunk` is already an encoded chunk on THIS SAME codec instance
+            // (#209) - a prior dispatched stage's own reply, never decoded here to begin with.
+            // `materialize()` is a no-op on a real array, so this is safe whether or not anything
+            // upstream ever produced an encoded chunk.
+            const payload =
+              isEncodedChunk(chunk) && chunk.codec === this._codec
+                ? chunk.payload
+                : await this._codec.encode(await materialize(chunk));
             // The two awaits above are the window a close/error can race through: `getConnection()`'s
             // own `evictAndFail` rejects only requests already in `pending` at the moment it runs, so
             // an entry registered AFTER that moment would otherwise never settle. Checked here, with
@@ -627,9 +650,16 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
             }
             try {
               conn.pending.set(id, {
-                onFrame: (_header, responsePayload) => {
+                onFrame: (header, responsePayload) => {
                   conn.pending.delete(id);
                   release();
+                  // Stays encoded (#209): a later dispatched stage forwards `responsePayload`
+                  // verbatim if it shares this codec, and a site that actually reads items
+                  // (`drainable()`, the `.local()` seed, `flattenChunks`) decodes it there instead.
+                  if (encodedChunksEnabled()) {
+                    resolve(encodedChunk(responsePayload, header.rows ?? 0, this._codec) as unknown as U[]);
+                    return;
+                  }
                   Promise.resolve(this._codec.decode(responsePayload)).then(
                     (value) => resolve(value as U[]),
                     reject,
@@ -727,6 +757,14 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
             wake();
             return;
           }
+          // Stays encoded (#209), the same reason `stageWork()`'s own `onFrame` does: a later
+          // dispatched stage forwards this payload verbatim, and a site that reads items decodes
+          // it there instead.
+          if (encodedChunksEnabled()) {
+            emitQueue.push(encodedChunk(responsePayload, header.rows ?? 0, self._codec) as unknown as U[]);
+            wake();
+            return;
+          }
           Promise.resolve(self._codec.decode(responsePayload)).then((value) => {
             emitQueue.push(value as U[]);
             wake();
@@ -746,7 +784,12 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           // partition's `share()` view rather than continuing to pull chunks a dead id can no
           // longer use away from sibling partitions still folding for real.
           if (streamDone) break;
-          const payload = await self._codec.encode(chunk);
+          // Verbatim when `chunk` is already an encoded chunk on THIS SAME codec instance
+          // (#209) - `stageWork()`'s own dispatch shares the identical shape.
+          const payload =
+            isEncodedChunk(chunk) && chunk.codec === self._codec
+              ? chunk.payload
+              : await self._codec.encode(await materialize(chunk));
           if (streamDone) break;
           conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
         }
