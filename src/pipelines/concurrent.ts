@@ -28,6 +28,7 @@ import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
 import { share } from "@src/utils/chunk";
 import { runStageChunk } from "@src/utils/helpers";
+import { encodedChunksEnabled, rowsOf } from "@src/utils/encoded-chunk";
 
 /** Construction-time knobs for `ConcurrentPipeline` and every class that extends it. */
 export interface ConcurrentPipelineOptions {
@@ -326,8 +327,13 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     // chunk", and `[]` is the empty-chunk answer the fan-out below needs for that. Kept `async` on
     // purpose: it turns a synchronous throw from a LOCAL `rawWork` into a rejection, which
     // `fanOutOrdered` needs to fail at the chunk's own ordered position.
-    const work: InternalTransformer<T, U> = async (chunk, ctx) =>
-      runStageChunk(rawWork, chunk, ctx, this._runHandler);
+    const work: InternalTransformer<T, U> = async (chunk, ctx) => {
+      // A chunk a prior stage emptied is never dispatched (#209, behind the flag) - the reply
+      // would come back empty regardless, so this trades one network round trip for one `rowsOf()`
+      // check that never decodes to answer it.
+      if (encodedChunksEnabled() && rowsOf(chunk) === 0) return [] as U[];
+      return runStageChunk(rawWork, chunk, ctx, this._runHandler);
+    };
     const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;
     // `this._chunks` handed straight to the fan-out - no chunking call of this class's own (#39):
     // whatever boundary `.buffer()` (or the constructor's own default) already cut is what gets
