@@ -11,7 +11,7 @@
  * `cluster-file-codec.ts`, #208).
  */
 import { describe, it, expect } from "vitest";
-import { WebSocketPipeline, JsonCodec, type Codec } from "../src";
+import { WebSocketPipeline, JsonCodec, type Codec, type PipelineSocket } from "../src";
 import { withWebSocketServer } from "./helpers/websocket";
 import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
 
@@ -79,7 +79,9 @@ describe("#209 the Interface program's own after example, over a real ClusterPip
 describe("#209 dispatched replies stay encoded between two stages (Done-when 2)", () => {
   it("primary decode 8 encode 8 against base's own 16/16", async () => {
     const worker = makeWorker((t) =>
-      t.transform((tr) => tr.map((x: number) => x * 2)).transform((tr) => tr.map((x: number) => x + 1)),
+      t
+        .transform((tr) => tr.map((x: number) => x * 2))
+        .transform((tr) => tr.map((x: number) => x + 1)),
     );
     await withWebSocketServer(worker, async (connect) => {
       const codec = new CountingCodec(new JsonCodec());
@@ -102,7 +104,9 @@ describe("#209 an emptied chunk is never re-dispatched to the next stage (Done-w
     const serverCodec = new CountingCodec(new JsonCodec());
     const worker = makeWorker(
       (t) =>
-        t.transform((tr) => tr.filter((x: number) => x > 100)).transform((tr) => tr.map((x: number) => x + 1)),
+        t
+          .transform((tr) => tr.filter((x: number) => x > 100))
+          .transform((tr) => tr.map((x: number) => x + 1)),
       serverCodec,
     );
     await withWebSocketServer(worker, async (connect) => {
@@ -167,8 +171,8 @@ describe("#209 tap/local/buffer recut and branch keep base's own output (Done-wh
         .buffer(3)
         .transform((t) => t.map((x: number) => x + 1))
         .branch((b) => b.when("big", (x: number) => x > 10).otherwise("rest"))([
-          1, 2, 3, 4, 5, 6, 7, 8,
-        ]);
+        1, 2, 3, 4, 5, 6, 7, 8,
+      ]);
       expect(routed).toEqual({ big: [11, 13, 15, 17], rest: [3, 5, 7, 9] });
       expect(seenTapped).toEqual([2, 4, 6, 8, 10, 12, 14, 16]);
     });
@@ -194,6 +198,53 @@ describe("#209 a pipeline with no codec still encodes JSON (Done-when 6)", () =>
         .toArray();
     });
     expect(captured).toEqual(new TextEncoder().encode(JSON.stringify([1, 2, 3])));
+  });
+});
+
+describe("#209 a reply with no row count fails loud under the flag", () => {
+  // A foreign or version-skewed server that replies with the pre-#209 wire shape (no `rows` on the
+  // header) - `WebSocketPipeline.serve()` itself always sets `rows` now, so this hand-rolls the
+  // exact framing the class's own docstring documents (a 4-byte big-endian header-length prefix,
+  // the JSON header, then the payload) to reach the gap a real deployment could still hit.
+  function encodeRawFrame(header: object, payload: Uint8Array): Uint8Array {
+    const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+    const frame = new Uint8Array(4 + headerBytes.length + payload.length);
+    new DataView(frame.buffer).setUint32(0, headerBytes.length, false);
+    frame.set(headerBytes, 4);
+    frame.set(payload, 4 + headerBytes.length);
+    return frame;
+  }
+
+  it("rejects naming the stage, rather than treating the reply as empty", async () => {
+    const codec = new JsonCodec();
+    const rowsLessServer = {
+      serve(socket: PipelineSocket) {
+        socket.onMessage((data) => {
+          if (typeof data === "string") return;
+          const view = new DataView(
+            (data as Uint8Array).buffer,
+            (data as Uint8Array).byteOffset,
+            (data as Uint8Array).byteLength,
+          );
+          const headerLength = view.getUint32(0, false);
+          const header = JSON.parse(
+            new TextDecoder().decode((data as Uint8Array).subarray(4, 4 + headerLength)),
+          ) as { id: number };
+          // No `rows` field - the pre-#209 reply shape.
+          socket.send(encodeRawFrame({ id: header.id }, codec.encode([1, 2])));
+        });
+      },
+    };
+    await withWebSocketServer(rowsLessServer, async (connect) => {
+      await withEncodedChunks(async () => {
+        const pipeline = new WebSocketPipeline<number>({ connect, codec }).transform((t) =>
+          t.map((x: number) => x),
+        );
+        await expect(pipeline([1, 2]).toArray()).rejects.toThrow(
+          /stage 0.*reply carried no row count/,
+        );
+      });
+    });
   });
 });
 

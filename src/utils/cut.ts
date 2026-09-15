@@ -12,7 +12,7 @@
 import type { ChunkerFunction } from "@src/types";
 import { chain } from "@src/utils/helpers";
 import { drainSync, dispatchSync, type MaybeAsyncChunks } from "@src/utils/drain";
-import { materialize } from "@src/utils/encoded-chunk";
+import { isEncodedChunk, materialize } from "@src/utils/encoded-chunk";
 
 /** The `chunkSize`/`size` guard `buildChunkGenerator`, `buildSyncChunkGenerator` and
  * `recut.ts`'s own `recutSyncChunks` each need before doing any real work (#133: was spelled
@@ -137,7 +137,10 @@ export async function* normalize<T>(stream: AsyncIterable<T | T[]>): AsyncGenera
  */
 export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T> {
   for await (const chunk of chunks) {
-    yield* await materialize(chunk);
+    // `isEncodedChunk` checked synchronously first (#209) - `materialize` is `async`, so awaiting
+    // it costs a Promise even on its own no-op fast path; skipping the call for a real chunk keeps
+    // this generator's per-chunk cost at what it was before the encoded-chunk mechanism existed.
+    yield* isEncodedChunk(chunk) ? await materialize(chunk) : chunk;
   }
 }
 

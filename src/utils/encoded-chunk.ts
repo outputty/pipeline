@@ -22,26 +22,21 @@ export interface EncodedChunk {
 
 /** Builds an encoded chunk - the one place `{ payload, rows, codec }` is assembled, called only
  * from `websocket.ts`'s own dispatch (`stageWork()`/`reduceWork()`) when
- * `encodedChunksEnabled()`. */
+ * `encodedChunksEnabled()`.
+ *
+ * `encodedChunk(bytes, 3, codec)` → `{ [ENCODED_CHUNK]: true, payload: bytes, rows: 3, codec }`. */
 export function encodedChunk(payload: Uint8Array, rows: number, codec: Codec): EncodedChunk {
   return { [ENCODED_CHUNK]: true, payload, rows, codec };
 }
 
 /** `chunk` is `T[]` by its own declared type everywhere this is called from - the encoded case is
  * the type lie this file exists to undo, so the parameter stays `unknown` here at the one place
- * that actually tells the two apart. */
+ * that actually tells the two apart.
+ *
+ * `isEncodedChunk([1, 2, 3])` → `false`. `isEncodedChunk(encodedChunk(bytes, 3, codec))` → `true`. */
 // oxlint-disable-next-line anti-slop/no-unknown-parameters -- see this file's own header
 export function isEncodedChunk(chunk: unknown): chunk is EncodedChunk {
   return typeof chunk === "object" && chunk !== null && ENCODED_CHUNK in chunk;
-}
-
-/** The row count of a chunk that may or may not be encoded, without decoding to find out - an
- * encoded chunk's own `rows` field, or a real array's `.length`. `ConcurrentPipeline`'s fan-out
- * (`pipelines/concurrent.ts`) uses this to skip dispatching a chunk with nothing in it.
- *
- * `rowsOf([1, 2, 3])` → `3`. `rowsOf(encodedChunk(bytes, 6, codec))` → `6`, no decode. */
-export function rowsOf<T>(chunk: T[]): number {
-  return isEncodedChunk(chunk) ? chunk.rows : chunk.length;
 }
 
 /** Decodes a chunk that may or may not be encoded - a real array passes through UNCHANGED, so this
@@ -56,13 +51,40 @@ export async function materialize<T>(chunk: T[]): Promise<T[]> {
   return (await chunk.codec.decode(chunk.payload)) as T[];
 }
 
+/** Encodes `chunk` for the wire with `codec` - the payload VERBATIM when `chunk` is already an
+ * encoded chunk on this SAME codec instance (a prior dispatched stage's own reply, never decoded
+ * to begin with), otherwise materialized then encoded fresh. The one place `websocket.ts`'s
+ * `stageWork()` dispatch and `reduceWork()`'s pump loop both build an outgoing payload (#209
+ * review, dedup: both carried an identical ternary before this).
+ *
+ * `await encodeOrForward([1, 2], codec)` → `codec.encode([1, 2])`'s own result. `await
+ * encodeOrForward(encodedChunk(bytes, 2, codec), codec)` → `bytes`, unchanged, no encode call. */
+export async function encodeOrForward<T>(chunk: T[], codec: Codec): Promise<Uint8Array> {
+  if (isEncodedChunk(chunk) && chunk.codec === codec) return chunk.payload;
+  return codec.encode(await materialize(chunk));
+}
+
 /** `materialize()` over a whole chunk STREAM, one chunk at a time - `Pipeline.local()`'s own seed
  * (`pipeline.ts`) uses this, since the bare `Pipeline` it builds runs `Transformer.process()`
  * directly over the chunks it is handed and needs real items, never an encoded one. */
 export async function* materializeChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T[]> {
   for await (const chunk of chunks) {
-    yield await materialize(chunk);
+    yield isEncodedChunk(chunk) ? await materialize(chunk) : chunk;
   }
+}
+
+/** `materializeChunks()`, skipped entirely when the flag is off (#209) - an `EncodedChunk` can only
+ * ever exist behind `encodedChunksEnabled()`, so wrapping a chunk stream that could never carry one
+ * in its own async generator would cost a Promise per chunk for nothing: measured on `bench/memory.ts`,
+ * `Pipeline.local()`/`drainable()` routing every chunk stream through this wrapper unconditionally
+ * regressed `promisesPerRow` on plain, non-WebSocket chains (`Concurrent .local()` 0.013 -> 0.025,
+ * `Branch router` 0.005 -> 0.011) with the flag never set. `chunks` passes through by reference, not
+ * a copy, so this costs one boolean read when the flag is off.
+ *
+ * `materializeChunksIfNeeded(chunksOf([[1, 2]]))` with the flag unset -> the SAME `chunks` iterable,
+ * no wrapper. */
+export function materializeChunksIfNeeded<T>(chunks: AsyncIterable<T[]>): AsyncIterable<T[]> {
+  return encodedChunksEnabled() ? materializeChunks(chunks) : chunks;
 }
 
 /** Whether a dispatched WebSocket reply stays encoded until a site actually reads its items

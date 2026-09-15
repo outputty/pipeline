@@ -54,12 +54,7 @@ import { Reducer, foldChunk } from "@src/utils/reduce";
 import { WebSocket as WSWebSocket, WebSocketServer } from "ws";
 import type { Codec } from "@src/codec";
 import { JsonCodec } from "@src/codec";
-import {
-  encodedChunk,
-  encodedChunksEnabled,
-  isEncodedChunk,
-  materialize,
-} from "@src/utils/encoded-chunk";
+import { encodedChunk, encodedChunksEnabled, encodeOrForward } from "@src/utils/encoded-chunk";
 
 /** The frame HEADER's own JSON encoding - separate from `Codec`, which only ever touches the
  * payload bytes after it. */
@@ -569,9 +564,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   ): Promise<void> {
     const trailing = reducer.final();
     if (trailing.length > 0) {
-      socket.send(
-        encodeFrame({ id, rows: trailing.length }, await this._codec.encode(trailing)),
-      );
+      socket.send(encodeFrame({ id, rows: trailing.length }, await this._codec.encode(trailing)));
     }
     socket.send(encodeFrame({ id, done: true }, new Uint8Array(0)));
     this.reduceSessions.delete(id);
@@ -632,12 +625,9 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
             const id = conn.nextId++;
             // Verbatim when `chunk` is already an encoded chunk on THIS SAME codec instance
             // (#209) - a prior dispatched stage's own reply, never decoded here to begin with.
-            // `materialize()` is a no-op on a real array, so this is safe whether or not anything
-            // upstream ever produced an encoded chunk.
-            const payload =
-              isEncodedChunk(chunk) && chunk.codec === this._codec
-                ? chunk.payload
-                : await this._codec.encode(await materialize(chunk));
+            // `encodeOrForward` is a safe no-op-then-encode on a real array, whether or not
+            // anything upstream ever produced an encoded chunk.
+            const payload = await encodeOrForward(chunk, this._codec);
             // The two awaits above are the window a close/error can race through: `getConnection()`'s
             // own `evictAndFail` rejects only requests already in `pending` at the moment it runs, so
             // an entry registered AFTER that moment would otherwise never settle. Checked here, with
@@ -657,7 +647,21 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
                   // verbatim if it shares this codec, and a site that actually reads items
                   // (`drainable()`, the `.local()` seed, `flattenChunks`) decodes it there instead.
                   if (encodedChunksEnabled()) {
-                    resolve(encodedChunk(responsePayload, header.rows ?? 0, this._codec) as unknown as U[]);
+                    // A reply with no `rows` cannot become an encoded chunk without lying about its
+                    // own row count (#209) - `concurrent.ts`'s own zero-row skip reads `chunk.rows`
+                    // directly once `isEncodedChunk(chunk)` is true, and would silently drop a later
+                    // dispatched stage's real data instead of forwarding it.
+                    if (header.rows === undefined) {
+                      reject(
+                        new Error(
+                          `stage ${stageIndex} at ${connectTarget}: reply carried no row count under PIPELINE_ENCODED_CHUNKS=1`,
+                        ),
+                      );
+                      return;
+                    }
+                    resolve(
+                      encodedChunk(responsePayload, header.rows, this._codec) as unknown as U[],
+                    );
                     return;
                   }
                   Promise.resolve(this._codec.decode(responsePayload)).then(
@@ -761,7 +765,19 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           // dispatched stage forwards this payload verbatim, and a site that reads items decodes
           // it there instead.
           if (encodedChunksEnabled()) {
-            emitQueue.push(encodedChunk(responsePayload, header.rows ?? 0, self._codec) as unknown as U[]);
+            // Same reason as `stageWork()`'s own `onFrame` above: a reply with no `rows` cannot
+            // become an encoded chunk without lying about its own row count.
+            if (header.rows === undefined) {
+              fail(
+                new Error(
+                  `reduce stage ${stageIndex} at ${connectTarget}: reply carried no row count under PIPELINE_ENCODED_CHUNKS=1`,
+                ),
+              );
+              return;
+            }
+            emitQueue.push(
+              encodedChunk(responsePayload, header.rows, self._codec) as unknown as U[],
+            );
             wake();
             return;
           }
@@ -785,11 +801,8 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           // longer use away from sibling partitions still folding for real.
           if (streamDone) break;
           // Verbatim when `chunk` is already an encoded chunk on THIS SAME codec instance
-          // (#209) - `stageWork()`'s own dispatch shares the identical shape.
-          const payload =
-            isEncodedChunk(chunk) && chunk.codec === self._codec
-              ? chunk.payload
-              : await self._codec.encode(await materialize(chunk));
+          // (#209) - `stageWork()`'s own dispatch shares `encodeOrForward`'s identical shape.
+          const payload = await encodeOrForward(chunk, self._codec);
           if (streamDone) break;
           conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
         }

@@ -122,7 +122,7 @@ export class PipelineResult<T, M extends PipelineMode> {
   /**
    * Run the chain for its side effects, collecting nothing - and reading no item, so it decodes
    * none (#209): every stage still runs, but a dispatched reply an upstream stage left encoded is
-   * never unwrapped, unlike `forEach(() => {})`, which drains through the materialized view.
+   * never materialized, unlike `forEach(() => {})`, which drains through the materialized view.
    *
    * @example
    * `score([1, 2, 3]).consume()` → `undefined`, every stage having run.
