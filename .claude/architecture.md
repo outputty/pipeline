@@ -746,6 +746,39 @@ scope, Done-when 8) - `checkGate`'s own regression-only design never flags a spe
 stays green with a now-stale ceiling; a future ticket updating the baseline for real would tighten
 it, not loosen anything.
 
+## Codec and encoded chunks - pending #209
+
+A dispatched WebSocket reply stays encoded in the orchestrating process until a site reads its
+items. `Codec` (the interface) and `JsonCodec` (the default class) live in `src/codec.ts`, outside
+the file that loads `ws`, so a core chunk type can name `Codec` without a utils-to-pipelines import.
+`Codec` is not generic: one instance serves every stage while the item type changes, so it sees
+`unknown`, and `Pipeline<T>` carries the type hints. The `jsonCodec` object is deleted (BREAKING).
+
+```text
+BEFORE  stage 0 reply -> codec.decode (primary) -> rows -> codec.encode (primary) -> stage 1
+AFTER   stage 0 reply -> encoded chunk { payload, rows, codec } ------------------> stage 1
+                                      \-> materialize() only where items are read
+```
+
+- `WebSocketPipeline.stageWork()` resolves an encoded chunk; the reply header carries `rows`. A
+  reduce emit frame carries `rows` too, and `reduceWork()` yields an encoded chunk.
+- A later dispatched transform or reduce sends the payload verbatim when the codec is the same one.
+- Three sites decode: `drainable()` (every item-returning terminal and `.branch()`), the `.local()`
+  seed (which covers `Pipeline.tap`) and `flattenChunks` (which covers a `.buffer()` recut).
+  `.consume()` decodes nothing.
+- `ConcurrentPipeline`'s fan-out skips a chunk with 0 rows before `stageWork()`, on every
+  dispatching class. The source cut (`cut.ts`) and the terminal (`result.ts`) already drop empties.
+- The encoded chunk is internal and travels typed `T[]`. A site that reads items without decoding
+  returns `[]` without an error, so each decoding site keeps its own e2e case.
+
+Measured in planning (spike 2, `WebSocketPipeline`, `[1..8]`, `.buffer(1)`, two dispatched stages):
+the primary's decode/encode count fell from 16/16 to 8/8 with the JSON codec and with a
+by-reference codec alike, output unchanged. `.tap()`, `.local()`, a recut and `.branch()` between stages kept
+their base counts, since each reads rows.
+
+The package ships no storage codec. A caller's by-reference codec owns its store, its keys and its
+cleanup; a dispatch that fails before decode leaves that codec's stored object unread.
+
 ## EventEmitterPipeline - #124
 
 `stageWork()` is the only DISPATCH override, the same seam `HttpPipeline` overrides to POST -

@@ -272,6 +272,49 @@ open for the whole stream and sends results back along it while chunks are still
 client that waits for the complete reply before returning it stops those results arriving until the
 last chunk has been sent. Everything still completes, and nothing arrives early.
 
+How a chunk is encoded on a WebSocket connection is the caller's to change too. `options.codec` on
+`WebSocketPipeline` and `ClusterPipeline` takes any object implementing `Codec`, `new JsonCodec()` by
+default. A caller's own codec can change the format, or keep large chunks off the wire by storing
+each one elsewhere and sending only a key. How a chunk travels stays the codec's business: the chain
+keeps its item types whichever codec is used. Between two dispatched stages the orchestrating
+process passes a reply on still encoded, so it reads rows only where it needs them - a `.tap()`, a
+`.local()` region, a `.buffer()` recut, a `.branch()`, or a terminal that returns items.
+`.consume()` reads none. A chunk that a stage emptied is not dispatched to the next one.
+
+> **`Codec`** - how a chunk becomes bytes on a WebSocket connection: `encode(value)`,
+> `decode(bytes)` and an optional `contentType`. Not generic: one codec serves every stage while the
+> item type changes, so it sees `unknown`. Every process builds its own by running the same entry
+> module, so any store it writes to must be reachable from every process.
+> **`JsonCodec`** - the default `Codec`, a class: `JSON.stringify` to UTF-8 bytes and back.
+
+```ts
+import { ClusterPipeline, type Codec } from "@outputty/pipeline";
+
+class FileCodec implements Codec {
+  constructor(private dir: string) {}
+  encode(value: unknown) {
+    const key = randomUUID();
+    writeFileSync(join(this.dir, key), JSON.stringify(value));
+    return new TextEncoder().encode(key);
+  }
+  decode(bytes: Uint8Array) {
+    return JSON.parse(readFileSync(join(this.dir, new TextDecoder().decode(bytes)), "utf8"));
+  }
+}
+
+const codec = new FileCodec(process.env.STORE_DIR!);
+
+const data = await new ClusterPipeline<number>({ workers: 2, maxConcurrency: 2, codec })
+  .buffer(1)
+  .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+  .transform((t) => t.map((x: number) => x + 1))
+  ([1, 2, 3, 4, 5, 6, 7, 8]).toArray();
+```
+
+```json
+[7, 9, 11, 13, 15, 17]
+```
+
 Two rules follow from a stage being a position rather than a name, and both are the caller's to keep:
 
 - Every instance must run the same build. A rolling deploy that mixes versions can run a chunk through
