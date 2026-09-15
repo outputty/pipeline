@@ -7,6 +7,18 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-14 Dispatching every incoming multiplexed frame concurrently dropped a reduce fold's result
+
+Building #201's `WebSocketPipeline`, `serve()`'s first cut dispatched every incoming binary frame as
+it arrived, with no ordering between frames sharing the same correlation `id`. A reduce stream's own
+chunk frame and its `inputDone` frame arrive back to back, and `inputDone`'s own path to
+`Reducer.final()` is shorter than a chunk's own path to `foldChunk()` - the trailing flush ran before
+the chunk it was meant to flush had folded, and a real run summed `[1,2,3,4,5]` to `[]` instead of
+`[15]`. Fixed with `frameQueues`, a `Map<id, Promise<void>>` tail-chain: same-id frames await the
+prior one's own handling before their own runs, different ids still dispatch concurrently.
+`.claude/rules/code.md` gained a new "Shape" line naming the pattern generally, for the next
+multiplexed wire protocol this codebase builds.
+
 ## 2026-09-14 Guessing proximity to a `/goal`'s own turn-cap and drafting an early handoff, twice
 
 Building #180, after L1 and again after L2, the session reasoned it was "probably close" to the

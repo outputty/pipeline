@@ -169,8 +169,8 @@ built and the difference matters at your own scale.
 ### Where the work runs
 
 The class you construct decides where a chain's chunks are processed. The chain itself - the
-`map`/`filter`/`reduce` calls - is identical in all five, and so is the output. Only the class name
-changes.
+`map`/`filter`/`reduce` calls - is identical across every one of them, and so is the output. Only
+the class name changes.
 
 > **`Pipeline`** - one chunk at a time, in this process. The default, and the base every other one
 > extends.
@@ -183,8 +183,18 @@ changes.
 > signature, so the default is a drop-in and so is a caller's own. The default is the fastest client
 > the runtime offers, resolved once per process; a caller supplies their own to add authentication, a
 > proxy, a retry or a different transport.
-> **`ClusterPipeline`** - each chunk dispatched to another process on the same machine. It brings up
-> its own workers on first run and every later pipeline in the process reuses them.
+> **`WebSocketPipeline`** - each chunk dispatched over one persistent, multiplexed WebSocket
+> connection to another instance, instead of one HTTP request per chunk. The caller gives it
+> `connect` - where to dial (a unix socket path or a host:port) - and the receiving instance calls
+> `.serve(socket)` on an already-open connection to answer for it.
+> **`ClusterHttpPipeline`** - each chunk dispatched to another process on the same machine, over
+> HTTP. It brings up its own workers on first run and every later pipeline in the process reuses
+> them. The class this package shipped first as `ClusterPipeline`, kept under this name for a caller
+> who wants the unchanged HTTP transport.
+> **`ClusterPipeline`** - the same "each chunk to another process on the same machine" shape as
+> `ClusterHttpPipeline`, over `WebSocketPipeline`'s own persistent connection instead - the class
+> name every caller already imports. Each worker gets its own connection; dispatch spreads across
+> them automatically.
 > **`EventEmitterPipeline`** - each chunk handed to whichever Worker functions are registered on
 > `pipeline.emitter`, a `node:events` `EventEmitter`. The chain's own `.transform()` function
 > auto-registers as a stage's first Worker; any number of extra Workers may register afterward from

@@ -11,6 +11,18 @@ Each line is one rule: the moment, then the action. Rules that hold in any repo 
     `bunx oxlint src/` run - a `CLAUDE.md`/`architecture.md` sentence describing the same boundary is
     checked only when a reader happens to compare a new import against it by hand (#117).
 
+## Shape
+
+- Queue an incoming message on a multiplexed connection PER CORRELATION-ID, never dispatch every
+  message concurrently. (2026-09-14)
+  - Two messages sharing one `id` (a reduce stream's own chunk frame and its `inputDone` frame,
+    `src/pipelines/websocket.ts`) can settle out of the order they were SENT once each takes a
+    different async path to its own effect - `inputDone`'s path to `Reducer.final()` was shorter
+    than a chunk's own path to `foldChunk()`, so the trailing flush ran before the chunk it was
+    meant to flush had folded, and `[1,2,3,4,5]` summed to `[]` instead of `[15]`. A per-id
+    `Map<id, Promise<void>>` tail-chain (`frameQueues`) fixed it: same-id messages await the prior
+    one's own handling before their own runs; different ids still dispatch concurrently.
+
 ## Prove it
 
 - Start feeding a streaming or duplex probe's input BEFORE awaiting the call that consumes it.

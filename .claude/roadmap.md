@@ -64,6 +64,51 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`WebSocketPipeline`, a fourth dispatch mode, and `ClusterPipeline` reparented onto it** (#201,
+  `feat`, PR #203 (L1)/#204 (L2)/#206 (L3) and this docs PR) - each chunk of a stage dispatched over
+  one persistent, multiplexed `ws+unix:`/`ws://` connection instead of one HTTP request per chunk
+  (`HttpPipeline`), one binary frame per dispatch (a 4-byte length-prefixed JSON header, then the
+  `codec`-encoded payload; a JSON TEXT frame on failure). `ClusterPipeline` - the class name every
+  existing caller already imports (BREAKING, no deprecation period, no code change required) - now
+  dispatches over that wire; `ClusterHttpPipeline` is the class's own pre-#201 identity, kept under
+  that name unchanged for a caller who wants the old HTTP/TCP transport. Each worker binds its own
+  unique `ws+unix:` socket path (a WebSocket connection is persistent, so a shared port would leave
+  every worker but one un-dialed); dispatch round-robins across the bootstrapped set.
+
+  Measured live: `ClusterPipeline`'s own `pnpm bench:overhead` row moved from 217.08 ns/row
+  (HTTP-based, pre-#201) to roughly 69-71 ns/row - a 3.0-3.2x reduction, beating the planning spike's
+  own composed ~33-35% estimate. Seven findings, each caught by review and fixed before merge: (1) a
+  reduce stream's own chunk and `inputDone` frames, dispatched concurrently rather than queued per
+  `id`, could settle out of order - a `[1,2,3,4,5]` sum returned `[]` instead of `[15]` when the
+  trailing flush ran before the chunk it was meant to flush had folded. (2) `WorkerSet`/`WsWorkerSet`
+  both iterated `cluster.workers`, a registry `node:cluster` shares PROCESS-WIDE - a process
+  constructing both a `ClusterHttpPipeline` and a `ClusterPipeline` had one class's idle timer kill
+  the other's still-in-flight workers. (3) `ClusterPipeline`'s own round-robin mutated a shared
+  dispatch-target field between concurrent dispatches (`maxConcurrency > 1`); a later dispatch's own
+  reassignment could land inside an earlier one's `await`s and make it reject a perfectly healthy
+  connection as closed - fixed by capturing the target once per dispatch. (4) That capture stopped
+  the wrong REJECTION, but the same shared field still raced on the WRITE: every partition of a
+  `maxConcurrency: 2` reduce launches in one synchronous burst, so every partition's own round-robin
+  write landed on the field before any of them read it back, collapsing all partitions onto whichever
+  worker the LAST write picked - `resolveConnect()`, a hook called fresh per dispatch with nothing
+  shared to race on, replaced the field entirely; a `maxConcurrency: 2` reduce reading
+  `totalConnections: 1` now reads 2, asserted directly in `websocket-pipeline.e2e.test.ts`'s
+  Done-when 4 test. (5) The connection counter itself was a plain incrementing total with no
+  decrement, so a transient reconnect on one worker read as two connections - now a `Set` sized on
+  query, with the socket deleted on close. (6) `reduceWork()`'s own connection setup could throw
+  before entering the `try`/`finally` that releases it, leaking an in-flight count the idle-kill
+  timer waits on forever. (7) `stageWork()`'s own dispatch registered a pending request before a
+  synchronous `send()` could throw, leaking that entry on a socket adapter whose `send()` throws
+  rather than silently drops (`ws`'s own does not; the seam is public, and another `PipelineSocket`
+  implementation can).
+
+  `ws` 8.21.3 is this package's first runtime dependency - `bufferutil`/`utf-8-validate` (its own
+  optional native-acceleration peers) stay absent from `package.json`, and `pnpm build && grep -c
+  "ws/lib" dist/index.js` prints `0`. `bench/baseline.json`'s own committed `ClusterPipeline` number
+  stays the pre-#201 figure (`bench/*.ts` sat outside this ticket's own file scope) -
+  `checkGate`'s regression-only design stays green regardless, but a future ticket updating the
+  baseline for real would tighten it, never loosen anything.
+
 - **A fifth benchmark leg, a fourth dispatching class's own legs, and five real findings** (#180,
   `perf`, PR #194/#195/#197/#198/#199/#<DOCS_PR>) - `bench/legs/branch.ts` measures `.branch()`
   against a hand-rolled floor producing the identical record, its own `LEG_TOLERANCE` (0.15) set from
@@ -471,6 +516,23 @@ The two older candidates, still not filed:
   `In`/`Out` with no `transform`. PRs #7, #8, #10, #12.
 
 ## Killed
+
+- **`HttpPipeline.reduceWork()` dispatched as multiple POSTs instead of one duplex connection**
+  (#201, add-on scope) - the premise was that a client-carried accumulator (`{acc, chunk, context}`
+  out, `{acc, emitted, pending}` back, `pending` derived from `Reducer.itemsSinceEmit` and simply
+  overwritten per response - provably equivalent to the single-Reducer design's own trailing-flush
+  decision) would let any worker serve any chunk, dropping the session-id/affinity machinery a
+  multi-request reduce would otherwise need. Killed on measurement, not built: N=10,000,
+  `.buffer(100)` (100 chunks), `maxConcurrency: 1` - a scalar accumulator (`acc + x`) went from
+  ~24-25ms to ~185-197ms (~8x), an array accumulator (`acc.push(x)`) from ~7-10ms to ~228-244ms
+  (~25-30x). The array case is the one that generalizes: today's accumulator never crosses the wire
+  at all (it lives in worker memory for the connection's life); under this design every POST resends
+  the WHOLE accumulated-so-far value, so total wire bytes grow roughly with N²/bufferSize for any
+  non-scalar accumulator, on top of the per-request overhead `stageWork()` already pays per chunk
+  (`http.ts:518-522`'s own measured reason `reduceWork()` uses one connection today). Shown the
+  numbers, the user chose to keep the duplex design. Untested middle ground, if revisited: batch K
+  chunks per POST instead of 1, amortizing the per-request cost while keeping the array-payload cost
+  - traded a new knob (a reduce batch size) for a smaller regression, never priced.
 
 - **Normalizing an async generator source through a hand-rolled iterator inside `fromSource()`**
   (#180) - the premise was that `fromSource()`'s own consumption of a genuine async generator adds

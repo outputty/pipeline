@@ -289,10 +289,22 @@ none of it survived the hand-trim (#745).
   fan-out window (`fanOutOrdered`/`fanOutUnordered`), the reorder buffer and failure containment -
   fanning out the pipeline's OWN already-cut chunk stream, never cutting one of its own (#39);
   `HttpPipeline` overrides `stageWork()` alone to POST a chunk to another instance and adds
-  a `.fetch` handler; `ClusterPipeline` adds the worker bootstrap, brought up lazily on the first
-  chunk actually dispatched. Each level overrides ONE thing, and the chain is identical in all four.
+  a `.fetch` handler; `ClusterHttpPipeline` adds the worker bootstrap, brought up lazily on the first
+  chunk actually dispatched. `WebSocketPipeline` (#201) is a SIBLING of `HttpPipeline` - it overrides
+  `stageWork()`/`reduceWork()`/adds `serve()` the same seam-shape, but dispatches one binary frame
+  per request over ONE persistent, multiplexed connection (memoized per `connect` target) instead of
+  opening a request per chunk; `ClusterPipeline` (#201, the class name every existing caller already
+  imports, BREAKING, no deprecation period) adds the SAME worker-bootstrap pattern
+  `ClusterHttpPipeline` uses, over N distinct `ws+unix:` socket paths (one per worker, dispatch
+  round-robining across them - a WebSocket connection is persistent, so a shared port would leave
+  every worker but one un-dialed) instead of one shared port. `ClusterHttpPipeline` is
+  `ClusterPipeline`'s own pre-#201 identity, kept under that name unchanged for a caller who wants
+  the old HTTP/TCP transport. Each level overrides ONE thing, and the chain is identical across all
+  of them; `routePath()`/the registries-resolving helper both moved to `ConcurrentPipeline` (#201
+  review) so `HttpPipeline`/`WebSocketPipeline` inherit one canonical implementation instead of
+  `HttpPipeline`/`WebSocketPipeline` each maintaining an identical copy.
 - **`options.client`** (#179) - how a dispatched chunk reaches another instance, on `HttpPipeline`
-  and therefore on `ClusterPipeline`. `PipelineClient` is `(url: string, init: RequestInit) =>
+  and therefore on `ClusterHttpPipeline`. `PipelineClient` is `(url: string, init: RequestInit) =>
   Promise<Response>` - the global `fetch` signature, so the default is a drop-in and so is a
   caller's own - and it is carried through copy-on-write like every other knob. Named `client`,
   never `fetch`, because `pipeline.fetch` is already this class's own SERVER handler and the two
@@ -315,10 +327,11 @@ none of it survived the hand-trim (#745).
   `return this.apply(transformer)`. A stage's identity is its INDEX in
   `_chunkTransforms`, so a dispatching class sends a chunk plus an index and never a function.
   `.transform((t) => t.map(f).filter(g))` is ONE stage; two chained `.transform()` calls are TWO, and
-  on a dispatching class that is two network hops. `_chunkTransforms` is `HttpPipeline`/
-  `ClusterPipeline`'s own worker-side stage registry (`this._chunkTransforms[requested]` in
-  `HttpPipeline.fetch`, `src/pipelines/http.ts`) - unrelated to chunking and untouched by #39. A
-  reduce stage occupies
+  on a dispatching class that is two network hops. `_chunkTransforms` is every dispatching class's
+  own worker-side stage registry (`this._chunkTransforms[requested]` in `HttpPipeline.fetch`,
+  `src/pipelines/http.ts`, and the identical lookup in `WebSocketPipeline`'s own `handleTransformFrame`,
+  `src/pipelines/websocket.ts`, #201) - unrelated to chunking and untouched by #39. A reduce stage
+  occupies
   the SAME index space with its own registry, `_reduceStages` (#45) - its `_chunkTransforms` slot
   holds a placeholder that throws if ever invoked as a per-chunk transform.
 - **`.local(build)`** (#61) - Runs a whole region of the chain in the orchestrating process: builds
