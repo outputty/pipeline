@@ -497,8 +497,8 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
    * (#201, review: `HttpPipeline` and `WebSocketPipeline` each carried an identical copy of this
    * method - moved here so `ClusterPipeline`/`ClusterHttpPipeline` (each already overriding it to
    * prefix `/pipeline/<pipelineIndex>`) override ONE canonical base implementation rather than two
-   * independently maintained ones). `EventEmitterPipeline` inherits it unused - it addresses
-   * Workers by plain event name, never a route - which costs nothing at runtime.
+   * independently maintained ones). `EventEmitterPipeline` calls it too (#221) - every event it
+   * emits is named after the route a chain was built along, not a plain flat event name.
    */
   protected routePath(verb: RouteVerb, index: number): string {
     return `${this._routeTrail}/${verb}/${index}`;
