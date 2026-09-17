@@ -429,13 +429,55 @@ process.exit(0);
   `ws+unix:` scheme splits on the FIRST `:` after the scheme: everything before it is the socket
   path, everything after is the URL path (default `/`) - write it with no leading `//`, unlike every
   other scheme here.
-- **`options.codec`** - how a chunk is encoded on the wire. Defaults to JSON; supply your own
-  `{ encode, decode }` pair for a binary format.
+- **`options.codec`** - how a chunk is encoded on the wire, any object implementing `Codec`.
+  Defaults to `new JsonCodec()`. Between two dispatched stages the reply stays encoded until a site
+  that reads items (a terminal, `.tap()`, `.local()`, a `.buffer()` recut, `.branch()`) decodes it -
+  `.consume()` reads none, and a chunk a stage emptied is never dispatched to the next one.
 - **`.serve(socket)`** - registers this chain's stages on an already-open `PipelineSocket` - the
   role `.fetch` plays for `HttpPipeline`.
 - **`toNodeWebSocketHandler(pipeline)`** - bridges a pipeline's own `.serve()` to `ws`'s
   `WebSocketServer({ noServer: true })`/`handleUpgrade`, for a caller's own `"upgrade"` listener on a
   real `http.Server`.
+
+⚠ A codec's own `decode` failing rejects the whole call - it runs outside a stage's own try/catch, at
+whichever site reads items first, so `.onError()` never sees it. `.consume()` never decodes at all,
+so a bad reply there completes silently with nothing to report.
+
+`Codec` is the interface: `encode(value: unknown): Uint8Array | Promise<Uint8Array>`,
+`decode(bytes: Uint8Array): unknown | Promise<unknown>`, an optional `contentType`. Not generic - one instance serves
+every stage of a chain while the item type changes, so it sees `unknown` on both sides. `JsonCodec`
+is the default, a class: `JSON.stringify` to UTF-8 bytes and back - BREAKING: the `jsonCodec` object
+it replaces is deleted; construct `new JsonCodec()` instead.
+
+A caller's own `Codec` can keep large chunks off the wire - store each one elsewhere and send only a
+key:
+
+<!-- illustrative -->
+
+```typescript
+import { randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { ClusterPipeline, type Codec } from "@outputty/pipeline";
+
+class FileCodec implements Codec {
+  constructor(private dir: string) {}
+  encode(value: unknown) {
+    const key = randomUUID();
+    writeFileSync(join(this.dir, key), JSON.stringify(value));
+    return new TextEncoder().encode(key);
+  }
+  decode(bytes: Uint8Array) {
+    return JSON.parse(readFileSync(join(this.dir, new TextDecoder().decode(bytes)), "utf8"));
+  }
+}
+
+// Every worker builds its own FileCodec by re-running this entry module, so `dir` must be a
+// store every one of them can reach - `process.env`, which cluster.fork() inherits.
+const data = await new ClusterPipeline<number>({ codec: new FileCodec(process.env.STORE_DIR!) })
+  .transform((t) => t.map((x: number) => x * 2))([1, 2, 3, 4, 5])
+  .toArray();
+```
 
 ### ClusterPipeline
 
@@ -467,9 +509,9 @@ console.log(JSON.stringify(data)); // [2,4,6,8,10]
 
 - **`options.workers`** - worker processes to bring up on first drain. Default
   `os.availableParallelism()`.
-- **`options.codec`** - `WebSocketPipeline`'s own knob (above), forwarded to `super` unchanged - it
-  never crosses the process boundary itself, so a store it writes to must be reachable from every
-  worker (`process.env`, which `cluster.fork()` inherits).
+- **`options.codec`** - `WebSocketPipeline`'s own knob (above), forwarded to `super` unchanged - each
+  worker builds its own by re-running the entry module, so a store it writes to must be reachable
+  from every one of them (`process.env`, which `cluster.fork()` inherits).
 
 ### EventEmitterPipeline
 

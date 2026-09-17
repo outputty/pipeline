@@ -25,13 +25,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   day this was planned is exactly the kind of large, fast-moving change this gap lets through
   silently; `typedoc --validation.notDocumented` is proven this session to catch it for real
   (`Pipeline.local has an @param with name "wrongName", which was not used`).
-- **A `Codec` interface with a `JsonCodec` class, and dispatched replies stay encoded in the
-  primary** (#209) - `Codec` sits inside `src/pipelines/websocket.ts` with a plain-object default,
-  and whatever codec a caller passes, the primary decodes every reply and re-encodes it for the next
-  dispatched stage. A caller's by-reference codec (`__tests__/fixtures/cluster-file-codec.ts`) then
-  pays a store read and write per chunk per hop, even under `.consume()`. Now, because #208 made
-  `codec` reachable on `ClusterPipeline`, and #212 waits on the `src/codec.ts` module this ticket
-  creates.
 
 ### Later - not yet filed
 
@@ -85,6 +78,24 @@ The two older candidates, still not filed:
   composed function, `off()` no longer takes a stage over, and a stage with no
   caller-registered Worker no longer rejects - the composed function always answers. Breaking,
   no deprecation period.
+- **A `Codec` interface with a `JsonCodec` class, and dispatched replies stay encoded in the
+  primary** (#209, `feat`, PR #216 (L1)/#217 (L2)/#219 (L3)/#220 (enable) and this docs PR) - `Codec`
+  and `JsonCodec` move to `src/codec.ts`, outside the file that loads `ws`, so a core chunk type can
+  name `Codec` with no utils-to-pipelines import edge; the `jsonCodec` object is deleted (BREAKING).
+  A dispatched WebSocket reply stays bytes-on-the-wire in the orchestrating process until a site
+  that reads items decodes it - `drainable()`, the `.local()` seed, `flattenChunks` - a later
+  dispatched stage on the same codec forwards the payload verbatim, and a chunk a prior stage
+  emptied is never re-dispatched, on both a plain dispatched transform and a dispatched `.reduce()`.
+  `.consume()` decodes nothing at all. `Pipeline.mayCarryEncodedChunks()` (`true` only on
+  `WebSocketPipeline`) replaces the build's own internal flag once shipped, so a plain
+  `Pipeline`/`ConcurrentPipeline`/`HttpPipeline`/`EventEmitterPipeline` chain pays nothing for a
+  mechanism it can never carry - closing a real `bench:memory` regression the naive unconditional
+  form introduced. Measured (`__tests__/codec.e2e.test.ts`): the primary's own decode/encode count
+  fell from 16/16 to 8/8 across two dispatched stages, an emptied chunk cut the server's own decode
+  count from 16 to 8, and a dispatched reduce decoded only at the terminal - matching planning's own
+  spike 2 findings exactly. ⚠ A `codec.decode()` failure now rejects the whole drain rather than
+  being dropped by `Pipeline.onError()`'s per-chunk contract - confirmed with the user as final,
+  documented behavior, not a defect owed a fix.
 - **`ClusterPipeline` accepts `codec`, `ClusterHttpPipeline` accepts `client`** (#208, `feat`, PR
   #214) - both classes already forwarded the field to `super` at runtime; only the exported options
   types refused it, so every caller had to cast. `ClusterPipelineOptions` and
