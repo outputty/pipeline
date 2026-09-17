@@ -101,10 +101,11 @@ src/
                              toNodeWebSocketHandler (the Node upgrade bridge, its own types derived
                              off ws's exports rather than a node: import), peekFrame()/
                              sendUnknownRouteError() (ClusterPipeline's own shared-worker-server seam)
-    eventemitter.ts           EventEmitterPipeline (#124) - stageWork() dispatches through
-                             pipeline.emitter instead of HTTP/cluster; apply()/drainable() overridden
-                             a second and third time for stage:<n>:end/pipeline:end; carriedKnobs()
-                             (not createPipeline()) carries its emitter/registeredStages (#133)
+    eventemitter.ts           EventEmitterPipeline (#124, events renamed to routes #221) -
+                             stageWork() calls the composed function directly and dispatches
+                             through pipeline.emitter for any extra Workers; apply()/drainable()
+                             overridden a second and third time for a route's own :end/a trail's
+                             own :end; carriedKnobs() (not createPipeline()) carries its emitter
   context/
     simple.ts              SimpleContextManager - the one shipped IContextManager; context/types.ts
                              (a dead re-export) is deleted (#133)
@@ -781,16 +782,6 @@ cleanup; a dispatch that fails before decode leaves that codec's stored object u
 
 ## EventEmitterPipeline - #124
 
-⚠ **pending #221** - every event name below changes, and the composed function stops registering on
-the emitter. Stage channels become `routePath("transform", n)` (`/transform/<n>`, or
-`/branch/<i>/<name>/transform/<n>` inside an arm), lifecycle events append `:dispatched`/`:done`/
-`:error`/`:end` to that route, and `pipeline:end` becomes `<trail>:end` (`:end` on a chain).
-`stageWork()` dispatches to `[composed function, ...emitter.listeners(route)]`, so the
-registered-name `Set`, the `registeredStages` option, the "no worker registered" rejection and the
-`off()` takeover all go, and `options.emitter` is validated on every construction. This fixes the
-two collision bullets at the end of this section: arms, forks and a shared emitter each run their
-own function. The docs layer rewrites the section once it ships.
-
 `stageWork()` is the only DISPATCH override, the same seam `HttpPipeline` overrides to POST -
 `apply()`'s own fan-out (`fanOutOrdered`/`fanOutUnordered`, `maxConcurrency`, `ordered`) is
 inherited UNCHANGED, and stays that way: no pool, no round-robin, no readiness tracking of its
@@ -805,43 +796,45 @@ request - "not even think about concurrency at this stage" - not by a defect
 
 ```text
 stageWork(transformer, stageIndex)
-  registers transformer.runnable() on pipeline.emitter, "stage:<n>", ONCE PER STAGE INDEX
-    (a Set keyed by event name, carried through createPipeline() - never once per RUN, since
-    stageWork() replays on every bound call and a naive registration there leaks a listener)
+  route = this.routePath("transform", stageIndex)      /transform/<n>, or an arm's own trail
   returns (chunk, ctx) => new Promise((resolve, reject) => {
-    emitSafely("stage:<n>:dispatched")                <- every lifecycle emit is emitSafely, no exceptions
-    for each fn in emitter.listeners("stage:<n>"):   <- composed fn is ALWAYS listeners()[0]
+    emitSafely(`${route}:dispatched`)                 <- every lifecycle emit is emitSafely, no exceptions
+    try: Promise.resolve(transformer.runnable()(chunk, ctx)).then(respond, doReject)
+    catch (sync throw): doReject(error)                <- the composed function, called DIRECTLY, never registered
+    for each fn in emitter.listeners(route):          <- only a caller's OWN Workers live here
       try: Promise.resolve(fn({chunk, ctx, respond, reject})).catch(doReject)
       catch (sync throw): doReject(error)             <- one Worker's throw never skips the rest
-    (no listeners at all -> doReject immediately, naming the stage)
-  settle(outcome):  resolve/reject first, THEN emitSafely("stage:<n>:done" | ":error")
+  settle(outcome):  resolve/reject first, THEN emitSafely(`${route}:done` | ":error")
     respond(value) = settle({ok:true, value}); doReject(error) = settle({ok:false, error})
 ```
 
-Dispatch calls `emitter.listeners(workEvent)` itself and invokes each directly, inside its own
-`try` - never `emitter.emit()`, which cannot catch a Worker's throw after its own `await` (an
-unhandled rejection Node/Bun may treat as fatal; measured, isolated with the composed Worker
+Dispatch calls the composed function and every `emitter.listeners(route)` entry directly, inside
+its own `try` - never `emitter.emit()`, which cannot catch a Worker's throw after its own `await`
+(an unhandled rejection Node/Bun may treat as fatal; measured, isolated with the composed function
 removed: a plain `emit()`-based dispatch left the request permanently pending while the process
-still crashed on the side). Every registered Worker runs on every chunk - broadcast, deliberately
-uncontrolled - and the first one to SETTLE, `respond()` or `reject()`, decides the chunk: measured,
-a Worker rejecting at 5ms beat one resolving at 30ms even though the resolving one was registered
-first, so "first to settle" is the real contract, not "first to respond." The per-Worker `try`
-(review-caught, first cut lacked it) is what stops a Worker's SYNCHRONOUS throw aborting the whole
-loop before every Worker registered after it gets its turn - verified live: a throwing Worker
-registered ahead of a correct one still leaves the correct one's own body run, even though the
-throw settles the dispatch first. `settle()` (both `respond()`/`doReject()` narrow to it - one
-guard, not two, review-caught: the first cut hand-rolled the same `if (settled) return; settled =
-true;` guard twice) settles the REAL `Promise` (`resolve`/`reject`) BEFORE emitting its own
-lifecycle event, through `emitSafely()` - EVERY lifecycle emit in this class goes through it,
-`:dispatched` included, not only `:done`/`:error` (review-caught: the first cut left `:dispatched`
-as a raw `emitter.emit()` call, so a throwing `:dispatched` listener synchronously rejected the
-whole dispatch Promise as if it were a Worker's own failure, silently absorbed by `.onError()` -
+still crashed on the side). Both run on every chunk - broadcast, deliberately uncontrolled - and
+the first one to SETTLE, the composed function's own resolve/reject or a Worker's
+`respond()`/`reject()`, decides the chunk: measured, a Worker rejecting at 5ms beat the composed
+function resolving at 30ms even though the composed function's own dispatch started first, so
+"first to settle" is the real contract, not "first to start." The per-contender `try` (review-caught,
+first cut lacked it) is what stops one SYNCHRONOUS throw aborting the whole loop before every
+contender registered after it gets its turn - verified live: a throwing Worker registered ahead of
+a correct one still leaves the correct one's own body run, even though the throw settles the
+dispatch first. `settle()` (both `respond()`/`doReject()` narrow to it - one guard, not two,
+review-caught: the first cut hand-rolled the same `if (settled) return; settled = true;` guard
+twice) settles the REAL `Promise` (`resolve`/`reject`) BEFORE emitting its own lifecycle event,
+through `emitSafely()` - EVERY lifecycle emit in this class goes through it, `:dispatched`
+included, not only `:done`/`:error` (review-caught: the first cut left `:dispatched` as a raw
+`emitter.emit()` call, so a throwing `:dispatched` listener synchronously rejected the whole
+dispatch Promise as if it were a Worker's own failure, silently absorbed by `.onError()` -
 measured: `out` came back `[]` with no error surfaced anywhere). A `:done`/`:error` listener that
 itself throws would otherwise fire inside a `.then()` callback with no downstream `.catch()`, and
 since that throw would happen BEFORE the real settle, the dispatch could hang forever rather than
-merely leak an unhandled rejection (review-caught, verified live: a throwing `stage:0:done`
+merely leak an unhandled rejection (review-caught, verified live: a throwing `/transform/0:done`
 listener produced zero unhandled rejections and no hang, surfacing instead as its own separate
-`uncaughtException` on the next microtask via `emitSafely`'s `queueMicrotask`).
+`uncaughtException` on the next microtask via `emitSafely`'s `queueMicrotask`). Since the composed
+function is never itself a listener, `#221`'s own no-worker-registered case never arises: the
+composed function always answers, so there is no "no worker registered" rejection left to raise.
 
 `emitSafely()` itself (shared by every lifecycle emit in this class) is a plain
 `try { emitter.emit(event, payload) } catch { queueMicrotask(() => { throw error }) }` - the
@@ -858,23 +851,25 @@ rethrow at all - `.emit()` never awaits a listener's return value, so nothing he
 `.catch()` to it without abandoning plain `.emit()` for manual listener invocation, priced and
 rejected as not worth the cost (a custom emitter's own `.emit()` bypassed entirely, `.once()` broken
 for every event this class touches, not only the Worker channel). ⚠ A LOSING Worker's own failure on
-a multi-Worker `stage:<n>` is discarded with no trace once another Worker has already settled -
+a multi-Worker route is discarded with no trace once another contender has already settled -
 `settle()`'s `if (settled) return` guard means no `:error` emit, no log, nothing observable anywhere
 for it. This matches "first to settle wins" for the WINNER; nothing catches a bug in a Worker that
 merely lost the race.
 
 `apply()` is overridden a second time, wrapping the stage's own output chunk stream so
-`stage:<n>:end` fires once, after every chunk that stage's fan-out produced has been yielded from
+`<route>:end` fires once, after every chunk that stage's fan-out produced has been yielded from
 THIS WRAPPED STREAM - the stage index it wraps under is read OFF THE RESULT
 (`dispatched._chunkTransforms.length - 1`, the slot `super.apply()` just appended), never
 independently re-derived, so it can never drift from `ConcurrentPipeline.apply()`'s own internal
-computation. Both the wrapped generator's `onEnd` here and `drainable()`'s own `fireOnce` (below)
-call `emitSafely()`, never a raw `emitter.emit()` - the callback runs inside the stream's own
-`finally` block, and JS's finally-overrides-exception semantics mean an unguarded throw there would
-REPLACE whatever real stream error was already propagating with the observer's own unrelated one
-(review-caught, measured: a chunk that genuinely fails combined with a throwing `stage:0:end`
-listener rejected with the OBSERVER's error, not the real one, before this fix). ⚠ Under
-`maxConcurrency > 1` with an early terminal (`.first(n)`), `stage:<n>:end` can fire BEFORE some of
+computation, and `dispatched.routePath(...)` (not `this.routePath(...)`) is what makes the route
+carry an arm's own trail rather than the parent's when `dispatched` is an arm's pipeline. Both the
+wrapped generator's `onEnd` here and `drainable()`'s own `fireOnce` (below) call `emitSafely()`,
+never a raw `emitter.emit()` - the callback runs inside the stream's own `finally` block, and JS's
+finally-overrides-exception semantics mean an unguarded throw there would REPLACE whatever real
+stream error was already propagating with the observer's own unrelated one (review-caught,
+measured: a chunk that genuinely fails combined with a throwing `/transform/0:end` listener
+rejected with the OBSERVER's error, not the real one, before this fix). ⚠ Under
+`maxConcurrency > 1` with an early terminal (`.first(n)`), `<route>:end` can fire BEFORE some of
 that same stage's own `:done`/`:error` events: an early return stops PULLING from the wrapped
 stream, but a chunk already dispatched into `ConcurrentPipeline`'s own fan-out keeps running in the
 background and settles independently of when the consumer stopped reading - measured, `maxConcurrency:
@@ -883,10 +878,11 @@ three more `:done`s after `:end`. Treat `:end` as "no more chunks will be YIELDE
 "every in-flight Worker for this stage has finished."
 
 `drainable()` (`src/pipeline.ts:1292`, the one seam every terminal calls) is overridden a third
-time, wrapping whichever of `items()`/`chunks()` a terminal actually calls so `pipeline:end` fires
-once the wrapped stream is exhausted - once per TERMINAL CALL, matching `PipelineResult`'s own
-"every terminal re-drains" contract: calling `.first()` then `.toArray()` on the same result fires
-it twice.
+time, wrapping whichever of `items()`/`chunks()` a terminal actually calls so the TRAIL's own
+`:end` fires once the wrapped stream is exhausted - `this._routeTrail` is `""` for a chain (so the
+event reads bare `:end`) and `/branch/<i>/<name>` for an arm - once per TERMINAL CALL, matching
+`PipelineResult`'s own "every terminal re-drains" contract: calling `.first()` then `.toArray()` on
+the same result fires it twice.
 
 `Pipeline.onError()` (the run handler) reaches a rejecting Worker for free, through
 `ConcurrentPipeline.apply()`'s existing wrapped `work` - no explicit `dropOrRethrow()` call is
@@ -895,40 +891,39 @@ entirely and had to call it explicitly.
 
 The constructor mirrors `HttpPipeline`'s own two-overload shape (`Pipeline.wrapping()`, `(pipeline,
 options)` wraps a chain built elsewhere, `(options)` builds standalone), and validates a
-caller-supplied `options.emitter` against `PipelineEmitter`'s five methods at construction - a
-trust-boundary value, so a missing method fails loud there rather than as a generic `TypeError`
-deep inside `stageWork()`'s dispatch closure later. Validated ONCE, at the ORIGINAL caller-facing
-construction only - gated on the ABSENCE of the internal `registeredStages` option, which only
-`createPipeline()` (below) ever sets, so a long chain's own copy-on-write calls
-(`.transform()`/`.buffer()`/`.context()`) never re-validate the identical, unchanged `emitter`
-object a second time.
+caller-supplied `options.emitter` against `PipelineEmitter`'s five methods on EVERY construction
+(`#221`) - a trust-boundary value, so a missing method fails loud there rather than as a generic
+`TypeError` deep inside `stageWork()`'s dispatch closure later. A `.transform()`/`.buffer()`/
+`.context()` call re-validates the identical, unchanged `emitter` object every time, which costs
+nothing measurable for a real one and is what lets a stage composed after a bad emitter also fail
+loud, rather than only the chain's very first construction.
 
-One emitter per chain, in two DIFFERENT failure shapes depending on where the `Set` comes from -
-`#113`'s `pipelineIndex` fix for `ClusterPipeline` is the family's precedent for solving either
-properly; unbuilt here, both named in `#124`'s own Settle first.
+One emitter, any number of chains built on it, none of them sharing anything to race on (`#221`):
 
 - Two INDEPENDENTLY-CONSTRUCTED `EventEmitterPipeline`s sharing one caller-supplied `emitter`
-  option each get their OWN fresh `_registeredStages` (no `registeredStages` option was carried
-  in), so BOTH composed functions register on the shared emitter's `"stage:0"` - measured, not
-  "the second never registers" as an earlier draft of this section claimed: `listenerCount` reaches
-  `2`, and the two RACE on every dispatch. Since neither's own work is genuinely async, the
-  EARLIER-registered chain's function won: its `.then()` microtask is scheduled first in the same
-  dispatch loop, so for two purely synchronous transforms the outcome is not a coin flip - the
-  second chain's own transform never ran at all, its output silently the first chain's.
+  option each call their OWN composed function directly on dispatch - neither registers anything
+  on the shared emitter, so there is nothing for the two to race on any more. `#124`'s own defect
+  here (both composed functions registering as the shared emitter's first stage's own listener,
+  then racing on every dispatch) has no mechanism left to reproduce it.
 - Two chains FORKED from the SAME unbound instance - two `.transform()` calls off one shared base,
   or two `.branch()` arms (`Pipeline.branch()`'s own `emptyOfOwnClass()` resets the arm's
-  `_chunkTransforms` to `[]`, so its first stage is index 0 again, while `createPipeline()` still
-  carries the SAME `emitter`/registered-stages `Set` into it) - collide the OPPOSITE way: the
-  `Set` is the SAME object by reference, so the second fork's own `stage:0` is already marked
-  registered and its composed function never registers at all; its dispatch silently reuses the
-  FIRST fork's Worker instead. `#124`'s own Settle first already names ARM naming as "undesigned."
+  `_chunkTransforms` to `[]`, so its first stage is index 0 again) - each closes over its OWN
+  composed function inside its OWN `stageWork()` call; `#124`'s own defect here (the second fork's
+  own first stage already marked registered on a shared `Set`, so its dispatch silently reused the
+  first fork's Worker) has no `Set` left to share.
+- A `.branch()` arm's own trail (`/branch/<i>/<name>`, carried into `routePath()` via
+  `emptyOfOwnClass()`'s `routeTrail` option) distinguishes its routes from the parent's and from a
+  sibling arm's even where a Worker IS registered externally: `/branch/0/evens/transform/0` and
+  `/branch/0/odds/transform/0` name different channels, where `#124`'s own flat, position-only
+  naming named the same one for both.
 
 `.once(eventName, fn)` is not supported as "handle exactly one chunk": dispatch reads
 `emitter.listeners(eventName)` and invokes each function directly (the reason above - `emit()`
 cannot catch a throw after `await`), so Node's own once-unwrap machinery, which lives INSIDE
-`EventEmitter.emit()`, never runs - measured, a Worker registered via `.once()` alongside the
-composed function (`listenerCount` `2`) still fired on a SECOND, later chunk, `listenerCount`
-unchanged at `2` after both calls.
+`EventEmitter.emit()`, never runs - measured, a Worker registered via `.once()` still fired on a
+SECOND, later chunk, `listenerCount` unchanged after both calls. The composed function is never a
+listener, so it never appears in this count at all - `emitter.eventNames()` reads `[]` for a chain
+with no caller-registered Worker of its own.
 
 ## The chain and the run - `Pipeline` and `PipelineResult` (#90)
 

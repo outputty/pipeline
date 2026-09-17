@@ -122,8 +122,9 @@ console.log(JSON.stringify(data)); // ["A","B","C"]
 over a persistent, multiplexed WebSocket connection instead - one connection per target, not one
 request per chunk; `ClusterPipeline` dispatches to worker processes on the same machine over that
 same WebSocket wire, brought up automatically (`ClusterHttpPipeline` is the same idea over the older
-HTTP transport, for a caller who wants it); `EventEmitterPipeline` hands each chunk to Worker
-functions registered on `pipeline.emitter`, in this same process. See
+HTTP transport, for a caller who wants it); `EventEmitterPipeline` hands each chunk directly to the
+chain's own composed function, and to any Worker functions registered on `pipeline.emitter`, in
+this same process. See
 [HttpPipeline](#httppipeline), [WebSocketPipeline](#websocketpipeline),
 [ClusterPipeline](#clusterpipeline), [ClusterHttpPipeline](#clusterhttppipeline) and
 [EventEmitterPipeline](#eventemitterpipeline) in the API Reference for their constructors and knobs.
@@ -472,11 +473,11 @@ console.log(JSON.stringify(data)); // [2,4,6,8,10]
 
 ### EventEmitterPipeline
 
-Extends `ConcurrentPipeline`. Hands each chunk of a stage to whichever Worker functions are
-registered on `pipeline.emitter`, a `node:events`-shaped `EventEmitter` - no server, no separate
-process, no url. The chain's own composed function auto-registers as a stage's first Worker the
-moment the chain is built; registering an extra one is optional, for when other code in the same
-process wants to add capacity or take over the work entirely.
+Extends `ConcurrentPipeline`. Hands each chunk of a stage directly to the chain's own composed
+function, and to whichever Worker functions a caller separately registers on `pipeline.emitter`, a
+`node:events`-shaped `EventEmitter` - no server, no separate process, no url. Registering an extra
+Worker is optional, for when other code in the same process wants to add capacity or take over the
+work entirely.
 
 <!-- compiles -->
 
@@ -485,18 +486,26 @@ import { EventEmitterPipeline } from "@outputty/pipeline";
 
 const pipeline = new EventEmitterPipeline<number>().transform((t) => t.map((x: number) => x * 2));
 
-// Optional - registered from anywhere else, runs alongside the chain's own function.
-pipeline.emitter.on("stage:0", ({ chunk, respond }) => respond(chunk.map((x: number) => x * 2)));
+// Optional - registered from anywhere else, runs alongside the chain's own composed function.
+pipeline.emitter.on("/transform/0", ({ chunk, respond }) =>
+  respond(chunk.map((x: number) => x * 2)),
+);
 
 const data = await pipeline([1, 2, 3, 4, 5]).toArray();
 console.log(JSON.stringify(data)); // [2,4,6,8,10]
 ```
 
-Every Worker registered on a stage runs on every chunk that reaches it; whichever settles first -
-`respond(value)` or `reject(error)` - decides that chunk. Lifecycle events
-(`stage:<n>:dispatched`/`:done`/`:error`/`:end`, `pipeline:end`) let other code watch a run without
-becoming a Worker itself, as long as it listens on one of those names rather than the bare
-`stage:<n>` channel - registering on the bare channel makes that listener a Worker too.
+Every Worker registered on a stage runs on every chunk that reaches it, alongside the chain's own
+composed function; whichever settles first - `respond(value)` or `reject(error)`, or the composed
+function's own resolve/reject - decides that chunk. Events are named after the route the chain was
+built along, the same `/transform/<n>` grammar `HttpPipeline` dispatches to (a `.branch()` arm's own
+`/branch/<i>/<name>/transform/<n>`). Lifecycle events (`<route>:dispatched`/`:done`/`:error`, and
+`<route>:end` for a stage or `:end` for a whole chain's own drain) let other code watch a run
+without becoming a Worker itself, as long as it listens on one of those names rather than the bare
+route - registering on the bare route makes that listener a Worker too. The composed function is
+never itself a listener, so it never appears in `emitter.listeners()`/`emitter.eventNames()`, and a
+fork of one chain, two sibling `.branch()` arms, or two independently-constructed pipelines sharing
+one `emitter` each answer with their own output - nothing about them is shared to race on.
 
 - **`options.emitter`** - a caller-supplied `node:events`-compatible emitter. Optional; a fresh
   `EventEmitter` is built when omitted. Validated at construction: a caller's own compatible

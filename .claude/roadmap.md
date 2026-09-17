@@ -32,13 +32,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   pays a store read and write per chunk per hop, even under `.consume()`. Now, because #208 made
   `codec` reachable on `ClusterPipeline`, and #212 waits on the `src/codec.ts` module this ticket
   creates.
-- **`EventEmitterPipeline` events read as routes, and the composed function is never a listener**
-  (#221) - every chain numbers its stages from 0 and the composed function registers once per event
-  name, so a `.branch()` arm, two sibling arms, two forks of one base and two pipelines on one shared
-  emitter each return another chain's output with no error. Events move to `/transform/<n>` and
-  `/branch/<i>/<name>/transform/<n>` with `:dispatched`/`:done`/`:error`/`:end` suffixes and a
-  `<trail>:end` per drain, and dispatch runs the chain's own function directly beside registered
-  Workers. Now, because #222 lands this class's branch tests as expected failures citing it.
 
 ### Later - not yet filed
 
@@ -79,6 +72,19 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`EventEmitterPipeline` events read as routes, the composed function never a listener** (#221,
+  `feat!`, PR #226 (L1)/#227 (L2) and this docs PR) - events renamed from a flat `stage:<n>`
+  counter to the route the chain was built along (`/transform/<n>`, a `.branch()` arm's own
+  `/branch/<i>/<name>/transform/<n>`, a trail-level `:end`), and `stageWork()` calls the chain's
+  own composed function directly instead of registering it on `pipeline.emitter`. Fixes four
+  documented collisions - a `.branch()` arm dispatching on the parent's own stage, two sibling
+  arms, two forks of one chain, and two independently-constructed pipelines sharing one
+  `emitter` - each of which used to silently answer with (or lose to) another chain's output;
+  every one now answers with its own, proven by a real run per case rather than by reasoning
+  about the deleted `Set`. Trades away three guarantees: `listenerCount` no longer counts the
+  composed function, `off()` no longer takes a stage over, and a stage with no
+  caller-registered Worker no longer rejects - the composed function always answers. Breaking,
+  no deprecation period.
 - **`ClusterPipeline` accepts `codec`, `ClusterHttpPipeline` accepts `client`** (#208, `feat`, PR
   #214) - both classes already forwarded the field to `super` at runtime; only the exported options
   types refused it, so every caller had to cast. `ClusterPipelineOptions` and
