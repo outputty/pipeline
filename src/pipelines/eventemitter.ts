@@ -275,8 +275,8 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * iteration protocols all read the chunk view now, where a flattened item view used to need its
    * own identical wrap beside this one.
    */
-  override drainable(input: PipelineSource<In>): Drainable<T> {
-    const base = super.drainable(input);
+  override drainable(input: PipelineSource<In>, materialize = true): Drainable<T> {
+    const base = super.drainable(input, materialize);
     const emitter = this.emitter;
     const trailEnd = `${this._routeTrail}:end`;
     let fired = false;
