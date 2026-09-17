@@ -43,8 +43,8 @@ import type {
   WebSocketPipelineOptions,
   PipelineSocket,
   ResolvedConnect,
-  Codec,
 } from "@src/pipelines/websocket";
+import type { Codec } from "@src/codec";
 import { emptyChunks, Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
