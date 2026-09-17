@@ -25,7 +25,8 @@ const textDecoder = new TextDecoder();
  * since every dispatched chunk pays this on the hot path (#180 measured this cost).
  *
  * Replaces the deleted `jsonCodec` object (#209, BREAKING, no deprecation period): `import {
- * jsonCodec }` now fails `tsc` with `TS2305`.
+ * jsonCodec }` now fails `tsc` with `TS2724` (`JsonCodec`'s own similar spelling upgrades what
+ * would otherwise be a bare TS2305 into tsc's "did you mean" form).
  *
  * `new JsonCodec().decode(new JsonCodec().encode([1, 2]))` → `[1, 2]`.
  */

@@ -884,6 +884,16 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     });
   }
 
+  /** Whether this class's own `_chunks` could ever hold an `EncodedChunk` (#209) - `false` on the
+   * base, since only a class holding a `Codec` (`WebSocketPipeline`, `pipelines/websocket.ts`) ever
+   * calls `encodedChunk()`. `.local()`'s own seed and `drainable()` both read this to decide whether
+   * `materializeChunksIfNeeded` needs to wrap the chunk stream at all - a structural check, so a
+   * plain `Pipeline`/`ConcurrentPipeline`/`HttpPipeline`/`EventEmitterPipeline` chain pays nothing
+   * for a mechanism it can never carry. */
+  protected mayCarryEncodedChunks(): boolean {
+    return false;
+  }
+
   /** Whether this pipeline runs on the synchronous engine (#90) - what `reduce()`/`apply()`/
    * `buffer()`/`chunkStream()`/`syncChunkStream()` all ask before choosing between the sync and
    * the async engine, rather than each raw-spelling `_mode === "sync" && _syncChunks !== null`
@@ -1481,10 +1491,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       // Materialized (#209): the bare Pipeline this builds runs Transformer.process() directly
       // over these chunks, which needs real items - an encoded chunk a dispatched stage upstream
       // left behind is decoded here, the one seam .tap() (wrapped in .local()) goes through.
-      // `materializeChunksIfNeeded` skips the wrapper entirely when the flag is off, since nothing
-      // in `this._chunks` could be an encoded chunk then (measured: paying one Promise per chunk
-      // unconditionally regressed every non-WebSocket `.local()` region's own promises/row).
-      chunks: materializeChunksIfNeeded(this._chunks),
+      // `materializeChunksIfNeeded` skips the wrapper entirely when this class can never carry one
+      // (measured: paying one Promise per chunk unconditionally regressed every non-WebSocket
+      // `.local()` region's own promises/row).
+      chunks: materializeChunksIfNeeded(this._chunks, this.mayCarryEncodedChunks()),
       pendingStages: [],
     });
     // `build`'s own declared parameter type is `Pipeline<T, M, any>` - cast straight to it rather
@@ -1610,9 +1620,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       // nothing (#209). Every other terminal, and `.branch()`, keeps the default: `syncChunks`
       // above needs no such split, since a sync chain never dispatches and therefore never carries
       // an encoded chunk to begin with. `materializeChunksIfNeeded` skips the wrapper generator
-      // when the flag is off, since nothing in the stream could be encoded then.
+      // when this class can never carry one.
       chunks: () =>
-        materialize ? materializeChunksIfNeeded(bound.chunkStream()) : bound.chunkStream(),
+        materialize
+          ? materializeChunksIfNeeded(bound.chunkStream(), bound.mayCarryEncodedChunks())
+          : bound.chunkStream(),
       // THIS run's manager, which is a fresh one per call unless the caller named their own (#90).
       // `.branch()` reads it so an arm's own pipeline sees the writes the parent chain just made,
       // rather than the chain's manager, which holds the previous call's.
