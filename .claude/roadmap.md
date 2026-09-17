@@ -25,6 +25,7 @@ already exists (Building / Later), or one already tried (Killed) - point the new
   day this was planned is exactly the kind of large, fast-moving change this gap lets through
   silently; `typedoc --validation.notDocumented` is proven this session to catch it for real
   (`Pipeline.local has an @param with name "wrongName", which was not used`).
+
 ### Later - not yet filed
 
 - **A distributed event emitter solution layer for `EventEmitterPipeline`** (#124's own planning) -
