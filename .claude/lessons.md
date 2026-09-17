@@ -7,6 +7,18 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-17 A drafted ticket body broke two already-loaded issues.md rules, caught by luck
+
+Planning #230 (the Killed-section staleness audit), the first ticket-body draft left an empty
+`## Settle first` heading and wrote specific benchmark figures straight into `## Problem`/`## Done
+when` - both against rules already in `~/.claude/rules/issues.md` since the start of the
+conversation. Caught only because a concurrent session's own edit to that file triggered a
+file-changed notification that happened to re-surface the two violated lines; not caught by a
+deliberate re-check of the draft. Fixed by moving the figures to a `gh issue comment` and dropping
+the empty heading before filing #230. Produced a new line in `~/.claude/rules/issues.md`: grep a
+drafted ticket body against this file's own body-shape rules right before `gh issue create`/`gh
+issue edit`, rather than relying on having read the rules once earlier in the session.
+
 ## 2026-09-14 Dispatching every incoming multiplexed frame concurrently dropped a reduce fold's result
 
 Building #201's `WebSocketPipeline`, `serve()`'s first cut dispatched every incoming binary frame as

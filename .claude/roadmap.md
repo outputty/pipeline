@@ -9,6 +9,11 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
+- **Re-verify six Killed-section entries whose kill cited a number since moved** (#230) - three
+  tickets (#179, #201) cut dispatch and chunk-level costs several Killed entries leaned on to reject
+  an idea; one of those entries (O2, fusing adjacent sync `map`/`filter`, #120) already flipped on
+  re-measurement. Six entries flagged by risk classification get re-priced against current `main`,
+  each corrected in place or handed to its own `needs-planning` ticket, case by case.
 - **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
   `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
   change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results
