@@ -6,10 +6,9 @@
  * "should have" is exactly the phrasing that produced #179's own wrong diagnosis, so it is measured
  * here rather than assumed.
  *
- * Its `.local()` row proves a pinned region registers no extra Worker and dispatches nothing
- * (Done-when 10): a manually-registered Worker on `stage:0`, counted while the `.local()` chain
- * runs - `stageWork()` never runs there, so the chain's own composed function never registers
- * either, and this manual Worker is the WHOLE of `listenerCount("stage:0")`.
+ * Its `.local()` row proves a pinned region dispatches nothing (#221 Done-when 7): a
+ * manually-registered Worker on `/transform/0`, counted while the `.local()` chain runs -
+ * `stageWork()` never runs there, so this manual Worker never fires either.
  */
 import { EventEmitterPipeline } from "../../src";
 import {
@@ -26,9 +25,9 @@ import { legReport, type LegReport } from "../gate";
 /** Real, timed `pipelineNsPerRow`/`ratio` at `ROWS.EventEmitterPipeline` rows, plus the `.local()`
  * row and its `workersWhilePinned` correctness check. `floorNsPerRow` is measured ONCE by the
  * caller and passed in - see `measurePipeline`'s own docstring for why. Each timed pipeline is its
- * own fresh instance with its own default emitter (never one shared `options.emitter` across two
- * constructions) - `architecture.md`'s own warning that two independently-constructed
- * `EventEmitterPipeline`s sharing one emitter both register on `stage:0` and race.
+ * own fresh instance with its own default emitter, kept apart for measurement isolation alone -
+ * #221 means an independently-constructed `EventEmitterPipeline` never depends on a fresh emitter
+ * to answer correctly any more, sharing one with a sibling included.
  *
  * `measureEventEmitterPipeline(11.4, 5)` → `{ pipelineNsPerRow: 17.9, floorNsPerRow: 11.4, ratio:
  * 1.57, local: { nsPerRow: 16.5, workersWhilePinned: 0 } }`.
@@ -51,7 +50,7 @@ export async function measureEventEmitterPipeline(
     .buffer(BUFFER_SIZE)
     .local((p) => p.transform(canonicalChain));
   const counter = { calls: 0 };
-  localPipeline.emitter.on("stage:0", () => {
+  localPipeline.emitter.on("/transform/0", () => {
     counter.calls++;
   });
   const localNsPerRow = await timeRounds(async () => {

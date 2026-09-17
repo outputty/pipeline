@@ -1,22 +1,22 @@
 /**
- * eventemitter.e2e.test.ts — #124's own Done-when cases (unchanged below), plus #221's own
- * (appended at the end, L1) - each proven through a real `EventEmitterPipeline` run over a real
- * `node:events` `EventEmitter`. No mocks: every "worker" is a real function registered on a real
- * emitter, every race is a real `setTimeout`.
+ * eventemitter.e2e.test.ts — #221's Done-when cases, each proven through a real
+ * `EventEmitterPipeline` run over a real `node:events` `EventEmitter`. No mocks: every "worker" is
+ * a real function registered on a real emitter, every race is a real `setTimeout`.
+ *
+ * #124's own guarantees this ticket deletes (Done-when 9) - a route's own `listenerCount` counting
+ * the composed function, `off()` taking the composed function's own stage over, and "no worker
+ * registered" rejecting - have no test here any more; the composed function is never a listener,
+ * so none of the three has anything left to assert.
  *
  * #124's own Done-when 6 (an async Worker throwing after its own `await` leaks no unhandled
- * rejection) runs as a subprocess fixture (`__tests__/fixtures/eventemitter-async-throw.ts`) for
- * the same reason `concurrent-unhandled.ts` (#17) does: Vitest installs its own
- * `unhandledRejection` handler and would report a leak as a test-runner error, never a value this
+ * rejection) and the throwing-lifecycle-observer regressions run as subprocess fixtures, the same reason
+ * `concurrent-unhandled.ts` (#17) does - Vitest installs its own `unhandledRejection`/
+ * `uncaughtException` handlers and would report a leak as a test-runner error, never a value this
  * file can observe directly.
  *
- * #221's own Done-when 8 (the repo-wide `rg` sweep for the old spellings) and Done-when 12
- * (`pnpm check`, including the memory-benchmark baseline) are repo-wide gates, not per-case
- * assertions - checked once at the end of the build, not here.
- *
- * #221's own new cases run `it.fails` here in L1, against this ticket's own unchanged stub -
- * Done-when 10 (a missing `off()` throws) already holds on the unchanged code, so it runs live
- * from L1 rather than xfail. Every `it.fails` case flips live once L2's real redesign lands.
+ * Done-when 8 (the repo-wide `rg` sweep for the old spellings) and Done-when 12 (`pnpm check`,
+ * including the memory-benchmark baseline) are repo-wide gates, not per-case assertions - checked
+ * once at the end of the build, not here.
  */
 import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
@@ -27,33 +27,167 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** The real contract a Worker registered directly on `stage:<n>` receives - `code-review xhigh`'s
- * own F14: a hand-duplicated local interface reported errors the real shape never has. */
+/** The real contract a Worker registered directly on a route receives - `code-review xhigh`'s own
+ * F14: a hand-duplicated local interface reported errors the real shape never has. */
 type WorkerEvent = WorkEvent<number, number>;
 
-describe("#124 the Interface program (Done-when 1)", () => {
-  it("prints [2,4,6,8,10,12] with dispatched/done per chunk, then stage 0 ended, then run ended", async () => {
-    const pipeline = new EventEmitterPipeline<number>({ maxConcurrency: 2 })
-      .buffer(1)
-      .transform((t) => t.map((x: number) => x * 2));
+describe("#221 the Interface program - events read as routes, the composed function never registers (Done-when 1, 6)", () => {
+  it("returns {evens:[60,80,100],odds:[]} and records exactly the eight after-event names", async () => {
+    const emitter = new EventEmitter();
+    const seen: string[] = [];
+    const emit = emitter.emit.bind(emitter);
+    emitter.emit = ((event: string, ...args: unknown[]) => {
+      seen.push(String(event));
+      return emit(event, ...args);
+    }) as typeof emitter.emit;
 
-    const labels: string[] = [];
-    pipeline.emitter.on("stage:0:dispatched", () => labels.push("dispatched"));
-    pipeline.emitter.on("stage:0:done", () => labels.push("done"));
-    pipeline.emitter.on("stage:0:end", () => labels.push("stage 0 ended"));
-    pipeline.emitter.on("pipeline:end", () => labels.push("run ended"));
+    const split = new EventEmitterPipeline<number>({ emitter })
+      .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
+      .branch((b) =>
+        b
+          .when(
+            "evens",
+            (x) => x % 2 === 0,
+            (q) => q.transform((t) => t.map((x) => x * 10)),
+          )
+          .otherwise("odds"),
+      );
 
-    const out = await pipeline([1, 2, 3, 4, 5, 6]).toArray();
+    const out = await split([1, 2, 3, 4, 5]);
 
-    expect(out).toEqual([2, 4, 6, 8, 10, 12]);
-    expect(labels.filter((l) => l === "dispatched")).toHaveLength(6);
-    expect(labels.filter((l) => l === "done")).toHaveLength(6);
-    expect(labels.at(-2)).toBe("stage 0 ended");
-    expect(labels.at(-1)).toBe("run ended");
+    expect(out).toEqual({ evens: [60, 80, 100], odds: [] });
+    expect(seen).toEqual([
+      "/transform/0:dispatched",
+      "/transform/0:done",
+      "/transform/0:end",
+      ":end",
+      "/branch/0/evens/transform/0:dispatched",
+      "/branch/0/evens/transform/0:done",
+      "/branch/0/evens/transform/0:end",
+      "/branch/0/evens:end",
+    ]);
+    // The composed function is called directly, never registered - the emitter carries only what
+    // this run's own lifecycle observer above added, and even that observer used `.on()` on an
+    // event this class itself emits, never a Worker channel, so nothing is left listening either.
+    expect(emitter.eventNames()).toEqual([]);
   });
 });
 
-describe("#124 the composed function alone is a complete Worker (Done-when 2)", () => {
+describe("#221 two sibling arms with a parent stage no longer collide on the same route (Done-when 2)", () => {
+  it("returns {big:[40,50,60,70],rest:[-3]}, the record a plain Pipeline returns", async () => {
+    const out = await new EventEmitterPipeline<number>()
+      .transform((t) => t.map((x: number) => x + 1))
+      .branch((b) =>
+        b
+          .when(
+            "big",
+            (x) => x > 3,
+            (q) => q.transform((t) => t.map((x) => x * 10)),
+          )
+          .otherwise("rest", (q) => q.transform((t) => t.map((x) => -x))),
+      )([2, 3, 4, 5, 6]);
+
+    expect(out).toEqual({ big: [40, 50, 60, 70], rest: [-3] });
+  });
+});
+
+describe("#221 two forks of one base chain each answer with their own output (Done-when 3)", () => {
+  it("returns [20,30] and [-2,-3], not both collapsing to the first fork's result", async () => {
+    const base = new EventEmitterPipeline<number>().transform((t) => t.map((x: number) => x + 1));
+
+    const a = await base
+      .transform((t) => t.map((v) => v * 10))([1, 2])
+      .toArray();
+    const b = await base
+      .transform((t) => t.map((v) => -v))([1, 2])
+      .toArray();
+
+    expect(a).toEqual([20, 30]);
+    expect(b).toEqual([-2, -3]);
+  });
+});
+
+describe("#221 two independently-constructed pipelines sharing one emitter each answer with their own output (Done-when 4)", () => {
+  it("returns [10,20] and [-1,-2], not both collapsing to the first pipeline's", async () => {
+    const emitter = new EventEmitter();
+    const p1 = new EventEmitterPipeline<number>({ emitter }).transform((t) =>
+      t.map((x: number) => x * 10),
+    );
+    const p2 = new EventEmitterPipeline<number>({ emitter }).transform((t) =>
+      t.map((x: number) => -x),
+    );
+
+    const out1 = await p1([1, 2]).toArray();
+    const out2 = await p2([1, 2]).toArray();
+
+    expect(out1).toEqual([10, 20]);
+    expect(out2).toEqual([-1, -2]);
+  });
+});
+
+describe("#221 a Worker registered on an arm's own route name answers that arm (Done-when 5)", () => {
+  it("returns {all:['W2','W3','W4']} from a Worker on /branch/0/all/transform/0", async () => {
+    const emitter = new EventEmitter();
+    emitter.on("/branch/0/all/transform/0", ({ chunk, respond }: WorkEvent<number, string>) =>
+      respond(chunk.map((x: number) => "W" + x)),
+    );
+
+    const out = await new EventEmitterPipeline<number>({ emitter })
+      .transform((t) => t.map((x: number) => x + 1))
+      .branch((b) => b.otherwise("all", (q) => q.transform((t) => t.map((x) => -x))))([1, 2, 3]);
+
+    expect(out).toEqual({ all: ["W2", "W3", "W4"] });
+  });
+});
+
+describe("#221 .local() emits :dispatched only on the two dispatched stages (Done-when 7)", () => {
+  it("dispatches on /transform/0 and /transform/2 only, skipping the pinned local stage", async () => {
+    const emitter = new EventEmitter();
+    const dispatched: string[] = [];
+    emitter.on("/transform/0:dispatched", () => dispatched.push("/transform/0"));
+    emitter.on("/transform/1:dispatched", () => dispatched.push("/transform/1"));
+    emitter.on("/transform/2:dispatched", () => dispatched.push("/transform/2"));
+
+    const out = await new EventEmitterPipeline<number>({ emitter })
+      .transform((t) => t.map((x: number) => x * 2))
+      .local((p) => p.transform((t) => t.filter((x: number) => x > 2)))
+      .transform((t) => t.map((x: number) => x + 1))([1, 2, 3])
+      .toArray();
+
+    expect(out).toEqual([5, 7]);
+    expect(dispatched).toEqual(["/transform/0", "/transform/2"]);
+  });
+});
+
+describe("#221 options.emitter missing off() throws on both constructor forms (Done-when 10)", () => {
+  // Missing exactly `off` - a trust-boundary value, so a real caller-supplied emitter this
+  // incomplete is exactly what assertPipelineEmitter() exists to catch at construction.
+  const withoutOff = {
+    on() {},
+    listeners() {
+      return [];
+    },
+    listenerCount() {
+      return 0;
+    },
+    emit() {},
+  } as unknown as PipelineEmitter;
+
+  it("throws on the options-only chain form", () => {
+    expect(() => new EventEmitterPipeline<number>({ emitter: withoutOff })).toThrow(
+      "options.emitter is missing 'off()' - it must satisfy PipelineEmitter",
+    );
+  });
+
+  it("throws on the wrapping (chain, options) form", () => {
+    const chain = new EventEmitterPipeline<number>().transform((t) => t.map((x: number) => x));
+    expect(() => new EventEmitterPipeline<number>(chain, { emitter: withoutOff })).toThrow(
+      "options.emitter is missing 'off()' - it must satisfy PipelineEmitter",
+    );
+  });
+});
+
+describe("#221 the composed function alone is a complete Worker", () => {
   it("runs with zero external .on() calls", async () => {
     const out = await new EventEmitterPipeline<number>()
       .buffer(1)
@@ -63,38 +197,7 @@ describe("#124 the composed function alone is a complete Worker (Done-when 2)", 
   });
 });
 
-describe("#124 the composed function registers once per stage index, never once per run (Done-when 3, 7)", () => {
-  it("emitter.listenerCount('stage:0') is unchanged across two separate calls", async () => {
-    const pipeline = new EventEmitterPipeline<number>()
-      .buffer(1)
-      .transform((t) => t.map((x: number) => x * 2));
-
-    const first = await pipeline([1, 2]).toArray();
-    expect(first).toEqual([2, 4]);
-    expect(pipeline.emitter.listenerCount("stage:0")).toBe(1);
-
-    const second = await pipeline([3, 4]).toArray();
-    expect(second).toEqual([6, 8]);
-    expect(pipeline.emitter.listenerCount("stage:0")).toBe(1);
-  });
-
-  it("a stage with no worker registered rejects immediately, naming the stage index", async () => {
-    const pipeline = new EventEmitterPipeline<number>()
-      .buffer(1)
-      .transform((t) => t.map((x: number) => x * 2));
-
-    await pipeline([1]).toArray();
-    const [registered] = pipeline.emitter.listeners("stage:0");
-    pipeline.emitter.off("stage:0", registered as (...args: unknown[]) => void);
-    expect(pipeline.emitter.listenerCount("stage:0")).toBe(0);
-
-    // The dedup Set still thinks stage 0 is registered (Done-when 3's own mechanism), so the
-    // composed function is NOT re-added here - the stage genuinely has no worker left.
-    await expect(pipeline([2]).toArray()).rejects.toThrow(/stage 0/);
-  });
-});
-
-describe("#124 an external Worker races the composed function (Done-when 4)", () => {
+describe("#221 an external Worker races the composed function", () => {
   it("a Worker rejecting at 5ms beats one resolving at 30ms, even though the resolving one registered first", async () => {
     const pipeline = new EventEmitterPipeline<number>().buffer(1).transform((t) =>
       t.map(async (x: number) => {
@@ -103,7 +206,7 @@ describe("#124 an external Worker races the composed function (Done-when 4)", ()
       }),
     );
 
-    pipeline.emitter.on("stage:0", async ({ chunk, reject }: WorkerEvent) => {
+    pipeline.emitter.on("/transform/0", async ({ chunk, reject }: WorkerEvent) => {
       await delay(5);
       reject(new Error(`external-worker-rejected-${chunk.join(",")}`));
     });
@@ -112,8 +215,8 @@ describe("#124 an external Worker races the composed function (Done-when 4)", ()
   });
 });
 
-describe("#124 Pipeline.onError() reaches a rejecting Worker for free (Done-when 5)", () => {
-  it("drops the chunk that fails and the run continues, with no explicit call in the new code", async () => {
+describe("#221 Pipeline.onError() reaches a rejecting Worker for free", () => {
+  it("drops the chunk that fails and the run continues, with no explicit call in the class's own code", async () => {
     const out = await new EventEmitterPipeline<number>()
       .buffer(1)
       .onError(() => undefined)
@@ -128,7 +231,7 @@ describe("#124 Pipeline.onError() reaches a rejecting Worker for free (Done-when
   });
 });
 
-describe("#124 an async Worker that throws after its own await never hangs or leaks (Done-when 6)", () => {
+describe("#221 an async Worker that throws after its own await never hangs or leaks", () => {
   it(
     "rejects the chunk exactly as an explicit reject() would, and leaves no unhandled rejection",
     async () => {
@@ -144,7 +247,7 @@ describe("#124 an async Worker that throws after its own await never hangs or le
   );
 });
 
-describe("#124 maxConcurrency/ordered behave exactly as ConcurrentPipeline's own (Done-when 8)", () => {
+describe("#221 maxConcurrency/ordered behave exactly as ConcurrentPipeline's own", () => {
   it("ordered: true - chunk 0 made 12x slower still comes out first", async () => {
     const out = await new EventEmitterPipeline<number>({ maxConcurrency: 4, ordered: true })
       .buffer(1)
@@ -178,13 +281,13 @@ describe("#124 maxConcurrency/ordered behave exactly as ConcurrentPipeline's own
   });
 });
 
-describe("#124 lifecycle events fire on channels separate from the worker channel (Done-when 9)", () => {
-  it("an observer on stage:0:done alone is never handed a chunk to process", async () => {
+describe("#221 lifecycle events fire on channels separate from the worker channel", () => {
+  it("an observer on /transform/0:done alone is never handed a chunk to process", async () => {
     const received: unknown[] = [];
     const pipeline = new EventEmitterPipeline<number>()
       .buffer(1)
       .transform((t) => t.map((x: number) => x * 2));
-    pipeline.emitter.on("stage:0:done", (event: unknown) => received.push(event));
+    pipeline.emitter.on("/transform/0:done", (event: unknown) => received.push(event));
 
     const out = await pipeline([1, 2]).toArray();
 
@@ -197,15 +300,15 @@ describe("#124 lifecycle events fire on channels separate from the worker channe
   });
 });
 
-describe("#124 stage:<n>:end and pipeline:end fire once per run (Done-when 10)", () => {
-  it(".first() then .toArray() on the same result fires pipeline:end twice", async () => {
+describe("#221 <route>:end and :end fire once per run", () => {
+  it(".first() then .toArray() on the same result fires :end twice", async () => {
     let stageEnds = 0;
     let pipelineEnds = 0;
     const pipeline = new EventEmitterPipeline<number>()
       .buffer(1)
       .transform((t) => t.map((x: number) => x * 2));
-    pipeline.emitter.on("stage:0:end", () => stageEnds++);
-    pipeline.emitter.on("pipeline:end", () => pipelineEnds++);
+    pipeline.emitter.on("/transform/0:end", () => stageEnds++);
+    pipeline.emitter.on(":end", () => pipelineEnds++);
 
     const result = pipeline([1, 2, 3]);
     await result.first();
@@ -218,37 +321,22 @@ describe("#124 stage:<n>:end and pipeline:end fire once per run (Done-when 10)",
   });
 });
 
-describe("#124 .local() dispatches nothing, and the stage after it resumes at the correct index (Done-when 11)", () => {
-  it("stage 1 (the local region) never touches the emitter; stage 2 does", async () => {
-    const pipeline = new EventEmitterPipeline<number>()
-      .transform((t) => t.map((x: number) => x * 2))
-      .local((p) => p.transform((t) => t.filter((x: number) => x > 2)))
-      .transform((t) => t.map((x: number) => x + 1));
-
-    const out = await pipeline([1, 2, 3]).toArray();
-
-    expect(out).toEqual([5, 7]); // [2,4,6] -> filter >2 -> [4,6] -> +1 -> [5,7]
-    expect(pipeline.emitter.listenerCount("stage:0")).toBe(1);
-    expect(pipeline.emitter.listenerCount("stage:1")).toBe(0);
-    expect(pipeline.emitter.listenerCount("stage:2")).toBe(1);
-  });
-});
-
-// Not Done-when cases - real correctness gaps the review found in this class's own documented
-// "every registered Worker runs on every chunk, first to settle decides" contract. Committed per
-// this repo's Tests rule: the spike that proved each fix is deleted, and the answer survives here.
-describe("#124 review round 1 - a synchronously-throwing Worker never aborts the dispatch loop", () => {
+// Not Done-when cases - real correctness gaps #124's own review found in this class's own
+// documented "every registered Worker runs on every chunk, first to settle decides" contract.
+// Committed per this repo's Tests rule: the spike that proved each fix is deleted, and the answer
+// survives here, under the routes this ticket renamed them to.
+describe("#221 review round 1 - a synchronously-throwing Worker never aborts the dispatch loop", () => {
   it("F2: settles the dispatch with the throw, but a Worker registered after it still runs", async () => {
     const pipeline = new EventEmitterPipeline<number>()
       .buffer(1)
       .transform((t) => t.map((x: number) => x * 2));
 
-    pipeline.emitter.on("stage:0", () => {
+    pipeline.emitter.on("/transform/0", () => {
       throw new Error("sync-throw-from-first-worker");
     });
 
     let laterWorkerRan = false;
-    pipeline.emitter.on("stage:0", ({ chunk, respond }: WorkerEvent) => {
+    pipeline.emitter.on("/transform/0", ({ chunk, respond }: WorkerEvent) => {
       laterWorkerRan = true;
       respond(chunk.map((x) => x * 2));
     });
@@ -258,9 +346,9 @@ describe("#124 review round 1 - a synchronously-throwing Worker never aborts the
   });
 });
 
-describe("#124 review round 1/2 - a throwing lifecycle observer never absorbs or masks a real outcome", () => {
+describe("#221 review round 1/2 - a throwing lifecycle observer never absorbs or masks a real outcome", () => {
   it(
-    "F3 (:dispatched), F4 (:done) and F5 (:end/pipeline:end) each surface as their own separate failure, never the dispatch's own",
+    "F3 (:dispatched), F4 (:done) and F5 (:end) each surface as their own separate failure, never the dispatch's own",
     async () => {
       const result = await runFixtureJson<{
         dispatched: { out: number[] | null; rejection: string | null };
@@ -281,8 +369,9 @@ describe("#124 review round 1/2 - a throwing lifecycle observer never absorbs or
       expect(result.done.rejection).toBeNull();
       expect(result.done.out).toEqual([2, 4, 6]);
 
-      // F5: a throwing :end/pipeline:end listener used to REPLACE a real, already-propagating chunk
-      // error with its own unrelated one - both apply()'s and drainable()'s own wrap are covered.
+      // F5: a throwing /transform/0:end/:end listener used to REPLACE a real, already-propagating
+      // chunk error with its own unrelated one - both apply()'s and drainable()'s own wrap are
+      // covered.
       expect(result.ended.rejection).toBe("real-chunk-failure");
 
       // Every observer's own throw still surfaces - as its own separate uncaughtException, never
@@ -297,175 +386,4 @@ describe("#124 review round 1/2 - a throwing lifecycle observer never absorbs or
     },
     FIXTURE_TIMEOUT,
   );
-});
-
-// #221's own Done-when cases - events read as routes, and the composed function is called
-// directly instead of registering on the emitter. Written against L1's own unchanged stub, so
-// every one of these is expected to fail until L2 lands the real redesign.
-describe("#221 the Interface program - events read as routes, the composed function never registers (Done-when 1, 6)", () => {
-  it.fails(
-    "returns {evens:[60,80,100],odds:[]} and records exactly the eight after-event names",
-    async () => {
-      const emitter = new EventEmitter();
-      const seen: string[] = [];
-      const emit = emitter.emit.bind(emitter);
-      emitter.emit = ((event: string, ...args: unknown[]) => {
-        seen.push(String(event));
-        return emit(event, ...args);
-      }) as typeof emitter.emit;
-
-      const split = new EventEmitterPipeline<number>({ emitter })
-        .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
-        .branch((b) =>
-          b
-            .when(
-              "evens",
-              (x) => x % 2 === 0,
-              (q) => q.transform((t) => t.map((x) => x * 10)),
-            )
-            .otherwise("odds"),
-        );
-
-      const out = await split([1, 2, 3, 4, 5]);
-
-      expect(out).toEqual({ evens: [60, 80, 100], odds: [] });
-      expect(seen).toEqual([
-        "/transform/0:dispatched",
-        "/transform/0:done",
-        "/transform/0:end",
-        ":end",
-        "/branch/0/evens/transform/0:dispatched",
-        "/branch/0/evens/transform/0:done",
-        "/branch/0/evens/transform/0:end",
-        "/branch/0/evens:end",
-      ]);
-      expect(emitter.eventNames()).toEqual([]);
-    },
-  );
-});
-
-describe("#221 two sibling arms with a parent stage no longer collide on the same route (Done-when 2)", () => {
-  it.fails(
-    "returns {big:[40,50,60,70],rest:[-3]}, the record a plain Pipeline returns",
-    async () => {
-      const out = await new EventEmitterPipeline<number>()
-        .transform((t) => t.map((x: number) => x + 1))
-        .branch((b) =>
-          b
-            .when(
-              "big",
-              (x) => x > 3,
-              (q) => q.transform((t) => t.map((x) => x * 10)),
-            )
-            .otherwise("rest", (q) => q.transform((t) => t.map((x) => -x))),
-        )([2, 3, 4, 5, 6]);
-
-      expect(out).toEqual({ big: [40, 50, 60, 70], rest: [-3] });
-    },
-  );
-});
-
-describe("#221 two forks of one base chain each answer with their own output (Done-when 3)", () => {
-  it.fails(
-    "returns [20,30] and [-2,-3], not both collapsing to the first fork's result",
-    async () => {
-      const base = new EventEmitterPipeline<number>().transform((t) => t.map((x: number) => x + 1));
-
-      const a = await base
-        .transform((t) => t.map((v) => v * 10))([1, 2])
-        .toArray();
-      const b = await base
-        .transform((t) => t.map((v) => -v))([1, 2])
-        .toArray();
-
-      expect(a).toEqual([20, 30]);
-      expect(b).toEqual([-2, -3]);
-    },
-  );
-});
-
-describe("#221 two independently-constructed pipelines sharing one emitter each answer with their own output (Done-when 4)", () => {
-  it.fails("returns [10,20] and [-1,-2], not both collapsing to the first pipeline's", async () => {
-    const emitter = new EventEmitter();
-    const p1 = new EventEmitterPipeline<number>({ emitter }).transform((t) =>
-      t.map((x: number) => x * 10),
-    );
-    const p2 = new EventEmitterPipeline<number>({ emitter }).transform((t) =>
-      t.map((x: number) => -x),
-    );
-
-    const out1 = await p1([1, 2]).toArray();
-    const out2 = await p2([1, 2]).toArray();
-
-    expect(out1).toEqual([10, 20]);
-    expect(out2).toEqual([-1, -2]);
-  });
-});
-
-describe("#221 a Worker registered on an arm's own route name answers that arm (Done-when 5)", () => {
-  it.fails(
-    "returns {all:['W2','W3','W4']} from a Worker on /branch/0/all/transform/0",
-    async () => {
-      const emitter = new EventEmitter();
-      emitter.on("/branch/0/all/transform/0", ({ chunk, respond }: WorkEvent<number, string>) =>
-        respond(chunk.map((x: number) => "W" + x)),
-      );
-
-      const out = await new EventEmitterPipeline<number>({ emitter })
-        .transform((t) => t.map((x: number) => x + 1))
-        .branch((b) => b.otherwise("all", (q) => q.transform((t) => t.map((x) => -x))))([1, 2, 3]);
-
-      expect(out).toEqual({ all: ["W2", "W3", "W4"] });
-    },
-  );
-});
-
-describe("#221 .local() emits :dispatched only on the two dispatched stages (Done-when 7)", () => {
-  it.fails(
-    "dispatches on /transform/0 and /transform/2 only, skipping the pinned local stage",
-    async () => {
-      const emitter = new EventEmitter();
-      const dispatched: string[] = [];
-      emitter.on("/transform/0:dispatched", () => dispatched.push("/transform/0"));
-      emitter.on("/transform/1:dispatched", () => dispatched.push("/transform/1"));
-      emitter.on("/transform/2:dispatched", () => dispatched.push("/transform/2"));
-
-      const out = await new EventEmitterPipeline<number>({ emitter })
-        .transform((t) => t.map((x: number) => x * 2))
-        .local((p) => p.transform((t) => t.filter((x: number) => x > 2)))
-        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3])
-        .toArray();
-
-      expect(out).toEqual([5, 7]);
-      expect(dispatched).toEqual(["/transform/0", "/transform/2"]);
-    },
-  );
-});
-
-describe("#221 options.emitter missing off() throws on both constructor forms (Done-when 10)", () => {
-  // Missing exactly `off` - a trust-boundary value, so a real caller-supplied emitter this
-  // incomplete is exactly what assertPipelineEmitter() exists to catch at construction.
-  const withoutOff = {
-    on() {},
-    listeners() {
-      return [];
-    },
-    listenerCount() {
-      return 0;
-    },
-    emit() {},
-  } as unknown as PipelineEmitter;
-
-  it("throws on the options-only chain form", () => {
-    expect(() => new EventEmitterPipeline<number>({ emitter: withoutOff })).toThrow(
-      "options.emitter is missing 'off()' - it must satisfy PipelineEmitter",
-    );
-  });
-
-  it("throws on the wrapping (chain, options) form", () => {
-    const chain = new EventEmitterPipeline<number>().transform((t) => t.map((x: number) => x));
-    expect(() => new EventEmitterPipeline<number>(chain, { emitter: withoutOff })).toThrow(
-      "options.emitter is missing 'off()' - it must satisfy PipelineEmitter",
-    );
-  });
 });
