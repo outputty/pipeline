@@ -94,22 +94,16 @@ export class Reducer<U, T> {
   private recover(item: T, ctx: IContextManager, emitted: U[], error: Error): U[] | Promise<U[]> {
     if (!this.rowHandler) throw error;
     return chain(this.rowHandler(item, error, ctx), (recovered) => {
-      this.applyRecovery(recovered as U | typeof DROP);
+      // `DROP` undoes `fold()`'s own increment - guarded, since `fn` can `emit()` (resetting
+      // `itemsSinceEmit` to `0`) and THEN throw, and `0 - 1` would leave `.final()` owing a value
+      // nothing was folded into since that emit. Any other value replaces the accumulator directly.
+      if (recovered === DROP) {
+        if (this.itemsSinceEmit > 0) this.itemsSinceEmit--;
+      } else {
+        this.acc = recovered as U;
+      }
       return emitted;
     });
-  }
-
-  /** Applies a recovered row (#78): `DROP` undoes `fold()`'s own increment - guarded, since `fn`
-   * can `emit()` (resetting `itemsSinceEmit` to `0`) and THEN throw, and `0 - 1` would leave
-   * `.final()` owing a value nothing was folded into since that emit - any other value replaces the
-   * accumulator directly. Split out of `fold()` to keep that method's own `try`/`catch` at this
-   * repo's `max-depth: 2`. */
-  private applyRecovery(recovered: U | typeof DROP): void {
-    if (recovered === DROP) {
-      if (this.itemsSinceEmit > 0) this.itemsSinceEmit--;
-      return;
-    }
-    this.acc = recovered;
   }
 
   /** The final accumulator, only if items were folded since the last `emit()` - `[]` otherwise. */
@@ -250,7 +244,6 @@ export function* foldSyncChunkStream<U, T>(
   if (trailing.length > 0) yield trailing;
 }
 
-/**
 /**
  * Adapts a caller's `BufferFunction<T>` onto `ReduceFunction<T[], T>` (#88) - `pending` is the SAME
  * mutable array `Reducer` folds as `acc`, never exposed to `fn` directly: `flush` (the zero-arg
