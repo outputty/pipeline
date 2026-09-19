@@ -37,7 +37,7 @@
  */
 
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
-import { ConcurrentPipeline } from "@src/pipelines/concurrent";
+import { ConcurrentPipeline, parseRoute } from "@src/pipelines/concurrent";
 import { Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
@@ -47,7 +47,6 @@ import type {
   PipelineMode,
   ReduceFunction,
   ReduceWork,
-  RouteVerb,
   StageRoute,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
@@ -188,20 +187,6 @@ export function sendUnknownRouteError(
   route: string | undefined,
 ): void {
   socket.send(encodeErrorFrame(id, `unknown pipeline route ${route ?? "(missing)"}`));
-}
-
-/**
- * Reads back the route grammar `WebSocketPipeline.routePath()` builds (#201, mirroring
- * `HttpPipeline`'s own `parseRoute` in `http.ts`, kept as its own copy since the two parse different
- * strings - a URL pathname there, a bare JSON field here - even though the grammar is identical):
- * `/transform/<n>`, `/reduce/<n>`, optionally prefixed by a `/branch/<i>/<name>` trail.
- *
- * `parseRoute("/branch/1/big/transform/2")` → `{ trail: "/branch/1/big", verb: "transform", index: 2 }`.
- */
-function parseRoute(route: string): StageRoute | null {
-  const match = /(\/branch\/\d+\/[^/]+)?\/(transform|reduce)\/(\d+)$/.exec(route);
-  if (match === null) return null;
-  return { trail: match[1] ?? null, verb: match[2] as RouteVerb, index: Number(match[3]) };
 }
 
 /** Wraps a real `ws` `WebSocket` (client-dialed or server-accepted, identical shape either way) as
