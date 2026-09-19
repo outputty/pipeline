@@ -5,7 +5,7 @@
  * barrel has to change.
  */
 
-import { chain, isThenable } from "@src/utils/helpers";
+import { chain, isThenable, tryRecover } from "@src/utils/helpers";
 
 /**
  * A sync chunk stream whose individual chunks may still be pending (#90) - what a `"sync"`-Mode
@@ -77,18 +77,10 @@ export function drainSync<T>(
  * the identical chain over an async source released it. Stays synchronous when `drain` does.
  */
 function closingOnFailure<R>(iterator: Iterator<unknown>, drain: () => R): R {
-  try {
-    const result = drain();
-    if (!isThenable(result)) return result;
-    // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a rejection can carry anything JS can throw; re-thrown untouched, genuinely unknown, not a gap
-    return Promise.resolve(result).catch((error: unknown) => {
-      close(iterator);
-      throw error;
-    }) as R;
-  } catch (error) {
+  return tryRecover(drain, (error) => {
     close(iterator);
     throw error;
-  }
+  }) as R;
 }
 
 /**
