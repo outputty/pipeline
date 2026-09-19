@@ -252,24 +252,12 @@ export async function* prefetch<T>(
 
   try {
     for (let i = 0; i < capacity; i++) pull();
-    yield* drainPrefetched(pending, pull);
+    for (let step = await pending.shift()!; !step.done; step = await pending.shift()!) {
+      pull();
+      yield step.value;
+    }
   } finally {
     await iterator.return?.();
-  }
-}
-
-/** `prefetch()`'s own steady-state loop, its own function so the `try/finally` around it (which
- * must wrap the WHOLE pump, not just this loop, so an early `.return()` during the initial fill
- * still closes `iterator`) costs one nesting level, not two (this repo's own `max-depth: 2`). */
-async function* drainPrefetched<T>(
-  pending: Promise<IteratorResult<T[]>>[],
-  pull: () => void,
-): AsyncGenerator<T[]> {
-  for (;;) {
-    const { done, value } = await pending.shift()!;
-    if (done) return;
-    pull();
-    yield value;
   }
 }
 
