@@ -24,7 +24,8 @@ export { DEFAULT_CHUNK_SIZE, DROP } from "./types";
 export { SimpleContextManager } from "./context/simple";
 
 // Utils
-export { buildChunkGenerator, isContextAware } from "./utils";
+export { buildChunkGenerator } from "./utils/chunk";
+export { isContextAware } from "./utils/helpers";
 
 // Transformer
 export { Transformer } from "./transformer";
