@@ -39,7 +39,7 @@ import {
   prefetch,
 } from "./utils/chunk";
 import { assertWholeNumberAtLeastOne } from "./utils/cut";
-import { chain, isThenable, runStageChunk } from "./utils/helpers";
+import { chain, runStageChunk } from "./utils/helpers";
 import { materializeChunksIfNeeded } from "./utils/encoded-chunk";
 import { PipelineResult } from "./result";
 import { BranchBuilder, runBranch } from "./branch";
@@ -1096,7 +1096,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * The two forms run on DIFFERENT engines since #179, and the boundaries they produce are
    * unchanged by that. `fn` folds item by item through the `Reducer<T[], T>` class
    * `Pipeline.reduce()` uses, which is what a per-item decision needs; `size` cuts by count through
-   * the ordinary chunk cutters (`bufferBySize`, below), which need neither the per-item closure call
+   * the ordinary chunk cutters (`cutBy`, below), which need neither the per-item closure call
    * nor the array-mutating accumulator that fold charges for a decision it never makes. `size` ran
    * on the fold engine until #179, configured with an identity `fn` and a framework-side auto-flush
    * at `pending.length >= size`, and cost 3.001 promises per row over an async source for it.
@@ -1131,177 +1131,100 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   ): Pipeline<T, "async", In>;
   buffer(fn: (item: T, ctx: IContextManager, emit: () => void) => T | typeof DROP): this;
   buffer(sizeOrFn: number | BufferFunction<T>): this | Pipeline<T, "async", In> {
+    // Validated before the deferral branch, so a deferred `.buffer(0)` fails here under its own name
+    // and not later at the drain. Non-integer is refused as well as `< 1`: the cutting paths round
+    // it differently (`.buffer(2.5)` cut the source at 3 and re-cut at 2). `BufferFunction` takes no
+    // such validation - any function is accepted.
+    if (typeof sizeOrFn === "number") {
+      assertWholeNumberAtLeastOne("buffer size", sizeOrFn);
+    }
+
     // Before an input there is no stream to cut, so the call is recorded and replayed in PLACE
-    // (#90) - the same deferral `.apply()`/`.reduce()`/`.local()` use, for the same reason.
-    //
-    // Recording only the size, as an earlier form did, loses the call's position: `fromSource` then
-    // applied it to the SOURCE cut, so a `.buffer()` written after a stage took effect before it.
-    // Measured on `.transform(t => t.flatMap(x => [x, x])).buffer(2)` over `[1,2,3,4]` - chunks
-    // came out `[[1,1,2,2],[3,3,4,4]]` where the same chain after `.from()` gives
-    // `[[1,1],[2,2],[3,3],[4,4]]`. `chunkSize` is still carried alongside a NUMERIC `.buffer()`,
-    // because a `.buffer()` written BEFORE any stage must also cut the source itself, which is what
-    // it now does by replaying against a pipeline whose source is already cut at that size.
-    // `BufferFunction` has no equivalent knob (`_chunkSize` is a plain `number`), so a deferred
-    // `.buffer(fn)` leaves the SOURCE's own first cut at the default and relies entirely on its own
-    // replay's re-cut from `_preBufferItems` - the same final chunking either way, since that
-    // re-cut always runs regardless of what the first cut used.
+    // (#90) - the same deferral `.apply()`/`.reduce()`/`.local()` use. Recording only the size lost
+    // the call's position: a `.buffer()` written after a stage took effect before it.
+    // `chunkSize` is still carried alongside a NUMERIC `.buffer()` written BEFORE any stage, which
+    // must also cut the source itself. `BufferFunction` has no such knob: a deferred
+    // `.buffer(fn)` relies entirely on its own replay's re-cut from `_preBufferItems`.
     if (this.isDeferred()) {
-      // Validated HERE as well as on the bound path (below), because a deferred `.buffer()`
-      // only records the call: `new Pipeline<number>().buffer(0)` used to return a pipeline and
-      // throw `chunkSize must be at least 1` later, at the drain, in a message that never names
-      // `.buffer()`. Every chain is source-less by default now, so that is the ordinary path.
-      // Non-integer refused as well as `< 1`: the two cutting paths round it differently.
-      // `.buffer(2.5)` accumulated until `length >= 2.5`, so the SOURCE cut at 3, while
-      // `cutChunk`'s re-cut sliced `index + 2.5` and cut at 2 - one call, two boundaries over the
-      // same data, no error. `BufferFunction` takes no such validation - any function is accepted.
-      if (typeof sizeOrFn === "number") {
-        assertWholeNumberAtLeastOne("buffer size", sizeOrFn);
-      }
-      const cutsTheSource = this._pendingStages.length === 0;
       if (typeof sizeOrFn === "number") {
         const size = sizeOrFn;
+        const cutsTheSource = this._pendingStages.length === 0;
         return this.defer<T, this>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {});
       }
       const fn = sizeOrFn;
       return this.defer<T, this>((p) => p.buffer(fn));
     }
 
-    // A NUMERIC size cuts by COUNT, on every arm (#179). `.buffer(fn)` keeps the `Reducer<T[], T>`
-    // fold engine below, which is what a per-item callback genuinely needs; a count-based cut needs
-    // neither the per-item closure call nor the array-mutating accumulator that engine runs, and the
-    // cutters it uses instead are the same ones `fromSource()` cuts every source with. Measured at
-    // N=10,000 over an async generator, output asserted identical: `.buffer(1000)` cost 7.006
-    // promises per row through the fold engine and 4.005 cutting by count - `buildChunkGenerator`'s
-    // own floor, and exactly what the same chain with NO `.buffer()` call at all reads. The 3.001
-    // difference was the fold engine's own per-item closure call and array-mutating accumulator.
-    //
-    // Validated here as well as in the deferred branch above: this is the already-bound path, where
-    // `sizeReduceFunction` used to be what refused a bad size, and it no longer runs.
+    // A NUMERIC size cuts by COUNT with the ordinary chunk cutters (#179); `.buffer(fn)` folds
+    // item by item through the `Reducer<T[], T>` engine (`bufferReduceFunction`, #88), which is
+    // what a per-item callback needs. A count-based cut pays neither the per-item closure call nor
+    // the array-mutating accumulator: 4.005 promises per row against 7.006 at N=10,000.
     if (typeof sizeOrFn === "number") {
-      assertWholeNumberAtLeastOne("buffer size", sizeOrFn);
-      return this.bufferBySize(sizeOrFn);
+      const size = sizeOrFn;
+      return this.cutBy(
+        buildSyncChunkGenerator<T>(size),
+        (slots) => recutSyncChunks(slots, size),
+        buildChunkGenerator<T>(size),
+      );
     }
-
-    // "One engine, not two" (#88): `bufferReduceFunction` adapts a caller's own `BufferFunction`
-    // onto the SAME `Reducer<T[], T>`-based engine (`src/utils/reduce.ts`) every `Pipeline.reduce()`
-    // uses. `sizeReduceFunction`, which configured that engine with an identity fn and a
-    // framework-side auto-flush at `pending.length >= size`, has no caller left after the numeric
-    // branch above and is deleted with it.
     const reduceFn: ReduceFunction<T[], T> = bufferReduceFunction<T>(sizeOrFn);
-
-    // The `"sync"` arm recuts with the sync chunker (#90) - going through the async one here would
-    // make `.buffer()` alone widen a chain whose every callback is synchronous, which is exactly
-    // the Mode/runtime divergence this ticket exists to remove.
-    if (this.isSync()) {
-      const items = this._syncPreBufferItems;
-      // Nothing has consumed the stream since the last cut: re-cut from the raw items, so a run of
-      // back-to-back `.buffer()` calls collapses to the LAST one, exactly as the async arm does.
-      if (items !== null) {
-        return this.createPipeline<T>(emptyChunks<T>(), {
-          ...this.carriedOptions(),
-          syncChunks: buildSyncBufferGenerator<T>(reduceFn, this._context)(items),
-          syncPreBufferItems: items,
-        }) as this;
-      }
-      // A real stage already ran, so only `_syncChunks` survives. A `BufferFunction` folds each
-      // existing chunk SLOT through the same engine via `recutSyncChunksWith` - never flattened to
-      // items first, because a slot can still carry a genuinely pending `Promise<T[]>` even while
-      // `isSync()` reads `true` (a stage between two `.buffer()` calls widens only THAT stage's own
-      // output, not the chain's Mode).
-      return this.createPipeline<T>(emptyChunks<T>(), {
-        ...this.carriedOptions(),
-        syncChunks: recutSyncChunksWith<T>(this._syncChunks!, reduceFn, this._context),
-        syncPreBufferItems: null,
-      }) as this;
-    }
-
-    // F3: `data` was never really async here either - only a dispatching class's own
-    // `sourcePolicy()` forced Mode `"async"`, and `fromSource()` kept the original sync view alive
-    // for exactly this. Fold synchronously (`buildSyncBufferGenerator`, the SAME engine the
-    // `isSync()` branch above already uses) and cross the async boundary once per CHUNK instead of
-    // once per raw item - `buildBufferGenerator`'s own `for await` pays a Promise-wrap per item
-    // regardless of how cheap the fold itself is.
-    if (this._syncPreBufferItems !== null) {
-      const syncItems = this._syncPreBufferItems;
-      const syncChunks = buildSyncBufferGenerator<T>(reduceFn, this._context)(syncItems);
-      return this.createPipeline<T>(
-        (async function* () {
-          for (const chunkOrPromise of syncChunks) {
-            yield isThenable(chunkOrPromise) ? await chunkOrPromise : chunkOrPromise;
-          }
-        })(),
-        {
-          ...this.carriedOptions(),
-          preBufferItems: null,
-          // The item view survives, mirroring the `isSync()` branch above (`items !== null`) -
-          // nothing has consumed the stream since the last cut, so a back-to-back `.buffer()`
-          // call collapses to the LAST one by re-cutting from these SAME raw items, rather than
-          // falling through to `buildBufferGenerator`'s per-item path for the second call.
-          syncPreBufferItems: syncItems,
-        },
-      ) as this;
-    }
-
-    const items = this._preBufferItems ?? flattenChunks(this._chunks);
-    return this.createPipeline<T>(buildBufferGenerator<T>(reduceFn, this._context)(items), {
-      ...this.carriedOptions(),
-      preBufferItems: items,
-    }) as this;
+    const ctx = this._context;
+    return this.cutBy(
+      buildSyncBufferGenerator<T>(reduceFn, ctx),
+      (slots) => recutSyncChunksWith(slots, reduceFn, ctx),
+      buildBufferGenerator<T>(reduceFn, ctx),
+    );
   }
 
   /**
-   * `.buffer(size)`'s own body (#179) - the same three arms `.buffer(fn)` takes above, cutting by
-   * COUNT on each rather than folding every item through `Reducer<T[], T>`.
+   * The three arms every `.buffer()` form takes (#88, #179), parameterised over how each cuts:
+   * `cutSync` over raw items, `recut` over already-staged chunk slots, `cutAsync` over an async
+   * item stream. Which view survives, and what a back-to-back `.buffer()` re-cuts from, is decided
+   * here once for both forms.
    *
-   * Its own method, not a fourth branch inside `buffer()`: that method already carries the deferral,
-   * the validation and the callback engine, and a count-based cut shares none of their bodies. The
-   * arms themselves are unchanged in meaning - which view survives, and what a back-to-back
-   * `.buffer()` call re-cuts from, are decided exactly as `.buffer(fn)` decides them.
+   * A `"sync"` chain recuts with the sync cutter (#90): going through the async one would widen a
+   * chain whose every callback is synchronous. From raw items a run of `.buffer()` calls collapses
+   * to the LAST one. After a real stage only `_syncChunks` survives, and `recut` re-slices those
+   * slots without flattening, since a slot can still carry a pending `Promise<T[]>` even while
+   * `isSync()` reads `true`. A dispatching class's own `sourcePolicy()` forces Mode `"async"` on
+   * data that was never really async: `fromSource()` kept the sync view alive, so cut it
+   * synchronously and cross the async boundary once per CHUNK, not once per item.
    *
-   * `new Pipeline<number>()([1,2,3,4,5]).chunks()` after `.buffer(2)` yields `[1, 2]`, `[3, 4]`,
-   * `[5]` - the same chunks the fold engine produced, by counting instead of folding.
+   * `new Pipeline<number>()([1,2,3,4,5])` after `.buffer(2)` yields the chunks `[1, 2]`, `[3, 4]`,
+   * `[5]`.
    */
-  private bufferBySize(size: number): this {
+  private cutBy(
+    cutSync: (items: Iterable<T>) => MaybeAsyncChunks<T>,
+    recut: (slots: MaybeAsyncChunks<T>) => MaybeAsyncChunks<T>,
+    cutAsync: (items: AsyncIterable<T>) => AsyncIterable<T[]>,
+  ): this {
     if (this.isSync()) {
       const items = this._syncPreBufferItems;
-      // Nothing has consumed the stream since the last cut: re-cut from the raw items, so a run of
-      // back-to-back `.buffer()` calls collapses to the LAST one.
       if (items !== null) {
         return this.createPipeline<T>(emptyChunks<T>(), {
           ...this.carriedOptions(),
-          syncChunks: buildSyncChunkGenerator<T>(size)(items),
+          syncChunks: cutSync(items),
           syncPreBufferItems: items,
         }) as this;
       }
-      // A real stage already ran, so only `_syncChunks` survives - `recutSyncChunks` re-slices those
-      // existing chunk slots by index, pending ones included, which is what a raw item view cannot
-      // do here. Unchanged by this ticket.
       return this.createPipeline<T>(emptyChunks<T>(), {
         ...this.carriedOptions(),
-        syncChunks: recutSyncChunks(this._syncChunks!, size),
+        syncChunks: recut(this._syncChunks!),
         syncPreBufferItems: null,
       }) as this;
     }
 
-    // The data was never really async - a dispatching class's own `sourcePolicy()` forced Mode
-    // `"async"`, and `fromSource()` kept the original sync view alive for exactly this. Cut
-    // synchronously and cross the async boundary once per CHUNK.
     if (this._syncPreBufferItems !== null) {
       const syncItems = this._syncPreBufferItems;
-      return this.createPipeline<T>(asAsyncChunks<T>(buildSyncChunkGenerator<T>(size)(syncItems)), {
+      return this.createPipeline<T>(asAsyncChunks<T>(cutSync(syncItems)), {
         ...this.carriedOptions(),
         preBufferItems: null,
-        // The item view survives, mirroring the `isSync()` arm above, so a back-to-back `.buffer()`
-        // call re-cuts from these SAME raw items rather than falling to the per-item path below.
         syncPreBufferItems: syncItems,
       }) as this;
     }
 
-    // Genuinely async, with no sync view to fall back on. `buildChunkGenerator` is the same cutter
-    // `fromSource()` uses for an async source, and is the floor for this shape: the fold engine's
-    // own `for await` paid a Promise-wrap per item on top of it, for a cut that counts.
     const items = this._preBufferItems ?? flattenChunks(this._chunks);
-    return this.createPipeline<T>(buildChunkGenerator<T>(size)(items), {
+    return this.createPipeline<T>(cutAsync(items), {
       ...this.carriedOptions(),
       preBufferItems: items,
     }) as this;
