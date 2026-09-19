@@ -310,24 +310,10 @@ async function collectAsyncChunks<T>(
   chunks: () => AsyncIterable<T[]>,
 ): Promise<T[]> {
   for await (const chunk of chunks()) {
-    if (takeChunk(results, chunk, limit)) break;
+    const take =
+      limit === undefined ? chunk.length : Math.min(chunk.length, limit - results.length);
+    for (let i = 0; i < take; i++) results.push(chunk[i]);
+    if (limit !== undefined && results.length >= limit) break;
   }
   return results;
-}
-
-/** Appends one chunk's items to `results`, reporting whether `limit` is now reached - its own
- * function so `collectAsyncChunks` above stays within this repo's own `max-depth: 2`. The
- * unlimited case skips the per-item check entirely, which is `.toArray()`'s own path; a spread
- * (`results.push(...chunk)`) is deliberately not used, since it passes a whole chunk as arguments
- * and a large enough one overflows the call stack. */
-function takeChunk<T>(results: T[], chunk: T[], limit: number | undefined): boolean {
-  if (limit === undefined) {
-    for (let i = 0; i < chunk.length; i++) results.push(chunk[i]);
-    return false;
-  }
-  for (let i = 0; i < chunk.length; i++) {
-    results.push(chunk[i]);
-    if (results.length >= limit) return true;
-  }
-  return false;
 }
