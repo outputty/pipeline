@@ -895,21 +895,11 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   }
 
   /** Whether this pipeline runs on the synchronous engine (#90) - what `reduce()`/`apply()`/
-   * `buffer()`/`chunkStream()`/`syncChunkStream()` all ask before choosing between the sync and
+   * `buffer()`/`chunkStream()` all ask before choosing between the sync and
    * the async engine, rather than each raw-spelling `_mode === "sync" && _syncChunks !== null`
    * (#133: was spelled inline 4x, its own negation included). */
   protected isSync(): boolean {
     return this._mode === "sync" && this._syncChunks !== null;
-  }
-
-  /** This pipeline's chunks as a SYNC stream, for the synchronous fold. A pipeline that is not
-   * `"sync"` has none, so this raises rather than inventing one; `isSync()` above is the guard
-   * every caller checks first. */
-  protected syncChunkStream(): MaybeAsyncChunks<T> {
-    if (!this.isSync()) {
-      throw new Error("no sync chunk stream: this pipeline runs on the asynchronous engine");
-    }
-    return this._syncChunks!;
   }
 
   // ===== Static Factory Methods =====
@@ -1335,7 +1325,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       return this.createPipeline<U>(emptyChunks<U>(), {
         ...carried,
         mode: this.sourcePolicy() === "async" ? "async" : "sync",
-        syncChunks: foldSyncChunkStream(fn, initial, this.syncChunkStream(), this._context),
+        syncChunks: foldSyncChunkStream(fn, initial, this._syncChunks!, this._context),
       }) as AnyPipeline<U>;
     }
 
