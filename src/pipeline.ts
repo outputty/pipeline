@@ -879,9 +879,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   protected chunkStream(): AsyncIterable<T[]> {
     if (!this.isSync()) return this._chunks;
     const syncChunks = this._syncChunks!;
-    return asyncIterableFrom(async function* () {
-      for (const chunk of syncChunks) yield await chunk;
-    });
+    return asyncIterableFrom(() => asAsyncChunks(syncChunks));
   }
 
   /** Whether this class's own `_chunks` could ever hold an `EncodedChunk` (#209) - `false` on the

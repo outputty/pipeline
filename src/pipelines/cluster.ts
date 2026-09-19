@@ -80,21 +80,6 @@ interface BootstrapResult {
  * own measurement), which this window is comfortably larger than for back-to-back dispatches. */
 const IDLE_KILL_MS = 500;
 
-/**
- * The per-PROCESS state every `ClusterHttpPipeline` instance shares, on both the primary and every
- * worker (`cluster.fork()` re-execs the entry module, so this class is instantiated once per
- * worker too) - one object instead of 5 module-level mutable bindings and 4 free functions closing
- * over them (#133). `workers` (below the class) is the ONE instance this file ever constructs.
- *
- * `register()`/`lookup()` are the pipeline registry: every `ClusterHttpPipeline` ever constructed in
- * this process, keyed by its own `pipelineIndex` - a worker's own copy ends up identical to the
- * primary's, because both run the exact same entry module, constructing pipelines in the exact
- * same order (product.md's own "index N means the same transform on both sides", one level up).
- * `enter()` is `bootstrap()` plus the `inFlight`/idle-kill bracket `stageWork()` (once per chunk)
- * and `reduceWork()` (once per whole stream) both need - a caller `await`s it, does its dispatch,
- * then calls the release it returns; `stageWork()`'s own `finally { inFlight--; scheduleIdleCheck();
- * }` and `reduceWork()`'s identical copy collapse to that one call.
- */
 /** Validates a worker's own IPC "ready" message before `bootstrap()` trusts its `port` - real
  * validation in place of a blind `as` cast, since a worker's `message` event is genuinely
  * arbitrary (Node's own `@types/node` types it `any`, this file already narrows to `unknown`).
@@ -400,7 +385,7 @@ export class ClusterHttpPipeline<T, In = T> extends HttpPipeline<T, In> {
   }
 
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain
-   * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`http.ts`) exists for, so several
+   * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`concurrent.ts`) exists for, so several
    * `ClusterHttpPipeline`s can share one worker server without colliding on stage 0. */
   protected override routePath(verb: RouteVerb, index: number): string {
     return `/pipeline/${this.pipelineIndex}${super.routePath(verb, index)}`;

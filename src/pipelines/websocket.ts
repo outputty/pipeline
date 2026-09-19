@@ -15,8 +15,8 @@
  * itself the discriminator: `{ "id": 0, "error": "…" }`.
  *
  * `route` carries what a URL path carried before - `/transform/<n>`, `/reduce/<n>`,
- * `/branch/<i>/<name>/transform/<n>` - unchanged trail, new home (`routePath()`, mirroring
- * `HttpPipeline`'s own).
+ * `/branch/<i>/<name>/transform/<n>` - unchanged trail, new home (`routePath()`, inherited
+ * from `ConcurrentPipeline`).
  *
  * One connection per `connect` target, memoized per process (`getConnection()`, below) -
  * planning's own "Connection shape" spike found this beats a pool sized to `maxConcurrency` on
@@ -37,7 +37,7 @@
  */
 
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
-import { ConcurrentPipeline } from "@src/pipelines/concurrent";
+import { ConcurrentPipeline, parseRoute } from "@src/pipelines/concurrent";
 import { Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
@@ -47,7 +47,6 @@ import type {
   PipelineMode,
   ReduceFunction,
   ReduceWork,
-  RouteVerb,
   StageRoute,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
@@ -140,16 +139,10 @@ function encodeFrame(header: Frame, payload: Uint8Array): Uint8Array {
   return frame;
 }
 
-/** `decodeFrame`'s own return shape - a parsed `Frame` header plus whatever payload bytes follow
- * it, possibly empty for an `inputDone`/`done` signal frame. */
-interface DecodedFrame {
-  header: Frame;
-  payload: Uint8Array;
-}
-
 /** The exact inverse of `encodeFrame` - reads the length prefix, slices the header JSON off the
- * front, and returns whatever bytes remain as the payload. */
-function decodeFrame(data: Uint8Array): DecodedFrame {
+ * front, and returns whatever bytes remain as the payload (empty for an `inputDone`/`done` signal
+ * frame). */
+function decodeFrame(data: Uint8Array) {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const headerLength = view.getUint32(0, false);
   const headerBytes = data.subarray(4, 4 + headerLength);
@@ -164,18 +157,11 @@ function encodeErrorFrame(id: number, error: string): string {
   return JSON.stringify({ id, error } satisfies ErrorFrame);
 }
 
-/** `peekFrame()`'s own return shape - a frame's `id`/`route` alone, read without decoding its
- * payload. */
-export interface FramePreview {
-  id: number;
-  route: string | undefined;
-}
-
 /** A frame's own `id`/`route`, read WITHOUT decoding its payload - `ClusterPipeline`'s own shared
  * worker server (`cluster.ts`, #201 L3) needs only these two fields to route a frame to the right
  * registered pipeline by its `/pipeline/<i>/` prefix, before that pipeline's own `receiveFrame()`
  * decodes the same bytes again in full. */
-export function peekFrame(data: Uint8Array): FramePreview {
+export function peekFrame(data: Uint8Array) {
   const { header } = decodeFrame(data);
   return { id: header.id, route: header.route };
 }
@@ -188,20 +174,6 @@ export function sendUnknownRouteError(
   route: string | undefined,
 ): void {
   socket.send(encodeErrorFrame(id, `unknown pipeline route ${route ?? "(missing)"}`));
-}
-
-/**
- * Reads back the route grammar `WebSocketPipeline.routePath()` builds (#201, mirroring
- * `HttpPipeline`'s own `parseRoute` in `http.ts`, kept as its own copy since the two parse different
- * strings - a URL pathname there, a bare JSON field here - even though the grammar is identical):
- * `/transform/<n>`, `/reduce/<n>`, optionally prefixed by a `/branch/<i>/<name>` trail.
- *
- * `parseRoute("/branch/1/big/transform/2")` → `{ trail: "/branch/1/big", verb: "transform", index: 2 }`.
- */
-function parseRoute(route: string): StageRoute | null {
-  const match = /(\/branch\/\d+\/[^/]+)?\/(transform|reduce)\/(\d+)$/.exec(route);
-  if (match === null) return null;
-  return { trail: match[1] ?? null, verb: match[2] as RouteVerb, index: Number(match[3]) };
 }
 
 /** Wraps a real `ws` `WebSocket` (client-dialed or server-accepted, identical shape either way) as
