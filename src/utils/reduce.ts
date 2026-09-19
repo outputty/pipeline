@@ -342,20 +342,22 @@ function* driveFold<T, Unit>(
   let remaining: T[][] = [];
 
   for (const unit of units) {
-    yield* nonEmpty(remaining);
-    remaining = [];
+    if (remaining.length > 0) {
+      yield* nonEmpty(remaining);
+      remaining = [];
+    }
 
     const out: T[][] | Promise<T[][]> = tail === null ? work(unit) : tail.then(() => work(unit));
 
     if (isThenable(out)) {
       tail = out as Promise<T[][]>;
       yield tail.then((values) => {
-        remaining = values.slice(1).filter((value) => value.length > 0);
+        remaining = values.slice(1);
         return values[0] ?? [];
       });
       continue;
     }
-    yield* nonEmpty(out as T[][]);
+    if ((out as T[][]).length > 0) yield* nonEmpty(out as T[][]);
   }
 
   yield* nonEmpty(remaining);
