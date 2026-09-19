@@ -217,31 +217,15 @@ export function* foldSyncChunkStream<U, T>(
   ctx: IContextManager,
 ): MaybeAsyncChunks<U> {
   const reducer = new Reducer<U, T>(fn, initial);
-  let tail: Promise<U[]> | null = null;
-
-  for (const chunk of chunks) {
-    const fold = (): U[] | Promise<U[]> => chain(chunk, (items) => foldChunk(reducer, items, ctx));
-    const out: U[] | Promise<U[]> = tail === null ? fold() : tail.then(fold);
-
-    if (isThenable(out)) {
-      tail = out as Promise<U[]>;
-      // NOT guarded on length, unlike the settled arm below: a pending chunk's emptiness is not
-      // knowable until it settles, and a generator cannot un-yield. `PipelineResult.chunks()`
-      // drops the empties instead, which is where they are observable.
-      yield out as Promise<U[]>;
-      continue;
-    }
-    if ((out as U[]).length > 0) yield out as U[];
-  }
-
-  // The trailing accumulator owes the same ordering: once anything deferred, it is only known after
-  // the last chunk settles.
-  if (tail !== null) {
-    yield tail.then(() => reducer.final());
-    return;
-  }
-  const trailing = reducer.final();
-  if (trailing.length > 0) yield trailing;
+  yield* driveFold(
+    chunks,
+    (slot) =>
+      chain(
+        chain(slot, (items) => foldChunk(reducer, items, ctx)),
+        (out) => [out],
+      ),
+    () => [reducer.final()],
+  );
 }
 
 /**
