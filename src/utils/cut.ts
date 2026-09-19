@@ -11,7 +11,7 @@
 
 import type { ChunkerFunction } from "@src/types";
 import { chain } from "@src/utils/helpers";
-import { drainSync, dispatchSync, type MaybeAsyncChunks } from "@src/utils/drain";
+import { drainSync, type MaybeAsyncChunks } from "@src/utils/drain";
 import { isEncodedChunk, materialize } from "@src/utils/encoded-chunk";
 
 /** The `chunkSize`/`size` guard `buildChunkGenerator`, `buildSyncChunkGenerator` and
@@ -286,17 +286,13 @@ export function collectItems<T>(
   limit?: number,
 ): T[] | Promise<T[]> {
   const results: T[] = [];
-  return dispatchSync(
-    syncChunks,
-    (syncView) =>
-      chain(
-        drainSync(syncView, (item) => {
-          results.push(item);
-          return limit !== undefined && results.length >= limit;
-        }),
-        () => results,
-      ),
-    () => collectAsyncChunks(results, limit, chunks),
+  if (syncChunks === null) return collectAsyncChunks(results, limit, chunks);
+  return chain(
+    drainSync(syncChunks, (item) => {
+      results.push(item);
+      return limit !== undefined && results.length >= limit;
+    }),
+    () => results,
   );
 }
 
