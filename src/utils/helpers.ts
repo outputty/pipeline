@@ -206,16 +206,6 @@ export function runStageChunk<In, Out>(
 ): Out[] | Promise<Out[]> {
   return tryRecover(
     () => runnable(chunk, ctx),
-    (error) => dropChunk<Out>(runHandler, error, ctx),
+    (error) => chain(dropOrRethrow(runHandler, error, ctx), () => [] as Out[]),
   );
-}
-
-/** One chunk's failure answer: run the handler, then contribute nothing. Its own function so
- * `runStageChunk`'s happy path never builds a closure for it. */
-function dropChunk<Out>(
-  runHandler: PipelineErrorHandler | undefined,
-  error: Error,
-  ctx: IContextManager,
-): Out[] | Promise<Out[]> {
-  return chain(dropOrRethrow(runHandler, error, ctx), () => [] as Out[]);
 }
