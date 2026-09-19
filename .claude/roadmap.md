@@ -65,6 +65,17 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **The source, simplified with the public API unchanged** (#232, `refactor`, PRs #233 (L1)/#234
+  (L2)/#236 (L3) and this docs PR) - a read-only survey of every module scored code and docstring
+  complexity separately, and the stack landed the candidates that deleted a whole pattern or shrank
+  the code: `normalize` and its 3-case test file, `dispatchSync`, the utils barrel, five one-caller
+  helpers, 19 "Python equivalent" porting blocks, one `parseRoute` for `HttpPipeline` and
+  `WebSocketPipeline`, and one private `cutBy` behind both `.buffer()` forms. Runtime cost against
+  the base commit: garbage collections and peak heap unchanged on every `bench/memory.ts` case,
+  promises per row down 7-8% on the `ConcurrentPipeline` cases, sync `.buffer(fn)` faster. Left as
+  decisions, each changing a public surface: `createTransformer`, `flatten`, `shortCircuit`, the
+  `EventEmitterPipeline` lifecycle events, and `toNodeHandler`'s pre-first-byte failure.
+
 - **`EventEmitterPipeline` events read as routes, the composed function never a listener** (#221,
   `feat!`, PR #226 (L1)/#227 (L2) and this docs PR) - events renamed from a flat `stage:<n>`
   counter to the route the chain was built along (`/transform/<n>`, a `.branch()` arm's own
