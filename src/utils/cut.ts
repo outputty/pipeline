@@ -83,51 +83,6 @@ export function buildChunkGenerator<T>(chunkSize: number): ChunkerFunction<T> {
 }
 
 /**
- * Normalize a mixed stream of single items and pre-chunked arrays into chunks.
- *
- * Runs whenever a source stream mixes loose items with already-chunked arrays
- * (e.g. an ingestion source that occasionally emits a batch). Non-array items
- * are buffered in arrival order; the buffer is flushed as a chunk whenever an
- * array item is encountered (the array itself passes through as its own chunk,
- * unwrapped) or when the stream ends. Order is always preserved.
- *
- * @param stream - Async iterable yielding either loose items or arrays of items
- * @returns An async generator of chunks (arrays), in stream order
- *
- * @example
- * ```typescript
- * async function* mixed() {
- *   yield { id: 1 };
- *   yield [{ id: 2 }, { id: 3 }];
- *   yield { id: 4 };
- * }
- * for await (const chunk of normalize(mixed())) {
- *   console.log(chunk);
- * }
- * // Output: [{id:1}], [{id:2},{id:3}], [{id:4}]
- * ```
- */
-export async function* normalize<T>(stream: AsyncIterable<T | T[]>): AsyncGenerator<T[]> {
-  let buffer: T[] = [];
-
-  for await (const item of stream) {
-    if (!Array.isArray(item)) {
-      buffer.push(item as T);
-      continue;
-    }
-    if (buffer.length > 0) {
-      yield buffer;
-      buffer = [];
-    }
-    yield item;
-  }
-
-  if (buffer.length > 0) {
-    yield buffer;
-  }
-}
-
-/**
  * Flattens a chunk stream into its items, in order (#39) - the one place a chunk becomes items
  * again for `.buffer()`'s re-cut fallback. Materializes each chunk first (#209): an encoded chunk
  * a dispatched stage left behind is decoded here, since a re-cut needs real items to slice.
