@@ -139,16 +139,10 @@ function encodeFrame(header: Frame, payload: Uint8Array): Uint8Array {
   return frame;
 }
 
-/** `decodeFrame`'s own return shape - a parsed `Frame` header plus whatever payload bytes follow
- * it, possibly empty for an `inputDone`/`done` signal frame. */
-interface DecodedFrame {
-  header: Frame;
-  payload: Uint8Array;
-}
-
 /** The exact inverse of `encodeFrame` - reads the length prefix, slices the header JSON off the
- * front, and returns whatever bytes remain as the payload. */
-function decodeFrame(data: Uint8Array): DecodedFrame {
+ * front, and returns whatever bytes remain as the payload (empty for an `inputDone`/`done` signal
+ * frame). */
+function decodeFrame(data: Uint8Array) {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const headerLength = view.getUint32(0, false);
   const headerBytes = data.subarray(4, 4 + headerLength);
@@ -163,18 +157,11 @@ function encodeErrorFrame(id: number, error: string): string {
   return JSON.stringify({ id, error } satisfies ErrorFrame);
 }
 
-/** `peekFrame()`'s own return shape - a frame's `id`/`route` alone, read without decoding its
- * payload. */
-export interface FramePreview {
-  id: number;
-  route: string | undefined;
-}
-
 /** A frame's own `id`/`route`, read WITHOUT decoding its payload - `ClusterPipeline`'s own shared
  * worker server (`cluster.ts`, #201 L3) needs only these two fields to route a frame to the right
  * registered pipeline by its `/pipeline/<i>/` prefix, before that pipeline's own `receiveFrame()`
  * decodes the same bytes again in full. */
-export function peekFrame(data: Uint8Array): FramePreview {
+export function peekFrame(data: Uint8Array) {
   const { header } = decodeFrame(data);
   return { id: header.id, route: header.route };
 }
