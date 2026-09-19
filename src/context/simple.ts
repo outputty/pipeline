@@ -1,24 +1,5 @@
 /**
  * Simple context manager implementation.
- *
- * Python equivalent:
- * ```python
- * class SimpleContextManager:
- *   def __init__(self, initial: dict[str, Any] | None = None):
- *     self._data = initial.copy() if initial else {}
- *
- *   def __getitem__(self, key: str) -> Any:
- *     return self._data[key]
- *
- *   def __setitem__(self, key: str, value: Any) -> None:
- *     self._data[key] = value
- *
- *   def get(self, key: str, default: Any = None) -> Any:
- *     return self._data.get(key, default)
- *
- *   def to_dict(self) -> dict[str, Any]:
- *     return self._data.copy()
- * ```
  */
 
 import type { IContextManager } from "@src/types";

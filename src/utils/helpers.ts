@@ -1,13 +1,5 @@
 /**
  * Helper utilities for checking function signatures.
- *
- * Python equivalent:
- * ```python
- * def is_context_aware(func: Callable) -> bool:
- *   sig = inspect.signature(func)
- *   params = list(sig.parameters.values())
- *   return len(params) >= 2
- * ```
  */
 
 import type { IContextManager, PipelineFunction, PipelineErrorHandler } from "@src/types";

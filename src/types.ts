@@ -187,11 +187,6 @@ export interface RunScope {
  * `run` is optional and forwarded by `pipe()` alone (#78) - a caller driving a `Transformer`
  * standalone via `.process()` never has to supply it; `Transformer.runnable()` is what builds it
  * from `this.rowHandler` before the top of the chain is ever called.
- *
- * Python equivalent:
- * ```python
- * type InternalTransformer[In, Out] = Callable[[list[In], IContextManager], list[Out]]
- * ```
  */
 export type InternalTransformer<In, Out> = (
   chunk: In[],
@@ -201,11 +196,6 @@ export type InternalTransformer<In, Out> = (
 
 /**
  * Chunker function type - breaks an async iterable into chunks.
- *
- * Python equivalent:
- * ```python
- * Callable[[Iterable[T]], Iterator[list[T]]]
- * ```
  */
 export type ChunkerFunction<T> = (data: AsyncIterable<T>) => AsyncGenerator<T[]>;
 
@@ -236,15 +226,6 @@ export type BufferFunction<T> = (
 
 /**
  * Context manager interface for sharing state across pipeline operations.
- *
- * Python equivalent:
- * ```python
- * class IContextManager(Protocol):
- *   def __getitem__(self, key: str) -> Any: ...
- *   def __setitem__(self, key: str, value: Any) -> None: ...
- *   def get(self, key: str, default: Any = None) -> Any: ...
- *   def to_dict(self) -> dict[str, Any]: ...
- * ```
  */
 export interface IContextManager {
   /**

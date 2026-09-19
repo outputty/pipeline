@@ -1,18 +1,5 @@
 /**
  * Transformer class - chainable chunk transformation operations.
- *
- * Python equivalent:
- * ```python
- * class Transformer[In, Out](BaseTransformer[In, Out]):
- *   def __init__(
- *     self,
- *     transformer: InternalTransformer[In, Out] | None = None,
- *   ) -> None:
- *     ...
- *
- *   def __call__(self, chunks: Iterable[list[In]], context: IContextManager | None = None) -> Iterator[list[Out]]:
- *     ...
- * ```
  */
 
 import type {
@@ -382,14 +369,6 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    * `Pipeline.apply()` hands it `this._chunks` directly, and a caller running a `Transformer`
    * standalone supplies its own already-cut `AsyncIterable<In[]>`.
    *
-   * Python equivalent:
-   * ```python
-   * def __call__(self, chunks: Iterable[list[In]], context: IContextManager | None = None) -> Iterator[list[Out]]:
-   *   run_context = context if context is not None else self._default_context
-   *   for chunk in chunks:
-   *     yield self.transformer(chunk, run_context)
-   * ```
-   *
    * `runHandler` is `Pipeline.onError()`'s own RUN handler (#78) - `Pipeline.apply()` passes its
    * `_runHandler` through here, and it reaches `runSequentially`'s per-chunk try/catch (above): no
    * handler means a chunk failure still propagates and ends the run, same as before #78; a handler
@@ -431,21 +410,6 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    * Each operation creates a NEW transformer that composes the current
    * transform with the new operation.
    *
-   * Python equivalent:
-   * ```python
-   * def _pipe[U](self, operation: Callable[[list[Out], IContextManager], list[U]]) -> "Transformer[In, U]":
-   *   current_transformer = self.transformer
-   *
-   *   def new_transformer(chunk: list[In], ctx: IContextManager) -> list[U]:
-   *     intermediate = current_transformer(chunk, ctx)
-   *     return operation(intermediate, ctx)
-   *
-   *   return Transformer[In, U](
-   *     chunk_size=self.chunk_size,
-   *     transformer=new_transformer,
-   *   )
-   * ```
-   *
    * @param operation - Function that transforms the output of the current transform
    * @returns A new Transformer with the composed operation
    */
@@ -473,17 +437,6 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
 
   /**
    * Transform each element using a mapping function.
-   *
-   * Python equivalent:
-   * ```python
-   * def map[U](self, function: PipelineFunction[Out, U]) -> "Transformer[In, U]":
-   *   if is_context_aware(function):
-   *     context_aware_func: Callable[[Out, IContextManager], U] = function
-   *     return self._pipe(lambda chunk, ctx: [context_aware_func(x, ctx) for x in chunk])
-   *
-   *   non_context_func: Callable[[Out], U] = function
-   *   return self._pipe(lambda chunk, _ctx: [non_context_func(x) for x in chunk])
-   * ```
    *
    * @param fn - Mapping function (can be context-aware)
    * @returns New Transformer with map operation applied
@@ -513,17 +466,6 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   /**
    * Filter elements using a predicate function.
    *
-   * Python equivalent:
-   * ```python
-   * def filter(self, predicate: PipelineFunction[Out, bool]) -> "Transformer[In, Out]":
-   *   if is_context_aware(predicate):
-   *     context_aware_predicate: Callable[[Out, IContextManager], bool] = predicate
-   *     return self._pipe(lambda chunk, ctx: [x for x in chunk if context_aware_predicate(x, ctx)])
-   *
-   *   non_context_predicate: Callable[[Out], bool] = predicate
-   *   return self._pipe(lambda chunk, _ctx: [x for x in chunk if non_context_predicate(x)])
-   * ```
-   *
    * @param predicate - Filter function (can be context-aware)
    * @returns New Transformer with filter operation applied
    */
@@ -551,14 +493,6 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
 
   /**
    * Flatten nested arrays in the output.
-   *
-   * Python equivalent:
-   * ```python
-   * def flatten[T](
-   *   self: Union["Transformer[In, list[T]]", "Transformer[In, tuple[T, ...]]", "Transformer[In, set[T]]"],
-   * ) -> "Transformer[In, T]":
-   *   return self._pipe(lambda chunk, ctx: [item for sublist in chunk for item in sublist])
-   * ```
    *
    * @returns New Transformer with flattened output
    */
@@ -596,21 +530,6 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    * Can be called with either:
    * - A function that receives each element (and optionally context)
    * - A Transformer whose transform function will be executed for side effects
-   *
-   * Python equivalent:
-   * ```python
-   * def tap(self, arg: Union["Transformer[Out, Any]", PipelineFunction[Out, Any]]) -> "Transformer[In, Out]":
-   *   match arg:
-   *     case Transformer() as transformer:
-   *       tapped_func = transformer.transformer
-   *       return self._pipe(lambda chunk, ctx: chunk if tapped_func(chunk, ctx) or True else chunk)
-   *     case function if callable(function):
-   *       if is_context_aware(function):
-   *         context_aware_func: Callable[[Out, IContextManager], Any] = function
-   *         return self._pipe(lambda chunk, ctx: [x for x in chunk if context_aware_func(x, ctx) or True])
-   *       non_context_func: Callable[[Out], Any] = function
-   *       return self._pipe(lambda chunk, _ctx: [x for x in chunk if non_context_func(x) or True])
-   * ```
    */
 
   // Overload signatures
@@ -655,12 +574,6 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    * This is a composition helper that allows applying a function that takes
    * this transformer and returns a new one. Useful for extracting reusable
    * transformation chains.
-   *
-   * Python equivalent:
-   * ```python
-   * def apply[T](self, t: Callable[[Self], "Transformer[In, T]"]) -> "Transformer[In, T]":
-   *   return t(self)
-   * ```
    *
    * @param fn - Function that receives this transformer and returns a new one
    * @returns Result of applying the function to this transformer
@@ -824,16 +737,6 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    *
    * When the condition function returns true, throws an error to halt
    * the pipeline execution. Useful for implementing early exit conditions.
-   *
-   * Python equivalent:
-   * ```python
-   * def short_circuit(self, function: Callable[[IContextManager], bool | None]) -> "Transformer[In, Out]":
-   *   def operation(chunk: list[Out], ctx: IContextManager) -> list[Out]:
-   *     if function(ctx):
-   *       raise RuntimeError("Short-circuit condition met, stopping execution.")
-   *     return chunk
-   *   return self._pipe(operation)
-   * ```
    *
    * @param fn - Function that returns true to stop execution
    * @returns New transformer with short-circuit condition applied
