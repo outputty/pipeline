@@ -19,7 +19,6 @@
 import type { AnyPipeline, Pipeline, PipelineSource } from "./pipeline";
 import type { Drainable, IContextManager, JoinMode, PipelineMode } from "./types";
 import { drainSync, type MaybeAsyncChunks } from "./utils/chunk";
-import { dispatchSync } from "./utils/drain";
 import { chain, mapSettle } from "./utils/helpers";
 
 /** An arm's own pipeline, before its builder composes anything onto it. */
@@ -194,8 +193,8 @@ export class BranchBuilder<T, R = Record<never, never>, AM extends PipelineMode 
  * item enters, so sending it out would cost every item two trips (one to be classified, one to be
  * worked on) and would stop a predicate closing over anything the caller holds.
  *
- * Walks `syncChunks`/`chunks()` directly through the same `dispatchSync`/`drainSync` machinery every
- * other synchronous drain in this package shares, classifying each item as it streams off the chunk
+ * Walks `syncChunks`/`chunks()` directly through the same `drainSync` machinery every other
+ * synchronous drain in this package shares, classifying each item as it streams off the chunk
  * view - never `collectItems()` into one flat array first and then a second loop over it (#180's own
  * finding: that two-pass shape measured 2.27x a single-pass floor, and accounted for nearly the whole
  * gap between `.branch()` and its hand-rolled floor - `bench/legs/branch.ts`'s own `ratio`).
@@ -211,16 +210,12 @@ function classifyItems<T>(
   broadcast: boolean,
 ): Map<string, T[]> | Promise<Map<string, T[]>> {
   const grouped = new Map<string, T[]>(arms.map((arm) => [arm.name, []]));
-  return dispatchSync(
-    syncChunks,
-    (syncView) =>
-      chain(
-        drainSync(syncView, (item) => {
-          claimItem(item, arms, grouped, broadcast);
-        }),
-        () => grouped,
-      ),
-    () => classifyAsyncChunks(grouped, chunks, arms, broadcast),
+  if (syncChunks === null) return classifyAsyncChunks(grouped, chunks, arms, broadcast);
+  return chain(
+    drainSync(syncChunks, (item) => {
+      claimItem(item, arms, grouped, broadcast);
+    }),
+    () => grouped,
   );
 }
 

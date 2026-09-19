@@ -1,6 +1,6 @@
 /**
  * Chunk utilities - the barrel (#133). The real implementations split into `cut.ts`
- * (cutting/flattening/normalizing/sharing), `drain.ts` (draining a `MaybeAsyncChunks` stream) and
+ * (cutting/flattening/sharing), `drain.ts` (draining a `MaybeAsyncChunks` stream) and
  * `recut.ts` (re-cutting an already-staged one), each its own real seam; this file re-exports every
  * symbol `chunk.ts` itself used to export, so every existing `@src/utils/chunk`/`./utils/chunk`
  * import keeps resolving unchanged. `assertPositiveChunkSize` and `close` are NOT re-exported here
@@ -12,7 +12,6 @@
 
 export {
   buildChunkGenerator,
-  normalize,
   flattenChunks,
   asAsyncChunks,
   buildSyncChunkGenerator,

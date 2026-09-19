@@ -1,13 +1,5 @@
 /**
  * Helper utilities for checking function signatures.
- *
- * Python equivalent:
- * ```python
- * def is_context_aware(func: Callable) -> bool:
- *   sig = inspect.signature(func)
- *   params = list(sig.parameters.values())
- *   return len(params) >= 2
- * ```
  */
 
 import type { IContextManager, PipelineFunction, PipelineErrorHandler } from "@src/types";
@@ -43,12 +35,7 @@ export function isContextAware<Out, T>(
  * lives once rather than twice. No handler registered → rethrow (today's behaviour, the run dies).
  * A handler that itself throws (or a caller who writes `(e) => { throw e; }`) still propagates - it
  * is not caught here, so it escalates past this call to whatever awaits the caller. `runHandler` is
- * declared as bare `void` (`.claude/rules/typescript.md`), which still accepts an `async` callback -
- * this function is itself `async` and `await`s the call so a Promise-returning handler's own
- * rejection is caught HERE rather than becoming an unhandled rejection the caller never sees: with
- * no `await`, a handler that decides to rethrow only after an `await` of its own would resolve this
- * function normally (its caller then treats the chunk as dropped) before that rejection ever
- * surfaces.
+ * declared as bare `void` (`.claude/rules/typescript.md`), which still accepts an `async` callback.
  *
  * `await dropOrRethrow(undefined, err, ctx)` throws `err`. `await dropOrRethrow((e) => log(e), err,
  * ctx)` calls the handler and returns normally - the caller drops the chunk and continues.
@@ -206,16 +193,6 @@ export function runStageChunk<In, Out>(
 ): Out[] | Promise<Out[]> {
   return tryRecover(
     () => runnable(chunk, ctx),
-    (error) => dropChunk<Out>(runHandler, error, ctx),
+    (error) => chain(dropOrRethrow(runHandler, error, ctx), () => [] as Out[]),
   );
-}
-
-/** One chunk's failure answer: run the handler, then contribute nothing. Its own function so
- * `runStageChunk`'s happy path never builds a closure for it. */
-function dropChunk<Out>(
-  runHandler: PipelineErrorHandler | undefined,
-  error: Error,
-  ctx: IContextManager,
-): Out[] | Promise<Out[]> {
-  return chain(dropOrRethrow(runHandler, error, ctx), () => [] as Out[]);
 }
