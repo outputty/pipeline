@@ -1401,11 +1401,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `Transformer.tap` keeps `Out` unchanged, so `T` never changes either and no subclass
    * re-declaration is needed, unlike `.local()` itself.
    *
-   * `arg`'s two overloads dispatch to `Transformer.tap`'s own two overloads inside `build` - a
-   * plain `t.tap(arg)` call with `arg` still typed as their union would not typecheck against either
-   * overload individually, so the `instanceof` check narrows it first, mirroring
-   * `Transformer.tap`'s own implementation.
-   *
    * @example
    * `new Pipeline([1, 2, 3]).tap((x) => seen.push(x)).transform((t) => t.map((x) => x *
    * 2)).toArray()` → `[2, 4, 6]`, with `seen` `[1, 2, 3]`.
@@ -1421,13 +1416,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   tap(
     arg: PipelineFunction<T, unknown> | Transformer<T, unknown, "sync" | "async">,
   ): this | Pipeline<T, "async", In> {
-    // Both arms below call the exact same runtime expression, `t.tap(arg)` - this is NOT dead code:
-    // `Transformer.tap` is itself overloaded, and a union-typed `arg` matches neither overload on
-    // its own, so the instanceof check exists purely to narrow `arg`'s STATIC type per arm before
-    // each (otherwise-identical) call, the same way `Transformer.tap`'s own implementation narrows
-    // it internally. Collapsing this to one arm - `p.transform((t) => t.tap(arg))` - fails to
-    // typecheck. Never edit one arm without the other; a real behavior change belongs in
-    // `Transformer.tap` itself, which both arms delegate to unconditionally.
     // The region is typed at a CONCRETE Mode before `.transform()` is called on it: inside this
     // generic method `M` is still abstract, so `.transform()`'s own `M extends "unset" ? never`
     // guard cannot resolve and refuses the receiver. The guard is for a CALLER who has not called
@@ -1439,17 +1427,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       // so any placeholder does, and `unknown` names that honestly rather than borrowing a runtime
       // value's own literal type.
       const sourced = p as Pipeline<T, "sync" | "async", unknown> as Pipeline<T, "sync", unknown>;
-      // Both arms call the identical runtime expression; the narrowing exists purely to pick one
-      // of `Transformer.tap`'s own overloads, which a union-typed `arg` matches neither of. The
-      // Mode cast on the transformer arm is safe for the same reason: `tap` runs its argument for
-      // side effects and returns the chunk unchanged, so the argument's own Mode never reaches the
-      // value this region produces - only the CALLER's `tap` overload records it, above.
+      // `Transformer.tap` tells a function from a `Transformer` at runtime, so one call serves both.
+      // The cast picks its `Transformer` overload for the compiler, and the Mode it names never
+      // reaches this region: `tap` runs its argument for side effects and returns the chunk
+      // unchanged - only the CALLER's `tap` overload records it, above.
       const tapped = arg as Transformer<T, unknown, "sync">;
-      return (arg instanceof Transformer
-        ? sourced.transform((t) => t.tap(tapped))
-        : sourced.transform((t) =>
-            t.tap(arg as PipelineFunction<T, unknown>),
-          )) as unknown as Pipeline<T, "sync", unknown>;
+      return sourced.transform((t) => t.tap(tapped)) as unknown as Pipeline<T, "sync", unknown>;
       // `as unknown` first: `.local()`'s return names a concrete `In`, which `this` need not share
       // (#90 added `In` as the class's fourth type parameter), so the two no longer overlap enough
       // for a direct cast. `.tap()` keeps `T` and every knob, so the receiver's own type is right.
