@@ -150,8 +150,7 @@ export function disarm<R>(created: (R | Promise<R>)[]): void {
  * try `attempt`; a synchronous throw OR a rejected `Promise` both route to `recover`. Neither path
  * builds a closure this function doesn't already need - `recover` is a plain function the CALLER
  * already holds, invoked directly at the failure site, never wrapped or hoisted here. Serves
- * `runStageChunk` below and `transformer.ts`'s own `attemptRow` (was spelled out separately, 2
- * copies, before this).
+ * `runStageChunk` below, `drain.ts`'s own `closingOnFailure` and `transformer.ts`'s own `settleRowStep`.
  *
  * `Reducer.fold` (`utils/reduce.ts`) does NOT use this, by decision: its own docstring records a
  * measured perf note (372.5 ns/item for a hoisted commit/recover pair against 8.9 ns/item inlined)

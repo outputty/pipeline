@@ -10,7 +10,7 @@
  */
 
 import type { ChunkerFunction } from "@src/types";
-import { chain } from "@src/utils/helpers";
+import { chain, isThenable } from "@src/utils/helpers";
 import { drainSync, type MaybeAsyncChunks } from "@src/utils/drain";
 import { isEncodedChunk, materialize } from "@src/utils/encoded-chunk";
 
@@ -107,13 +107,14 @@ export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenera
  *
  * One `Promise` per CHUNK, where `buildChunkGenerator` over `toAsyncIterable(data)` pays one per
  * ROW twice over - `toAsyncIterable`'s own `Promise.resolve` per pull, then the cutter's `for await`
- * on top. Nothing here can be pending: `buildSyncChunkGenerator` yields real arrays, so no `await`
- * on the yielded value is needed and none is written.
+ * on top. A slot may still be a pending `Promise` (a stage between two `.buffer()` calls widens only
+ * its own output), so a thenable is awaited; the loop is hand-rolled because it measured faster
+ * per chunk than `yield*` over the same slots.
  *
- * `[...] = await Array.fromAsync(asAsyncChunks([[1, 2], [3]]))` → `[[1, 2], [3]]`.
+ * `asAsyncChunks([[1, 2], Promise.resolve([3])])` yields `[1, 2]`, then `[3]`.
  */
-export async function* asAsyncChunks<T>(chunks: Iterable<T[]>): AsyncGenerator<T[]> {
-  yield* chunks;
+export async function* asAsyncChunks<T>(chunks: MaybeAsyncChunks<T>): AsyncGenerator<T[]> {
+  for (const chunk of chunks) yield isThenable(chunk) ? await chunk : chunk;
 }
 
 /**
