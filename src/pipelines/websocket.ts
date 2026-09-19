@@ -15,8 +15,8 @@
  * itself the discriminator: `{ "id": 0, "error": "…" }`.
  *
  * `route` carries what a URL path carried before - `/transform/<n>`, `/reduce/<n>`,
- * `/branch/<i>/<name>/transform/<n>` - unchanged trail, new home (`routePath()`, mirroring
- * `HttpPipeline`'s own).
+ * `/branch/<i>/<name>/transform/<n>` - unchanged trail, new home (`routePath()`, inherited
+ * from `ConcurrentPipeline`).
  *
  * One connection per `connect` target, memoized per process (`getConnection()`, below) -
  * planning's own "Connection shape" spike found this beats a pool sized to `maxConcurrency` on

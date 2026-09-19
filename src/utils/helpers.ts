@@ -147,15 +147,13 @@ export function disarm<R>(created: (R | Promise<R>)[]): void {
 
 /**
  * The try/catch-if-thenable/recover skeleton every ROW- or CHUNK-level recovery site shares (#133):
- * try `attempt`; a synchronous throw OR a rejected `Promise` both route to `recover`. Neither path
- * builds a closure this function doesn't already need - `recover` is a plain function the CALLER
- * already holds, invoked directly at the failure site, never wrapped or hoisted here. Serves
+ * try `attempt`; a synchronous throw OR a rejected `Promise` both route to `recover`. Serves
  * `runStageChunk` below, `drain.ts`'s own `closingOnFailure` and `transformer.ts`'s own `settleRowStep`.
  *
  * `Reducer.fold` (`utils/reduce.ts`) does NOT use this, by decision: its own docstring records a
  * measured perf note (372.5 ns/item for a hoisted commit/recover pair against 8.9 ns/item inlined)
- * that is specifically about its PER-ITEM fold path - the two sites this helper serves are each
- * called at most once per chunk's own row or once per chunk, never once per item inside a hot fold,
+ * that is specifically about its PER-ITEM fold path - the sites this helper serves are each
+ * called at most once per row of a chunk, once per chunk or once per drain, never once per item inside a hot fold,
  * so the trade that note rejects for `Reducer.fold` does not apply here.
  *
  * `tryRecover(() => parseStrict("3"), () => -1)` → `3`, no `Promise` created, `recover` never

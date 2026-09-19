@@ -385,7 +385,7 @@ export class ClusterHttpPipeline<T, In = T> extends HttpPipeline<T, In> {
   }
 
   /** Routes this pipeline's stages through `/pipeline/<pipelineIndex>/<verb>/<n>` instead of plain
-   * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`http.ts`) exists for, so several
+   * `HttpPipeline`'s `/<verb>/<n>` - the one hook `routePath()` (`concurrent.ts`) exists for, so several
    * `ClusterHttpPipeline`s can share one worker server without colliding on stage 0. */
   protected override routePath(verb: RouteVerb, index: number): string {
     return `/pipeline/${this.pipelineIndex}${super.routePath(verb, index)}`;

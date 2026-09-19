@@ -175,7 +175,7 @@ function settleRowStep<T, U>(
 }
 
 /**
- * The row-level recovery `.map()`/`.filter()`/`.tap(fn)` share (#78): try `attempt`, and on a throw
+ * The row-level recovery `.map()`/`.filter()`/`.flatMap()`/`.tap(fn)` share (#78): try `attempt`, and on a throw
  * (or a rejected `Promise`) call `rowHandler` for a replacement value or `DROP`. Results keep their
  * ORIGINAL index regardless of completion order, leaving every recovered or successful row at its
  * own position.

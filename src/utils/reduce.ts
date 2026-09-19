@@ -315,9 +315,9 @@ export function buildBufferGenerator<T>(
 }
 
 /**
- * The shared item-by-item / slot-by-slot fold-and-yield engine `buildSyncBufferGenerator` and
- * `recutSyncChunksWith` (below) both drive (#88, code-review) - the SAME tail-chaining
- * `foldSyncChunkStream` uses, generalised over "a unit of input" (one raw item, or one existing
+ * The shared item-by-item / slot-by-slot fold-and-yield engine `foldSyncChunkStream`,
+ * `buildSyncBufferGenerator` and `recutSyncChunksWith` (below) all drive (#88, #232) - the
+ * tail-chaining, generalised over "a unit of input" (one raw item, or one existing
  * chunk's worth of items) instead of assuming which. `work(unit)` folds ONE unit and may emit any
  * number of chunks; every one of them must reach the caller as its OWN separate `MaybeAsyncChunks`
  * slot, never grouped, since each `emit()` IS a chunk boundary - `.flat()`-ing them together (the
