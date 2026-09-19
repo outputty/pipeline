@@ -31,6 +31,9 @@ Each line is one rule: the moment, then the action. Rules that hold in any repo 
     result under test: `RESPONSE HEADERS AT +90011ms status 408` read as "the response is withheld
     until the request body is sent", where the reordered probe returned the opposite.
 
+- After `pnpm bench:compare <ref>` on a branch that deleted a source file, run `git status --porcelain` and `git rm -f` every `A` line under `src/`. (2026-09-19)
+  - The compare restores `src/` with `git checkout HEAD -- src/`, which cannot delete a file the base ref still has, so the next compare refuses with "src/ has uncommitted changes".
+
 ## Names and pointers
 
 - Before moving a call a ticket says to move rather than duplicate, grep every path that reached

@@ -71,8 +71,8 @@ src/
                           classifyItems/classifyAsyncChunks/claimItem fuse the demux into ONE walk
                           over the chunk stream instead of collectItems() then a second loop (#180)
   result.ts               PipelineResult - every terminal op; drainable() returns Drainable<T>
-                          directly; forEach()/[Symbol.iterator]() share utils/drain.ts's own
-                          dispatchSync() instead of each testing syncChunks separately (#133)
+                          directly; forEach()/[Symbol.iterator]() each test `syncChunks !== null` for the
+                          sync/async branch (#232 deleted the dispatchSync() wrapper)
   pipelines/
     concurrent.ts          ConcurrentPipeline - the fan-out (fanOutOrdered/fanOutUnordered),
                              stageWork()/reduceWork(); carriedKnobs() (not createPipeline()) is the
@@ -111,23 +111,19 @@ src/
                              (a dead re-export) is deleted (#133)
   utils/
     chunk.ts                a thin re-export barrel over cut.ts/drain.ts/recut.ts, so an existing
-                             `from "@src/utils/chunk"` import keeps resolving (#133), normalize
-                             included - this internal path is unchanged. What dropped is the
-                             PACKAGE's own public surface: `utils/index.ts` and `src/index.ts`
-                             never re-export normalize any more (BREAKING) - the one caller left
-                             (`__tests__/normalize-and-chunks.e2e.test.ts`) reaches it through this
-                             internal `@src/utils/chunk` path, same as before
+                             `from "@src/utils/chunk"` import keeps resolving (#133); `normalize`, its
+                             one test file and the `utils/index.ts` barrel are deleted (#232) -
+                             `src/index.ts` re-exports `buildChunkGenerator` from here and
+                             `isContextAware` from helpers.ts directly
     cut.ts                  buildChunkGenerator/buildSyncChunkGenerator (cut) / flattenChunks
-                             (undo) / normalize / share / collectItems (`collectAsyncItems()` is
+                             (undo) / share / collectItems (`collectAsyncChunks()` is
                              `collectItems()`'s own unexported async half); assertPositiveChunkSize()
                              is the one `chunkSize < 1` guard 3 sites shared inline before (#133);
                              assertWholeNumberAtLeastOne(label, value) is `.buffer(size)`/`.queue()`'s
                              own shared, labelled validator (#123); prefetch(upstream, capacity) is
                              `.queue()`'s own engine, beside `share()` (#123)
-    drain.ts                 MaybeAsyncChunks<T>, drainSync/drainSyncSettled/close/dispatchSync -
-                             dispatchSync(syncChunks, onSync, onAsync) is the sync/async branch
-                             result.ts's forEach/[Symbol.iterator] and cut.ts's collectItems all
-                             shared inline before (#133)
+    drain.ts                 MaybeAsyncChunks<T>, drainSync/drainSyncSettled/close - the sync terminal-op
+                             drivers; closingOnFailure() builds on helpers.ts's tryRecover()
     recut.ts                 RecutState<T> ({iterator, size}) / recutFrom / recutPending /
                              cutChunk / recutSyncChunks - the iterator+size pair `recutFrom` and
                              `recutPending` used to thread separately is now one state object (#133)
@@ -137,7 +133,7 @@ src/
                              "call it, or propagate" decision, shared by runSequentially and
                              ConcurrentPipeline.apply()'s wrapped work (#78); tryRecover() is the
                              try/catch-if-thenable/recover skeleton runStageChunk here and
-                             transformer.ts's attemptRow both now share - NOT used by
+                             drain.ts's closingOnFailure and transformer.ts's settleRowStep all share - NOT used by
                              utils/reduce.ts's Reducer.fold, whose own hot per-item path keeps its
                              measured-faster inlined form (#133)
     reduce.ts                Reducer/foldChunk/foldChunkStream - the shared fold, used by
@@ -200,8 +196,8 @@ fold engine buys a per-ITEM decision, which a count never makes, and charged a c
 array-mutating accumulator per row for it: measured at N=10,000 over an async generator with output
 asserted identical, `.buffer(1000)` cost 7.006 promises per row through the fold and 4.005 cutting by
 count, which is `buildChunkGenerator`'s own floor and exactly what the same chain with NO `.buffer()`
-call at all reads. `bufferBySize()` now cuts by count on all three arms with the same cutters
-`fromSource()` uses, and `.buffer(size)` validates its size on the BOUND path too, where
+call at all reads. `.buffer(size)` now cuts by count on all three arms with the same cutters
+`fromSource()` uses, through the one private `cutBy()` that `.buffer(fn)` shares (#232), and `.buffer(size)` validates its size on the BOUND path too, where
 `sizeReduceFunction` used to be what refused a bad one (BREAKING: `.local((p) => p.buffer(2.5))`
 threw nothing before and now throws under `.buffer()`'s own name).
 
@@ -209,7 +205,7 @@ threw nothing before and now throws under `.buffer()`'s own name).
 Pipeline.buffer(sizeOrFn)
 	isDeferred() ? record + replay : …
 	typeof sizeOrFn === "number" ?
-		bufferBySize(size)                                  cuts by COUNT, no fold
+		cutBy(buildSyncChunkGenerator, recutSyncChunks, buildChunkGenerator)   by COUNT, no fold
 			isSync() && _syncPreBufferItems  → buildSyncChunkGenerator(size)(items)
 			isSync()                         → recutSyncChunks(_syncChunks, size)
 			_syncPreBufferItems              → asAsyncChunks(buildSyncChunkGenerator(size)(items))
@@ -646,9 +642,9 @@ The wire, one BINARY frame per dispatch (`src/pipelines/websocket.ts`'s own `enc
 ```
 
 `route` carries what a URL path carried before - `/transform/<n>`, `/reduce/<n>`,
-`/branch/<i>/<name>/transform/<n>` - unchanged trail, parsed by the file's own `parseRoute` (kept as
-its OWN copy of `HttpPipeline`'s identical regex, since the two parse different strings - a URL
-pathname there, a bare JSON field here). A failure is a separate TEXT frame, always fixed JSON
+`/branch/<i>/<name>/transform/<n>` - unchanged trail, parsed by the one `parseRoute` in
+`src/pipelines/concurrent.ts`, which `HttpPipeline` uses for a URL pathname and this class for a
+bare JSON field. A failure is a separate TEXT frame, always fixed JSON
 regardless of `codec` - the WS opcode itself the discriminator: `{"id":0,"error":"…"}`.
 
 `getConnection(connect)` memoizes ONE `ClientConnection` per `connect` string, module-level, shared
@@ -979,8 +975,8 @@ re-spellings of this exact shape collapsed to the one type - `BranchOwner.draina
 `PipelineResult`'s own field each used to declare it inline). Each terminal calls it exactly once
 and threads what it got into its own async arm; calling it again there ran a user's `.local(build)`
 callback twice per call. `PipelineResult.forEach()`/`[Symbol.iterator]()` and `utils/cut.ts`'s
-`collectItems()` share one `dispatchSync(syncChunks, onSync, onAsync)` (`utils/drain.ts`, #133) for
-the "is there a sync chunk stream, or not" branch every one of them used to test inline.
+`collectItems()` each branch on `syncChunks !== null` for the "is there a sync chunk stream, or
+not" decision (#232 deleted the `dispatchSync()` wrapper that once held it).
 
 A fourth field, a flattened per-ITEM view, sat beside `chunks` until #179 (BREAKING: `Drainable<T>`
 is public, since `Pipeline.drainable(input)` is). Every async terminal read it, and flattening cost
@@ -1029,7 +1025,7 @@ view to completion gives it everything and the other `[]`. Owning the concurrenc
 what makes that unrepresentable.
 
 Nothing here is new machinery: `classifyItems`/`classifyAsyncChunks` share `claimItem` for the
-per-item classify step and `dispatchSync`/`drainSync` (`utils/drain.ts`, #133) for the sync/async
+per-item classify step and `drainSync` (`utils/drain.ts`, #133) for the sync/async
 split every other synchronous drain in the package already uses, and the join is `settleMaybe` +
 `chain`. That reuse is what makes the Mode rule reachable rather than aspirational: every arm
 synchronous creates ZERO promises, and one asynchronous arm widens the whole record to a single
@@ -1039,8 +1035,8 @@ synchronous creates ZERO promises, and one asynchronous arm widens the whole rec
 time with a separate `demux()` - two full passes over every row, one to materialize, one to
 classify (#180's own finding, Done-when 4). Measured: the two-pass shape cost 2.27x a single-pass
 floor over the identical input, spiked and confirmed before the fix landed. Fixed, not Killed:
-`classifyItems`/`classifyAsyncChunks` classify WHILE draining, reusing the same `dispatchSync`/
-`drainSync` primitives `collectItems()` itself is built from, so no intermediate array is
+`classifyItems`/`classifyAsyncChunks` classify WHILE draining, reusing the same
+`drainSync` primitive `collectItems()` itself is built from, so no intermediate array is
 materialized at all - `runBranch`'s own body shrank from a collect call plus a `demux()` call to one
 `classifyItems()` call.
 
