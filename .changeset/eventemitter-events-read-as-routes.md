@@ -1,5 +1,5 @@
 ---
-"@outputty/pipeline": major
+"@outputty/pipeline": minor
 ---
 
 `EventEmitterPipeline`'s events read as the route the chain was built along, and the chain's own

@@ -1,5 +1,5 @@
 ---
-"@outputty/pipeline": major
+"@outputty/pipeline": minor
 ---
 
 BREAKING: `Drainable<T>` no longer carries `items`, so `pipeline.drainable(input).items()` is gone.
