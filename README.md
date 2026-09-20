@@ -279,7 +279,8 @@ One call's output. Every operation below re-drains the input, so a spent generat
 - **`.flatMap(fn)`** - transform and flatten results.
 - **`.filter(fn)`** - keep elements matching predicate.
 - **`.reduce(fn, initial)`** - fold this ONE chunk; `fn` is `(acc, item, ctx, emit) => acc`, called
-  with all four arguments regardless of its own declared arity. See [Reducing](#reducing).
+  with all four arguments regardless of its own declared arity. A chunk that arrives empty emits
+  `initial`. See [Reducing](#reducing).
 - **`.tap(fn | transformer)`** - execute a side-effect without changing data. `fn` receives each item
   and the context; the `transformer` form receives the whole chunk. This one travels with its stage,
   so on a dispatching class it runs in the worker. `Pipeline.tap(...)` is the same observation point
@@ -860,6 +861,31 @@ const data = await new Pipeline<number>()
 
 console.log(data); // [150]
 ```
+
+A reduce that received no data emits its seed, the `initial` argument, once - as `[].reduce(fn,
+initial)` returns it. A count over no matching row is `0`, whether the input was empty or a `filter`
+removed every row:
+
+<!-- compiles -->
+
+```typescript
+import { Pipeline } from "@outputty/pipeline";
+
+const data = await new Pipeline<number>()
+  .transform((t) => t.filter((x: number) => x > 9))
+  .reduce(
+    (acc: number) => acc + 1,
+    0,
+  )([1, 2, 3])
+  .toArray();
+
+console.log(data); // [0]
+```
+
+A partitioned reduce emits that seed once, from the stage: `ConcurrentPipeline` at `maxConcurrency: 4`
+over `[]` returns `[0]`, and a partition that receives no chunk while its siblings fold stays silent.
+Inside a `.transform()`, `Transformer.reduce` emits its seed for every chunk that arrives empty, one
+an earlier link emptied included. A reducer that emits mid-fold gets the same seed over no data.
 
 `emit`, the reducer callback's fourth parameter (`(acc, item, ctx, emit) => acc`), pushes a value
 downstream mid-fold and resets the accumulator - a running total banked whenever it crosses a

@@ -247,7 +247,8 @@ const survived = await new Pipeline<string>()
 `Pipeline.reduce` folds every chunk the pipeline produces, unlike `Transformer.reduce`, which folds
 the one chunk it receives. `emit()` banks a value downstream mid-fold, so the caller decides what a
 finished result is; the final accumulator is emitted only if items were folded since the last
-`emit()`, which is why `[60,90]` has no trailing `0`.
+`emit()`, which is why `[60,90]` has no trailing `0`. A reduce that received no data emits its seed
+once instead, so a count over no matching row is `0`, not nothing.
 
 <!-- compiles -->
 
@@ -270,10 +271,15 @@ const banked = await new Pipeline<number>()
   }, 0)
   .transform((t) => t.map((n: number) => n * 10))
   ([1, 2, 3, 4, 5]).toArray(); // [60,90]
+
+const none = await new Pipeline<number>()
+  .transform((t) => t.filter((x: number) => x > 9))
+  .reduce((acc: number) => acc + 1, 0)
+  ([1, 2, 3, 4, 5]).toArray(); // [0]
 ```
 
 ```json
-{ "total": [150], "banked": [60, 90] }
+{ "total": [150], "banked": [60, 90], "none": [0] }
 ```
 
 ## Case 7 - observing without changing the data
