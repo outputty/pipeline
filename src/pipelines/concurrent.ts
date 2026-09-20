@@ -202,16 +202,16 @@ const SEED_REFUSAL =
  * Output-empty is the same fact as fold-never-ran here, because a partition that folded anything
  * yields a trailing accumulator or an emit.
  *
- * `seedIfNoChunk(asyncFrom([]), 0)` → yields `[0]`. `seedIfNoChunk(asyncFrom([[3], [7]]), 0)` → yields
+ * `seedIfNoChunk(asyncFrom([]), () => 0)` → yields `[0]`. `seedIfNoChunk(asyncFrom([[3], [7]]), () => 0)` → yields
  * `[3]`, `[7]`.
  */
-async function* seedIfNoChunk<U>(source: AsyncGenerator<U[]>, seed: U): AsyncGenerator<U[]> {
+async function* seedIfNoChunk<U>(source: AsyncGenerator<U[]>, seed: () => U): AsyncGenerator<U[]> {
   let yielded = false;
   for await (const chunk of source) {
     yielded = true;
     yield chunk;
   }
-  if (!yielded) yield [seed];
+  if (!yielded) yield [seed()];
 }
 
 /**
@@ -440,7 +440,7 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     );
     // A stream no partition folded anything from owes ONE seed, from the stage rather than from any
     // partition (#241): `[0]` over `[]`, where each partition seeding would repeat it N times.
-    const newChunks = seedIfNoChunk(mergeUnordered(partitions), seedFor(initial));
+    const newChunks = seedIfNoChunk(mergeUnordered(partitions), () => seedFor(initial));
 
     // See `apply()`'s own identical `createPipeline<U, R>()` call above.
     return this.createPipeline<U, ConcurrentPipeline<U, In>>(newChunks, {
