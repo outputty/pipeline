@@ -620,3 +620,38 @@ for await (const chunk of new Pipeline<Event>().buffer(fiveMinuteWindow)(events)
   [{ "id": 4, "ts": 300000 }, { "id": 5, "ts": 301000 }]
 ]
 ```
+
+## Case 16 - the runtime cost of a simplification stack (#232)
+
+The canonical chain, `.map((x) => x * 2).filter((x) => x > 4)`, measured on `bench/memory.ts` before the first edit and after each layer of the #232 stack. Every number reads against the base commit `da267f4`, in one harness, one case per process (`pnpm bench:compare da267f4`).
+
+<!-- illustrative -->
+
+```text
+pnpm bench:compare da267f4
+```
+
+Real output, `Pipeline async source` (the async-generator source case) and `Concurrent array`:
+
+```json
+{
+  "Pipeline async source": {
+    "base":         { "promisesPerRow": 4.012, "gcCount": 13, "heldAtEndMB": 12.64 },
+    "after layer 1": { "promisesPerRow": 4.012, "gcCount": 13, "heldAtEndMB": 12.64 },
+    "after layer 2": { "promisesPerRow": 4.012, "gcCount": 13, "heldAtEndMB": 12.64 },
+    "after layer 3": { "promisesPerRow": 4.012, "gcCount": 13, "heldAtEndMB": 12.65 }
+  },
+  "Concurrent array": {
+    "base":         { "promisesPerRow": 0.012, "gcCount": 1, "heldAtEndMB": 4.59 },
+    "after layer 1": { "promisesPerRow": 0.012, "gcCount": 1, "heldAtEndMB": 4.62 },
+    "after layer 2": { "promisesPerRow": 0.011, "gcCount": 1, "heldAtEndMB": 4.61 },
+    "after layer 3": { "promisesPerRow": 0.011, "gcCount": 1, "heldAtEndMB": 4.60 }
+  }
+}
+```
+
+The three numbers map onto `bench/memory.ts`'s own columns: promises per row is `promisesPerRow`, garbage collections is `gcCount`, and peak heap is `heldAtEndMB`, the mid-run peak read off real collector events. Collections come from `v8.GCProfiler` and allocation from `v8.getHeapStatistics().total_allocated_bytes`, not `PerformanceObserver('gc')` or a `heapUsed` delta: `roadmap.md` records the observer reading zero collections for a run with 13.
+
+`nsPerRow` is not part of the record. Two identical runs of one case read -7% and +68%, so a wall-clock figure measures the machine.
+
+`bench:compare` restores `src/` with `git checkout HEAD -- src/`, which cannot delete a file the new HEAD removed. After a compare on a stack that deletes a source file, `git status` shows the deleted file as added: remove it with `git rm -f`.
