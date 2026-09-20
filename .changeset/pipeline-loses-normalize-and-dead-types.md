@@ -1,5 +1,5 @@
 ---
-"@outputty/pipeline": major
+"@outputty/pipeline": minor
 ---
 
 **Breaking:** `normalize` is removed from `@outputty/pipeline`'s public export surface. It had zero

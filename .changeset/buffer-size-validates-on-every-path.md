@@ -1,5 +1,5 @@
 ---
-"@outputty/pipeline": major
+"@outputty/pipeline": minor
 ---
 
 BREAKING: `.buffer(size)` on an ALREADY-BOUND pipeline now refuses a size that is not a whole number

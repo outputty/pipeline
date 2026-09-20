@@ -1,5 +1,5 @@
 ---
-"@outputty/pipeline": major
+"@outputty/pipeline": minor
 ---
 
 BREAKING: `new Pipeline({ chunkSize })` now refuses a value that is not a whole number of at least 1,
