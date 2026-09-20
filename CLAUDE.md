@@ -293,8 +293,8 @@ none of it survived the hand-trim (#745).
   chunk actually dispatched. `WebSocketPipeline` (#201) is a SIBLING of `HttpPipeline` - it overrides
   `stageWork()`/`reduceWork()`/adds `serve()` the same seam-shape, but dispatches one binary frame
   per request over ONE persistent, multiplexed connection (memoized per `connect` target) instead of
-  opening a request per chunk; `ClusterPipeline` (#201, the class name every existing caller already
-  imports, BREAKING, no deprecation period) adds the SAME worker-bootstrap pattern
+  opening a request per chunk; `ClusterPipeline` (#201, BREAKING, no deprecation period; on the
+  `websocket` entry below since #239) adds the SAME worker-bootstrap pattern
   `ClusterHttpPipeline` uses, over N distinct `ws+unix:` socket paths (one per worker, dispatch
   round-robining across them - a WebSocket connection is persistent, so a shared port would leave
   every worker but one un-dialed) instead of one shared port. `ClusterHttpPipeline` is
@@ -303,6 +303,17 @@ none of it survived the hand-trim (#745).
   of them; `routePath()`/the registries-resolving helper both moved to `ConcurrentPipeline` (#201
   review) so `HttpPipeline`/`WebSocketPipeline` inherit one canonical implementation instead of
   `HttpPipeline`/`WebSocketPipeline` each maintaining an identical copy.
+- **`websocket` entry** (#239, no prior term) - `@outputty/pipeline/websocket`, the second tsup entry
+  (`src/websocket.ts`), and the only one that loads `ws`. It exports `WebSocketPipeline`,
+  `WebSocketPipelineOptions`, `PipelineSocket`, `toNodeWebSocketHandler`, `NodeWebSocketHandler`,
+  `ClusterPipeline` and `ClusterPipelineOptions`, and BREAKING drops all seven from the root, which
+  therefore loads no package: `ws` is an OPTIONAL PEER dependency, so a caller of this entry
+  installs it. `ClusterPipeline` lives in `src/pipelines/websocket-cluster.ts`, which must never
+  import `src/pipelines/cluster.ts` - that module starts the HTTP worker server at load, in every
+  worker. ⚠ tsup splits CJS only with `splitting: true`; without it `dist/websocket.cjs` carries its
+  own `Pipeline` copy and `Pipeline.wrapping`'s `instanceof` reads a root chain as an options object.
+  `NodeWebSocketHandler.upgrade` is typed with `node:http`'s `IncomingMessage` and `node:stream`'s
+  `Duplex`, so no `.d.ts` names a `ws` type and `@types/ws` is not needed.
 - **`options.client`** (#179) - how a dispatched chunk reaches another instance, on `HttpPipeline`
   and therefore on `ClusterHttpPipeline`. `PipelineClient` is `(url: string, init: RequestInit) =>
   Promise<Response>` - the global `fetch` signature, so the default is a drop-in and so is a

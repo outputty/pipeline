@@ -7,6 +7,10 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-20 A zero-hit search was controlled on one build variant and reused on another
+
+Proving the root bundle held no `ws` for #239, `rg '"ws"'` was controlled on the unsplit CJS build, where `dist/websocket.cjs` hit, then reused after `splitting: true`, whose output writes `require('ws')` with single quotes; the result passed vacuously until the test's own control assertion failed. Added a `.claude/rules/code.md` line under "Prove it": re-run the control on the exact artifact, after every change to how it is produced.
+
 ## 2026-09-19 "Read-only" fan-out agents switched branches in the shared worktree
 
 Simplifying the source under #232, Phase 3's per-layer agents were told to be read-only and ran `git checkout` across the stack's branches to read each diff: HEAD ended detached, uncommitted docs edits rode along, and one agent hung for 38 minutes. A reflog read found it; the rerun handed agents dumped diff files and an explicit no-git line. Change: `~/.claude/rules/code.md` "While you work". Same build: `bench:compare` left a deleted source file staged after every run; change: `.claude/rules/code.md` "Prove it".

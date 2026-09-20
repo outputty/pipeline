@@ -65,6 +65,17 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **`ws` is optional: the WebSocket runners move to `@outputty/pipeline/websocket`** (#239, `feat!`,
+  PRs #240 (L1) and this docs PR) - `require("@outputty/pipeline")` failed with `Cannot find module
+  'ws'` even for a plain `Pipeline`, because the root entry imported the package at load time.
+  `WebSocketPipeline`, `ClusterPipeline`, `toNodeWebSocketHandler`, `PipelineSocket`,
+  `NodeWebSocketHandler` and the two options types left the root for a second tsup entry (BREAKING,
+  `minor`), `ws` became an optional peer dependency, and `NodeWebSocketHandler.upgrade` is typed with
+  Node's own `IncomingMessage`/`Duplex` so no `.d.ts` names a `ws` type. Planning found what a unit
+  run cannot see: tsup does not split CJS by default, and two `Pipeline` copies made `instanceof`
+  false across the entries. `packaging.e2e.test.ts` builds and runs `dist` for it. Runtime cost
+  against the base commit: promises per row, collections and allocation unchanged on every
+  `bench/memory.ts` case.
 - **The source, simplified with the public API unchanged** (#232, `refactor`, PRs #233 (L1)/#234
   (L2)/#236 (L3) and this docs PR) - a read-only survey of every module scored code and docstring
   complexity separately, and the stack landed the candidates that deleted a whole pattern or shrank
@@ -152,7 +163,7 @@ The two older candidates, still not filed:
   rather than silently drops (`ws`'s own does not; the seam is public, and another `PipelineSocket`
   implementation can).
 
-  `ws` 8.21.3 is this package's first runtime dependency - `bufferutil`/`utf-8-validate` (its own
+  `ws` 8.21.3 was this package's first runtime dependency (an optional peer since #239) - `bufferutil`/`utf-8-validate` (its own
   optional native-acceleration peers) stay absent from `package.json`, and `pnpm build && grep -c
   "ws/lib" dist/index.js` prints `0`. `bench/baseline.json`'s own committed `ClusterPipeline` number
   stays the pre-#201 figure (`bench/*.ts` sat outside this ticket's own file scope) -
@@ -566,6 +577,17 @@ The two older candidates, still not filed:
   `In`/`Out` with no `transform`. PRs #7, #8, #10, #12.
 
 ## Killed
+
+- **A lazy `import("ws")` inside `WebSocketPipeline`, keeping `ws` a dependency** (#239 planning) -
+  no break and no second entry. Killed because the root `.d.ts` graph still reaches `ws`
+  (`dist/pipelines/websocket.d.ts` imports it) and `ws` stays a mandatory install for every consumer.
+- **CJS output left unsplit under the second entry** (#239 planning) - the build and 434 unit tests
+  stayed green while `dist/websocket.cjs` carried its own `Pipeline` copy: `new
+  WebSocketPipeline(rootChain, …) instanceof root.Pipeline` printed `false`, and `Pipeline.wrapping`
+  dropped the chain's stages. Killed for `splitting: true`, which prints `true`.
+- **`NodeWebSocketHandler.upgrade` typed off `ws`'s `handleUpgrade`** (#239 planning) - kept the file
+  free of `node:` imports, but left an import of `ws` in the published `.d.ts`: a consumer with
+  `ws` and no `@types/ws` got `TS7016`. Killed for `IncomingMessage`/`Duplex` type-only imports.
 
 - **Colon-prefixed arm event names, `branch:<i>:<name>:stage:<n>`** (#221 planning) - spiked
   working and non-breaking at top level. Killed by the user's pick of the route string HTTP already

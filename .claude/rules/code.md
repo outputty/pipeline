@@ -34,6 +34,9 @@ Each line is one rule: the moment, then the action. Rules that hold in any repo 
 - After `pnpm bench:compare <ref>` on a branch that deleted a source file, run `git status --porcelain` and `git rm -f` every `A` line under `src/`. (2026-09-19)
   - The compare restores `src/` with `git checkout HEAD -- src/`, which cannot delete a file the base ref still has, so the next compare refuses with "src/ has uncommitted changes".
 
+- Re-run a zero-hit search's control on the exact artifact the result is claimed for, after every change to how that artifact is produced (a bundler flag, a format, a target). (2026-09-20)
+  - A pattern that hit the old output can miss the new one, and the zero-hit result then passes vacuously: `rg '"ws"'` hit the unsplit CJS build and missed the split one, which writes `require('ws')`.
+
 ## Names and pointers
 
 - Before moving a call a ticket says to move rather than duplicate, grep every path that reached

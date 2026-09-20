@@ -34,10 +34,10 @@ Both boundaries are oxlint-enforced, not merely descriptive (#117): `.oxlintrc.j
 `pipelines/http.ts`, `pipelines/cluster.ts`, `pipelines/eventemitter.ts` (the third dispatching
 file, added when #124 shipped `EventEmitterPipeline` after this diagram's own node: exception list was
 first written) and `pipelines/client.ts` (the fourth, #179 - `HttpPipeline`'s own dispatch client,
-whose `node:http` default is what its seam exists to choose between). `pipelines/websocket.ts` (#201,
-the fourth dispatching FILE, a fifth class between `EventEmitterPipeline` and `client.ts`) needed no
-fifth exception added here - verified live (`bunx oxlint`) - its own Node bridge derives every type
-structurally off `ws`'s own exports rather than importing `node:http`/`node:stream` directly. A
+whose `node:http` default is what its seam exists to choose between). `pipelines/websocket.ts` and
+`pipelines/websocket-cluster.ts` (#239, both on the `websocket` entry) are the fifth and sixth: the
+first takes `IncomingMessage`/`Duplex` as type-only imports so no published `.d.ts` names a `ws`
+type, the second is `ClusterPipeline`'s own `node:cluster` bootstrap. A
 `no-restricted-imports`
 override fails any `@outputty/laygo` or `@outputty/laygo/**`
 import from anywhere in `src/`. A reader no longer has to compare a new import against this diagram by
@@ -73,6 +73,9 @@ src/
   result.ts               PipelineResult - every terminal op; drainable() returns Drainable<T>
                           directly; forEach()/[Symbol.iterator]() each test `syncChunks !== null` for the
                           sync/async branch (#232 deleted the dispatchSync() wrapper)
+  websocket.ts           The `@outputty/pipeline/websocket` entry (#239): WebSocketPipeline,
+                          ClusterPipeline, toNodeWebSocketHandler and their types, the only entry
+                          that loads ws. index.ts exports none of them
   pipelines/
     concurrent.ts          ConcurrentPipeline - the fan-out (fanOutOrdered/fanOutUnordered),
                              stageWork()/reduceWork(); carriedKnobs() (not createPipeline()) is the
@@ -92,15 +95,20 @@ src/
                              (register/claimIndex/lookup/bootstrap/enter/kill/startWorkerServer)
                              replaces 5 module-level mutable bindings and 4 free functions with one
                              per-process singleton (#133); bootstrapAndSetUrl() calls
-                             workerSet.enter() once, no longer bootstraps twice. ClusterPipeline
-                             (#201) - the SAME shape over WsWorkerSet, N distinct ws+unix: socket
-                             paths instead of one shared port, enter() round-robining across them
+                             workerSet.enter() once, no longer bootstraps twice. Loads no ws, and
+                             websocket-cluster.ts never imports it: its module scope starts the HTTP
+                             worker server in every worker (#239)
     websocket.ts             WebSocketPipeline (#201) - encodeFrame/decodeFrame (the 4-byte
                              length-prefixed binary framing), getConnection() (the per-connect-target
                              memoized client), stageWork()/reduceWork()/serve()/receiveFrame(),
-                             toNodeWebSocketHandler (the Node upgrade bridge, its own types derived
-                             off ws's exports rather than a node: import), peekFrame()/
-                             sendUnknownRouteError() (ClusterPipeline's own shared-worker-server seam)
+                             toNodeWebSocketHandler (the Node upgrade bridge; NodeWebSocketHandler.
+                             upgrade is typed with node:http's IncomingMessage and node:stream's
+                             Duplex, so no .d.ts names a ws type, #239), peekFrame()/
+                             sendUnknownRouteError() (ClusterPipeline's own shared-worker-server seam).
+                             The one file that imports ws
+    websocket-cluster.ts     ClusterPipeline (#201, moved here #239) - the SAME shape as cluster.ts
+                             over WsWorkerSet, N distinct ws+unix: socket paths instead of one shared
+                             port, enter() round-robining across them
     eventemitter.ts           EventEmitterPipeline (#124, events renamed to routes #221) -
                              stageWork() calls the composed function directly and dispatches
                              through pipeline.emitter for any extra Workers; apply()/drainable()
@@ -440,13 +448,12 @@ Pipeline                one chunk at a time, in process              src/pipelin
                                under this name for the unchanged HTTP
                                transport (#201)
     WebSocketPipeline        a chunk sent over one persistent,         src/pipelines/websocket.ts
-                               multiplexed ws connection (#201) -
+                               multiplexed ws connection (#201) -       (entry: /websocket, #239)
                                a SIBLING of HttpPipeline: it overrides
                                stageWork()/reduceWork() the same way,
                                but never POSTs
-      ClusterPipeline          a chunk sent to another local process    src/pipelines/cluster.ts
-                               over that SAME ws connection (#201) -
-                               the name every existing caller imports;
+      ClusterPipeline          a chunk sent to another local process    src/pipelines/websocket-cluster.ts
+                               over that SAME ws connection (#201) -    (entry: /websocket, #239)
                                each worker binds its own unique
                                ws+unix: socket, dispatch round-robins
                                across the set (never a shared port - a
@@ -690,19 +697,16 @@ the happy one, or a failed reduce chunk leaked its entry for the worker's whole 
 
 `toNodeWebSocketHandler(pipeline)` bridges `ws`'s own `WebSocketServer({ noServer: true })`/
 `handleUpgrade` to `PipelineSocket` for Node, the same gap `toNodeHandler` bridges for `.fetch()`.
-Its own parameter/return types are derived structurally off `ws`'s `WebSocketServer.handleUpgrade`
-signature (`Parameters<InstanceType<typeof WebSocketServer>["handleUpgrade"]>`) rather than an
-explicit `node:http`/`node:stream` import - verified live (`bunx oxlint`) that this keeps the file
-carrying no `node:` import of its own, needing none of `.oxlintrc.json`'s per-file exceptions the
-other three dispatching files already have. `ws`'s own `ws+unix:` URL scheme splits its whole path on
+`NodeWebSocketHandler.upgrade(request: IncomingMessage, socket: Duplex, head: Buffer)` is typed with
+`node:http` and `node:stream` type-only imports, never with `Parameters<...handleUpgrade>` off
+`ws` (#239): a `ws`-derived type leaves an import of `ws` in the published `.d.ts`, so a consumer
+would need `@types/ws`. The file therefore joins `.oxlintrc.json`'s `node:` import exceptions. `ws`'s own `ws+unix:` URL scheme splits its whole path on
 the FIRST `:` (verified against `ws` 8.21.3's own `initAsClient`, `lib/websocket.js`) -
 `ws+unix:/tmp/w.sock:/`, no leading `//`; the URL-with-authority shape every OTHER scheme here uses
 (`ws+unix:///tmp/w.sock:/`) dials the wrong path, an empty authority segment `ws` does not strip.
 
-`ClusterPipeline` (#201) reparents onto `WebSocketPipeline` - the class name every existing caller
-already imports (BREAKING, no deprecation period, no code change required); `ClusterHttpPipeline` is
-`ClusterPipeline`'s own pre-#201 identity, kept under that name unchanged for a caller who wants the
-old HTTP/TCP transport back. `WsWorkerSet` mirrors `WorkerSet`'s shape one seam apart: each worker
+`ClusterPipeline` (#201, in `websocket-cluster.ts`) reparents onto `WebSocketPipeline`;
+`ClusterHttpPipeline` is its HTTP/TCP counterpart. `WsWorkerSet` mirrors `WorkerSet`'s shape one seam apart: each worker
 binds its own UNIQUE `ws+unix:` socket path (never a shared port, the way HTTP's `listen(0)` shares
 one across every worker) - a WebSocket connection is persistent, so sharing one target across workers
 would mean only one worker is ever dialed, and `#201`'s own Done-when 3 needs one distinct connection
@@ -750,6 +754,31 @@ items. `Codec` (the interface) and `JsonCodec` (the default class) live in `src/
 the file that loads `ws`, so a core chunk type can name `Codec` without a utils-to-pipelines import.
 `Codec` is not generic: one instance serves every stage while the item type changes, so it sees
 `unknown`, and `Pipeline<T>` carries the type hints. The `jsonCodec` object is deleted (BREAKING).
+
+## Package entries - #239 (done)
+
+Two entries, so the root loads no package: `@outputty/pipeline` (`src/index.ts`) and
+`@outputty/pipeline/websocket` (`src/websocket.ts`), each with `import`, `require` and `types`
+conditions in `package.json`'s `exports`.
+
+```text
+@outputty/pipeline              Pipeline, ConcurrentPipeline, HttpPipeline, ClusterHttpPipeline,
+  src/index.ts                    EventEmitterPipeline, Transformer, Codec, JsonCodec ...   no package
+@outputty/pipeline/websocket    WebSocketPipeline, ClusterPipeline, toNodeWebSocketHandler,
+  src/websocket.ts                PipelineSocket, NodeWebSocketHandler + options types      needs ws
+    src/pipelines/websocket.ts        the ONE file that imports ws
+    src/pipelines/websocket-cluster.ts ClusterPipeline; must not import cluster.ts
+```
+
+- **Root is package-free.** `ws` is the only package `src/` imports (`rg 'from "ws"' src` hits
+  `pipelines/websocket.ts` alone), and `packaging.e2e.test.ts` runs the built `dist` in a directory
+  with no `ws`, greps every root bundle, chunk and `.d.ts` for it, and typechecks a strict consumer
+  with neither `ws` nor `@types/ws`.
+- **`cluster.ts` and `websocket-cluster.ts` share nothing but `IDLE_KILL_MS`** (`src/types.ts`).
+  `cluster.ts` starts the HTTP worker server at module scope, so importing it from the WebSocket side
+  would start that server in every `/websocket` worker.
+- **Both entries share one class copy.** ESM splits chunks by default; CJS needs `splitting: true`
+  (Constraints in dependencies).
 
 ```text
 BEFORE  stage 0 reply -> codec.decode (primary) -> rows -> codec.encode (primary) -> stage 1
@@ -1143,14 +1172,18 @@ rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed
 
 ## Constraints in dependencies
 
-- `ws` 8.21.3 (#201, this package's first runtime dependency - `bufferutil`/`utf-8-validate` are its
-  own optional peer dependencies for native-accelerated masking/UTF-8 validation, not required, and
-  stay absent from `package.json`) delivers every WS frame's payload - text or binary - as a
-  `Buffer` on `"message"`, with `isBinary` the only discriminator; it never auto-decodes a text frame
-  into a JS string. Its own `ws+unix:` scheme splits the WHOLE path on the FIRST `:` (`initAsClient`,
-  `lib/websocket.js`) - `ws+unix:/path:/urlpath`, no leading `//`. `tsup.config.ts`'s own `external`
-  array lists it explicitly, alongside what tsup already excludes by default for a real
-  `dependencies` entry - verified live, `grep -c "ws/lib" dist/index.js` prints `0`.
+- `ws` 8.21.3 (#201; an optional peer dependency since #239, the only package `src/` imports -
+  `bufferutil`/`utf-8-validate` are its own optional peer dependencies for native-accelerated
+  masking/UTF-8 validation, not required, and stay absent from `package.json`) delivers every WS
+  frame's payload - text or binary - as a `Buffer` on `"message"`, with `isBinary` the only
+  discriminator; it never auto-decodes a text frame into a JS string. Its own `ws+unix:` scheme
+  splits the WHOLE path on the FIRST `:` (`initAsClient`, `lib/websocket.js`) -
+  `ws+unix:/path:/urlpath`, no leading `//`. `ws` ships no types, so `@types/ws` is a devDependency
+  only. `tsup.config.ts`'s own `external` array lists it explicitly, alongside what tsup already
+  excludes by default for a `peerDependencies` entry.
+- tsup splits ESM chunks by default and CJS not at all: `splitting: true` is its experimental CJS
+  flag. Without it, `dist/websocket.cjs` carries its own `Pipeline` copy, and `Pipeline.wrapping`'s
+  `instanceof Pipeline` reads a chain built from `dist/index.cjs` as an options object.
 - TypeScript removed `baseUrl` at 7.0; a tsconfig that sets it fails with `TS5102`.
 - A conditional type distributes only over a naked type parameter. `Ps[number] extends Pipeline<infer
   U> ? U : never` is an indexed access, so it compiles and evaluates to `never`; the deleted merge
