@@ -1318,7 +1318,8 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
 
     // `foldSyncChunkStream` folds the same reducer over the sync chunk stream, deferring only at the
     // first thenable a chunk or the reducer itself produces. `foldChunkStream` is that fold over an
-    // `AsyncIterable`, which is the only reason the second arm is always `"async"`.
+    // `AsyncIterable`, which is the only reason the second arm is always `"async"`. Both own the
+    // stage's one accumulator, so a stream that folds nothing yields the seed (#241).
     if (this.isSync()) {
       return this.createPipeline<U>(emptyChunks<U>(), {
         ...carried,
@@ -1327,11 +1328,14 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       }) as AnyPipeline<U>;
     }
 
-    return this.createPipeline<U>(foldChunkStream(fn, initial, this.chunkStream(), this._context), {
-      ...carried,
-      mode: "async",
-      syncChunks: null,
-    }) as AnyPipeline<U>;
+    return this.createPipeline<U>(
+      foldChunkStream(fn, initial, this.chunkStream(), this._context, true),
+      {
+        ...carried,
+        mode: "async",
+        syncChunks: null,
+      },
+    ) as AnyPipeline<U>;
   }
 
   /**

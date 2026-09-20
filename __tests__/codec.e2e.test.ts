@@ -134,7 +134,7 @@ describe("#209 review: an emptied chunk is never sent to a dispatched reduce eit
   // the reduce pump specifically (`WebSocketPipeline.reduceWork()`'s own dispatch loop) - the
   // `isEncodedChunk(chunk) && chunk.rows === 0` skip this review added there, mirroring
   // `ConcurrentPipeline.apply()`'s existing one for a plain dispatched transform.
-  it("output [], the server decodes only 8 items - the empty chunk never reaches the fold", async () => {
+  it("output [0], the server decodes only 8 items - the empty chunk never reaches the fold", async () => {
     const serverCodec = new CountingCodec(new JsonCodec());
     const worker = makeWorker(
       (t) =>
@@ -152,7 +152,9 @@ describe("#209 review: an emptied chunk is never sent to a dispatched reduce eit
           0,
         )([1, 2, 3, 4, 5, 6, 7, 8])
         .toArray();
-      expect(out).toEqual([]);
+      // The seed (#241): no chunk reached the fold, so the stage owes its one seed, from the
+      // orchestrator - the server's own `Reducer` never ran, and `decodes` proves it.
+      expect(out).toEqual([0]);
       expect(serverCodec.decodes).toBe(8);
     });
   });

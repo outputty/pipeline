@@ -484,8 +484,9 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   /** Serves one `/reduce/<n>` frame: an ordinary chunk folds through this `id`'s own `Reducer`
    * (`HttpPipeline`'s own `Reducer`/`foldChunk` engine, `src/utils/reduce.ts`, unchanged), replying
    * with whatever it emitted; `inputDone` flushes the trailing accumulator (`Reducer.final()`,
-   * same "only if items were folded since the last emit" contract every reducer in the package
-   * shares) and closes the session with a `done: true` frame.
+   * only if items were folded since the last emit) and closes the session with a `done: true`
+   * frame. A session that received no chunk emits nothing: the seed for an empty stream belongs to
+   * the stage (`ConcurrentPipeline.reduce`), never to one partition's session (#241).
    *
    * Returns whether THIS id's session concluded here - `inputDone` reached, or the frame itself
    * failed (an unknown branch/stage, a decode/fold error) - so `handleParsedFrame` (caller) knows
