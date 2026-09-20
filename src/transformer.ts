@@ -155,12 +155,11 @@ function settleRowStep<T, U>(
   kept: U[],
   tail: (U | typeof DROP | Promise<U | typeof DROP>)[] | undefined,
 ): (U | typeof DROP | Promise<U | typeof DROP>)[] | undefined {
-  const result = attemptRow(
-    item,
-    attempt,
-    rowHandler,
-    ctx,
-    (recovered) => recovered as U | typeof DROP,
+  // A throw OR a rejection hands the row to `rowHandler`, whose own return (a value, `DROP`, or a
+  // `Promise` of either) is the row's result - `tryRecover` keeps this synchronous when `attempt` is.
+  const result = tryRecover(
+    () => attempt(item),
+    (error) => rowHandler(item, error, ctx) as U | typeof DROP | Promise<U | typeof DROP>,
   );
   if (tail) {
     tail.push(result);
@@ -226,62 +225,6 @@ function settleRows<T, U>(
     }
     return kept;
   });
-}
-
-/**
- * One row's try/recover step (#78), staying synchronous when `attempt` does (#90) - shared by
- * `settleRows` and `settleRowsFlat` below rather than written once per helper, since both need the
- * identical "run it, and on a throw OR a rejection hand the row to `rowHandler`" decision and only
- * differ in what they do with the SUCCESS value. A synchronous `attempt` that throws recovers
- * synchronously too; an async one recovers through `.catch`, which is where a REJECTION (as opposed
- * to a throw) is caught at all.
- *
- * `attemptRow("a", parseStrict, () => DROP, ctx)` → `DROP`, no `Promise` created.
- */
-function attemptRow<T, R>(
-  item: T,
-  attempt: (item: T) => R | Promise<R>,
-  rowHandler: RowErrorHandler,
-  ctx: IContextManager,
-  // oxlint-disable-next-line anti-slop/no-unknown-parameters -- recovered is RowErrorHandler's own unknown return value, by the same design (see types.ts)
-  onRecovered: (recovered: unknown) => R,
-): R | Promise<R> {
-  // `onRecovered` is what keeps SUCCESS and RECOVERY on separate channels. Sniffing the value's own
-  // shape instead cannot tell them apart: `.flatMap()`'s success is already an array, so a handler
-  // that legitimately returns an array had its value spread across the output rather than placed in
-  // the failing row's slot - wrong for any `U` that is itself an array type.
-  return tryRecover(
-    () => attempt(item),
-    (error) => chain(rowHandler(item, error, ctx), onRecovered),
-  );
-}
-
-/**
- * `.flatMap()`'s own row-level recovery (#78) - the same try/attempt/recover shape as `settleRows`
- * above, but each item's SUCCESS is already an array to flatten, so a recovered value (not itself
- * required to be an array) is wrapped as its own one-element array in the row's place; `DROP`
- * contributes nothing for that row. `.flat()` afterward is the same post-processing the no-handler
- * path already used.
- *
- * `settleRowsFlat([1, 2], (x) => (x === 2 ? Promise.reject(new Error("boom")) : [x, x]), () => -1, ctx)`
- * → `[1, 1, -1]`.
- */
-function settleRowsFlat<T, U>(
-  chunk: T[],
-  attempt: (item: T) => U[] | Promise<U[]>,
-  rowHandler: RowErrorHandler,
-  ctx: IContextManager,
-): U[] | Promise<U[]> {
-  const perItem = mapSettle(chunk, (item) =>
-    // A SUCCESS is already an array to flatten. A recovered value is not required to be one, so it
-    // takes the failing row's place as its own single-element array - even when it IS an array -
-    // and `DROP` contributes nothing. That decision belongs on the recovery channel alone, which is
-    // why it is passed to `attemptRow` rather than applied to its return.
-    attemptRow<T, U[]>(item, attempt, rowHandler, ctx, (recovered) =>
-      recovered === DROP ? [] : [recovered as U],
-    ),
-  );
-  return chain(perItem, (rows) => rows.flat());
 }
 
 /**
@@ -520,7 +463,18 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
         const results = mapSettle(chunk, (x) => call(x, ctx));
         return chain(results, (rows) => rows.flat());
       }
-      return settleRowsFlat(chunk, (x) => call(x, ctx), run.rowHandler, ctx);
+      // A SUCCESS is already an array to flatten. A recovered value takes the failing row's place as
+      // its own one-element array - even when it IS an array - and `DROP` contributes nothing, so the
+      // wrap sits on the recovery channel alone, never on a success `settleRows` passes through.
+      const { rowHandler } = run;
+      const wrapped: RowErrorHandler = (item, error, rowCtx) =>
+        chain(rowHandler(item, error, rowCtx), (recovered) =>
+          recovered === DROP ? DROP : [recovered],
+        );
+      return chain(
+        settleRows(chunk, (x) => call(x, ctx), wrapped, ctx),
+        (rows) => rows.flat(),
+      );
     });
   }
 
