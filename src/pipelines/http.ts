@@ -188,7 +188,9 @@ async function foldChunkFrame(
 }
 
 /** The final accumulator, sent as its own `{"emit":…}` frame only if items were folded since the
- * last emit - `Reducer.final()`'s own contract, same as every other reducer in the package. */
+ * last emit - `Reducer.final()`'s own contract. A request that received no chunk sends nothing:
+ * the seed for an empty stream belongs to the stage (`ConcurrentPipeline.reduce`), never to one
+ * partition's request (#241). */
 async function flushTrailing(
   reducer: Reducer<unknown, unknown>,
   writer: WritableStreamDefaultWriter<Uint8Array>,
