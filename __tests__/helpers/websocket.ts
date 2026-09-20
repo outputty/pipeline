@@ -8,8 +8,8 @@ import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unlink } from "node:fs/promises";
-import { toNodeWebSocketHandler } from "../../src";
-import type { PipelineSocket } from "../../src";
+import { toNodeWebSocketHandler } from "../../src/websocket";
+import type { PipelineSocket } from "../../src/websocket";
 
 let nextSocketId = 0;
 

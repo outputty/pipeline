@@ -44,10 +44,10 @@ import {
   Pipeline,
   ConcurrentPipeline,
   HttpPipeline,
-  ClusterPipeline,
   EventEmitterPipeline,
   type Transformer,
 } from "../src";
+import { ClusterPipeline } from "../src/websocket";
 import {
   canonicalChain,
   canonicalInput,

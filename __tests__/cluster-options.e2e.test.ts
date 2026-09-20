@@ -6,7 +6,8 @@
  * `process.argv[1]`, Vitest's own entry inside a worker (`pipelines.e2e.test.ts`'s own header).
  */
 import { describe, it, expect } from "vitest";
-import { ClusterPipeline, ClusterHttpPipeline, JsonCodec, fetchClient } from "../src";
+import { ClusterHttpPipeline, JsonCodec, fetchClient } from "../src";
+import { ClusterPipeline } from "../src/websocket";
 import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
 
 describe("#208 ClusterPipeline/ClusterHttpPipeline accept codec/client with no cast (Done-when 1)", () => {

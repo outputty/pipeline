@@ -7,10 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      ws:
-        specifier: ^8.21.3
-        version: 8.21.3
     devDependencies:
       '@changesets/cli':
         specifier: ^3.0.1
@@ -45,6 +41,9 @@ importers:
       vitest:
         specifier: ^4.0.15
         version: 4.1.11(@types/node@26.4.1)(vite@8.2.2(@types/node@26.4.1)(esbuild@0.27.7)(tsx@4.23.13)(yaml@2.9.0))
+      ws:
+        specifier: ^8.21.3
+        version: 8.21.3
 
 packages:
 

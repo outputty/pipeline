@@ -6,7 +6,7 @@
  * workers. A worker that never answers (the HTTP-backed class, before L3) reads `-1`, so a missing
  * reply fails the assertion instead of hanging past `FIXTURE_TIMEOUT`.
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterPipeline } from "../../src/websocket";
 import { queryAllConnections } from "../helpers/cluster-connections";
 
 const workers = 2;

@@ -10,7 +10,8 @@
  * `cluster-file-codec.ts`, #208).
  */
 import { describe, it, expect } from "vitest";
-import { WebSocketPipeline, JsonCodec, type Codec, type PipelineSocket } from "../src";
+import { JsonCodec, type Codec } from "../src";
+import { WebSocketPipeline, type PipelineSocket } from "../src/websocket";
 import { withWebSocketServer } from "./helpers/websocket";
 import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
 // Done-when 7's own compile-time probe (below): a real named import, not a `typeof import()`

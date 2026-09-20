@@ -15,7 +15,8 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ClusterPipeline, type Codec } from "../../src";
+import type { Codec } from "../../src";
+import { ClusterPipeline } from "../../src/websocket";
 
 // Only the PRIMARY creates the store - a worker re-executing this same module must NOT mint its
 // own directory, or its codec silently writes and reads a different one than the primary's

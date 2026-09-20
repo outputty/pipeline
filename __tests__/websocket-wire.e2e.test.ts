@@ -4,7 +4,7 @@
  * mocks. `ClusterPipeline` reparenting onto this class is L3's own layer, not exercised here.
  */
 import { describe, it, expect } from "vitest";
-import { WebSocketPipeline } from "../src";
+import { WebSocketPipeline } from "../src/websocket";
 import { withWebSocketServer } from "./helpers/websocket";
 
 /** The "another instance" side of a `WebSocketPipeline` chain - an empty-source pipeline whose only
