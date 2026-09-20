@@ -11,7 +11,7 @@
  * `bench/overhead.ts` (the CLI) and `__tests__/fixtures/bench-cluster-*.ts` (this file's own test
  * subprocesses) are the only two callers.
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterPipeline } from "../../src/websocket";
 import {
   canonicalChain,
   canonicalInput,

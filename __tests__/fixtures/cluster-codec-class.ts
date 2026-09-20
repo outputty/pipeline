@@ -11,7 +11,8 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ClusterPipeline, type Codec } from "../../src";
+import type { Codec } from "../../src";
+import { ClusterPipeline } from "../../src/websocket";
 
 if (cluster.isPrimary) {
   process.env.CODEC_CLASS_STORE = mkdtempSync(join(tmpdir(), "cluster-codec-class-"));

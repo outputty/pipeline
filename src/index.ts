@@ -46,23 +46,14 @@ export { HttpPipeline, type HttpPipelineOptions, toNodeHandler } from "./pipelin
 // exported so a caller can annotate their own client, plus the two shipped implementations.
 export { type PipelineClient, fetchClient, defaultClient } from "./pipelines/client";
 export { ClusterHttpPipeline, type ClusterHttpPipelineOptions } from "./pipelines/cluster";
-// `ClusterPipeline` (#201, BREAKING, no deprecation period) - reparented onto `WebSocketPipeline`,
-// `ws+unix:` its default transport; the name every existing caller already imports, unchanged.
-// `ClusterHttpPipeline` (above) is the untouched HTTP/TCP class for a caller who wants it instead.
-export { ClusterPipeline, type ClusterPipelineOptions } from "./pipelines/cluster";
 export {
   EventEmitterPipeline,
   type EventEmitterPipelineOptions,
   type PipelineEmitter,
   type WorkEvent,
 } from "./pipelines/eventemitter";
-export {
-  WebSocketPipeline,
-  type WebSocketPipelineOptions,
-  type PipelineSocket,
-  toNodeWebSocketHandler,
-  type NodeWebSocketHandler,
-} from "./pipelines/websocket";
+// `WebSocketPipeline` and `ClusterPipeline` are on `@outputty/pipeline/websocket` (#239, BREAKING),
+// the one entry that loads `ws` - this root loads no package.
 // How a chunk is encoded on the wire (#209) - outside `pipelines/websocket.ts` so this barrel
 // doesn't need to load `ws` just to reach `Codec`/`JsonCodec`.
 export { type Codec, JsonCodec } from "./codec";

@@ -81,10 +81,15 @@
       // client.ts is the fourth (#179): HttpPipeline's own dispatch client, whose node:http default
       // is what the seam exists to choose between. Its node: imports are DYNAMIC and inside a try,
       // so a runtime without them falls back to the global fetch rather than failing to load.
+      // websocket.ts and websocket-cluster.ts are the fifth and sixth (#239): both ship on the
+      // `/websocket` entry. websocket.ts takes `IncomingMessage`/`Duplex` as type-only imports so its
+      // `.d.ts` names no `ws` type; websocket-cluster.ts is `ClusterPipeline`, split out of cluster.ts.
       "files": ["src/**/*.ts"],
       "excludeFiles": [
         "src/pipelines/http.ts",
         "src/pipelines/cluster.ts",
+        "src/pipelines/websocket.ts",
+        "src/pipelines/websocket-cluster.ts",
         "src/pipelines/eventemitter.ts",
         "src/pipelines/client.ts"
       ],

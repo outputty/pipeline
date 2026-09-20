@@ -18,7 +18,7 @@
  * `totalConnections: 1` for a reason unrelated to the round-robin fix this fixture exists to prove
  * (code review).
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterPipeline } from "../../src/websocket";
 import { queryAllConnections } from "../helpers/cluster-connections";
 
 const sum = await new ClusterPipeline<number>({ workers: 2, maxConcurrency: 2 })

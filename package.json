@@ -22,6 +22,11 @@
       "types": "./dist/index.d.ts",
       "require": "./dist/index.cjs",
       "import": "./dist/index.js"
+    },
+    "./websocket": {
+      "types": "./dist/websocket.d.ts",
+      "require": "./dist/websocket.cjs",
+      "import": "./dist/websocket.js"
     }
   },
   "files": [
@@ -57,9 +62,15 @@
     "tsup": "^8.5.1",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
-    "vitest": "^4.0.15"
-  },
-  "dependencies": {
+    "vitest": "^4.0.15",
     "ws": "^8.21.3"
+  },
+  "peerDependencies": {
+    "ws": "^8.21.3"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
   }
 }

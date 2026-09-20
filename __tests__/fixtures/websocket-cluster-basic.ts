@@ -4,7 +4,7 @@
  * `cluster-basic.ts` (#17) exactly, imports swapped - `ClusterPipeline` forks real workers, so this
  * runs as a subprocess fixture the same reason that one does (`pipelines.e2e.test.ts`'s own header).
  */
-import { ClusterPipeline } from "../../src";
+import { ClusterPipeline } from "../../src/websocket";
 
 const data = await new ClusterPipeline<number>()
 

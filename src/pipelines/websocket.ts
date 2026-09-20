@@ -51,6 +51,8 @@ import type {
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
 import { WebSocket as WSWebSocket, WebSocketServer } from "ws";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
 import type { Codec } from "@src/codec";
 import { JsonCodec } from "@src/codec";
 import { encodedChunk, encodeOrForward, isEmptyEncodedChunk } from "@src/utils/encoded-chunk";
@@ -815,20 +817,15 @@ export interface ResolvedConnect {
   release: () => void;
 }
 
-/** `toNodeWebSocketHandler()`'s own parameter derivation - `ws`'s own `WebSocketServer.handleUpgrade`
- * signature (`Parameters<...>`), rather than an explicit `node:http`/`node:stream` import: this file
- * carries no `node:` import of its own this way, so it needs none of `.oxlintrc.json`'s per-file
- * exceptions the other three dispatching files already have. */
-type HandleUpgradeParams = Parameters<InstanceType<typeof WebSocketServer>["handleUpgrade"]>;
-
 /** The shape `toNodeWebSocketHandler()` (below) returns - one method, taking the same raw
- * request/socket/head Node's own `"upgrade"` event hands a listener. */
+ * request/socket/head Node's own `"upgrade"` event hands a listener. Typed with `node:http`'s
+ * `IncomingMessage` and `node:stream`'s `Duplex`, never `ws`'s own `WebSocketServer.handleUpgrade`
+ * parameters (#239): a derived type leaves an import of the `ws` package in the published `.d.ts`,
+ * so a consumer would need `@types/ws`.
+ *
+ * `createServer().on("upgrade", (req, socket, head) => handler.upgrade(req, socket, head))`. */
 export interface NodeWebSocketHandler {
-  upgrade(
-    request: HandleUpgradeParams[0],
-    socket: HandleUpgradeParams[1],
-    head: HandleUpgradeParams[2],
-  ): void;
+  upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void;
 }
 
 /**

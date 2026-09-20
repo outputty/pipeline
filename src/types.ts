@@ -11,6 +11,13 @@ import type { MaybeAsyncChunks } from "./utils/chunk";
  */
 export const DEFAULT_CHUNK_SIZE = 1000;
 
+/** How long with zero in-flight dispatches before workers are killed and the process can exit on
+ * its own (Done-when 3). Not a caller-facing option - the ticket names the mechanism (an unref'd
+ * idle timer), not a tuned value; a re-fork after a real idle gap costs ~50-60ms (architecture.md's
+ * own measurement), which this window is comfortably larger than for back-to-back dispatches.
+ * Shared by `ClusterHttpPipeline` and `ClusterPipeline`, which cannot import each other's file. */
+export const IDLE_KILL_MS = 500;
+
 /**
  * Whether a chain runs synchronously, and therefore whether its terminal ops return a value or a
  * `Promise` (#90). `"unset"` is the ORDINARY state of a composed chain: nothing about it is async
