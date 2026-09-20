@@ -8,6 +8,23 @@ Async streaming data processing pipelines with chunking and concurrency control.
 pnpm add @outputty/pipeline
 ```
 
+The package installs no other package. Each runner - the `Pipeline` class a chain is built on - lists
+what it needs:
+
+- **`Pipeline`** - nothing.
+- **`ConcurrentPipeline`** - nothing.
+- **`HttpPipeline`** - nothing.
+- **`ClusterHttpPipeline`** - nothing.
+- **`EventEmitterPipeline`** - nothing.
+- **`WebSocketPipeline`** - `ws`, imported from `@outputty/pipeline/websocket`.
+- **`ClusterPipeline`** - `ws`, imported from `@outputty/pipeline/websocket`.
+
+Install `ws` yourself before using either of the last two. `@types/ws` is not needed.
+
+```bash
+pnpm add ws
+```
+
 ## Quick Start
 
 A pipeline declares the type it accepts, holds no data, and IS the function you call.
@@ -121,8 +138,9 @@ console.log(JSON.stringify(data)); // ["A","B","C"]
 `HttpPipeline` dispatches each chunk to another instance over HTTP; `WebSocketPipeline` dispatches
 over a persistent, multiplexed WebSocket connection instead - one connection per target, not one
 request per chunk; `ClusterPipeline` dispatches to worker processes on the same machine over that
-same WebSocket wire, brought up automatically (`ClusterHttpPipeline` is the same idea over the older
-HTTP transport, for a caller who wants it); `EventEmitterPipeline` hands each chunk directly to the
+same WebSocket wire, brought up automatically (`ClusterHttpPipeline` is the same idea over HTTP);
+both WebSocket runners import from `@outputty/pipeline/websocket` and need `ws`;
+`EventEmitterPipeline` hands each chunk directly to the
 chain's own composed function, and to any Worker functions registered on `pipeline.emitter`, in
 this same process. See
 [HttpPipeline](#httppipeline), [WebSocketPipeline](#websocketpipeline),
@@ -354,7 +372,7 @@ stops a reduce stage's emits reaching you until the request body closes.
 ### ClusterHttpPipeline
 
 Extends `HttpPipeline`. Dispatches each chunk of a stage to another process on the same machine,
-over HTTP - the same mechanism `ClusterPipeline` used before it moved to WebSocket (below). Needs no
+over HTTP - `ClusterPipeline` (below) is the same idea over WebSocket. Needs no
 server, port, url or fork in caller code - it brings its own workers up on the first dispatch and
 every later `ClusterHttpPipeline` in the process reuses them.
 
@@ -384,7 +402,8 @@ console.log(JSON.stringify(data)); // [2,4,6,8,10]
 
 ### WebSocketPipeline
 
-Extends `ConcurrentPipeline`. Dispatches each chunk of a stage over a persistent, multiplexed
+Extends `ConcurrentPipeline`. Imported from `@outputty/pipeline/websocket`; needs `ws` installed.
+Dispatches each chunk of a stage over a persistent, multiplexed
 WebSocket connection to another instance running the same code - one connection per `connect`
 target, kept open across every dispatch, instead of `HttpPipeline`'s one request per chunk. A stage
 is still its POSITION in the chain: the client sends one binary frame per dispatch (a small header
@@ -398,7 +417,7 @@ bridges `ws`'s own `WebSocketServer` for Node:
 
 ```typescript
 import { createServer } from "node:http";
-import { WebSocketPipeline, toNodeWebSocketHandler } from "@outputty/pipeline";
+import { WebSocketPipeline, toNodeWebSocketHandler } from "@outputty/pipeline/websocket";
 
 // The "another instance" side: a source-less pipeline holding the SAME chain, so its
 // .serve() can answer for it.
@@ -458,7 +477,8 @@ key:
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ClusterPipeline, type Codec } from "@outputty/pipeline";
+import type { Codec } from "@outputty/pipeline";
+import { ClusterPipeline } from "@outputty/pipeline/websocket";
 
 class FileCodec implements Codec {
   constructor(private dir: string) {}
@@ -481,10 +501,10 @@ const data = await new ClusterPipeline<number>({ codec: new FileCodec(process.en
 
 ### ClusterPipeline
 
-Extends `WebSocketPipeline`. Dispatches each chunk of a stage to another process on the same
-machine, over that same persistent WebSocket connection - the class every existing caller already
-imports; `ClusterHttpPipeline` (above) is the unchanged HTTP transport for a caller who wants it
-instead. Needs no server, socket path or fork in caller code - it brings its own workers up on the
+Extends `WebSocketPipeline`. Imported from `@outputty/pipeline/websocket`; needs `ws` installed.
+Dispatches each chunk of a stage to another process on the same
+machine, over that same persistent WebSocket connection; `ClusterHttpPipeline` (above) is the HTTP
+transport. Needs no server, socket path or fork in caller code - it brings its own workers up on the
 first dispatch and every later `ClusterPipeline` in the process reuses them, round-robining across
 the set.
 
@@ -497,7 +517,7 @@ its own with no explicit teardown:
 <!-- compiles -->
 
 ```typescript
-import { ClusterPipeline } from "@outputty/pipeline";
+import { ClusterPipeline } from "@outputty/pipeline/websocket";
 
 const data = await new ClusterPipeline<number>()
   .transform((t) => t.map((x: number) => x * 2))([1, 2, 3, 4, 5])

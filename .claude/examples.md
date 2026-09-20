@@ -58,7 +58,7 @@ per worker rather than one per chunk.
 <!-- illustrative -->
 
 ```ts
-import { ClusterPipeline } from "@outputty/pipeline";
+import { ClusterPipeline } from "@outputty/pipeline/websocket";
 
 const data = await new ClusterPipeline<number>({
   workers: 3,
@@ -102,7 +102,7 @@ later pipeline in the process reuses them - there is no server, port, url or for
 <!-- illustrative -->
 
 ```ts
-import { ClusterPipeline } from "@outputty/pipeline";
+import { ClusterPipeline } from "@outputty/pipeline/websocket";
 
 const data = await new ClusterPipeline<number>()
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
@@ -416,7 +416,8 @@ await new Promise<void>((resolve) => server.close(() => resolve()));
 <!-- compiles -->
 
 ```ts
-import { ClusterPipeline, DROP } from "@outputty/pipeline";
+import { DROP } from "@outputty/pipeline";
+import { ClusterPipeline } from "@outputty/pipeline/websocket";
 
 const parseStrict = (s: string): number => {
   const n = parseInt(s);
@@ -508,7 +509,7 @@ await new Promise<void>((resolve) => server.close(() => resolve()));
 <!-- compiles -->
 
 ```ts
-import { ClusterPipeline } from "@outputty/pipeline";
+import { ClusterPipeline } from "@outputty/pipeline/websocket";
 
 async function fetchScore(id: number): Promise<number> {
   await new Promise((resolve) => setTimeout(resolve, 5));

@@ -186,16 +186,15 @@ the class name changes.
 > **`WebSocketPipeline`** - each chunk dispatched over one persistent, multiplexed WebSocket
 > connection to another instance, instead of one HTTP request per chunk. The caller gives it
 > `connect` - where to dial (a unix socket path or a host:port) - and the receiving instance calls
-> `.serve(socket)` on an already-open connection to answer for it.
+> `.serve(socket)` on an already-open connection to answer for it. It imports from
+> `@outputty/pipeline/websocket` and needs the `ws` package installed.
 > **`ClusterHttpPipeline`** - each chunk dispatched to another process on the same machine, over
 > HTTP. It brings up its own workers on first run and every later pipeline in the process reuses
-> them. The class this package shipped first as `ClusterPipeline`, kept under this name for a caller
-> who wants the unchanged HTTP transport. `options.client` is `HttpPipeline`'s own knob, forwarded
-> to `super` unchanged.
+> them. `options.client` is `HttpPipeline`'s own knob, forwarded to `super` unchanged.
 > **`ClusterPipeline`** - the same "each chunk to another process on the same machine" shape as
-> `ClusterHttpPipeline`, over `WebSocketPipeline`'s own persistent connection instead - the class
-> name every caller already imports. Each worker gets its own connection; dispatch spreads across
-> them automatically. `options.codec` is `WebSocketPipeline`'s own knob, forwarded to `super`
+> `ClusterHttpPipeline`, over `WebSocketPipeline`'s own persistent connection instead. It imports
+> from `@outputty/pipeline/websocket` and needs the `ws` package installed. Each worker gets its own
+> connection; dispatch spreads across them automatically. `options.codec` is `WebSocketPipeline`'s own knob, forwarded to `super`
 > unchanged - it never crosses the process boundary itself, so a store it writes to must be
 > reachable from every worker (`process.env`, which `cluster.fork()` inherits).
 > **`EventEmitterPipeline`** - each chunk handed directly to the chain's own composed function, and
@@ -213,6 +212,15 @@ the class name changes.
 > `Pipeline`'s own cost, so a pinned region cannot drift from what pinning is meant to buy.
 > **Items in flight** - the number of callbacks a chain runs at once: the buffer size times
 > `maxConcurrency`. `maxConcurrency` bounds CHUNKS; the items inside one chunk run together.
+> **Optional peer** - a package the caller installs only for the runners that use it. `ws` is the
+> one: `WebSocketPipeline` and `ClusterPipeline` need it, and every other class needs no package at
+> all.
+
+Installing `@outputty/pipeline` installs no other package, and loading its root entry loads none.
+`Pipeline`, `ConcurrentPipeline`, `HttpPipeline`, `ClusterHttpPipeline` and `EventEmitterPipeline`
+run with nothing else on disk. `WebSocketPipeline` and `ClusterPipeline` live on the
+`@outputty/pipeline/websocket` entry, which loads `ws`, and a caller who imports it installs `ws`
+first. Their published types name no `ws` type, so `@types/ws` is not needed.
 
 The chunk is the unit of concurrency, so a `ConcurrentPipeline`'s parallelism is its buffer size
 times `maxConcurrency`, never `maxConcurrency` alone. A chain left at the default buffer of 1000 with
@@ -236,7 +244,7 @@ outweighing the parallelism gained. The defaults - `.buffer()` unset at 1000, `m
 at 4 - stay a reasonable point on this chain, not its fastest cell.
 
 ```ts
-import { ClusterPipeline } from "@outputty/pipeline";
+import { ClusterPipeline } from "@outputty/pipeline/websocket";
 
 const data = await new ClusterPipeline<number>()
   .transform((t) => t.map((x: number) => x * 2).filter((x: number) => x > 4))
@@ -291,7 +299,8 @@ process passes a reply on still encoded, so it reads rows only where it needs th
 > replaces the deleted `jsonCodec` object - construct `new JsonCodec()` instead.
 
 ```ts
-import { ClusterPipeline, type Codec } from "@outputty/pipeline";
+import type { Codec } from "@outputty/pipeline";
+import { ClusterPipeline } from "@outputty/pipeline/websocket";
 
 class FileCodec implements Codec {
   constructor(private dir: string) {}
@@ -399,7 +408,7 @@ mechanism and makes no other distinction: it seeds every worker forward, and nev
 worker's writes back.
 
 ```ts
-import { ClusterPipeline } from "@outputty/pipeline";
+import { ClusterPipeline } from "@outputty/pipeline/websocket";
 
 const data = await new ClusterPipeline<number>({
   workers: 3,
