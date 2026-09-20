@@ -1,5 +1,70 @@
 # @outputty/pipeline
 
+## 0.4.0
+
+### Minor Changes
+
+- 0257327: `WebSocketPipeline` and `ClusterPipeline` move to `@outputty/pipeline/websocket`, and `ws` becomes an
+  optional peer dependency. `require("@outputty/pipeline")` no longer fails with `Cannot find module
+'ws'` for a plain `Pipeline`: the root entry loads no package.
+
+  ```ts
+  // before
+  import { WebSocketPipeline, ClusterPipeline, toNodeWebSocketHandler } from "@outputty/pipeline";
+
+  // after
+  import {
+    WebSocketPipeline,
+    ClusterPipeline,
+    toNodeWebSocketHandler,
+  } from "@outputty/pipeline/websocket";
+  ```
+
+  Seven names leave the root: `WebSocketPipeline`, `WebSocketPipelineOptions`, `PipelineSocket`,
+  `toNodeWebSocketHandler`, `NodeWebSocketHandler`, `ClusterPipeline` and `ClusterPipelineOptions`.
+  `ClusterHttpPipeline`, `Codec` and `JsonCodec` stay on the root.
+
+  A caller of `/websocket` installs `ws` themselves (`pnpm add ws`); `@types/ws` is not needed, because
+  `NodeWebSocketHandler.upgrade` is typed with `node:http`'s `IncomingMessage` and `node:stream`'s
+  `Duplex` instead of `ws`'s own types. `Pipeline`, `ConcurrentPipeline`, `HttpPipeline`,
+  `ClusterHttpPipeline` and `EventEmitterPipeline` need no package.
+
+  A `/websocket`-only worker process now starts only the WebSocket worker server; it used to start the
+  HTTP one as well, because both lived in one file.
+
+  No deprecation period.
+
+### Patch Changes
+
+- 3f04f93: A reduce that received no data emits its seed once, where it used to emit nothing. A count over no
+  matching row is `0`, as `[].reduce(fn, seed)` returns it.
+
+  ```ts
+  // before
+  new Pipeline<number>()
+    .reduce(
+      (acc, x) => acc + x,
+      0,
+    )([])
+    .toArray(); // []
+
+  // after
+  new Pipeline<number>()
+    .reduce(
+      (acc, x) => acc + x,
+      0,
+    )([])
+    .toArray(); // [0]
+  ```
+
+  The rule holds for an empty input and for a stream a `filter` emptied, on every class. A partitioned
+  reduce (`ConcurrentPipeline`, `HttpPipeline`, `WebSocketPipeline`, both cluster classes) emits the seed
+  once for the stage; a partition that receives no chunk while its siblings fold stays silent, so three
+  chunks at `maxConcurrency: 4` still return three values. `Transformer.reduce` emits its seed for every
+  chunk that arrives empty, one a `filter` emptied included: `.buffer(1)` over `[1, 2, 3]` with
+  `.filter((x) => x > 1).reduce(sum, 0)` now returns `[0, 2, 3]`, where it returned `[2, 3]`. A reducer
+  that banks with `emit()` also gets its seed over no data. `.buffer(fn)` is unchanged.
+
 ## 0.3.0
 
 ### Minor Changes
