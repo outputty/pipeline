@@ -19,6 +19,7 @@ import type {
   PipelineMode,
   ChunkTransform,
   RouteVerb,
+  StageRoute,
   StageRegistries,
   Tagged,
   ReduceWork,
@@ -529,4 +530,22 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
   protected resolveRegistries(trail: string | null): StageRegistries | null {
     return trail === null ? this.registries() : this.registriesFor(trail);
   }
+}
+
+/**
+ * Reads back the route grammar `routePath()` builds (#90, #201): `/transform/<n>` or `/reduce/<n>`,
+ * optionally prefixed by a `/branch/<i>/<name>` trail. Both `HttpPipeline` (a URL pathname) and
+ * `WebSocketPipeline` (a JSON field) parse the same grammar with this one function.
+ *
+ * Deliberately NOT anchored at the start: `ClusterHttpPipeline`'s shared worker server hands the
+ * whole pathname through after looking the pipeline up by index, so the `/pipeline/<i>` prefix it
+ * added is still on it.
+ *
+ * `parseRoute("/pipeline/0/branch/1/big/transform/2")` →
+ * `{ trail: "/branch/1/big", verb: "transform", index: 2 }`.
+ */
+export function parseRoute(route: string): StageRoute | null {
+  const match = /(\/branch\/\d+\/[^/]+)?\/(transform|reduce)\/(\d+)$/.exec(route);
+  if (match === null) return null;
+  return { trail: match[1] ?? null, verb: match[2] as RouteVerb, index: Number(match[3]) };
 }

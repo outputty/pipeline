@@ -108,7 +108,7 @@ export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenera
  * One `Promise` per CHUNK, where `buildChunkGenerator` over `toAsyncIterable(data)` pays one per
  * ROW twice over - `toAsyncIterable`'s own `Promise.resolve` per pull, then the cutter's `for await`
  * on top. A slot may still be a pending `Promise` (a stage between two `.buffer()` calls widens only
- * its own output), so a thenable is awaited; the loop is hand-rolled because it measured faster
+ * its own output), so a thenable is awaited; the loop is hand-rolled so a settled slot costs no extra `await`
  * per chunk than `yield*` over the same slots.
  *
  * `asAsyncChunks([[1, 2], Promise.resolve([3])])` yields `[1, 2]`, then `[3]`.

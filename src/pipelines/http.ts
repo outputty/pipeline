@@ -13,7 +13,7 @@
  */
 
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
-import { ConcurrentPipeline } from "@src/pipelines/concurrent";
+import { ConcurrentPipeline, parseRoute } from "@src/pipelines/concurrent";
 import { Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
@@ -24,8 +24,6 @@ import type {
   PipelineMode,
   ReduceStage,
   ReduceWork,
-  RouteVerb,
-  StageRoute,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
 import { defaultClient, type PipelineClient } from "@src/pipelines/client";
@@ -199,28 +197,6 @@ async function flushTrailing(
   if (trailing.length > 0) {
     await writer.write(ndjsonFrame({ emit: trailing }));
   }
-}
-
-/**
- * Reads back the route grammar `HttpPipeline.routePath()` builds (#90): `/transform/<n>`,
- * `/reduce/<n>`, and either prefixed by a `/branch/<i>/<name>` trail, with `ClusterHttpPipeline`'s
- * own `/pipeline/<i>` ahead of all of it. Written and parsed in one file so the two cannot drift.
- *
- * Deliberately NOT anchored at the start: `ClusterHttpPipeline`'s shared worker server hands the
- * whole pathname through after looking the pipeline up by index, so the prefix it added is still on
- * it.
- *
- * `parseRoute("/pipeline/0/branch/1/big/transform/2")` →
- * `{ trail: "/branch/1/big", verb: "transform", index: 2 }`.
- */
-function parseRoute(pathname: string): StageRoute | null {
-  const match = /(\/branch\/\d+\/[^/]+)?\/(transform|reduce)\/(\d+)$/.exec(pathname);
-  if (match === null) return null;
-  return {
-    trail: match[1] ?? null,
-    verb: match[2] as RouteVerb,
-    index: Number(match[3]),
-  };
 }
 
 /**
