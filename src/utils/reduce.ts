@@ -94,22 +94,16 @@ export class Reducer<U, T> {
   private recover(item: T, ctx: IContextManager, emitted: U[], error: Error): U[] | Promise<U[]> {
     if (!this.rowHandler) throw error;
     return chain(this.rowHandler(item, error, ctx), (recovered) => {
-      this.applyRecovery(recovered as U | typeof DROP);
+      // `DROP` undoes `fold()`'s own increment - guarded, since `fn` can `emit()` (resetting
+      // `itemsSinceEmit` to `0`) and THEN throw, and `0 - 1` would leave `.final()` owing a value
+      // nothing was folded into since that emit. Any other value replaces the accumulator directly.
+      if (recovered === DROP) {
+        if (this.itemsSinceEmit > 0) this.itemsSinceEmit--;
+      } else {
+        this.acc = recovered as U;
+      }
       return emitted;
     });
-  }
-
-  /** Applies a recovered row (#78): `DROP` undoes `fold()`'s own increment - guarded, since `fn`
-   * can `emit()` (resetting `itemsSinceEmit` to `0`) and THEN throw, and `0 - 1` would leave
-   * `.final()` owing a value nothing was folded into since that emit - any other value replaces the
-   * accumulator directly. Split out of `fold()` to keep that method's own `try`/`catch` at this
-   * repo's `max-depth: 2`. */
-  private applyRecovery(recovered: U | typeof DROP): void {
-    if (recovered === DROP) {
-      if (this.itemsSinceEmit > 0) this.itemsSinceEmit--;
-      return;
-    }
-    this.acc = recovered;
   }
 
   /** The final accumulator, only if items were folded since the last `emit()` - `[]` otherwise. */
@@ -223,34 +217,17 @@ export function* foldSyncChunkStream<U, T>(
   ctx: IContextManager,
 ): MaybeAsyncChunks<U> {
   const reducer = new Reducer<U, T>(fn, initial);
-  let tail: Promise<U[]> | null = null;
-
-  for (const chunk of chunks) {
-    const fold = (): U[] | Promise<U[]> => chain(chunk, (items) => foldChunk(reducer, items, ctx));
-    const out: U[] | Promise<U[]> = tail === null ? fold() : tail.then(fold);
-
-    if (isThenable(out)) {
-      tail = out as Promise<U[]>;
-      // NOT guarded on length, unlike the settled arm below: a pending chunk's emptiness is not
-      // knowable until it settles, and a generator cannot un-yield. `PipelineResult.chunks()`
-      // drops the empties instead, which is where they are observable.
-      yield out as Promise<U[]>;
-      continue;
-    }
-    if ((out as U[]).length > 0) yield out as U[];
-  }
-
-  // The trailing accumulator owes the same ordering: once anything deferred, it is only known after
-  // the last chunk settles.
-  if (tail !== null) {
-    yield tail.then(() => reducer.final());
-    return;
-  }
-  const trailing = reducer.final();
-  if (trailing.length > 0) yield trailing;
+  yield* driveFold(
+    chunks,
+    (slot) =>
+      chain(
+        chain(slot, (items) => foldChunk(reducer, items, ctx)),
+        (out) => [out],
+      ),
+    () => [reducer.final()],
+  );
 }
 
-/**
 /**
  * Adapts a caller's `BufferFunction<T>` onto `ReduceFunction<T[], T>` (#88) - `pending` is the SAME
  * mutable array `Reducer` folds as `acc`, never exposed to `fn` directly: `flush` (the zero-arg
@@ -365,20 +342,22 @@ function* driveFold<T, Unit>(
   let remaining: T[][] = [];
 
   for (const unit of units) {
-    yield* nonEmpty(remaining);
-    remaining = [];
+    if (remaining.length > 0) {
+      yield* nonEmpty(remaining);
+      remaining = [];
+    }
 
     const out: T[][] | Promise<T[][]> = tail === null ? work(unit) : tail.then(() => work(unit));
 
     if (isThenable(out)) {
       tail = out as Promise<T[][]>;
       yield tail.then((values) => {
-        remaining = values.slice(1).filter((value) => value.length > 0);
+        remaining = values.slice(1);
         return values[0] ?? [];
       });
       continue;
     }
-    yield* nonEmpty(out as T[][]);
+    if ((out as T[][]).length > 0) yield* nonEmpty(out as T[][]);
   }
 
   yield* nonEmpty(remaining);

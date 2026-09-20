@@ -1019,13 +1019,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * is threaded through as `process()`'s own third argument, reaching `runSequentially`'s per-chunk
    * catch.
    *
-   * Python equivalent:
-   * ```python
-   * def apply(self, transformer: Transformer[T, U]) -> "Pipeline[U]":
-   *   self.chunks = transformer.process(self.chunks, self.context_manager)
-   *   return self
-   * ```
-   *
    * `pipeline.apply(new Transformer<T, T>().map((x) => x * 2))` on a pipeline of `[1, 2, 3]` →
    * `.toArray()` resolves `[2, 4, 6]`.
    */
@@ -1084,13 +1077,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * than the mistake. A source-less `.transform()` records the stage; calling the pipeline replays
    * it. What still refuses is DRAINING without an input, which the `Pipeline`/`PipelineResult`
    * split makes a type error rather than a runtime one.
-   *
-   * Python equivalent:
-   * ```python
-   * def transform(self, t: Callable[[Transformer[T, T]], Transformer[T, U]]) -> "Pipeline[U]":
-   *   transformer = t(Transformer[T, T]())
-   *   return self.apply(transformer)
-   * ```
    */
   transform<U, M2 extends "sync" | "async">(
     t: (transformer: Transformer<T, T, SeedMode<M>>) => Transformer<T, U, M2>,
@@ -1129,13 +1115,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * (`ReduceFunction<U, T>`'s two overloads) rather than `.tap()`'s conditional-collapse form,
    * since neither `.reduce()` nor `.buffer()` needs the "already async, stay `this`" special case
    * `.tap()`'s own `M extends "async" ? this : …` exists for.
-   *
-   * Python equivalent:
-   * ```python
-   * def buffer(self, size: int) -> "Pipeline[T]":
-   *   items = self.pre_buffer_items if self.pre_buffer_items is not None else flatten(self.chunks)
-   *   return Pipeline(build_chunk_generator(size)(items), pre_buffer_items=items)
-   * ```
    *
    * @example
    * `new Pipeline([1, 2, 3, 4, 5, 6, 7, 8, 9]).buffer(2).buffer(3).buffer(4)` yields the same
@@ -1343,12 +1322,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `this._chunks` directly, so a genuinely synchronous chain (`_syncChunks`, not `_chunks`) still
    * widens correctly - `chunkStream()` is the one seam that resolves either engine to an
    * `AsyncIterable<T[]>`, the same seam `.reduce()`'s own async arm reads.
-   *
-   * Python equivalent:
-   * ```python
-   * def queue(self, capacity: int) -> "Pipeline[T]":
-   *   return Pipeline(prefetch(self.chunk_stream(), capacity))
-   * ```
    *
    * @example
    * `new Pipeline<number>().buffer(1).queue(3)([1, 2, 3, 4, 5]).toArray()` → `Promise<number[]>`

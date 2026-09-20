@@ -11,7 +11,7 @@
 
 import type { ChunkerFunction } from "@src/types";
 import { chain } from "@src/utils/helpers";
-import { drainSync, dispatchSync, type MaybeAsyncChunks } from "@src/utils/drain";
+import { drainSync, type MaybeAsyncChunks } from "@src/utils/drain";
 import { isEncodedChunk, materialize } from "@src/utils/encoded-chunk";
 
 /** The `chunkSize`/`size` guard `buildChunkGenerator`, `buildSyncChunkGenerator` and
@@ -80,51 +80,6 @@ export function buildChunkGenerator<T>(chunkSize: number): ChunkerFunction<T> {
       yield chunk;
     }
   };
-}
-
-/**
- * Normalize a mixed stream of single items and pre-chunked arrays into chunks.
- *
- * Runs whenever a source stream mixes loose items with already-chunked arrays
- * (e.g. an ingestion source that occasionally emits a batch). Non-array items
- * are buffered in arrival order; the buffer is flushed as a chunk whenever an
- * array item is encountered (the array itself passes through as its own chunk,
- * unwrapped) or when the stream ends. Order is always preserved.
- *
- * @param stream - Async iterable yielding either loose items or arrays of items
- * @returns An async generator of chunks (arrays), in stream order
- *
- * @example
- * ```typescript
- * async function* mixed() {
- *   yield { id: 1 };
- *   yield [{ id: 2 }, { id: 3 }];
- *   yield { id: 4 };
- * }
- * for await (const chunk of normalize(mixed())) {
- *   console.log(chunk);
- * }
- * // Output: [{id:1}], [{id:2},{id:3}], [{id:4}]
- * ```
- */
-export async function* normalize<T>(stream: AsyncIterable<T | T[]>): AsyncGenerator<T[]> {
-  let buffer: T[] = [];
-
-  for await (const item of stream) {
-    if (!Array.isArray(item)) {
-      buffer.push(item as T);
-      continue;
-    }
-    if (buffer.length > 0) {
-      yield buffer;
-      buffer = [];
-    }
-    yield item;
-  }
-
-  if (buffer.length > 0) {
-    yield buffer;
-  }
 }
 
 /**
@@ -297,24 +252,12 @@ export async function* prefetch<T>(
 
   try {
     for (let i = 0; i < capacity; i++) pull();
-    yield* drainPrefetched(pending, pull);
+    for (let step = await pending.shift()!; !step.done; step = await pending.shift()!) {
+      pull();
+      yield step.value;
+    }
   } finally {
     await iterator.return?.();
-  }
-}
-
-/** `prefetch()`'s own steady-state loop, its own function so the `try/finally` around it (which
- * must wrap the WHOLE pump, not just this loop, so an early `.return()` during the initial fill
- * still closes `iterator`) costs one nesting level, not two (this repo's own `max-depth: 2`). */
-async function* drainPrefetched<T>(
-  pending: Promise<IteratorResult<T[]>>[],
-  pull: () => void,
-): AsyncGenerator<T[]> {
-  for (;;) {
-    const { done, value } = await pending.shift()!;
-    if (done) return;
-    pull();
-    yield value;
   }
 }
 
@@ -343,17 +286,13 @@ export function collectItems<T>(
   limit?: number,
 ): T[] | Promise<T[]> {
   const results: T[] = [];
-  return dispatchSync(
-    syncChunks,
-    (syncView) =>
-      chain(
-        drainSync(syncView, (item) => {
-          results.push(item);
-          return limit !== undefined && results.length >= limit;
-        }),
-        () => results,
-      ),
-    () => collectAsyncChunks(results, limit, chunks),
+  if (syncChunks === null) return collectAsyncChunks(results, limit, chunks);
+  return chain(
+    drainSync(syncChunks, (item) => {
+      results.push(item);
+      return limit !== undefined && results.length >= limit;
+    }),
+    () => results,
   );
 }
 
@@ -367,24 +306,10 @@ async function collectAsyncChunks<T>(
   chunks: () => AsyncIterable<T[]>,
 ): Promise<T[]> {
   for await (const chunk of chunks()) {
-    if (takeChunk(results, chunk, limit)) break;
+    const take =
+      limit === undefined ? chunk.length : Math.min(chunk.length, limit - results.length);
+    for (let i = 0; i < take; i++) results.push(chunk[i]);
+    if (limit !== undefined && results.length >= limit) break;
   }
   return results;
-}
-
-/** Appends one chunk's items to `results`, reporting whether `limit` is now reached - its own
- * function so `collectAsyncChunks` above stays within this repo's own `max-depth: 2`. The
- * unlimited case skips the per-item check entirely, which is `.toArray()`'s own path; a spread
- * (`results.push(...chunk)`) is deliberately not used, since it passes a whole chunk as arguments
- * and a large enough one overflows the call stack. */
-function takeChunk<T>(results: T[], chunk: T[], limit: number | undefined): boolean {
-  if (limit === undefined) {
-    for (let i = 0; i < chunk.length; i++) results.push(chunk[i]);
-    return false;
-  }
-  for (let i = 0; i < chunk.length; i++) {
-    results.push(chunk[i]);
-    if (results.length >= limit) return true;
-  }
-  return false;
 }

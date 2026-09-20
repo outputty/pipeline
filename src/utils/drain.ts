@@ -5,7 +5,7 @@
  * barrel has to change.
  */
 
-import { chain, isThenable } from "@src/utils/helpers";
+import { chain, isThenable, tryRecover } from "@src/utils/helpers";
 
 /**
  * A sync chunk stream whose individual chunks may still be pending (#90) - what a `"sync"`-Mode
@@ -13,22 +13,6 @@ import { chain, isThenable } from "@src/utils/helpers";
  * returned a thenable puts a `Promise` in, and that is where the run widens to async.
  */
 export type MaybeAsyncChunks<T> = Iterable<T[] | Promise<T[]>>;
-
-/**
- * The one sync/async decision every consumer of a `MaybeAsyncChunks | null` view shares (#133
- * review): `syncChunks !== null` picks `onSync` over `onAsync`. `cut.ts`'s own `collectItems` and
- * `result.ts`'s `PipelineResult.forEach()`/`[Symbol.iterator]()` all call this now, rather than
- * three independent `if (syncChunks !== null) { … } else { … }` spellings of the identical check.
- *
- * `dispatchSync(null, (c) => "sync", () => "async")` → `"async"`.
- */
-export function dispatchSync<T, S, A>(
-  syncChunks: MaybeAsyncChunks<T> | null,
-  onSync: (chunks: MaybeAsyncChunks<T>) => S,
-  onAsync: () => A,
-): S | A {
-  return syncChunks !== null ? onSync(syncChunks) : onAsync();
-}
 
 /**
  * Drains a `MaybeAsyncChunks` stream item by item into `onItem`, staying synchronous until the first
@@ -77,18 +61,10 @@ export function drainSync<T>(
  * the identical chain over an async source released it. Stays synchronous when `drain` does.
  */
 function closingOnFailure<R>(iterator: Iterator<unknown>, drain: () => R): R {
-  try {
-    const result = drain();
-    if (!isThenable(result)) return result;
-    // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a rejection can carry anything JS can throw; re-thrown untouched, genuinely unknown, not a gap
-    return Promise.resolve(result).catch((error: unknown) => {
-      close(iterator);
-      throw error;
-    }) as R;
-  } catch (error) {
+  return tryRecover(drain, (error) => {
     close(iterator);
     throw error;
-  }
+  }) as R;
 }
 
 /**

@@ -16,10 +16,6 @@ import type { Pipeline, PipelineSource } from "./pipeline";
 import type { MaybeAsyncChunks } from "./utils/chunk";
 import { isThenable } from "./utils/helpers";
 import { collectItems, drainSyncSettled } from "./utils/chunk";
-// Straight from `drain.ts`, not the `chunk.ts` barrel (#133 review, same reason `recut.ts` reaches
-// `cut.ts`/`drain.ts` directly): `dispatchSync` is new, with no pre-existing public contract at the
-// barrel path to preserve, so it stays off that barrel's own re-export list.
-import { dispatchSync } from "./utils/drain";
 
 /** The pipeline shape a result drains, with the Mode and policy erased - a result is handed its
  * pipeline by `Pipeline`'s own call signature, which has already fixed both. */
@@ -132,10 +128,8 @@ export class PipelineResult<T, M extends PipelineMode> {
     // callback still paid every stage's own decode. `drainable(false)` skips it - `.consume()`
     // reads no item, so it decodes nothing, whether or not an upstream stage left one encoded.
     const { syncChunks, chunks } = this.drainable(false);
-    return dispatchSync(
-      syncChunks,
-      (syncView) => drainSyncSettled(syncView, () => {}),
-      () => this.consumeAsync(chunks),
+    return (
+      syncChunks !== null ? drainSyncSettled(syncChunks, () => {}) : this.consumeAsync(chunks)
     ) as M extends "sync" ? void : Promise<void>;
   }
 
@@ -164,11 +158,7 @@ export class PipelineResult<T, M extends PipelineMode> {
     const { syncChunks, chunks } = this.drainable();
     // Each callback's own return is settled before the next item, so a `forEach` that turns out to
     // be async still runs strictly in order and still reports its own failures.
-    return dispatchSync(
-      syncChunks,
-      (syncView) => drainSyncSettled(syncView, fn),
-      () => this.forEachAsync(fn, chunks),
-    );
+    return syncChunks !== null ? drainSyncSettled(syncChunks, fn) : this.forEachAsync(fn, chunks);
   }
 
   /** `forEach`'s async arm, which settles each callback in turn (#179).
@@ -196,15 +186,12 @@ export class PipelineResult<T, M extends PipelineMode> {
    */
   [Symbol.iterator](): M extends "sync" ? Iterator<T> : never {
     const { syncChunks } = this.drainable();
-    return dispatchSync(
-      syncChunks,
-      (chunks) => syncItems(chunks),
-      () => {
-        throw new TypeError(
-          "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
-        );
-      },
-    ) as unknown as M extends "sync" ? Iterator<T> : never;
+    if (syncChunks === null) {
+      throw new TypeError(
+        "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
+      );
+    }
+    return syncItems(syncChunks) as unknown as M extends "sync" ? Iterator<T> : never;
   }
 
   /**
