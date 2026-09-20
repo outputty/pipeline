@@ -26,6 +26,9 @@ export class Reducer<U, T> {
    * value nothing was folded into since that emit (the ticket's own Constraints: real, that bug
    * produced `[60,90,0]` where `[60,90]` was written). */
   private itemsSinceEmit = 0;
+  /** Whether `fn` has run at all - never reset by `emit()`, so `.final(true)` can tell a fold over no
+   * data from a fold whose last item emitted. */
+  private folded = false;
 
   constructor(
     private readonly fn: ReduceFunction<U, T>,
@@ -54,6 +57,7 @@ export class Reducer<U, T> {
    */
   fold(item: T, ctx: IContextManager): U[] | Promise<U[]> {
     const emitted: U[] = [];
+    this.folded = true;
     this.itemsSinceEmit++;
 
     try {
@@ -106,9 +110,18 @@ export class Reducer<U, T> {
     });
   }
 
-  /** The final accumulator, only if items were folded since the last `emit()` - `[]` otherwise. */
-  final(): U[] {
-    return this.itemsSinceEmit > 0 ? [this.acc] : [];
+  /** The final accumulator, only if items were folded since the last `emit()` - `[]` otherwise.
+   *
+   * `seedIfEmpty` adds the fold that never ran: the seed is then the answer, as `[].reduce(f, seed)`
+   * returns it. Only a reducer that owns its whole stream passes it. A partition of a partitioned
+   * reduce sees a share of the stream, and the seed for an empty stream belongs to the stage
+   * (`ConcurrentPipeline.reduce`), never to one partition - a dispatched partition builds its own
+   * `Reducer` even when it receives no chunk.
+   *
+   * `new Reducer((acc, x) => acc + x, 0).final(true)` → `[0]`; `.final()` → `[]`. After one
+   * `.fold(1, ctx)`, both → `[1]`. */
+  final(seedIfEmpty = false): U[] {
+    return this.itemsSinceEmit > 0 || (seedIfEmpty && !this.folded) ? [this.acc] : [];
   }
 
   /** The RAW current accumulator, with no `itemsSinceEmit` gating (#88) - `.buffer()`'s own
@@ -176,14 +189,20 @@ export function foldChunk<U, T>(
  * never whether more than one does. Streams: yields whatever a given input chunk emitted as its own
  * output chunk, then the trailing accumulator once the stream ends.
  *
+ * `seedIfEmpty` makes a stream that folds nothing yield the seed, once. `Pipeline.reduce()` passes
+ * `true`, since its one accumulator IS the stage; a partition never does, because its share of the
+ * stream can be empty while the stage's is not.
+ *
  * `foldChunkStream((acc, x) => acc + x, 0, chunksOf([[1,2],[3]]), ctx)` → yields `[6]` once, the
- * whole dataset's sum, nothing emitted mid-fold.
+ * whole dataset's sum, nothing emitted mid-fold. Over `chunksOf([])` with `seedIfEmpty` → yields
+ * `[0]` once.
  */
 export async function* foldChunkStream<U, T>(
   fn: ReduceFunction<U, T>,
   initial: U,
   chunks: AsyncIterable<T[]>,
   ctx: IContextManager,
+  seedIfEmpty = false,
 ): AsyncGenerator<U[]> {
   const reducer = new Reducer<U, T>(fn, initial);
   for await (const chunk of chunks) {
@@ -193,7 +212,7 @@ export async function* foldChunkStream<U, T>(
   // `foldChunkStream` stays an async generator because its INPUT is an `AsyncIterable`, not because
   // a fold must defer: `foldSyncChunkStream` (below) folds the same reducer over a sync chunk stream
   // and is what `Pipeline.reduce()` picks on a `"sync"` chain.
-  const trailing = reducer.final();
+  const trailing = reducer.final(seedIfEmpty);
   if (trailing.length > 0) yield trailing;
 }
 
@@ -207,8 +226,12 @@ export async function* foldChunkStream<U, T>(
  * thenable therefore defers every chunk after it too. That deferral runs on `.then`, so a long
  * stream never grows the stack.
  *
+ * The seed for a stream that folds nothing is decided in `final()`, after `tail` settles, never by
+ * whether a chunk was yielded: `driveFold` yields a pending slot for an async chunk that then
+ * resolves empty, so a stream can yield a slot and still fold nothing.
+ *
  * `foldSyncChunkStream((acc, x) => acc + x, 0, [[1, 2], [3]], ctx)` → yields `[6]` once, no
- * `Promise` created.
+ * `Promise` created. Over `[]` → yields `[0]` once, no `Promise` created.
  */
 export function* foldSyncChunkStream<U, T>(
   fn: ReduceFunction<U, T>,
@@ -224,7 +247,7 @@ export function* foldSyncChunkStream<U, T>(
         chain(slot, (items) => foldChunk(reducer, items, ctx)),
         (out) => [out],
       ),
-    () => [reducer.final()],
+    () => [reducer.final(true)],
   );
 }
 

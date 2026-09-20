@@ -661,11 +661,13 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
    *   …` both work.
    * @param initial - Initial accumulator value, reset for every chunk.
    * @returns A new `Transformer` whose output is whatever `emit()` pushed plus the trailing
-   *   accumulator (only if items were folded since the last emit).
+   *   accumulator (only if items were folded since the last emit). A chunk that arrives empty emits
+   *   `initial` (#241), as `[].reduce(fn, initial)` returns it - including a chunk an earlier link
+   *   emptied.
    *
    * @example
    * `new Transformer<number, number>().reduce((acc, x) => acc + x, 0)` over chunks `[[1,2],[3]]` →
-   * `[3]` then `[3]` (each chunk's own independent sum).
+   * `[3]` then `[3]` (each chunk's own independent sum). Over `[[], [1,2]]` → `[0]` then `[3]`.
    */
   reduce<U>(
     fn: (acc: U, item: Out, ctx: IContextManager, emit: (value: U) => void) => Promise<U>,
@@ -677,10 +679,9 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   ): Transformer<In, U, M>;
   reduce<U>(fn: ReduceFunction<U, Out>, initial: U): Transformer<In, U, "sync" | "async"> {
     return this.pipe((chunk, ctx, run) => {
-      if (chunk.length === 0) return [];
       const reducer = new Reducer<U, Out>(fn, initial, run?.rowHandler);
       return chain(foldChunk(reducer, chunk, ctx), (values) => {
-        values.push(...reducer.final());
+        values.push(...reducer.final(true));
         return values;
       });
     });
