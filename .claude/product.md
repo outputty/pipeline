@@ -574,6 +574,9 @@ produced, never assuming there was one.
 > **`emit`** - the reducer callback's fourth parameter, `(acc, item, ctx, emit)`. Calling it pushes
 > a value downstream mid-fold and lets the caller decide what a finished result is. The final
 > accumulator is emitted only if items were folded since the last `emit()`.
+> **Seed** - the `initial` argument, the value a fold starts from. A reduce that received no data
+> emits its seed once, as `[].reduce(fn, initial)` returns it: a `Pipeline.reduce` over no rows, over
+> rows a `filter` removed, or over an empty input.
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
@@ -587,6 +590,30 @@ const data = await new Pipeline<number>()
 ```json
 [150]
 ```
+
+A reduce over no data answers with its seed, so a count of matching rows over no matches is `0`, not
+nothing. The rule holds whatever emptied the stream - an empty input, or a `filter` that removed every
+row:
+
+```ts
+import { Pipeline } from "@outputty/pipeline";
+
+const matches = await new Pipeline<number>()
+  .transform((t) => t.filter((x: number) => x > 9))
+  .reduce((acc: number) => acc + 1, 0)
+  ([1, 2, 3]).toArray();
+```
+
+```json
+[0]
+```
+
+A partitioned reduce owes ONE seed, from the stage: `ConcurrentPipeline` at `maxConcurrency: 4` over
+`[]` returns `[0]`, and a partition that receives no chunk while its siblings fold stays silent, so a
+stream of three chunks still returns three values. `Transformer.reduce` folds one chunk, so a chunk
+that arrives empty, one an earlier link emptied included, emits its seed. A `.transform()` over a
+stream of zero chunks never runs at all, so it emits nothing. A reducer that emits mid-fold gets the
+same seed over no data, a total nothing banked.
 
 A reducer that emits mid-fold turns one stream into a stream of finished results - a running total
 banked whenever it crosses a threshold, and no trailing value when the last item already banked one:

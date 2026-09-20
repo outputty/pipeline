@@ -213,7 +213,14 @@ none of it survived the hand-trim (#745).
   may produce several
   values and the chain continues after either, downstream running over every value produced.
   `emit(value)` pushes one downstream mid-fold; the final accumulator is emitted only if items were
-  folded since the last `emit()`. A reduce stage dispatches like any other stage; on
+  folded since the last `emit()`. A fold that never ran emits its SEED instead (#241), and the rule
+  sits at a different place per level: `Pipeline.reduce` seeds once per stage, from its own
+  whole-stream fold; a partitioned stage seeds once from `ConcurrentPipeline.reduce` itself, when no
+  partition yielded a chunk, and `Reducer.final()` is where it must NOT live, since a dispatched
+  partition builds its own `Reducer` even when it receives no chunk and one per partition returned
+  `[0,0,0,0]` over `[]`; `Transformer.reduce` seeds once per chunk that arrives empty, one a
+  `filter` emptied included. A `.transform()` over zero chunks never runs, so it emits nothing. A
+  reduce stage dispatches like any other stage; on
   `ConcurrentPipeline` (and `HttpPipeline`/`ClusterPipeline`) it PARTITIONS into `maxConcurrency`
   independent accumulators now (#62): `reduceWork()` is still called ONCE, but the closure it returns
   is called `maxConcurrency` times, each its own `share()` view of the one shared chunk stream - on
@@ -236,6 +243,9 @@ none of it survived the hand-trim (#745).
   automatically (#45, BREAKING: `ReduceOptions`, `PipelineReduceFunction` and the standalone
   callable `Transformer.reduce`'s old per-chunk-toggle overload are deleted -
   `ReduceFunction` is the one type, `Pipeline.reduce` the whole-dataset replacement).
+- **Seed** (#241, replaces: `initial value`, `initial accumulator`) - the `initial` argument of a
+  reduce, the value a fold starts from and the answer over no data: a reduce that received no data
+  emits it once. Each partition of a partitioned reduce starts from its OWN copy (`seedFor`, #113).
 - **Chunk** - the streaming unit a chain operates on: `In[]`/`Out[]`. Its boundary is a `Pipeline`
   decision, not a `Transformer` one (#39) - `.buffer(size)` sets it explicitly, defaulting
   to `DEFAULT_CHUNK_SIZE = 1000` when never called; every later stage sees the same chunks unchanged

@@ -65,6 +65,16 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **A reduce that received no data emits its seed** (#241, `fix`, PR #245 and this docs PR) - a
+  reduce over zero rows emitted nothing where `[].reduce(fn, seed)` returns the seed, so a consumer
+  counting matching rows over no matches got `undefined` instead of `0`. `Pipeline.reduce` seeds once
+  per stage (`Reducer.final(true)`, on both its sync and async arm), `ConcurrentPipeline.reduce` seeds
+  once when no partition yielded a chunk (`HttpPipeline`, `WebSocketPipeline` and both cluster
+  classes inherit it), and `Transformer.reduce` seeds every chunk that arrives empty. A partition that
+  receives no chunk stays silent, so three chunks at `maxConcurrency: 4` still return three values.
+  Runtime cost against `6c3d0b0`: garbage collections, promises per row and held heap unchanged. One
+  existing assertion moved, with the owner's approval (`codec.e2e.test.ts`, `[]` to `[0]`).
+
 - **`ws` is optional: the WebSocket runners move to `@outputty/pipeline/websocket`** (#239, `feat!`,
   PRs #240 (L1) and this docs PR) - `require("@outputty/pipeline")` failed with `Cannot find module
   'ws'` even for a plain `Pipeline`, because the root entry imported the package at load time.
@@ -577,6 +587,25 @@ The two older candidates, still not filed:
   `In`/`Out` with no `transform`. PRs #7, #8, #10, #12.
 
 ## Killed
+
+- **The empty-stream seed inside `Reducer.final()`** (#241 planning) - one line, `final()` answering
+  the seed when `fn` never ran. Killed on a real run: a dispatched partition builds its own `Reducer`
+  even when it receives no chunk, so `maxConcurrency: 4` over `[]` returned `[0,0,0,0]` and over five
+  items in three chunks returned `[0,3,7,5]`, a spurious `0` on a non-empty stream. The seed belongs
+  to the stage.
+- **A seed per partition** (#241 planning, the same result by another route) - each partition
+  emitting its seed when it received no data. Killed by the owner's pick of one seed per `.reduce()`
+  call, and by `partitioned-folds`' own rule that the partition count is a ceiling: a non-identity
+  seed of `100` over `[]` would have returned `[100,100,100,100]`.
+- **"No chunk was yielded" as the seed rule on every arm** (#241 planning) - a wrapper over the
+  stage's output with no `Reducer` change. Killed on the sync arm: `driveFold` yields a pending slot
+  for an async chunk that then resolves empty, so a stream can yield a slot and still fold nothing.
+  It survives only at a partitioned stage's merged output, where output-empty and fold-never-ran are
+  the same fact.
+- **`Transformer.reduce` left unchanged for an empty chunk** (#241 planning) - picked once, on the
+  price that `[2,3]` becomes `[0,2,3]` for a `.buffer(1)` chain that filters inside one transform, then
+  reversed by the owner's own next message: `Transformer.reduce` gives the same answer as
+  `Pipeline.reduce`, and a chunk a `filter` emptied is indistinguishable from a hand-cut `[]`.
 
 - **A lazy `import("ws")` inside `WebSocketPipeline`, keeping `ws` a dependency** (#239 planning) -
   no break and no second entry. Killed because the root `.d.ts` graph still reaches `ws`

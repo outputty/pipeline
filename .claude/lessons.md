@@ -7,6 +7,10 @@ the end of every planning session and inside every build's docs layer.
 - An entry is one paragraph; the incident's detail stays in the session.
 - Newest first. Development context lives here and in the tracker, never in `product.md`.
 
+## 2026-09-20 A "verified by run" label covered a clause the run never exercised
+
+Planning #241, a question's premise read "verified by run: `process([[],[1,2]])` gives `[[],[3]]` today; a Pipeline never passes it an empty chunk"; the run showed only the first clause, and a `filter` inside one `.transform()` empties a chunk, so the second was false. The pick built on it was re-asked, then reversed by the user's own next message: three rounds on one question. Added a `~/.claude/rules/code.md` line under "Prove it": a "verified by run" premise names the run behind each clause, and an unexercised clause is probed or labelled unverified.
+
 ## 2026-09-20 A zero-hit search was controlled on one build variant and reused on another
 
 Proving the root bundle held no `ws` for #239, `rg '"ws"'` was controlled on the unsplit CJS build, where `dist/websocket.cjs` hit, then reused after `splitting: true`, whose output writes `require('ws')` with single quotes; the result passed vacuously until the test's own control assertion failed. Added a `.claude/rules/code.md` line under "Prove it": re-run the control on the exact artifact, after every change to how it is produced.

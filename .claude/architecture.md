@@ -146,7 +146,9 @@ src/
                              measured-faster inlined form (#133)
     reduce.ts                Reducer/foldChunk/foldChunkStream - the shared fold, used by
                              Transformer.reduce, Pipeline.reduce and http.ts's own frame folding;
-                             Reducer takes an optional row handler (#78); Reducer.current() reads
+                             Reducer takes an optional row handler (#78); Reducer.final(seedIfEmpty)
+                             answers a fold that never ran with the seed, passed only by an owner of
+                             a whole stream (#241); Reducer.current() reads
                              the raw accumulator with no itemsSinceEmit gating (#88);
                              buildBufferGenerator/buildSyncBufferGenerator/recutSyncChunksWith are
                              .buffer(fn)'s own engine, bufferReduceFunction the one adapter onto
@@ -1307,7 +1309,36 @@ ConcurrentPipeline.reduce(fn, initial)
 		                      own bracket wraps one CHUNK)
 	emit(value)                                     buffered per input chunk, yielded as its own chunk
 	final accumulator                               only if items were folded since the last emit
+	seed                                            once, when the stage folded nothing (#241, done)
 ```
+
+A reduce that received no data emits its seed once (#241, done), and the rule sits where the whole
+stream is known:
+
+```text
+Pipeline.reduce(fn, initial)                          async arm and sync arm
+	foldChunkStream(..., seedIfEmpty = true)          the async arm's one Reducer for the whole stream
+		Reducer.final(true)                           [acc] if items folded since the last emit, OR fn never ran
+	foldSyncChunkStream                               the sync arm, no Promise created
+		Reducer.final(true)                           decided after `tail` settles, inside driveFold's final()
+ConcurrentPipeline.reduce(fn, initial)                Http / WebSocket / Cluster / EventEmitter inherit it
+	reduceWork()                                      maxConcurrency partitions, each foldChunkStream(..., false)
+		Reducer.final()                               a partition never seeds; its share can be empty
+	seedIfNoChunk(mergeUnordered(partitions), () => seedFor(initial))
+		yields [seed] once, when no partition yielded any chunk
+Transformer.reduce(fn, initial)                       per chunk
+	Reducer.final(true)                               a chunk that arrives empty emits `initial`
+```
+
+Two constraints, both measured. A rule inside `Reducer.final()` unconditionally is wrong: a dispatched
+partition builds its own `Reducer` even when it receives no chunk, so `maxConcurrency: 4` over `[]`
+returned `[0,0,0,0]` and over five items in three chunks returned `[0,3,7,5]`. A "no chunk was
+yielded" check is wrong on the sync arm: `driveFold` yields a pending slot for an async chunk that
+then resolves empty, so the seed is decided in `final()` after `tail` settles. Output-empty and
+fold-never-ran are the same fact only at the merged output of a partitioned stage, where any
+partition that folded anything yields a trailing accumulator or an emit. `.buffer(fn)` keeps its own
+trailing rule, `Reducer.current()`, and an empty pending array stays an empty chunk. `HttpPipeline`
+still opens `maxConcurrency` requests for a stream of zero chunks.
 
 `ConcurrentPipeline.reduce()` (#62) PARTITIONS rather than delegating once: `reduceWork()` itself is
 still called ONCE, but the closure it RETURNS is called `maxConcurrency` times, each its own
