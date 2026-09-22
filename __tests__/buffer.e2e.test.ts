@@ -14,8 +14,13 @@ import {
   closingSource,
   closingAsyncSource,
   chunksOf,
+  countPromises,
   countPromisesAsync,
 } from "./helpers/sequences";
+
+async function* asyncOf<T>(values: T[]): AsyncGenerator<T> {
+  yield* values;
+}
 
 /** Records each chunk `.apply()` hands to a stage, before that stage's own transform runs -
  * a chunk-level probe, not a per-item one (`.tap(fn)` runs per item and can't see boundaries). */
@@ -238,8 +243,8 @@ describe("async-engine tax spike (#120 follow-up) - a sync source on a forced-as
   });
 
   it("still drops an item via DROP and never emits an empty trailing chunk, on ConcurrentPipeline", async () => {
-    // The `.buffer(fn)` overload's own engine (`bufferReduceFunction`), exercised through the same
-    // fast path - #88's Done-when 3 case, restated on a dispatching class.
+    // The `.buffer(fn)` overload's own item loop (`src/utils/buffer-cut.ts`), exercised through the
+    // same fast path - #88's Done-when 3 case, restated on a dispatching class.
     const items = [
       { v: 1, invalid: false },
       { v: 2, invalid: true },
@@ -271,7 +276,7 @@ describe("async-engine tax spike (#120 follow-up) - a sync source on a forced-as
     // either way - what's at stake here is F3's fast path staying live for the SECOND call too:
     // if the sync item view were nulled after the first `.buffer()` (rather than kept alive, as
     // the `isSync()` branch above already does), the second call would silently fall through to
-    // `buildBufferGenerator`'s per-item path with no wrong OUTPUT to catch it - only more promises
+    // the async per-item cutter with no wrong OUTPUT to catch it - only more promises
     // created, at 1000 items an easy regression no `.toEqual()` on the result would ever see.
     // Measured directly (spiked, both real): the fast path creates 79 promises for this 9-item
     // case (`ConcurrentPipeline`'s own construction/dispatch scaffolding is most of that, unrelated
@@ -312,10 +317,9 @@ describe("async-engine tax spike (#120 follow-up) - a sync source on a forced-as
 // same way on .toArray(), on async iteration and on a .local() stage.
 
 // #88 - `.buffer()` accepts a `BufferFunction<T>` in place of a size, deciding the chunk boundary
-// per item instead of by count - `bufferReduceFunction` folds that form through the
-// `Reducer<T[], T>` engine (`src/utils/reduce.ts`). Both forms shared that engine until #179, when
-// the numeric form moved to the ordinary chunk cutters; the boundaries are unchanged either way,
-// which is what `__tests__/source-cut.e2e.test.ts` pins. Done-when 5 (`ChunkerFunction`
+// per item instead of by count - that form runs its own item loop (`src/utils/buffer-cut.ts`), and
+// the numeric form cuts through the ordinary chunk cutters. Both once folded through `Reducer`; the
+// boundaries are unchanged, which is what `__tests__/source-cut.e2e.test.ts` pins. Done-when 5 (`ChunkerFunction`
 // gone from the public export surface) and 6 (no file outside src/, __tests__/, .claude/ changed)
 // are structural checks, run via `rg`/`git diff` rather than a runtime case here.
 
@@ -387,10 +391,9 @@ describe("#88 buffer(fn) drops an item via DROP (Done-when 3)", () => {
   });
 
   it("never lets a flush-then-drop leave an empty pending array as its own chunk", async () => {
-    // `Reducer.itemsSinceEmit` increments BEFORE `fn` runs and DROP never undoes it outside a row
-    // handler (none is registered here, per this ticket's own Constraints) - a flush immediately
-    // followed by an item that drops leaves `pending` empty, and `.buffer(fn)`'s engine must guard
-    // every yield against it (`.toArray()` alone would hide the gap; `boundaryProbe` does not).
+    // A flush immediately followed by an item that drops leaves `pending` empty, and `.buffer(fn)`'s
+    // item loop must guard every yield against it (`.toArray()` alone would hide the gap;
+    // `boundaryProbe` does not).
     const items = [
       { v: 1, invalid: false },
       { v: 2, invalid: false },
@@ -467,11 +470,9 @@ describe("#88 buffer(fn) closes the source on early exit after a real stage alre
   it("closes a sync generator when .first(1) stops a chain that re-cuts with a BufferFunction", () => {
     // The numeric sibling of this case (above, "#90 review - an early exit closes the source on
     // both engines") exercises `recutSyncChunks`'s own manual-iterator cleanup; `.buffer(fn)`'s
-    // equivalent sub-path (`recutSyncChunksWith`, src/utils/reduce.ts) folds each existing chunk
-    // SLOT through the same `driveFold` engine instead - a plain nested `for...of`, the same shape
-    // `foldSyncChunkStream` already uses - relying on a generator's own `.return()` propagation
-    // rather than a manual iterator, and this is what proves that propagation still closes the
-    // source once folding replaces a plain re-slice.
+    // equivalent sub-path (`recutSyncChunksWith`, src/utils/buffer-cut.ts) walks each existing chunk
+    // SLOT with a plain `for...of`, relying on a generator's own `.return()` propagation rather
+    // than a manual iterator, and this is what proves that propagation still closes the source.
     const state = { closed: false };
     let count = 0;
     const sizeTwo = (item: number, _ctx: IContextManager, emit: () => void): number => {
@@ -491,7 +492,7 @@ describe("#88 buffer(fn) closes the source on early exit after a real stage alre
 
 describe("#88 buffer(fn)'s recut-from-chunks sub-path keeps every emit its own chunk (code-review)", () => {
   it("never merges an async stage's own single slot back into one oversized chunk", async () => {
-    // `recutSyncChunksWith` used to fold one incoming SLOT (here, the map stage's own single
+    // `.buffer(fn)`'s re-cut used to fold one incoming SLOT (here, the map stage's own single
     // 10-item chunk) and `.flat()` every value it emitted into ONE downstream chunk - correct only
     // when a slot emits at most once. A window function folding a real, multi-item slot emits
     // several times per slot as the ordinary case, not an edge case: measured before the fix,
@@ -517,8 +518,8 @@ describe("#88 buffer(fn)'s recut-from-chunks sub-path keeps every emit its own c
   });
 
   it("also drains correctly through .toArray()'s own iterator-driven consumer, not just .chunks()", async () => {
-    // `driveFold`'s `remaining` queue is written inside a yielded chunk's OWN `.then` and read back
-    // synchronously at the next `for` pass - correct only if every consumer awaits a pending chunk
+    // `recutSyncChunksWith`'s later chunks of a pending slot are filled inside that slot's OWN
+    // `.then` and yielded at the next `for` pass - correct only if every consumer awaits a pending chunk
     // before calling `.next()` again. `chunksOf` above proves it through `.chunks()`'s `for await`;
     // `.toArray()` goes through a different path (`drainSync`, a manual iterator) and must agree.
     let count = 0;
@@ -539,12 +540,10 @@ describe("#88 buffer(fn)'s recut-from-chunks sub-path keeps every emit its own c
 
 describe("#88 a flush-then-append on the LAST item is not dropped (found while verifying the fix above)", () => {
   it("keeps the item that caused the final flush as its own trailing chunk", async () => {
-    // `Reducer.final()`'s own `itemsSinceEmit` gate reads `0` right after an `emit()` - correct for
-    // `.reduce()`'s contract (`Reducer`'s own docstring), where a post-emit return value may be an
-    // unrelated fresh seed, but wrong for `bufferReduceFunction`'s flush-THEN-append shape: the
-    // item that triggers the flush also becomes the first (and here, only) item of the new pending
-    // array. `Reducer.current()`/`trailingOf` (src/utils/reduce.ts) reads the real pending state
-    // instead, so this item survives as its own trailing chunk rather than vanishing.
+    // `.buffer(fn)` flushes THEN appends: the item that triggers the flush also becomes the first
+    // (and here, only) item of the new pending chunk. A trailing check that asks "were items added
+    // since the last emit()" - `Reducer.final()`'s rule for `.reduce()` - reads no, and drops it; the
+    // item loop yields whatever is pending instead, so this item survives as its own trailing chunk.
     let windowStart = 0;
     const fiveMinuteWindow = (item: { ts: number }, _ctx: IContextManager, emit: () => void) => {
       if (item.ts - windowStart >= 300_000) {
@@ -575,5 +574,121 @@ describe("#88 buffer(fn) widens Mode to async for a Promise-returning fn (code-r
       .toArray();
 
     expect(await result).toEqual([2, 4, 6]);
+  });
+});
+
+describe(".buffer(fn) runs its own item loop", () => {
+  const everyThird = (item: number, _ctx: IContextManager, emit: () => void): number => {
+    if (item % 3 === 0) emit();
+    return item;
+  };
+  const items = [1, 2, 3, 4, 5, 6, 7];
+
+  it("creates no Promise over an array, and none after a sync stage", () => {
+    let out: number[] = [];
+    expect(
+      countPromises(() => (out = new Pipeline<number>().buffer(everyThird)(items).toArray())),
+    ).toBe(0);
+    expect(out).toEqual(items);
+
+    const afterStage = new Pipeline<number>()
+      .buffer(2)
+      .transform((t) => t.map((x: number) => x * 3))
+      .buffer(everyThird);
+    expect(countPromises(() => (out = afterStage(items).toArray()))).toBe(0);
+    expect(out).toEqual([3, 6, 9, 12, 15, 18, 21]);
+  });
+
+  it("flushes on an emit() an async fn calls after its own await", async () => {
+    const lateEmit = async (item: number, _ctx: IContextManager, emit: () => void) => {
+      await null;
+      if (item % 3 === 0) emit();
+      return item;
+    };
+    const expected = [
+      [1, 2],
+      [3, 4, 5],
+      [6, 7],
+    ];
+
+    expect(await chunksOf(new Pipeline<number>().buffer(lateEmit)(items))).toEqual(expected);
+    expect(await chunksOf(new Pipeline<number>().buffer(lateEmit)(asyncOf(items)))).toEqual(
+      expected,
+    );
+    expect(
+      await chunksOf(
+        new Pipeline<number>()
+          .buffer(2)
+          .transform((t) => t.map((x: number) => x))
+          .buffer(lateEmit)(asyncOf(items)),
+      ),
+    ).toEqual(expected);
+  });
+
+  it("re-cuts after a stage on the async engine exactly where the sync engine does", async () => {
+    const window = (item: number, _ctx: IContextManager, emit: () => void) => {
+      if (item === 10) return DROP;
+      if (item % 4 === 0) emit();
+      return item;
+    };
+    const chainWith = (cut: (p: Pipeline<number>) => Pipeline<number>) =>
+      cut(new Pipeline<number>().buffer(3).transform((t) => t.flatMap((x: number) => [x, x + 5])));
+    const byFn = chainWith((p) => p.buffer(window));
+    const bySize = chainWith((p) => p.buffer(4));
+
+    const syncFn = await chunksOf(byFn(items));
+    expect(syncFn).toEqual([[1, 6, 2, 7, 3], [8], [4, 9, 5, 6, 11, 7], [12]]);
+    expect(await chunksOf(byFn(asyncOf(items)))).toEqual(syncFn);
+
+    const syncSize = await chunksOf(bySize(items));
+    expect(syncSize).toEqual([
+      [1, 6, 2, 7],
+      [3, 8, 4, 9],
+      [5, 10, 6, 11],
+      [7, 12],
+    ]);
+    expect(await chunksOf(bySize(asyncOf(items)))).toEqual(syncSize);
+  });
+
+  it("hands a later stage one chunk per item once an array's fn turns async, empties included", async () => {
+    // A per-chunk `Transformer.reduce` seeds once per empty chunk it receives, so every slot the
+    // sync engine yields after the first thenable is visible here.
+    const sum = <M extends "sync" | "async">(t: Transformer<number, number, M>) =>
+      t.reduce((acc: number, x: number) => acc + x, 0);
+
+    expect(
+      await new Pipeline<number>()
+        .buffer(async (item: number) => item)
+        .transform(sum)(items)
+        .toArray(),
+    ).toEqual([0, 0, 0, 0, 0, 0, 0, 28]);
+    expect(
+      await new Pipeline<number>()
+        .buffer(2)
+        .transform((t) => t.map(async (x: number) => x))
+        .buffer(everyThird)
+        .transform(sum)(items)
+        .toArray(),
+    ).toEqual([0, 3, 12, 0, 13]);
+
+    // Only the first verdict is a thenable: every later item or slot still yields its own chunk.
+    // The cast picks the async overload; the runtime switches on the one thenable.
+    const firstAsync = ((item: number, ctx: IContextManager, emit: () => void) =>
+      item === 1 ? Promise.resolve(everyThird(item, ctx, emit)) : everyThird(item, ctx, emit)) as (
+      item: number,
+      ctx: IContextManager,
+      emit: () => void,
+    ) => Promise<number>;
+    expect(await new Pipeline<number>().buffer(firstAsync).transform(sum)(items).toArray()).toEqual(
+      [0, 0, 3, 0, 0, 12, 0, 13],
+    );
+    expect(
+      await new Pipeline<number>()
+        .buffer(2)
+        .transform((t) => t.map((x: number) => x))
+        .buffer(firstAsync)
+        .transform(sum)(items)
+        .toArray(),
+    ).toEqual([0, 3, 12, 0, 13]);
   });
 });

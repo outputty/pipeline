@@ -129,7 +129,12 @@ src/
                              drivers; closingOnFailure() builds on helpers.ts's tryRecover()
     recut.ts                 RecutState<T> ({iterator, size}) / recutFrom / recutPending /
                              cutChunk / recutSyncChunks - the iterator+size pair `recutFrom` and
-                             `recutPending` used to thread separately is now one state object (#133)
+                             `recutPending` used to thread separately is now one state object (#133);
+                             recutChunks is the async engine's count re-cut after a stage, slicing
+                             inside each chunk with the same cutChunk (#256)
+    buffer-cut.ts            .buffer(fn)'s own item loop (#256): openCut (one pending array and one
+                             emit closure per run) behind cutSyncItemsWith / cutItemsWith (items) and
+                             recutSyncChunksWith / recutChunksWith (after a stage)
     helpers.ts               isContextAware - fn.length arity check (isContextAwareReduce, its
                              reduce-side twin, is gone: every reduce path always passes all four
                              ReduceFunction arguments, #45); dropOrRethrow - the run handler's own
@@ -143,12 +148,8 @@ src/
                              Transformer.reduce, Pipeline.reduce and http.ts's own frame folding;
                              Reducer takes an optional row handler (#78); Reducer.final(seedIfEmpty)
                              answers a fold that never ran with the seed, passed only by an owner of
-                             a whole stream (#241); Reducer.current() reads
-                             the raw accumulator with no itemsSinceEmit gating (#88);
-                             buildBufferGenerator/buildSyncBufferGenerator/recutSyncChunksWith are
-                             .buffer(fn)'s own engine, bufferReduceFunction the one adapter onto
-                             Reducer<T[], T> (#88; .buffer(size) left this engine in #179 and
-                             sizeReduceFunction went with it)
+                             a whole stream (#241). Neither .buffer() form folds through it:
+                             .buffer(size) left in #179, .buffer(fn) in #256 (buffer-cut.ts)
     ndjson.ts                readNdjsonLines/ndjsonFrame - the reduce wire's framing, shared by
                              the client (reduceWork) and the server (.fetch's /reduce/<n>)
   factories.ts             createTransformer - Transformer construction sugar, no chunk-size
@@ -190,9 +191,11 @@ instead of configuring the `Transformer`.
 
 ## buffer(fn) - a callback-driven chunk boundary - #88
 
-`.buffer(fn: BufferFunction<T>)` folds through one `Reducer<T[], T>` (`src/utils/reduce.ts`,
-unchanged from what `Pipeline.reduce()` already uses), configured by `bufferReduceFunction(fn)`,
-which adapts a caller's zero-arg `emit`/`flush` onto the reducer's own value-taking `emit`.
+`.buffer(fn: BufferFunction<T>)` runs its own item loop (`src/utils/buffer-cut.ts`, #256).
+`openCut(fn, ctx)` holds one run's `pending` array and ONE `emit` closure, and calls `fn(item, ctx,
+emit)` directly; a verdict is awaited only when it is a thenable. `emit()` swaps `pending` out as the
+closed chunk and `settle` appends the item after, which is flush-then-append; `DROP` appends nothing;
+an `emit()` with nothing pending closes nothing. The trailing chunk is whatever is pending at the end.
 
 ⚠ `.buffer(size)` shared that engine until #179 and no longer does, though the chunk boundaries it
 produces are identical. It was configured with an identity `fn` and a framework-side auto-flush at
@@ -209,41 +212,39 @@ threw nothing before and now throws under `.buffer()`'s own name).
 ```text
 Pipeline.buffer(sizeOrFn)
 	isDeferred() ? record + replay : …
-	typeof sizeOrFn === "number" ?
-		cutBy(buildSyncChunkGenerator, recutSyncChunks, buildChunkGenerator)   by COUNT, no fold
-			isSync() && _syncPreBufferItems  → buildSyncChunkGenerator(size)(items)
-			isSync()                         → recutSyncChunks(_syncChunks, size)
-			_syncPreBufferItems              → asAsyncChunks(buildSyncChunkGenerator(size)(items))
-			else                             → buildChunkGenerator(size)(items)
-	: bufferReduceFunction(fn)                              ONE ReduceFunction<T[], T>
-		isSync() ?
-			_syncPreBufferItems !== null → buildSyncBufferGenerator(reduceFn, ctx)(items)
-			else (a real stage ran)      → recutSyncChunksWith(_syncChunks, reduceFn, ctx)
-		: buildBufferGenerator(reduceFn, ctx)(items)        fully async arm
+	cutBy(cutSync, recut, cutAsync, recutAsync)
+		isSync() && _syncPreBufferItems  → cutSync(items)
+		isSync()                         → recut(_syncChunks)            a slot may be a pending Promise
+		_syncPreBufferItems              → asAsyncChunks(cutSync(items))
+		_preBufferItems                  → cutAsync(items)
+		else (a stage ran, async)        → recutAsync(readableChunks(_chunks)), with
+		                                   preBufferItems = flattenChunks(same) for a back-to-back .buffer()
+	size: buildSyncChunkGenerator / recutSyncChunks / buildChunkGenerator / recutChunks
+	fn:   cutSyncItemsWith / recutSyncChunksWith / cutItemsWith / recutChunksWith
 ```
 
-Each `emit()` - a caller's explicit `flush()` - IS a chunk
-boundary, so `buildBufferGenerator`/`buildSyncBufferGenerator`/`recutSyncChunksWith` must never group
-more than one emit into a single downstream chunk, unlike `foldChunkStream`'s own reduce-shaped fold
-(there, everything one INPUT chunk emits collapses into one downstream value by design). The shared
-`driveFold` generator (`buildSyncBufferGenerator`/`recutSyncChunksWith`'s common tail-chaining
-engine) is what keeps that true once genuinely async: a `MaybeAsyncChunks` slot carries exactly one
-`T[]` per yield, so a unit (one item, or one existing chunk's worth via `foldChunk`) that emits more
-than once queues its later emits in `remaining`, drained - still in order - the moment the generator
-resumes, which only happens after the caller has awaited the first one. Review-caught, fixed before
-merge: an earlier cut `.flat()`-ed every emit from one unit into a single oversized chunk - real for
-a normal multi-item re-cut after an async stage, not an edge case, measured: `.buffer(10)
-.transform((t) => t.map(async (x) => x * 2)).buffer(sizeTwo)` (`sizeTwo` flushing every 2 items) over
-`[0..9]` yielded one 9-item chunk instead of six.
+Both async re-cuts loop inside each incoming chunk. Flattening the stage's chunks first cost one
+promise per item: `.transform(map).buffer(fn)` over an async source read 492-498 ns/row that way and
+122-125 looping, `.buffer(100)` 293-300 and 115.
 
-`Reducer.final()`'s own `itemsSinceEmit` gate - built for `.reduce()`'s contract, where a value
-returned right after an `emit()` may be an unrelated fresh seed - reads `0` whenever a fold both
-flushes and appends the SAME item, which `bufferReduceFunction`'s flush-then-append shape does on
-purpose. `.buffer(fn)`'s own trailing check is `Reducer.current()` (the raw accumulator, no gating)
-via `trailingOf()` instead: found verifying the `driveFold` fix above with a real run rather than a
-hand-derived expected value, a stream's own LAST item silently vanished whenever it both caused a
-flush and repopulated the pending array - `Reducer.final()` read `0` where `Reducer.current()` reads
-the real, non-empty pending array.
+Each `emit()` IS a chunk boundary, so no cutter ever groups two emits into one downstream chunk,
+unlike `foldChunkStream`'s reduce-shaped fold. Review-caught in #88: an earlier cut `.flat()`-ed
+every emit from one re-cut slot into a single oversized chunk - measured, `.buffer(10).transform((t)
+=> t.map(async (x) => x * 2)).buffer(sizeTwo)` over `[0..9]` yielded one 9-item chunk instead of six.
+
+⚠ The two sync cutters keep the slot shape the fold gave them, because a later stage sees every slot and a
+per-chunk `Transformer.reduce` seeds once per empty one. Until the first thenable, only closed chunks
+are yielded. From it on, `cutSyncItemsWith` yields one slot per item (the chunk it closed, else
+`[]`), and `recutSyncChunksWith` one leading slot per incoming slot (the chunk its first `emit()`
+closed, `[]` when that `emit()` closed nothing or none ran) followed by its other chunks; both always
+yield the pending chunk last, `[]` included. `.buffer(async (x) => x).transform((t) => t.reduce(sum,
+0))` over `[1..7]` returns `[0,0,0,0,0,0,0,28]` for that reason. The sync cutters run
+over any sync source, on every class (`ConcurrentPipeline` over an array included), and after a stage
+on the sync engine; `cutItemsWith`/`recutChunksWith` never yield an empty chunk. A tail that
+yielded one promise per OUTPUT chunk would return `[28]`; `__tests__/buffer.e2e.test.ts` pins both
+shapes. `recutSyncChunksWith` also runs a whole incoming slot before yielding any chunk it closed, so
+a later stage reading state `fn` writes sees it per slot, as it did through the fold. The tail relies
+on the consumer settling a yielded slot before pulling the next one, as `recutPending` does.
 
 `.buffer(fn)` widens Mode to `"async"` when `fn` returns a `Promise`, via two overloads ordered
 Promise-first - `(item, ctx, emit) => Promise<T | typeof DROP>` → `Pipeline<T, "async", In>`,
@@ -253,8 +254,8 @@ than `.tap()`'s `M extends "async" ? this : …` conditional-collapse form: neit
 `this`" case worth the extra complexity. The implementation body's own `_mode` field is NOT updated
 explicitly for an async `fn` on a `"sync"`-Mode chain - `.reduce()`'s own sync branch has the
 identical gap (`mode: this.sourcePolicy() === "async" ? "async" : "sync"`, blind to `fn`'s own
-async-ness) - and this is safe for the same reason `.reduce()`'s is: `buildSyncBufferGenerator`'s own
-tail-chaining discovers a genuine `Promise` from the DATA, never from `_mode`, so a terminal op still
+async-ness) - and this is safe for the same reason `.reduce()`'s is: `cutSyncItemsWith`'s own
+loop discovers a genuine `Promise` from the DATA, never from `_mode`, so a terminal op still
 returns the right value; only `isSync()`'s own bookkeeping reads stale until the next real cut.
 
 ## Prefetching - #123
@@ -494,7 +495,7 @@ async engine did per ROW for data that arrives per CHUNK (#179):
    cut with `slice` and handed over whole chunks.
 3. `.buffer(size)` folded every item through `Reducer<T[], T>` - a per-item closure call and an
    array-mutating accumulator - for a cut that only counts. It now cuts by count on all three arms;
-   `.buffer(fn)` keeps the fold engine, which is what a per-item decision needs.
+   `.buffer(fn)` kept the fold engine until #256 gave it its own item loop.
 4. `stageWork()` called the global `fetch` once per chunk, where `node:http` with a keep-alive agent
    is several times cheaper. `options.client` is the seam, and `node:http` the default on Node.
 
@@ -1336,8 +1337,8 @@ returned `[0,0,0,0]` and over five items in three chunks returned `[0,3,7,5]`. A
 yielded" check is wrong on the sync arm: `driveFold` yields a pending slot for an async chunk that
 then resolves empty, so the seed is decided in `final()` after `tail` settles. Output-empty and
 fold-never-ran are the same fact only at the merged output of a partitioned stage, where any
-partition that folded anything yields a trailing accumulator or an emit. `.buffer(fn)` keeps its own
-trailing rule, `Reducer.current()`, and an empty pending array stays an empty chunk. `HttpPipeline`
+partition that folded anything yields a trailing accumulator or an emit. `.buffer(fn)` does not fold
+through `Reducer`: it yields whatever is pending at the end. `HttpPipeline`
 still opens `maxConcurrency` requests for a stream of zero chunks.
 
 `ConcurrentPipeline.reduce()` (#62) PARTITIONS rather than delegating once: `reduceWork()` itself is

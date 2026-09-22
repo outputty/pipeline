@@ -1,6 +1,6 @@
-/** The folds behind `.reduce()` at every level, and behind `.buffer(fn)`. */
+/** The folds behind `.reduce()` at every level. */
 
-import type { IContextManager, ReduceFunction, RowErrorHandler, BufferFunction } from "@src/types";
+import type { IContextManager, ReduceFunction, RowErrorHandler } from "@src/types";
 import { DROP } from "@src/types";
 import type { MaybeAsyncChunks } from "@src/utils/drain";
 import { chain, isThenable } from "@src/utils/helpers";
@@ -110,14 +110,6 @@ export class Reducer<U, T> {
   final(seedIfEmpty = false): U[] {
     return this.itemsSinceEmit > 0 || (seedIfEmpty && !this.folded) ? [this.acc] : [];
   }
-
-  /** The current accumulator, whether or not an `emit()` just ran.
-   *
-   * ⚠ `.buffer(fn)` reads this, not `.final()`, for its trailing chunk. An item that flushes and is
-   * then appended leaves `.final()` at `[]`, which would drop that last item. */
-  current(): U {
-    return this.acc;
-  }
 }
 
 function pushAll<U>(target: U[], values: readonly U[]): void {
@@ -210,51 +202,10 @@ export function* foldSyncChunkStream<U, T>(
   );
 }
 
-/** ⚠ Flush, then append: the item whose callback calls `emit()` opens the next chunk. */
-function bufferReduceFunction<T>(fn: BufferFunction<T>): ReduceFunction<T[], T> {
-  return (acc, item, ctx, emit) => {
-    let pending = acc;
-    const flush = () => {
-      emit(pending);
-      pending = [];
-    };
-    return chain(fn(item, ctx, flush), (value) => {
-      if (value !== DROP) pending.push(value);
-      return pending;
-    });
-  };
-}
-
 function* nonEmpty<T>(values: T[][]): Generator<T[]> {
   for (const value of values) {
     if (value.length > 0) yield value;
   }
-}
-
-function trailingOf<T>(reducer: Reducer<T[], T>): T[][] {
-  const pending = reducer.current();
-  return pending.length > 0 ? [pending] : [];
-}
-
-/**
- * Cuts an async item stream into chunks with a `.buffer(fn)` fold: every flush is its own chunk,
- * and the pending remainder is the last. Empty chunks are never yielded.
- *
- * `buildBufferGenerator(everySecondItem, ctx)` over items `1, 2, 3` → yields `[1, 2]` then `[3]`.
- */
-export function buildBufferGenerator<T>(
-  fn: BufferFunction<T>,
-  ctx: IContextManager,
-): (data: AsyncIterable<T>) => AsyncGenerator<T[]> {
-  const reduceFn = bufferReduceFunction(fn);
-  return async function* bufferGenerator(data: AsyncIterable<T>): AsyncGenerator<T[]> {
-    const reducer = new Reducer<T[], T>(reduceFn, []);
-    for await (const item of data) {
-      const folded = reducer.fold(item, ctx);
-      yield* nonEmpty(isThenable(folded) ? await folded : folded);
-    }
-    yield* nonEmpty(trailingOf(reducer));
-  };
 }
 
 /**
@@ -295,48 +246,4 @@ function* driveFold<T, Unit>(
     return;
   }
   yield* nonEmpty(final());
-}
-
-/**
- * `buildBufferGenerator` over a synchronous item stream. It stays synchronous until the first async
- * fold.
- *
- * `[...buildSyncBufferGenerator(everySecondItem, ctx)([1, 2, 3])]` → `[[1, 2], [3]]`, no `Promise`
- * created.
- */
-export function buildSyncBufferGenerator<T>(
-  fn: BufferFunction<T>,
-  ctx: IContextManager,
-): (data: Iterable<T>) => MaybeAsyncChunks<T> {
-  const reduceFn = bufferReduceFunction(fn);
-  return function* bufferGenerator(data: Iterable<T>): MaybeAsyncChunks<T> {
-    const reducer = new Reducer<T[], T>(reduceFn, []);
-    yield* driveFold(
-      data,
-      (item) => reducer.fold(item, ctx),
-      () => trailingOf(reducer),
-    );
-  };
-}
-
-/**
- * Re-cuts a stage's output chunks with a `.buffer(fn)` fold, for a `.buffer(fn)` after that stage.
- *
- * ⚠ A slot can be pending even on a `"sync"` chain, so each slot is folded as it settles, never
- * flattened to items first.
- *
- * `[...recutSyncChunksWith([[1, 2], [3]], everySecondItem, ctx)]` → `[[1, 2], [3]]`, no `Promise`
- * created.
- */
-export function recutSyncChunksWith<T>(
-  chunks: MaybeAsyncChunks<T>,
-  fn: BufferFunction<T>,
-  ctx: IContextManager,
-): MaybeAsyncChunks<T> {
-  const reducer = new Reducer<T[], T>(bufferReduceFunction(fn), []);
-  return driveFold(
-    chunks,
-    (slot) => chain(slot, (items) => foldChunk(reducer, items, ctx)),
-    () => trailingOf(reducer),
-  );
 }

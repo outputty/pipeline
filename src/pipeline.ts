@@ -35,7 +35,13 @@ import {
   flattenChunks,
   prefetch,
 } from "./utils/cut";
-import { recutSyncChunks } from "./utils/recut";
+import { recutChunks, recutSyncChunks } from "./utils/recut";
+import {
+  cutItemsWith,
+  cutSyncItemsWith,
+  recutChunksWith,
+  recutSyncChunksWith,
+} from "./utils/buffer-cut";
 import { applyContextValues, chain, runStageChunk } from "./utils/helpers";
 import { PipelineResult } from "./result";
 import { BranchBuilder, runBranch } from "./branch";
@@ -47,13 +53,7 @@ import type {
   ModeOfArms,
   ResultsOf,
 } from "./branch";
-import {
-  foldChunkStream,
-  foldSyncChunkStream,
-  buildBufferGenerator,
-  buildSyncBufferGenerator,
-  recutSyncChunksWith,
-} from "./utils/reduce";
+import { foldChunkStream, foldSyncChunkStream } from "./utils/reduce";
 
 function asyncIterableFrom<U>(gen: () => AsyncGenerator<U>): AsyncIterable<U> {
   return { [Symbol.asyncIterator]: gen };
@@ -666,14 +666,16 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
         buildSyncChunkGenerator<T>(size),
         (slots) => recutSyncChunks(slots, size),
         buildChunkGenerator<T>(size),
+        (chunks) => recutChunks(chunks, size),
       );
     }
     const fn = sizeOrFn;
     const ctx = this._context;
     return this.cutBy(
-      buildSyncBufferGenerator<T>(fn, ctx),
+      cutSyncItemsWith<T>(fn, ctx),
       (slots) => recutSyncChunksWith(slots, fn, ctx),
-      buildBufferGenerator<T>(fn, ctx),
+      cutItemsWith<T>(fn, ctx),
+      recutChunksWith<T>(fn, ctx),
     );
   }
 
@@ -681,6 +683,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     cutSync: (items: Iterable<T>) => MaybeAsyncChunks<T>,
     recut: (slots: MaybeAsyncChunks<T>) => MaybeAsyncChunks<T>,
     cutAsync: (items: AsyncIterable<T>) => AsyncIterable<T[]>,
+    recutAsync: (chunks: AsyncIterable<T[]>) => AsyncIterable<T[]>,
   ): this {
     // ⚠ `recut` re-slices slots without flattening: a slot can hold a pending `Promise<T[]>` even
     // on a sync chain.
@@ -701,10 +704,14 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       }) as this;
     }
 
-    const items = this._preBufferItems ?? flattenChunks(this.readableChunks(this._chunks));
-    return this.createPipeline<T>(cutAsync(items), {
+    if (this._preBufferItems !== null) {
+      return this.createPipeline<T>(cutAsync(this._preBufferItems), this.carriedOptions()) as this;
+    }
+    const chunks = this.readableChunks(this._chunks);
+    return this.createPipeline<T>(recutAsync(chunks), {
       ...this.carriedOptions(),
-      preBufferItems: items,
+      // Drained only when a back-to-back `.buffer()` replaces this one, never alongside `recutAsync`.
+      preBufferItems: flattenChunks(chunks),
     }) as this;
   }
 

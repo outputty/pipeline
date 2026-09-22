@@ -692,11 +692,9 @@ console.log(JSON.stringify(data)); // [1,2,3,4,5] - buffer(2) would have printed
 ```
 
 `.buffer(fn)` decides the boundary per item instead of by count - a `T[]` pending array the
-framework owns, folded through it item by item. `fn`'s own `emit()` takes no value: it flushes
+framework owns, with `fn` called once per item. `fn`'s own `emit()` takes no value: it flushes
 whatever is currently pending and resets it to `[]`; returning a value appends it to the (possibly
-just-reset) pending array, and returning `DROP` skips the item entirely. `.buffer(size)` is this
-same mechanism configured with an identity `fn` and a framework-side auto-flush at
-`pending.length >= size`:
+just-reset) pending array, and returning `DROP` skips the item entirely:
 
 <!-- compiles -->
 

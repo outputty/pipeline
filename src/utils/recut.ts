@@ -1,4 +1,4 @@
-/** Re-cuts a synchronous chunk stream at a new chunk size. */
+/** Re-cuts a stage's chunk stream at a new chunk size. */
 
 import { isThenable } from "@src/utils/helpers";
 import { close, type MaybeAsyncChunks } from "@src/utils/drain";
@@ -49,6 +49,22 @@ function* recutFrom<T>(state: RecutState<T>): Generator<T[] | Promise<T[]>> {
   if (carry.length > 0) {
     yield carry;
   }
+}
+
+/**
+ * `recutSyncChunks` over a stage's async chunk stream, slicing inside each chunk rather than
+ * flattening it to one item per pull. The chunks it yields are the same.
+ *
+ * `recutChunks(chunks, 2)` over `[1, 2]` then `[3, 4, 5]` → yields `[1, 2]`, `[3, 4]`, `[5]`.
+ */
+export async function* recutChunks<T>(
+  chunks: AsyncIterable<T[]>,
+  size: number,
+): AsyncGenerator<T[]> {
+  assertPositiveChunkSize(size);
+  let carry: T[] = [];
+  for await (const chunk of chunks) carry = yield* cutChunk(carry, chunk, size);
+  if (carry.length > 0) yield carry;
 }
 
 /**
