@@ -533,35 +533,28 @@ console.log(JSON.stringify(data)); // [10,20,30,40,50]
 
 ## Case 13 - a synchronous chain, widening once async is introduced
 
-`.from(source)` decides whether the chain runs synchronously from the source's own shape - a plain
-array stays synchronous through every stage, and `.toArray()` returns `number[]` directly, no
-`await`. `.transform()` cannot be called before `.from()` at all - a compile error, since there is
-no source yet to decide sync or async against.
+A chain called with a plain array, whose callbacks are all synchronous, stays synchronous through
+every stage: `.toArray()` returns `number[]` directly, no `await`. One callback returning a
+`Promise` widens the chain's Mode, and the same terminal returns `Promise<number[]>`.
 
-<!-- illustrative, pending #90 -->
+<!-- compiles -->
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = new Pipeline()
-  .from([1, 2, 3, 4, 5])
-  .transform((t) => t.map((x) => x * 2).filter((x) => x > 4))
+const data = new Pipeline<number>()
+  .transform((t) => t.map((x) => x * 2).filter((x) => x > 4))([1, 2, 3, 4, 5])
   .toArray(); // number[] - no await
-```
 
-```json
-[6, 8, 10]
-```
-
-The same chain widens to asynchronous the moment any stage's own function returns a `Promise`:
-
-<!-- illustrative, pending #90 -->
-
-```ts
-const widened = await new Pipeline()
-  .from([1, 2, 3, 4, 5])
-  .transform((t) => t.map(async (x) => x * 2).filter((x) => x > 4))
+const widened = await new Pipeline<number>()
+  .transform((t) => t.map(async (x) => x * 2).filter((x) => x > 4))([1, 2, 3, 4, 5])
   .toArray(); // Promise<number[]>
+
+console.log(JSON.stringify(data), JSON.stringify(widened));
+```
+
+```text
+[6,8,10] [6,8,10]
 ```
 
 ## Case 14 - prefetching ahead of the consumer

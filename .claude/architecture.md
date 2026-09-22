@@ -338,35 +338,17 @@ the four one-liner overrides cheap.
 Measured end to end: a 100ms/item source through a 30ms/item transform, `.queue(3)`, 5 items - 674ms
 fully serial, 542ms queued, same 5 outputs in order.
 
-## Synchronous execution - pending #90
+## Synchronous execution
 
-Every piece above (`buildChunkGenerator`, `flattenChunks`, `Transformer.process()`/
-`runSequentially`, `.pipe()`'s own `await currentTransform(...)`) is unconditionally async, so a
-`Pipeline` over a plain in-memory array with only synchronous functions still pays a full
-async-generator round trip per item to convert its source into `_chunks`, before any stage or
-`Promise.all` ever runs - measured (#120) at 27.83 ns/row end to end for a two-stage
-`.map().filter()` chain against that same chain's hand-rolled equivalent at 11.51 ns/row (2.42x),
-19.94 ns/row of the framework's own cost paid with zero transform stages at all, against a bare
-array copy's 0.61 ns/row. See "Internal overhead benchmarks" below for the full per-class table.
+`PipelineMode` (`"unset" | "sync" | "async"`) is decided by the input a chain is called with and by
+its callbacks. Calling with an `Iterable` keeps the chain's Mode, an `AsyncIterable` widens it, and
+one callback returning a `Promise` widens it through `.transform()`'s overloads. A synchronous chain
+runs a parallel set of plain `function*` utilities (`buildSyncChunkGenerator`, `recutSyncChunks`,
+`_syncChunks`), so nothing async-shaped is constructed until a stage's own function returns a
+thenable; from that point every later link defers through `.then`.
 
-`.from(source)` becomes the one place `PipelineMode` (`"unset" | "sync" | "async"`) is decided -
-`Symbol.asyncIterator in Object(source)` the same way `toAsyncIterable()` already checks today. A
-`"sync"` `Pipeline` runs a SECOND, parallel set of chunk/transform utilities - plain `function*`
-counterparts to `buildChunkGenerator`/`flattenChunks`, and a plain (non-`async`) composed transform
-function mirroring `pipe()` - so nothing async-shaped is ever constructed until a stage's own
-function returns a `Promise`, or `.from()` is given an `AsyncIterable`, or `.merge()` combines in an
-already-async pipeline. `Transformer<In, Out, M extends "sync" | "async">`'s 3-overload
-`map()`/`filter()`/`flatMap()`/`reduce()`/`tap()` (async arm, a sync arm constrained
-`U extends Promise<unknown> ? never : U`, a generic fallback returning `"async"` for a call site
-generic in its own type parameters) is the seam that keeps a chain typed `"sync"` for exactly as
-long as every stage's callback is provably synchronous, and silently (never a compile error) falls
-back to `"async"` at a site TypeScript cannot prove sync-ness for. A stage whose callback is typed
-sync but returns a thenable at runtime is caught by a per-chunk fail-loud check on the sync engine's
-own output, at no measurable cost (~35 ns/row guarded, within noise of unguarded).
-
-`ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` each override `.from()` to return `"async"`
-unconditionally - none has a synchronous case, since each dispatches a chunk across a real boundary
-regardless of how synchronous the caller's own callbacks are.
+`ConcurrentPipeline` and every dispatching subclass force `"async"` through `sourcePolicy()` - each
+dispatches a chunk across a real boundary, whatever the caller's callbacks are.
 
 ## Error handling
 
@@ -757,7 +739,7 @@ the file that loads `ws`, so a core chunk type can name `Codec` without a utils-
 `Codec` is not generic: one instance serves every stage while the item type changes, so it sees
 `unknown`, and `Pipeline<T>` carries the type hints. The `jsonCodec` object is deleted (BREAKING).
 
-## Package entries - #239 (done), #249 (done)
+## Package entries
 
 Five entries, so the root loads no package AND resolves no Node builtin: `@outputty/pipeline`
 (`src/index.ts`), `@outputty/pipeline/websocket` (`src/websocket.ts`, needs `ws`), and
@@ -1100,7 +1082,7 @@ stage 0 collided with the parent's on the worker: measured, the parent's map ran
 (`300 -> 360 -> 432`) and the arm's own transform never ran. The name must survive a URL path, so the
 builder refuses one that would not.
 
-## Benchmarks - pending #11
+## Benchmarks - pending #193
 
 `benchmarks/` is a separate project, outside the pnpm workspace, that installs its comparators once
 in a `deps` image and runs them on six pinned runtimes: `node:20/22/24/26-alpine`,
@@ -1122,7 +1104,7 @@ resolves immediately with an EMPTY result - the worker exists only to hold the t
 (`_chunkTransforms`, registered by running the same entry module the primary runs) and serve
 `.fetch()` requests against them.
 
-## Internal overhead benchmarks - done (#120)
+## Internal overhead benchmarks
 
 `bench/` is a committed, in-repo, single-runtime harness - independent of `benchmarks/` above, which
 stays the Docker/six-runtime/`npm pack` comparison against OTHER libraries. This one compares the
@@ -1332,10 +1314,10 @@ ConcurrentPipeline.reduce(fn, initial)
 		                      own bracket wraps one CHUNK)
 	emit(value)                                     buffered per input chunk, yielded as its own chunk
 	final accumulator                               only if items were folded since the last emit
-	seed                                            once, when the stage folded nothing (#241, done)
+	seed                                            once, when the stage folded nothing
 ```
 
-A reduce that received no data emits its seed once (#241, done), and the rule sits where the whole
+A reduce that received no data emits its seed once, and the rule sits where the whole
 stream is known:
 
 ```text
