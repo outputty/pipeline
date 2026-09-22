@@ -66,7 +66,7 @@ The two older candidates, still not filed:
 ## Built
 
 - **The root entry drops Node builtins: `HttpPipeline`/`ClusterHttpPipeline`/`EventEmitterPipeline`
-  move to `/http`/`/cluster`/`/eventemitter`** (#249, `feat!`, PR TBD) - `dist/index.js` carried five
+  move to `/http`/`/cluster`/`/eventemitter`** (#249, `feat!`, PR #250) - `dist/index.js` carried five
   static top-level imports with no browser equivalent (`cluster`, `http`'s `createServer`, `os`'s
   `availableParallelism`, `stream`'s `Readable`, `events`'s `EventEmitter`), so a browser bundler
   aborted resolving the whole module graph before it could tree-shake unused exports - confirmed with
