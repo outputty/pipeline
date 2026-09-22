@@ -188,8 +188,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     return this._client ?? defaultClient();
   }
 
-  /** Where the worker's `.fetch` is mounted. `ClusterHttpPipeline` sets it once its workers pick a
-   * port. */
+  /** Where the worker's `.fetch` is mounted. */
   get url(): string {
     return this._url;
   }
@@ -285,6 +284,18 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     return new Response(readable, { headers: { "content-type": "application/x-ndjson" } });
   }
 
+  /**
+   * The url one dispatch uses, plus a `release` to call once it settles. `ClusterHttpPipeline`
+   * overrides it to start its workers.
+   *
+   * ⚠ Returned per call, never written to a field: concurrent dispatches would race on one field.
+   * Callers test it with `instanceof Promise`, never `isThenable`: that helper runs on every chunk,
+   * and handing it this object shape slows every chunk.
+   */
+  protected resolveUrl(): ResolvedUrl | Promise<ResolvedUrl> {
+    return { url: this._url, release: noRelease };
+  }
+
   /** Sends each chunk to the worker's `/transform/<n>` and returns the worker's result. The worker
    * runs its own copy of the stage, so `transformer` is unused. */
   protected override stageWork<U>(
@@ -292,22 +303,26 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     stageIndex: number,
   ): InternalTransformer<T, U> {
     return async (chunk, ctx) => {
-      // ⚠ `_url` and the client are read per call: `ClusterHttpPipeline` sets `_url` after this
-      // closure is built.
-      const client = await this.clientFor();
-      const response = await client(`${this._url}${this.routePath("transform", stageIndex)}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chunk, context: ctx.toDict() } satisfies StageRequestBody),
-      });
+      const resolved = this.resolveUrl();
+      const { url, release } = resolved instanceof Promise ? await resolved : resolved;
+      try {
+        const client = await this.clientFor();
+        const response = await client(`${url}${this.routePath("transform", stageIndex)}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chunk, context: ctx.toDict() } satisfies StageRequestBody),
+        });
 
-      if (!response.ok) {
-        const detail = await errorDetailOf(response);
-        throw new Error(`stage ${stageIndex} at ${this._url} failed: ${detail}`);
+        if (!response.ok) {
+          const detail = await errorDetailOf(response);
+          throw new Error(`stage ${stageIndex} at ${url} failed: ${detail}`);
+        }
+
+        const body = (await response.json()) as StageResponseBody<U>;
+        return body.chunk;
+      } finally {
+        release();
       }
-
-      const body = (await response.json()) as StageResponseBody<U>;
-      return body.chunk;
     };
   }
 
@@ -324,35 +339,49 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const self = this;
 
     return async function* dispatchReduce(chunks, ctx) {
-      // ⚠ Read here, not before returning: `ClusterHttpPipeline` sets `_url` after this method
-      // returns and before the generator runs.
-      const url = self._url;
-      const path = self.routePath("reduce", stageIndex);
-      const label = `reduce stage ${stageIndex} at ${url}`;
+      const resolved = self.resolveUrl();
+      // One dispatch holds the whole reduce stream, released once the stream ends or is abandoned.
+      const { url, release } = resolved instanceof Promise ? await resolved : resolved;
+      try {
+        const path = self.routePath("reduce", stageIndex);
+        const label = `reduce stage ${stageIndex} at ${url}`;
 
-      // ⚠ Built before the client call is awaited, or the request finishes before the response
-      // starts.
-      const requestBody = buildReduceRequestBody(chunks, ctx);
+        // ⚠ Built before the client call is awaited, or the request finishes before the response
+        // starts.
+        const requestBody = buildReduceRequestBody(chunks, ctx);
 
-      // One client serves both routes.
-      const client = await self.clientFor();
-      const response = await client(`${url}${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/x-ndjson" },
-        body: requestBody,
-        // undici requires `duplex: "half"` on a streaming body.
-        duplex: "half",
-      } as RequestInit);
+        // One client serves both routes.
+        const client = await self.clientFor();
+        const response = await client(`${url}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/x-ndjson" },
+          body: requestBody,
+          // undici requires `duplex: "half"` on a streaming body.
+          duplex: "half",
+        } as RequestInit);
 
-      if (!response.ok || !response.body) {
-        const detail = await errorDetailOf(response);
-        throw new Error(`${label} failed: ${detail}`);
+        if (!response.ok || !response.body) {
+          const detail = await errorDetailOf(response);
+          throw new Error(`${label} failed: ${detail}`);
+        }
+
+        yield* parseReduceFrames<U>(response.body, label);
+      } finally {
+        release();
       }
-
-      yield* parseReduceFrames<U>(response.body, label);
     };
   }
 }
+
+/** The url one dispatch posts to, plus a `release` the dispatch calls once it settles.
+ *
+ * `resolveUrl()` → `{ url: "http://localhost:41234", release }`. */
+export interface ResolvedUrl {
+  url: string;
+  release: () => void;
+}
+
+const noRelease = (): void => {};
 
 /** ⚠ Pull-driven. Draining `chunks` in `start` lets every partition of a shared stream pull the
  * whole source into memory before the server folds anything. */

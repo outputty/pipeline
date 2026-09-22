@@ -13,20 +13,14 @@ import { availableParallelism } from "node:os";
 import type { AddressInfo } from "node:net";
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler, errorResponse } from "@src/pipelines/http";
-import type { HttpPipelineOptions } from "@src/pipelines/http";
+import type { HttpPipelineOptions, ResolvedUrl } from "@src/pipelines/http";
 import type { PipelineClient } from "@src/pipelines/client";
 import { Pipeline } from "@src/pipeline";
 import type { WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import { onWorkerDrainNothing, pipelineRoute, WorkerSet } from "@src/pipelines/worker-set";
 import type { SlotOptions } from "@src/pipelines/worker-set";
-import type {
-  InternalTransformer,
-  ReduceFunction,
-  PipelineMode,
-  ReduceWork,
-  RouteVerb,
-} from "@src/types";
+import type { ReduceFunction, PipelineMode, RouteVerb } from "@src/types";
 
 /** Construction-time knobs for `ClusterHttpPipeline`. */
 export type ClusterHttpPipelineOptions = {
@@ -98,7 +92,7 @@ export class ClusterHttpPipeline<T, In = T> extends HttpPipeline<T, In> {
     second?: ClusterHttpPipelineOptions,
   ) {
     const options = Pipeline.wrapping<ClusterHttpPipelineConstructorOptions>(first, second);
-    // The url is set once the workers pick a port, on the first dispatch.
+    // Dispatch never reads `url`; `resolveUrl()` supplies the target per call.
     super(onWorkerDrainNothing({ ...options, url: "" }));
     this.workers = options?.workers ?? availableParallelism();
     this.pipelineIndex = workerSet.claimSlot(this as ClusterHttpPipeline<unknown>, options);
@@ -148,43 +142,9 @@ export class ClusterHttpPipeline<T, In = T> extends HttpPipeline<T, In> {
     return pipelineRoute(this.pipelineIndex, super.routePath(verb, index));
   }
 
-  /** Starts the workers if needed, points `_url` at them and returns the dispatch's `release`. */
-  protected async bootstrapAndSetUrl(): Promise<() => void> {
+  /** Starts the workers if needed and returns their shared url plus the dispatch's `release`. */
+  protected override async resolveUrl(): Promise<ResolvedUrl> {
     const { addresses, release } = await workerSet.enter(this.workers);
-    this._url = `http://localhost:${addresses[0]}`;
-    return release;
-  }
-
-  protected override stageWork<U>(
-    transformer: Transformer<T, U, "sync" | "async">,
-    stageIndex: number,
-  ): InternalTransformer<T, U> {
-    const dispatch = super.stageWork(transformer, stageIndex);
-    return async (chunk, ctx) => {
-      const release = await this.bootstrapAndSetUrl();
-      try {
-        return await dispatch(chunk, ctx);
-      } finally {
-        release();
-      }
-    };
-  }
-
-  /** Holds one worker dispatch open for the whole reduce stream, not per chunk. */
-  protected override reduceWork<U>(
-    fn: ReduceFunction<U, T>,
-    initial: U,
-    stageIndex: number,
-  ): ReduceWork<T, U> {
-    const dispatch = super.reduceWork(fn, initial, stageIndex);
-    const self = this;
-    return async function* dispatchOnWorker(chunks, ctx) {
-      const release = await self.bootstrapAndSetUrl();
-      try {
-        yield* dispatch(chunks, ctx);
-      } finally {
-        release();
-      }
-    };
+    return { url: `http://localhost:${addresses[0]}`, release };
   }
 }
