@@ -9,7 +9,12 @@ imports only `Pipeline`/`Transformer`: the root entry now loads no package AND n
 
 ```ts
 // before
-import { Pipeline, HttpPipeline, ClusterHttpPipeline, EventEmitterPipeline } from "@outputty/pipeline";
+import {
+  Pipeline,
+  HttpPipeline,
+  ClusterHttpPipeline,
+  EventEmitterPipeline,
+} from "@outputty/pipeline";
 
 // after
 import { Pipeline } from "@outputty/pipeline";
