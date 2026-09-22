@@ -259,6 +259,12 @@ export interface StageRoute {
   index: number;
 }
 
+/** A served route's stage, or the message a transport answers an unknown one with.
+ *
+ * A route naming stage 9 of a two-stage chain →
+ * `{ ok: false, error: "unknown stage 9; this deployment serves 0..1" }`. */
+export type StageLookup<S> = { ok: true; stage: S } | { ok: false; error: string };
+
 /** A value tagged with the id of the partition or source that produced it, so a `Promise.race`
  * over several can tell which one settled. `fanOutUnordered` and `mergeUnordered` use it.
  *

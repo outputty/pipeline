@@ -22,7 +22,6 @@ import { Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
-  IContextManager,
   InternalTransformer,
   PipelineMode,
   ReduceFunction,
@@ -36,7 +35,7 @@ import type { Duplex } from "node:stream";
 import type { Codec } from "@src/codec";
 import { JsonCodec, textEncoder } from "@src/codec";
 import { encodedChunk, encodeOrForward, isEmptyEncodedChunk } from "@src/utils/encoded-chunk";
-import { applyContextValues, errorMessage, toError } from "@src/utils/helpers";
+import { errorMessage, toError } from "@src/utils/helpers";
 
 const textDecoder = new TextDecoder();
 
@@ -217,6 +216,27 @@ function getConnection(connect: string): ClientConnection {
   return conn;
 }
 
+async function openDispatch(connect: string): Promise<{ conn: ClientConnection; id: number }> {
+  const conn = getConnection(connect);
+  await conn.ready;
+  return { conn, id: conn.nextId++ };
+}
+
+/** ⚠ The eviction check and `pending.set` stay in one synchronous call, with no await between. An
+ * entry registered after eviction is never settled. */
+function registerPending(
+  conn: ClientConnection,
+  connect: string,
+  id: number,
+  label: string,
+  request: PendingRequest,
+): void {
+  if (connections.get(connect) !== conn) {
+    throw new Error(`${label} failed: connection closed before dispatch`);
+  }
+  conn.pending.set(id, request);
+}
+
 /**
  * Runs each stage of a chain on another instance of the same code, over one shared WebSocket
  * connection per `connect` target. The worker serves through `toNodeWebSocketHandler` or `serve()`.
@@ -356,26 +376,15 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     parsed: StageRoute,
     payload: Uint8Array,
   ): Promise<void> {
-    const resolved = this.resolveRegistries(parsed.trail);
-    if (resolved === null) {
-      socket.send(encodeErrorFrame(header.id, `unknown branch route ${header.route}`));
-      return;
-    }
-    const { chunkTransforms } = resolved;
-    const maxIndex = chunkTransforms.length - 1;
-    if (parsed.index > maxIndex) {
-      socket.send(
-        encodeErrorFrame(
-          header.id,
-          `unknown stage ${parsed.index}; this deployment serves 0..${maxIndex}`,
-        ),
-      );
+    const lookup = this.lookupTransformStage(parsed, header.route!);
+    if (!lookup.ok) {
+      socket.send(encodeErrorFrame(header.id, lookup.error));
       return;
     }
     try {
       const ctx = this.applyContext(header.context);
       const chunk = (await this._codec.decode(payload)) as unknown[];
-      const result = await chunkTransforms[parsed.index](chunk, ctx);
+      const result = await lookup.stage(chunk, ctx);
       socket.send(
         encodeFrame({ id: header.id, rows: result.length }, await this._codec.encode(result)),
       );
@@ -391,22 +400,12 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     parsed: StageRoute,
     payload: Uint8Array,
   ): Promise<boolean> {
-    const resolved = this.resolveRegistries(parsed.trail);
-    if (resolved === null) {
-      socket.send(encodeErrorFrame(header.id, `unknown branch route ${header.route}`));
+    const lookup = this.lookupReduceStage(parsed, header.route!);
+    if (!lookup.ok) {
+      socket.send(encodeErrorFrame(header.id, lookup.error));
       return true;
     }
-    const stage = resolved.reduceStages.get(parsed.index);
-    if (!stage) {
-      const known = [...resolved.reduceStages.keys()].join(",") || "none";
-      socket.send(
-        encodeErrorFrame(
-          header.id,
-          `unknown reduce stage ${parsed.index}; this deployment serves ${known}`,
-        ),
-      );
-      return true;
-    }
+    const stage = lookup.stage;
 
     let reducer = this.reduceSessions.get(header.id);
     if (!reducer) {
@@ -450,16 +449,6 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     this.reduceSessions.delete(id);
   }
 
-  /** ⚠ Reuses the constructor's manager, never a fresh one per frame, so a `contextFactory` runs
-   * once per process. */
-  private applyContext(
-    // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- Context is a generic bag by design, unknown until a caller parses it at its own boundary, the same contract HttpPipeline's own StageRequestBody.context discloses
-    context: Record<string, unknown> | undefined,
-  ): IContextManager {
-    applyContextValues(this._context, context ?? {});
-    return this._context;
-  }
-
   /**
    * The target one dispatch uses, plus a `release` to call once it settles. `ClusterPipeline`
    * overrides it to round-robin across its workers.
@@ -482,38 +471,28 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       new Promise<U[]>((resolve, reject) => {
         const dispatch = async (): Promise<void> => {
           const { connect: connectTarget, release } = await this.resolveConnect();
+          const label = `stage ${stageIndex} at ${connectTarget}`;
           try {
-            const conn = getConnection(connectTarget);
-            await conn.ready;
-            const id = conn.nextId++;
+            const { conn, id } = await openDispatch(connectTarget);
             const payload = await encodeOrForward(chunk, this._codec);
-            // ⚠ `pending.set` must follow this eviction check with no await between. An entry
-            // registered after eviction is never settled.
-            if (connections.get(connectTarget) !== conn) {
-              throw new Error(
-                `stage ${stageIndex} at ${connectTarget} failed: connection closed before dispatch`,
-              );
-            }
+            registerPending(conn, connectTarget, id, label, {
+              onFrame: (header, responsePayload) => {
+                conn.pending.delete(id);
+                release();
+                // ⚠ No `rows` fails: an encoded chunk read as zero rows is skipped downstream.
+                if (header.rows === undefined) {
+                  reject(noRowCountError(label));
+                  return;
+                }
+                resolve(encodedChunk(responsePayload, header.rows, this._codec) as unknown as U[]);
+              },
+              onError: (message) => {
+                conn.pending.delete(id);
+                release();
+                reject(new Error(`${label} failed: ${message}`));
+              },
+            });
             try {
-              conn.pending.set(id, {
-                onFrame: (header, responsePayload) => {
-                  conn.pending.delete(id);
-                  release();
-                  // ⚠ No `rows` fails: an encoded chunk read as zero rows is skipped downstream.
-                  if (header.rows === undefined) {
-                    reject(noRowCountError(`stage ${stageIndex} at ${connectTarget}`));
-                    return;
-                  }
-                  resolve(
-                    encodedChunk(responsePayload, header.rows, this._codec) as unknown as U[],
-                  );
-                },
-                onError: (message) => {
-                  conn.pending.delete(id);
-                  release();
-                  reject(new Error(`stage ${stageIndex} at ${connectTarget} failed: ${message}`));
-                },
-              });
               conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
             } catch (sendError) {
               // ⚠ A DOM `WebSocket.send()` throws on a closed socket. The entry is removed, since
@@ -542,25 +521,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
 
     return async function* dispatchReduce(chunks, ctx) {
       const { connect: connectTarget, release } = await self.resolveConnect();
-      let conn: ClientConnection;
-      let id: number;
-      try {
-        conn = getConnection(connectTarget);
-        await conn.ready;
-        id = conn.nextId++;
-        // ⚠ `pending.set` must follow this eviction check with no await between. A session opened
-        // after eviction waits forever.
-        if (connections.get(connectTarget) !== conn) {
-          throw new Error(
-            `reduce stage ${stageIndex} at ${connectTarget} failed: connection closed before dispatch`,
-          );
-        }
-      } catch (error) {
-        // ⚠ Must release here, or a cluster's in-flight count never reaches zero and its workers
-        // are never killed.
-        release();
-        throw error;
-      }
+      const label = `reduce stage ${stageIndex} at ${connectTarget}`;
 
       const emitQueue: U[][] = [];
       let waiter: (() => void) | null = null;
@@ -577,24 +538,35 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
         wake();
       };
 
-      conn.pending.set(id, {
-        onFrame: (header, responsePayload) => {
-          if (header.done === true) {
-            streamDone = true;
+      let conn: ClientConnection;
+      let id: number;
+      try {
+        ({ conn, id } = await openDispatch(connectTarget));
+        registerPending(conn, connectTarget, id, label, {
+          onFrame: (header, responsePayload) => {
+            if (header.done === true) {
+              streamDone = true;
+              wake();
+              return;
+            }
+            // ⚠ No `rows` fails: an encoded chunk read as zero rows is skipped downstream.
+            if (header.rows === undefined) {
+              fail(noRowCountError(label));
+              return;
+            }
+            emitQueue.push(
+              encodedChunk(responsePayload, header.rows, self._codec) as unknown as U[],
+            );
             wake();
-            return;
-          }
-          // ⚠ No `rows` fails: an encoded chunk read as zero rows is skipped downstream.
-          if (header.rows === undefined) {
-            fail(noRowCountError(`reduce stage ${stageIndex} at ${connectTarget}`));
-            return;
-          }
-          emitQueue.push(encodedChunk(responsePayload, header.rows, self._codec) as unknown as U[]);
-          wake();
-        },
-        onError: (message) =>
-          fail(new Error(`reduce stage ${stageIndex} at ${connectTarget} failed: ${message}`)),
-      });
+          },
+          onError: (message) => fail(new Error(`${label} failed: ${message}`)),
+        });
+      } catch (error) {
+        // ⚠ Must release here, or a cluster's in-flight count never reaches zero and its workers
+        // are never killed.
+        release();
+        throw error;
+      }
 
       // ⚠ Fed apart from the yield loop, so a slow upstream never holds back a queued emit.
       const pump = (async (): Promise<void> => {

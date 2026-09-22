@@ -23,6 +23,7 @@ import type {
   PipelineMode,
   ReduceStage,
   ReduceWork,
+  StageRoute,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
 import { defaultClient, headersFromNode, type PipelineClient } from "@src/pipelines/client";
@@ -61,10 +62,6 @@ interface StageResponseBody<U> {
  * `errorResponse(404, "unknown stage 3")` → a 404 with body `{"error":"unknown stage 3"}`. */
 export function errorResponse(status: number, message: string): Response {
   return Response.json({ error: message }, { status });
-}
-
-function unknownBranchRoute(trail: string | null): Response {
-  return errorResponse(404, `unknown branch route ${trail}`);
 }
 
 /** ⚠ Returns a failure rather than throwing, so `.fetch()` answers a malformed body with a 400
@@ -239,7 +236,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const route = parseRoute(pathname);
 
     if (route?.verb === "reduce") {
-      return this.serveReduceRequest(route.index, request, route.trail);
+      return this.serveReduceRequest(route, request);
     }
 
     // ⚠ Answered before `resolveRegistries()`, which can replay the chain and throw. A throw there
@@ -247,21 +244,11 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     if (route === null) {
       return errorResponse(404, `unknown stage ${pathname}`);
     }
-    const requested = route.index;
-
     // ⚠ Not `_chunkTransforms` directly: a worker never binds an input, so that field is still
     // empty and every stage reads as unknown.
-    const resolved = this.resolveRegistries(route.trail);
-    if (resolved === null) {
-      return unknownBranchRoute(pathname);
-    }
-    const { chunkTransforms } = resolved;
-    const maxIndex = chunkTransforms.length - 1;
-    if (requested > maxIndex) {
-      return errorResponse(
-        404,
-        `unknown stage ${requested}; this deployment serves 0..${maxIndex}`,
-      );
+    const lookup = this.lookupTransformStage(route, pathname);
+    if (!lookup.ok) {
+      return errorResponse(404, lookup.error);
     }
 
     const body = await parseStageRequest(request);
@@ -270,34 +257,22 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     }
 
     try {
-      // ⚠ Reuses the constructor's manager, never a fresh one per request, so a `contextFactory`
-      // runs once per process.
-      const ctx = this._context;
-      applyContextValues(ctx, body.value.context);
-      const result = await chunkTransforms[requested](body.value.chunk, ctx);
+      const ctx = this.applyContext(body.value.context);
+      const result = await lookup.stage(body.value.chunk, ctx);
       return Response.json({ chunk: result } satisfies StageResponseBody<unknown>);
     } catch (error) {
       return errorResponse(500, errorMessage(error));
     }
   };
 
-  private async serveReduceRequest(
-    index: number,
-    request: Request,
-    trail: string | null,
-  ): Promise<Response> {
+  private async serveReduceRequest(route: StageRoute, request: Request): Promise<Response> {
     // ⚠ A branch trail resolves to the arm's own registry. The parent's registry would serve the
     // parent's fold instead.
-    const resolved = this.resolveRegistries(trail);
-    if (resolved === null) {
-      return unknownBranchRoute(trail);
+    const lookup = this.lookupReduceStage(route, route.trail);
+    if (!lookup.ok) {
+      return errorResponse(404, lookup.error);
     }
-    const { reduceStages } = resolved;
-    const stage = reduceStages.get(index);
-    if (!stage) {
-      const known = [...reduceStages.keys()].join(",") || "none";
-      return errorResponse(404, `unknown reduce stage ${index}; this deployment serves ${known}`);
-    }
+    const stage = lookup.stage;
     if (!request.body) {
       return errorResponse(400, "request body is missing");
     }
@@ -353,6 +328,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       // returns and before the generator runs.
       const url = self._url;
       const path = self.routePath("reduce", stageIndex);
+      const label = `reduce stage ${stageIndex} at ${url}`;
 
       // ⚠ Built before the client call is awaited, or the request finishes before the response
       // starts.
@@ -370,10 +346,10 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
 
       if (!response.ok || !response.body) {
         const detail = await errorDetailOf(response);
-        throw new Error(`reduce stage ${stageIndex} at ${url} failed: ${detail}`);
+        throw new Error(`${label} failed: ${detail}`);
       }
 
-      yield* parseReduceFrames<U>(response.body, stageIndex, url);
+      yield* parseReduceFrames<U>(response.body, label);
     };
   }
 }
@@ -406,13 +382,12 @@ function buildReduceRequestBody<T>(
 
 async function* parseReduceFrames<U>(
   body: ReadableStream<Uint8Array>,
-  stageIndex: number,
-  url: string,
+  label: string,
 ): AsyncGenerator<U[]> {
   for await (const line of readNdjsonLines(body)) {
     const frame = JSON.parse(line) as { emit?: U[]; error?: string };
     if (frame.error !== undefined) {
-      throw new Error(`reduce stage ${stageIndex} at ${url} failed: ${frame.error}`);
+      throw new Error(`${label} failed: ${frame.error}`);
     }
     if (frame.emit !== undefined && frame.emit.length > 0) {
       yield frame.emit;

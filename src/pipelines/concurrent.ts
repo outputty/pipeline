@@ -15,12 +15,14 @@ import type {
   StageRegistries,
   Tagged,
   ReduceWork,
+  ReduceStage,
+  StageLookup,
 } from "@src/types";
 import { Pipeline, type PipelineConstructorOptions, type WrappablePipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
 import { share } from "@src/utils/cut";
-import { runStageChunk } from "@src/utils/helpers";
+import { applyContextValues, runStageChunk } from "@src/utils/helpers";
 import { isEmptyEncodedChunk } from "@src/utils/encoded-chunk";
 
 /** Construction-time knobs for `ConcurrentPipeline` and every class that extends it. */
@@ -351,6 +353,60 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
    * `null` when no arm matches. */
   protected resolveRegistries(trail: string | null): StageRegistries | null {
     return trail === null ? this.registries() : this.registriesFor(trail);
+  }
+
+  /** The per-chunk stage `route` names on the serving side. `label` names the route in the
+   * unknown-branch message.
+   *
+   * `lookupTransformStage({ trail: null, verb: "transform", index: 9 }, "/transform/9")` on a
+   * two-stage chain → `{ ok: false, error: "unknown stage 9; this deployment serves 0..1" }`. */
+  protected lookupTransformStage(
+    route: StageRoute,
+    label: string | null,
+  ): StageLookup<ChunkTransform> {
+    const resolved = this.resolveRegistries(route.trail);
+    if (resolved === null) return { ok: false, error: `unknown branch route ${label}` };
+    const { chunkTransforms } = resolved;
+    const maxIndex = chunkTransforms.length - 1;
+    if (route.index > maxIndex) {
+      return {
+        ok: false,
+        error: `unknown stage ${route.index}; this deployment serves 0..${maxIndex}`,
+      };
+    }
+    return { ok: true, stage: chunkTransforms[route.index] };
+  }
+
+  /** The reduce stage `route` names on the serving side. `label` names the route in the
+   * unknown-branch message.
+   *
+   * `lookupReduceStage({ trail: null, verb: "reduce", index: 3 }, null)` on a chain with a reduce
+   * at 1 → `{ ok: false, error: "unknown reduce stage 3; this deployment serves 1" }`. */
+  protected lookupReduceStage(route: StageRoute, label: string | null): StageLookup<ReduceStage> {
+    const resolved = this.resolveRegistries(route.trail);
+    if (resolved === null) return { ok: false, error: `unknown branch route ${label}` };
+    const { reduceStages } = resolved;
+    const stage = reduceStages.get(route.index);
+    if (!stage) {
+      const known = [...reduceStages.keys()].join(",") || "none";
+      return {
+        ok: false,
+        error: `unknown reduce stage ${route.index}; this deployment serves ${known}`,
+      };
+    }
+    return { ok: true, stage };
+  }
+
+  /** Merges a served request's context into this pipeline's manager and returns it.
+   *
+   * ⚠ Reuses the constructor's manager, never a fresh one per request, so a `contextFactory` runs
+   * once per process. */
+  protected applyContext(
+    // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- Context is a generic bag by design, unknown until a caller parses it at its own boundary, the same contract HttpPipeline's own StageRequestBody.context discloses
+    context: Record<string, unknown> | undefined,
+  ): IContextManager {
+    applyContextValues(this._context, context ?? {});
+    return this._context;
   }
 }
 
