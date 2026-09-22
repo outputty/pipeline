@@ -26,17 +26,17 @@ import type {
 import { DEFAULT_CHUNK_SIZE, DROP } from "./types";
 import { SimpleContextManager } from "./context/simple";
 import { Transformer } from "./transformer";
-import type { MaybeAsyncChunks } from "./utils/chunk";
+import type { MaybeAsyncChunks } from "./utils/drain";
 import {
   asAsyncChunks,
+  assertWholeNumberAtLeastOne,
   buildChunkGenerator,
   buildSyncChunkGenerator,
   flattenChunks,
-  recutSyncChunks,
   prefetch,
-} from "./utils/chunk";
-import { assertWholeNumberAtLeastOne } from "./utils/cut";
-import { chain, runStageChunk } from "./utils/helpers";
+} from "./utils/cut";
+import { recutSyncChunks } from "./utils/recut";
+import { applyContextValues, chain, runStageChunk } from "./utils/helpers";
 import { materializeChunksIfNeeded } from "./utils/encoded-chunk";
 import { PipelineResult } from "./result";
 import { BranchBuilder, runBranch } from "./branch";
@@ -51,7 +51,6 @@ import type {
 import {
   foldChunkStream,
   foldSyncChunkStream,
-  bufferReduceFunction,
   buildBufferGenerator,
   buildSyncBufferGenerator,
   recutSyncChunksWith,
@@ -61,9 +60,8 @@ function asyncIterableFrom<U>(gen: () => AsyncGenerator<U>): AsyncIterable<U> {
   return { [Symbol.asyncIterator]: gen };
 }
 
-/** The empty chunk stream an unbound pipeline carries. One shared value, because it re-iterates; a
- * spent generator would read empty only once. */
-export const EMPTY_CHUNKS: AsyncIterable<never[]> = asyncIterableFrom(
+/** ⚠ One shared iterable, not a generator: a spent generator reads empty only once. */
+const EMPTY_CHUNKS: AsyncIterable<never[]> = asyncIterableFrom(
   // eslint-disable-next-line @typescript-eslint/require-await
   async function* () {},
 );
@@ -288,16 +286,19 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   protected fromSource<U>(data: PipelineSource<U>, policy: SourcePolicy): AnyPipeline<U> {
     const mode: "sync" | "async" =
       isAsyncSource(data) || policy === "async" || this._mode === "async" ? "async" : "sync";
+    const boundOptions: PipelineConstructorOptions = {
+      ...this.carriedOptions(),
+      mode,
+      pendingStages: [],
+      context: this.contextForRun(),
+      bound: true,
+    };
 
     if (mode === "sync") {
       const items = data as Iterable<U>;
       return this.replayPending(
         this.createPipeline<U>(emptyChunks<U>(), {
-          ...this.carriedOptions(),
-          mode,
-          pendingStages: [],
-          context: this.contextForRun(),
-          bound: true,
+          ...boundOptions,
           syncChunks: buildSyncChunkGenerator<U>(this._chunkSize)(items),
           syncPreBufferItems: items,
           preBufferItems: null,
@@ -312,11 +313,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       : buildChunkGenerator<U>(this._chunkSize)(items);
     return this.replayPending(
       this.createPipeline<U>(chunks, {
-        ...this.carriedOptions(),
-        mode,
-        pendingStages: [],
-        context: this.contextForRun(),
-        bound: true,
+        ...boundOptions,
         preBufferItems: items,
         syncChunks: null,
         // A sync input forced async keeps its sync view, so `.buffer()` can recut it synchronously.
@@ -446,13 +443,13 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     if (!this.isDeferred()) {
       return { chunkTransforms: this._chunkTransforms, reduceStages: this._reduceStages };
     }
-    this._registries ??= (() => {
+    if (this._registries === undefined) {
       const materialised = this.bind([] as T[]) as unknown as AnyPipeline<T>;
-      return {
+      this._registries = {
         chunkTransforms: materialised._chunkTransforms,
         reduceStages: materialised._reduceStages,
       };
-    })();
+    }
     return this._registries;
   }
 
@@ -532,9 +529,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    */
   // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- Context is a generic bag by design, unknown until a caller parses it at its own boundary (see .oxlintrc.json)
   context(ctx: Record<string, unknown>): this {
-    for (const [key, value] of Object.entries(ctx)) {
-      this._context.set(key, value);
-    }
+    applyContextValues(this._context, ctx);
     return this.createPipeline<T>(this._chunks, this.carriedOptions()) as this;
   }
 
@@ -670,12 +665,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
         buildChunkGenerator<T>(size),
       );
     }
-    const reduceFn: ReduceFunction<T[], T> = bufferReduceFunction<T>(sizeOrFn);
+    const fn = sizeOrFn;
     const ctx = this._context;
     return this.cutBy(
-      buildSyncBufferGenerator<T>(reduceFn, ctx),
-      (slots) => recutSyncChunksWith(slots, reduceFn, ctx),
-      buildBufferGenerator<T>(reduceFn, ctx),
+      buildSyncBufferGenerator<T>(fn, ctx),
+      (slots) => recutSyncChunksWith(slots, fn, ctx),
+      buildBufferGenerator<T>(fn, ctx),
     );
   }
 
@@ -688,17 +683,9 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     // on a sync chain.
     if (this.isSync()) {
       const items = this._syncPreBufferItems;
-      if (items !== null) {
-        return this.createPipeline<T>(emptyChunks<T>(), {
-          ...this.carriedOptions(),
-          syncChunks: cutSync(items),
-          syncPreBufferItems: items,
-        }) as this;
-      }
       return this.createPipeline<T>(emptyChunks<T>(), {
         ...this.carriedOptions(),
-        syncChunks: recut(this._syncChunks!),
-        syncPreBufferItems: null,
+        syncChunks: items !== null ? cutSync(items) : recut(this._syncChunks!),
       }) as this;
     }
 
@@ -784,7 +771,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     if (this.isSync()) {
       return this.createPipeline<U>(emptyChunks<U>(), {
         ...carried,
-        mode: this.sourcePolicy() === "async" ? "async" : "sync",
         syncChunks: foldSyncChunkStream(fn, initial, this._syncChunks!, this._context),
       }) as AnyPipeline<U>;
     }

@@ -3,6 +3,8 @@
  * `{"chunk":[…]}` per chunk. Incoming: `{"emit":[…]}` per emit, `{"error":"…"}` on a failure.
  */
 
+import { textEncoder } from "@src/codec";
+
 /** Reads a byte stream as complete NDJSON lines, as they arrive. Both ends of `/reduce/<n>` use it.
  *
  * A stream carrying `'{"a":1}\n{"b"'` then `':2}\n'` → yields `'{"a":1}'`, then `'{"b":2}'`. */
@@ -34,5 +36,5 @@ function splitLines(buffer: string) {
  *
  * `ndjsonFrame({ emit: [6] })` → the UTF-8 bytes of `'{"emit":[6]}\n'`. */
 export function ndjsonFrame<T>(value: T): Uint8Array {
-  return new TextEncoder().encode(`${JSON.stringify(value)}\n`);
+  return textEncoder.encode(`${JSON.stringify(value)}\n`);
 }

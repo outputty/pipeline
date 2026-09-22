@@ -118,11 +118,6 @@ src/
     simple.ts              SimpleContextManager - the one shipped IContextManager; context/types.ts
                              (a dead re-export) is deleted (#133)
   utils/
-    chunk.ts                a thin re-export barrel over cut.ts/drain.ts/recut.ts, so an existing
-                             `from "@src/utils/chunk"` import keeps resolving (#133); `normalize`, its
-                             one test file and the `utils/index.ts` barrel are deleted (#232) -
-                             `src/index.ts` re-exports `buildChunkGenerator` from here and
-                             `isContextAware` from helpers.ts directly
     cut.ts                  buildChunkGenerator/buildSyncChunkGenerator (cut) / flattenChunks
                              (undo) / share / collectItems (`collectAsyncChunks()` is
                              `collectItems()`'s own unexported async half); assertPositiveChunkSize()
@@ -831,7 +826,7 @@ own. `apply()`/`local()`/`transform()`/`reduce()` are each re-declared only to n
 return type back to `EventEmitterPipeline<U, In>`, the same shape `HttpPipeline` uses - `.reduce()`
 dispatch stays exactly `ConcurrentPipeline`'s own (folds in-process, no emitter involvement), left
 that way by decision (`#124`'s own Settle first). A free-slot-dealing pool design (`share()`,
-`src/utils/chunk.ts:454`, the mechanism `ConcurrentPipeline.reduce()` already uses to partition)
+`src/utils/cut.ts`, the mechanism `ConcurrentPipeline.reduce()` already uses to partition)
 was built and measured working during planning, then killed by the user's own simplification
 request - "not even think about concurrency at this stage" - not by a defect
 (`.claude/roadmap.md`, Killed).
@@ -1345,7 +1340,7 @@ still opens `maxConcurrency` requests for a stream of zero chunks.
 
 `ConcurrentPipeline.reduce()` (#62) PARTITIONS rather than delegating once: `reduceWork()` itself is
 still called ONCE, but the closure it RETURNS is called `maxConcurrency` times, each its own
-independent accumulator over its own `share()` view (`src/utils/chunk.ts`) of the ONE shared chunk
+independent accumulator over its own `share()` view (`src/utils/cut.ts`) of the ONE shared chunk
 stream - free-slot dealing, no dealer, no per-partition queues, a slow partition simply calls
 `.next()` less often, so the others pick up its slack. `mergeUnordered()`
 (`src/pipelines/concurrent.ts`) merges the partitions' own output in completion order, since there is

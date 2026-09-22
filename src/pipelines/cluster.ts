@@ -38,10 +38,6 @@ export type ClusterHttpPipelineOptions = {
 type ClusterHttpPipelineConstructorOptions = ClusterHttpPipelineOptions &
   PipelineConstructorOptions & { pipelineIndex?: number };
 
-interface BootstrapResult {
-  port: number;
-}
-
 function isReadyMessage(
   // oxlint-disable-next-line anti-slop/no-unknown-parameters -- this IS the I/O boundary parser the rule's own message asks for; message is genuinely unparsed until this function runs
   message: unknown,
@@ -59,7 +55,7 @@ function isReadyMessage(
 class WorkerSet {
   private nextPipelineIndex = 0;
   private readonly registry = new Map<number, ClusterHttpPipeline<unknown>>();
-  private bootstrapPromise: Promise<BootstrapResult> | undefined;
+  private bootstrapPromise: Promise<number> | undefined;
   private inFlight = 0;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
   /** ⚠ Kill only these ids: `cluster.workers` also holds every other worker set's workers. */
@@ -81,7 +77,7 @@ class WorkerSet {
 
   /** Forks the workers once per process and resolves with the port they share. `listen(0)` under
    * `cluster` gives every worker the same port. */
-  bootstrap(workerCount: number): Promise<BootstrapResult> {
+  bootstrap(workerCount: number): Promise<number> {
     this.bootstrapPromise ??= new Promise((resolve, reject) => {
       const count = workerCount > 0 ? workerCount : availableParallelism();
       let sharedPort: number | undefined;
@@ -96,7 +92,7 @@ class WorkerSet {
           readyCount++;
           if (readyCount === count && !settled) {
             settled = true;
-            resolve({ port: sharedPort! });
+            resolve(sharedPort!);
           }
         });
         // ⚠ A worker that dies before reporting must reject, or every dispatch hangs forever.
@@ -117,14 +113,14 @@ class WorkerSet {
   /** Marks one dispatch in flight and returns the port plus its `release`. A second `release`
    * call does nothing. */
   async enter(workerCount: number): Promise<{ port: number; release: () => void }> {
-    const { port } = await this.bootstrap(workerCount);
+    const port = await this.bootstrap(workerCount);
     this.inFlight++;
     let released = false;
     const release = (): void => {
       if (released) return;
       released = true;
       this.inFlight--;
-      this.scheduleIdleCheck();
+      if (this.inFlight === 0) this.scheduleIdleCheck();
     };
     return { port, release };
   }
@@ -210,7 +206,17 @@ export class ClusterHttpPipeline<T, In = T> extends HttpPipeline<T, In> {
   ) {
     const options = Pipeline.wrapping<ClusterHttpPipelineConstructorOptions>(first, second);
     // The url is set once the workers pick a port, on the first dispatch.
-    super({ ...options, url: "" });
+    const own: ClusterHttpPipelineConstructorOptions & HttpPipelineOptions = {
+      ...options,
+      url: "",
+    };
+    // ⚠ On a worker every terminal op resolves empty: a worker holds the stages and never
+    // orchestrates a drain.
+    if (cluster.isWorker) {
+      own.chunks = emptyChunks<T>();
+      own.preBufferItems = null;
+    }
+    super(own);
     this.workers = options?.workers ?? availableParallelism();
 
     // Which instances claim a pipeline index:
@@ -224,13 +230,6 @@ export class ClusterHttpPipeline<T, In = T> extends HttpPipeline<T, In> {
     this.pipelineIndex = claimsOwnSlot
       ? workerSet.register(this as ClusterHttpPipeline<unknown>)
       : (options?.pipelineIndex ?? workerSet.claimIndex());
-
-    // ⚠ On a worker every terminal op resolves empty: a worker holds the stages and never
-    // orchestrates a drain.
-    if (cluster.isWorker) {
-      this._chunks = emptyChunks<T>();
-      this._preBufferItems = null;
-    }
   }
 
   /** Carries `workers` and `pipelineIndex` into the next copy-on-write instance. */

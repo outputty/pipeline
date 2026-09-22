@@ -15,7 +15,7 @@ import type {
 import { DROP } from "./types";
 import { SimpleContextManager } from "./context/simple";
 import {
-  isContextAware,
+  withContext,
   dropOrRethrow,
   chain,
   mapSettle,
@@ -38,7 +38,8 @@ async function* runSequentially<In, Out>(
 ): AsyncGenerator<Out[]> {
   for await (const chunk of chunks) {
     try {
-      yield await transformerLogic(chunk, context);
+      const out = transformerLogic(chunk, context);
+      yield isThenable(out) ? await out : out;
     } catch (error) {
       await dropOrRethrow(runHandler, error as Error, context);
     }
@@ -163,7 +164,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   readonly rowHandler?: RowErrorHandler;
 
   /** The context `.process()` uses when the caller passes none. */
-  private defaultContext: IContextManager;
+  private defaultContext?: IContextManager;
 
   /**
    * Build from a real `transform`.
@@ -183,7 +184,6 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   constructor(options?: TransformerOptions<In, Out>) {
     this.transform = options?.transform ?? ((chunk, _ctx) => chunk as unknown as Out[]);
     this.rowHandler = options?.rowHandler;
-    this.defaultContext = new SimpleContextManager();
   }
 
   /**
@@ -212,7 +212,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
     context?: IContextManager,
     runHandler?: PipelineErrorHandler,
   ): AsyncGenerator<Out[]> {
-    const runContext = context ?? this.defaultContext;
+    const runContext = context ?? (this.defaultContext ??= new SimpleContextManager());
     yield* runSequentially(this.runnable(), chunks, runContext, runHandler);
   }
 
@@ -247,9 +247,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   ): Transformer<In, U, M>;
   map<U>(fn: (item: Out, ctx: IContextManager) => U): Transformer<In, U, "async">;
   map<U>(fn: PipelineFunction<Out, U>): Transformer<In, U, "sync" | "async"> {
-    const call = isContextAware(fn)
-      ? (x: Out, ctx: IContextManager) => fn(x, ctx)
-      : (x: Out, _ctx: IContextManager) => (fn as (item: Out) => U | Promise<U>)(x);
+    const call = withContext(fn);
     return this.pipe((chunk, ctx, run) => {
       // ⚠ `mapSettle`, not `Promise.all`: `Promise.all` makes a fully synchronous chunk async.
       if (!run?.rowHandler) {
@@ -269,10 +267,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   ): Transformer<In, Out, "async">;
   filter(predicate: (item: Out, ctx: IContextManager) => boolean): Transformer<In, Out, M>;
   filter(predicate: PipelineFunction<Out, boolean>): Transformer<In, Out, "sync" | "async"> {
-    const call = isContextAware(predicate)
-      ? (x: Out, ctx: IContextManager) => predicate(x, ctx)
-      : (x: Out, _ctx: IContextManager) =>
-          (predicate as (item: Out) => boolean | Promise<boolean>)(x);
+    const call = withContext(predicate);
     return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
         return filterSettle(chunk, (x) => call(x, ctx));
@@ -303,9 +298,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
   flatMap<U>(fn: (item: Out, ctx: IContextManager) => Promise<U[]>): Transformer<In, U, "async">;
   flatMap<U>(fn: (item: Out, ctx: IContextManager) => U[]): Transformer<In, U, M>;
   flatMap<U>(fn: PipelineFunction<Out, U[]>): Transformer<In, U, "sync" | "async"> {
-    const call = isContextAware(fn)
-      ? (x: Out, ctx: IContextManager) => fn(x, ctx) as U[] | Promise<U[]>
-      : (x: Out, _ctx: IContextManager) => (fn as (item: Out) => U[] | Promise<U[]>)(x);
+    const call = withContext(fn);
     return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
         const results = mapSettle(chunk, (x) => call(x, ctx));
@@ -346,10 +339,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
       );
     }
 
-    const fn = arg;
-    const call = isContextAware(fn)
-      ? (x: Out, ctx: IContextManager) => fn(x, ctx)
-      : (x: Out, _ctx: IContextManager) => (fn as (item: Out) => void)(x);
+    const call = withContext(arg);
     return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
         return chain(
@@ -411,7 +401,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
     maxIterations?: number,
   ): Transformer<In, Out, "sync" | "async"> {
     const loopedTransform = loopTransformer.transform;
-    const conditionIsContextAware = isContextAware<Out[], boolean>(condition);
+    const shouldLoop = withContext(condition);
 
     // ⚠ A `while` loop, recursing only across an async boundary: recursing per iteration overflows
     // the stack on a synchronous looped transformer.
@@ -426,10 +416,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
       while (true) {
         if (maxIterations !== undefined && iterations >= maxIterations) return currentChunk;
 
-        const shouldContinue = conditionIsContextAware
-          ? condition(currentChunk, ctx)
-          : (condition as (chunk: Out[]) => boolean)(currentChunk);
-        if (!shouldContinue) return currentChunk;
+        if (!shouldLoop(currentChunk, ctx)) return currentChunk;
 
         const next = loopedTransform(currentChunk, ctx);
         if (isThenable(next)) {

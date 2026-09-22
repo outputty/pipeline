@@ -57,11 +57,7 @@ export async function encodeOrForward<T>(chunk: T[], codec: Codec): Promise<Uint
   return codec.encode(encoded ? await materialize(chunk) : chunk);
 }
 
-/** `materialize()` over each chunk of a stream.
- *
- * A stream of `[1, 2]` then `encodedChunk(bytes, 1, codec)` → yields `[1, 2]`, then
- * `codec.decode(bytes)`. */
-export async function* materializeChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T[]> {
+async function* materializeChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T[]> {
   for await (const chunk of chunks) {
     yield isEncodedChunk(chunk) ? await materialize(chunk) : chunk;
   }

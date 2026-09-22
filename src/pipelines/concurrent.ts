@@ -19,7 +19,7 @@ import type {
 import { Pipeline, type PipelineConstructorOptions, type WrappablePipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
-import { share } from "@src/utils/chunk";
+import { share } from "@src/utils/cut";
 import { runStageChunk } from "@src/utils/helpers";
 import { isEmptyEncodedChunk } from "@src/utils/encoded-chunk";
 

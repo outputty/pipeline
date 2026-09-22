@@ -2,7 +2,7 @@
 
 import type { IContextManager, ReduceFunction, RowErrorHandler, BufferFunction } from "@src/types";
 import { DROP } from "@src/types";
-import type { MaybeAsyncChunks } from "@src/utils/chunk";
+import type { MaybeAsyncChunks } from "@src/utils/drain";
 import { chain, isThenable } from "@src/utils/helpers";
 
 /**
@@ -150,7 +150,8 @@ export async function* foldChunkStream<U, T>(
 ): AsyncGenerator<U[]> {
   const reducer = new Reducer<U, T>(fn, initial);
   for await (const chunk of chunks) {
-    const out = await foldChunk(reducer, chunk, ctx);
+    const folded = foldChunk(reducer, chunk, ctx);
+    const out = isThenable(folded) ? await folded : folded;
     if (out.length > 0) yield out;
   }
   const trailing = reducer.final(seedIfEmpty);
@@ -185,15 +186,8 @@ export function* foldSyncChunkStream<U, T>(
   );
 }
 
-/**
- * Turns a `.buffer(fn)` callback into a fold whose accumulator is the pending chunk. The callback's
- * `emit()` flushes the pending chunk; the value it returns is appended after the flush.
- *
- * `bufferReduceFunction<number>((item, _ctx, emit) => (item % 2 === 0 ? (emit(), item) : item))`
- * folding `[1, 2, 3]` from `[]`: item `1` → `[1]`; item `2` emits `[1]`, then pending is `[2]`;
- * item `3` → `[2, 3]`.
- */
-export function bufferReduceFunction<T>(fn: BufferFunction<T>): ReduceFunction<T[], T> {
+/** ⚠ Flush, then append: the item whose callback calls `emit()` opens the next chunk. */
+function bufferReduceFunction<T>(fn: BufferFunction<T>): ReduceFunction<T[], T> {
   return (acc, item, ctx, emit) => {
     let pending = acc;
     const flush = () => {
@@ -222,13 +216,13 @@ function trailingOf<T>(reducer: Reducer<T[], T>): T[][] {
  * Cuts an async item stream into chunks with a `.buffer(fn)` fold: every flush is its own chunk,
  * and the pending remainder is the last. Empty chunks are never yielded.
  *
- * `buildBufferGenerator(bufferReduceFunction(everySecondItem), ctx)` over items `1, 2, 3` → yields
- * `[1, 2]` then `[3]`.
+ * `buildBufferGenerator(everySecondItem, ctx)` over items `1, 2, 3` → yields `[1, 2]` then `[3]`.
  */
 export function buildBufferGenerator<T>(
-  reduceFn: ReduceFunction<T[], T>,
+  fn: BufferFunction<T>,
   ctx: IContextManager,
 ): (data: AsyncIterable<T>) => AsyncGenerator<T[]> {
+  const reduceFn = bufferReduceFunction(fn);
   return async function* bufferGenerator(data: AsyncIterable<T>): AsyncGenerator<T[]> {
     const reducer = new Reducer<T[], T>(reduceFn, []);
     for await (const item of data) {
@@ -267,6 +261,7 @@ function* driveFold<T, Unit>(
       });
       continue;
     }
+    // ⚠ Guarded: most folds emit nothing, and `yield*` builds a generator per item even for `[]`.
     if ((out as T[][]).length > 0) yield* nonEmpty(out as T[][]);
   }
 
@@ -282,13 +277,14 @@ function* driveFold<T, Unit>(
  * `buildBufferGenerator` over a synchronous item stream. It stays synchronous until the first async
  * fold.
  *
- * `[...buildSyncBufferGenerator(bufferReduceFunction(everySecondItem), ctx)([1, 2, 3])]` →
- * `[[1, 2], [3]]`, no `Promise` created.
+ * `[...buildSyncBufferGenerator(everySecondItem, ctx)([1, 2, 3])]` → `[[1, 2], [3]]`, no `Promise`
+ * created.
  */
 export function buildSyncBufferGenerator<T>(
-  reduceFn: ReduceFunction<T[], T>,
+  fn: BufferFunction<T>,
   ctx: IContextManager,
 ): (data: Iterable<T>) => MaybeAsyncChunks<T> {
+  const reduceFn = bufferReduceFunction(fn);
   return function* bufferGenerator(data: Iterable<T>): MaybeAsyncChunks<T> {
     const reducer = new Reducer<T[], T>(reduceFn, []);
     yield* driveFold(
@@ -305,15 +301,15 @@ export function buildSyncBufferGenerator<T>(
  * ⚠ A slot can be pending even on a `"sync"` chain, so each slot is folded as it settles, never
  * flattened to items first.
  *
- * `[...recutSyncChunksWith([[1, 2], [3]], bufferReduceFunction(everySecondItem), ctx)]` →
- * `[[1, 2], [3]]`, no `Promise` created.
+ * `[...recutSyncChunksWith([[1, 2], [3]], everySecondItem, ctx)]` → `[[1, 2], [3]]`, no `Promise`
+ * created.
  */
 export function recutSyncChunksWith<T>(
   chunks: MaybeAsyncChunks<T>,
-  reduceFn: ReduceFunction<T[], T>,
+  fn: BufferFunction<T>,
   ctx: IContextManager,
 ): MaybeAsyncChunks<T> {
-  const reducer = new Reducer<T[], T>(reduceFn, []);
+  const reducer = new Reducer<T[], T>(bufferReduceFunction(fn), []);
   return driveFold(
     chunks,
     (slot) => chain(slot, (items) => foldChunk(reducer, items, ctx)),

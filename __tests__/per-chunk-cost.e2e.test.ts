@@ -15,7 +15,7 @@ import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { DROP } from "@src/types";
 import { SimpleContextManager } from "@src/context/simple";
-import { buildSyncChunkGenerator } from "@src/utils/chunk";
+import { buildSyncChunkGenerator } from "@src/utils/cut";
 import { canonicalInput } from "../bench/canonical";
 import { closingSource } from "./helpers/sequences";
 

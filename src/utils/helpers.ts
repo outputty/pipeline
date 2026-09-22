@@ -10,16 +10,47 @@ import type { IContextManager, PipelineFunction, PipelineErrorHandler } from "@s
  * @example
  * ```typescript
  * const simple = (x: number) => x * 2;
- * const withContext = (x: number, ctx: IContextManager) => x * ctx.getOrDefault('multiplier', 1);
+ * const scaled = (x: number, ctx: IContextManager) => x * ctx.getOrDefault('multiplier', 1);
  *
- * isContextAware(simple);      // false (fn.length === 1)
- * isContextAware(withContext); // true (fn.length === 2)
+ * isContextAware(simple); // false (fn.length === 1)
+ * isContextAware(scaled); // true (fn.length === 2)
  * ```
  */
 export function isContextAware<Out, T>(
   fn: PipelineFunction<Out, T>,
 ): fn is (item: Out, ctx: IContextManager) => T | Promise<T> {
   return fn.length >= 2;
+}
+
+/** ⚠ Keeps the arity test: a callback with a default or rest second parameter must not receive
+ * `ctx`. */
+export function withContext<Out, R>(
+  fn: (item: Out, ctx: IContextManager) => R,
+): (item: Out, ctx: IContextManager) => R {
+  return isContextAware(fn) ? (x, ctx) => fn(x, ctx) : (x) => (fn as (item: Out) => R)(x);
+}
+
+// oxlint-disable-next-line anti-slop/no-unknown-parameters -- a caught value can be anything JS can throw
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+// oxlint-disable-next-line anti-slop/no-unknown-parameters -- a caught value can be anything JS can throw
+export function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+/** ⚠ Per key, never a bulk replace: a manager that refuses a key throws with earlier keys written. */
+// oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- Context is a generic bag by design, unknown until a caller parses it at its own boundary (see .oxlintrc.json)
+export function applyContextValues(ctx: IContextManager, values: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(values)) {
+    ctx.set(key, value);
+  }
+}
+
+// oxlint-disable-next-line anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type -- parses an unvalidated wire value into Context's generic bag
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

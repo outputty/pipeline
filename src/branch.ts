@@ -7,7 +7,7 @@
 
 import type { AnyPipeline, Pipeline, PipelineSource } from "./pipeline";
 import type { Drainable, IContextManager, JoinMode, PipelineMode } from "./types";
-import { drainSync, type MaybeAsyncChunks } from "./utils/chunk";
+import { drainSync, type MaybeAsyncChunks } from "./utils/drain";
 import { chain, mapSettle } from "./utils/helpers";
 
 /** An arm's own pipeline, before its builder composes anything onto it. */

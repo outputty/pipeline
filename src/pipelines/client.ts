@@ -94,11 +94,7 @@ function toFetchResponse(
   res: import("node:http").IncomingMessage,
   Readable: typeof import("node:stream").Readable,
 ): Response {
-  const headers = new Headers();
-  for (const [key, value] of Object.entries(res.headers)) {
-    if (value === undefined) continue;
-    for (const v of Array.isArray(value) ? value : [value]) headers.append(key, v);
-  }
+  const headers = headersFromNode(res.headers);
   // ⚠ `new Response(body)` throws for `204`, `205` and `304`, and a proxy can send them.
   const bodyless = res.statusCode === 204 || res.statusCode === 205 || res.statusCode === 304;
   if (bodyless) {
@@ -110,6 +106,17 @@ function toFetchResponse(
     status: res.statusCode,
     headers,
   });
+}
+
+export function headersFromNode(
+  nodeHeaders: Record<string, string | string[] | undefined>,
+): Headers {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(nodeHeaders)) {
+    if (value === undefined) continue;
+    for (const v of Array.isArray(value) ? value : [value]) headers.append(key, v);
+  }
+  return headers;
 }
 
 /** ⚠ Links a streamed body's failure to `req` both ways, which a bare `.pipe()` does not. A

@@ -7,9 +7,12 @@
 
 import type { Drainable, PipelineMode } from "./types";
 import type { Pipeline, PipelineSource } from "./pipeline";
-import type { MaybeAsyncChunks } from "./utils/chunk";
 import { isThenable } from "./utils/helpers";
-import { collectItems, drainSyncSettled } from "./utils/chunk";
+import { collectItems } from "./utils/cut";
+import { drainSyncSettled, type MaybeAsyncChunks } from "./utils/drain";
+
+const NOT_SYNC_ITERABLE =
+  "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()";
 
 /** The pipeline shape a result drains, with the Mode erased. */
 type BoundPipeline<T> = Pipeline<T, "sync" | "async", unknown>;
@@ -139,9 +142,7 @@ export class PipelineResult<T, M extends PipelineMode> {
   [Symbol.iterator](): M extends "sync" ? Iterator<T> : never {
     const { syncChunks } = this.drainable();
     if (syncChunks === null) {
-      throw new TypeError(
-        "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
-      );
+      throw new TypeError(NOT_SYNC_ITERABLE);
     }
     return syncItems(syncChunks) as unknown as M extends "sync" ? Iterator<T> : never;
   }
@@ -178,9 +179,7 @@ function* syncItems<T>(chunks: MaybeAsyncChunks<T>): Generator<T> {
     if (isThenable(chunk)) {
       // Nothing else will await it, and an abandoned rejection is fatal under Node's default.
       void Promise.resolve(chunk).catch(() => {});
-      throw new TypeError(
-        "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
-      );
+      throw new TypeError(NOT_SYNC_ITERABLE);
     }
     yield* chunk;
   }

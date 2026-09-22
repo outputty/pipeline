@@ -113,7 +113,7 @@ class WsWorkerSet {
       if (released) return;
       released = true;
       this.inFlight--;
-      this.scheduleIdleCheck();
+      if (this.inFlight === 0) this.scheduleIdleCheck();
     };
     return { connect: `ws+unix:${path}:/`, release };
   }
@@ -223,7 +223,16 @@ export class ClusterPipeline<T, In = T> extends WebSocketPipeline<T, In> {
   ) {
     const options = Pipeline.wrapping<ClusterPipelineConstructorOptions>(first, second);
     // Dispatch never reads `connect`; `resolveConnect()` supplies the target per call.
-    super({ ...options, connect: "" });
+    const own: ClusterPipelineConstructorOptions & WebSocketPipelineOptions = {
+      ...options,
+      connect: "",
+    };
+    // ⚠ On a worker every terminal op resolves empty.
+    if (cluster.isWorker) {
+      own.chunks = emptyChunks<T>();
+      own.preBufferItems = null;
+    }
+    super(own);
     this.workers = options?.workers ?? availableParallelism();
 
     // ⚠ Same index rules as `ClusterHttpPipeline`'s constructor: bound instances and branch arms
@@ -232,12 +241,6 @@ export class ClusterPipeline<T, In = T> extends WebSocketPipeline<T, In> {
     this.pipelineIndex = claimsOwnSlot
       ? wsWorkerSet.register(this as ClusterPipeline<unknown>)
       : (options?.pipelineIndex ?? wsWorkerSet.claimIndex());
-
-    // ⚠ On a worker every terminal op resolves empty.
-    if (cluster.isWorker) {
-      this._chunks = emptyChunks<T>();
-      this._preBufferItems = null;
-    }
   }
 
   /** Carries `workers` and `pipelineIndex` into the next copy-on-write instance. */

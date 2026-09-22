@@ -12,6 +12,7 @@ import type {
   PipelineMode,
   ReduceFunction,
 } from "@src/types";
+import { toError } from "@src/utils/helpers";
 import { EventEmitter } from "node:events";
 
 /**
@@ -158,9 +159,7 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
             resolve(outcome.value);
             emitSafely(emitter, doneEvent, { chunk: outcome.value, ctx });
           } else {
-            reject(
-              outcome.error instanceof Error ? outcome.error : new Error(String(outcome.error)),
-            );
+            reject(toError(outcome.error));
             emitSafely(emitter, errorEvent, { error: outcome.error, ctx });
           }
         };

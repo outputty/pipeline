@@ -34,10 +34,10 @@ import { WebSocket as WSWebSocket, WebSocketServer } from "ws";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { Codec } from "@src/codec";
-import { JsonCodec } from "@src/codec";
+import { JsonCodec, textEncoder } from "@src/codec";
 import { encodedChunk, encodeOrForward, isEmptyEncodedChunk } from "@src/utils/encoded-chunk";
+import { applyContextValues, errorMessage, toError } from "@src/utils/helpers";
 
-const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 /**
@@ -380,9 +380,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
         encodeFrame({ id: header.id, rows: result.length }, await this._codec.encode(result)),
       );
     } catch (error) {
-      socket.send(
-        encodeErrorFrame(header.id, error instanceof Error ? error.message : String(error)),
-      );
+      socket.send(encodeErrorFrame(header.id, errorMessage(error)));
     }
   }
 
@@ -431,9 +429,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       }
       return false;
     } catch (error) {
-      socket.send(
-        encodeErrorFrame(header.id, error instanceof Error ? error.message : String(error)),
-      );
+      socket.send(encodeErrorFrame(header.id, errorMessage(error)));
       this.reduceSessions.delete(header.id);
       return true;
     }
@@ -460,11 +456,8 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- Context is a generic bag by design, unknown until a caller parses it at its own boundary, the same contract HttpPipeline's own StageRequestBody.context discloses
     context: Record<string, unknown> | undefined,
   ): IContextManager {
-    const ctx = this._context;
-    for (const [key, value] of Object.entries(context ?? {})) {
-      ctx.set(key, value);
-    }
-    return ctx;
+    applyContextValues(this._context, context ?? {});
+    return this._context;
   }
 
   /**
@@ -618,9 +611,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           conn.socket.send(encodeFrame({ id, route, inputDone: true }, new Uint8Array(0)));
         }
         // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a rejected pump can carry anything JS can throw, the same catch-boundary contract toNodeHandler's own bridge (http.ts) already discloses
-      })().catch((error: unknown) =>
-        fail(error instanceof Error ? error : new Error(String(error))),
-      );
+      })().catch((error: unknown) => fail(toError(error)));
 
       const nextEmit = async (): Promise<U[] | null> => {
         while (emitQueue.length === 0 && !streamDone) {

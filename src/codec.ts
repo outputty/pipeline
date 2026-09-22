@@ -15,7 +15,7 @@ export interface Codec {
   contentType?: string;
 }
 
-const textEncoder = new TextEncoder();
+export const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 /**

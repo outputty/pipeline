@@ -2,7 +2,7 @@
  * Core type definitions for @outputty/pipeline.
  */
 
-import type { MaybeAsyncChunks } from "./utils/chunk";
+import type { MaybeAsyncChunks } from "./utils/drain";
 
 /**
  * Items per chunk when a chain never calls `.buffer(size)`.

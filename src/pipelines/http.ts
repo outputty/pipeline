@@ -25,8 +25,9 @@ import type {
   ReduceWork,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
-import { defaultClient, type PipelineClient } from "@src/pipelines/client";
+import { defaultClient, headersFromNode, type PipelineClient } from "@src/pipelines/client";
 import { ndjsonFrame, readNdjsonLines } from "@src/utils/ndjson";
+import { applyContextValues, errorMessage, isPlainRecord, toError } from "@src/utils/helpers";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 
@@ -85,7 +86,7 @@ async function parseStageRequest(
   if (!Array.isArray(chunk)) {
     return { ok: false, error: "request body is missing a 'chunk' array" };
   }
-  if (typeof context !== "object" || context === null || Array.isArray(context)) {
+  if (!isPlainRecord(context)) {
     return { ok: false, error: "request body is missing a 'context' object" };
   }
   return { ok: true, value: { chunk, context } };
@@ -106,8 +107,7 @@ async function runReduceStage(
     }
     await flushTrailing(reducer, writer);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await writer.write(ndjsonFrame({ error: message }));
+    await writer.write(ndjsonFrame({ error: errorMessage(error) }));
   } finally {
     await writer.close();
   }
@@ -119,13 +119,10 @@ function applyContextFrame(first: IteratorResult<string>, ctx: IContextManager):
     throw new Error("reduce stream ended before a context frame was sent");
   }
   const frame = JSON.parse(first.value) as { context?: unknown };
-  if (typeof frame.context !== "object" || frame.context === null || Array.isArray(frame.context)) {
+  if (!isPlainRecord(frame.context)) {
     throw new Error("first reduce frame is missing a 'context' object");
   }
-  // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- Context is a generic bag by design, unknown until a caller parses it at its own boundary (see .oxlintrc.json)
-  for (const [key, value] of Object.entries(frame.context as Record<string, unknown>)) {
-    ctx.set(key, value);
-  }
+  applyContextValues(ctx, frame.context);
 }
 
 /** ⚠ Checks `Array.isArray`, not truthiness: a string `chunk` would fold character by character. */
@@ -276,14 +273,11 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       // ⚠ Reuses the constructor's manager, never a fresh one per request, so a `contextFactory`
       // runs once per process.
       const ctx = this._context;
-      for (const [key, value] of Object.entries(body.value.context)) {
-        ctx.set(key, value);
-      }
+      applyContextValues(ctx, body.value.context);
       const result = await chunkTransforms[requested](body.value.chunk, ctx);
       return Response.json({ chunk: result } satisfies StageResponseBody<unknown>);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return errorResponse(500, message);
+      return errorResponse(500, errorMessage(error));
     }
   };
 
@@ -451,7 +445,7 @@ export function toNodeHandler(
       // ⚠ A handler that rejects would otherwise leave the client waiting forever.
       if (!res.headersSent) {
         res.statusCode = 500;
-        res.end(error instanceof Error ? error.message : String(error));
+        res.end(errorMessage(error));
       }
     });
   };
@@ -484,16 +478,10 @@ async function writeStreamedBody(res: ServerResponse, bodyStream: Readable): Pro
 /** ⚠ Streams the body in, so a reduce stage folds early chunks before later ones arrive. Whether
  * a body exists is decided by method, since GET/HEAD with a body makes `Request` throw. */
 function nodeRequestToFetchRequest(req: IncomingMessage): Request {
-  const headers = new Headers();
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (value === undefined) continue;
-    for (const v of Array.isArray(value) ? value : [value]) headers.append(key, v);
-  }
-
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   return new Request(new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`), {
     method: req.method,
-    headers,
+    headers: headersFromNode(req.headers),
     body: hasBody ? (Readable.toWeb(req) as ReadableStream<Uint8Array>) : undefined,
     // undici requires `duplex: "half"` whenever a body is passed.
     duplex: "half",
@@ -526,10 +514,10 @@ async function handleOverBridge(
     // ⚠ Once headers are sent, a failure destroys the connection. An error response is no longer
     // possible, and leaving it hangs the client.
     if (res.headersSent) {
-      res.destroy(error instanceof Error ? error : new Error(String(error)));
+      res.destroy(toError(error));
     } else {
       res.statusCode = 500;
-      res.end(error instanceof Error ? error.message : String(error));
+      res.end(errorMessage(error));
     }
   }
 }
