@@ -3,7 +3,6 @@
 import type { ChunkerFunction } from "@src/types";
 import { chain } from "@src/utils/helpers";
 import { drainSyncChunks, type MaybeAsyncChunks } from "@src/utils/drain";
-import { isEncodedChunk, materialize } from "@src/utils/encoded-chunk";
 
 /** Refuses a chunk size below 1, for the chunk cutters.
  *
@@ -61,16 +60,12 @@ export function buildChunkGenerator<T>(chunkSize: number): ChunkerFunction<T> {
 }
 
 /**
- * Flattens a chunk stream into its items, in order, so `.buffer()` can re-cut it. Decodes any
- * encoded chunk on the way.
+ * Flattens a chunk stream into its items, in order, so `.buffer()` can re-cut it.
  *
  * A stream of `[1, 2]` then `[3]` → yields `1`, `2`, `3`.
  */
 export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T> {
-  for await (const chunk of chunks) {
-    // Test before calling `materialize`: it is `async`, so calling it costs a Promise per chunk.
-    yield* isEncodedChunk(chunk) ? await materialize(chunk) : chunk;
-  }
+  for await (const chunk of chunks) yield* chunk;
 }
 
 /**

@@ -37,7 +37,6 @@ import {
 } from "./utils/cut";
 import { recutSyncChunks } from "./utils/recut";
 import { applyContextValues, chain, runStageChunk } from "./utils/helpers";
-import { materializeChunksIfNeeded } from "./utils/encoded-chunk";
 import { PipelineResult } from "./result";
 import { BranchBuilder, runBranch } from "./branch";
 import type {
@@ -499,10 +498,14 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     return asyncIterableFrom(() => asAsyncChunks(syncChunks));
   }
 
-  /** Whether this class's chunk stream can hold encoded chunks that need decoding before items are
-   * read. A class holding a `Codec` overrides it to `true`. */
-  protected mayCarryEncodedChunks(): boolean {
-    return false;
+  /**
+   * `chunks` as real items, for a site that reads them. A class whose stages can reply with encoded
+   * chunks overrides it to decode them; every other class reads its chunks as they are.
+   *
+   * `readableChunks(chunks)` → the same `chunks` iterable, on this class.
+   */
+  protected readableChunks(chunks: AsyncIterable<T[]>): AsyncIterable<T[]> {
+    return chunks;
   }
 
   /** Whether this pipeline runs on the synchronous engine. */
@@ -698,7 +701,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
       }) as this;
     }
 
-    const items = this._preBufferItems ?? flattenChunks(this._chunks);
+    const items = this._preBufferItems ?? flattenChunks(this.readableChunks(this._chunks));
     return this.createPipeline<T>(cutAsync(items), {
       ...this.carriedOptions(),
       preBufferItems: items,
@@ -806,8 +809,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     }
     const region = new Pipeline<T, "sync" | "async">({
       ...this.carriedOptions(),
-      // The region reads real items, so encoded chunks from an upstream dispatched stage decode here.
-      chunks: materializeChunksIfNeeded(this._chunks, this.mayCarryEncodedChunks()),
+      chunks: this.readableChunks(this._chunks),
       pendingStages: [],
     });
     const built = build(region as unknown as Pipeline<T, M, any>);
@@ -864,17 +866,14 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * Binds `input` and returns what a `PipelineResult` drains. That is the sync chunk stream (or
    * `null`), the async chunk stream, and this run's context manager.
    *
-   * `materialize: false` skips decoding encoded chunks; `.consume()` passes it because it reads no
-   * item.
+   * `materialize: false` hands back the chunks without making them readable as items; `.consume()`
+   * passes it because it reads no item.
    */
   drainable(input: PipelineSource<In>, materialize = true): Drainable<T> {
     const bound = this.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
     return {
       syncChunks: bound.isSync() ? bound._syncChunks : null,
-      chunks: () =>
-        materialize
-          ? materializeChunksIfNeeded(bound.chunkStream(), bound.mayCarryEncodedChunks())
-          : bound.chunkStream(),
+      chunks: () => (materialize ? bound.readableChunks(bound.chunkStream()) : bound.chunkStream()),
       // ⚠ This run's manager, not the chain's: an arm must see the writes this run just made.
       context: bound._context,
     };

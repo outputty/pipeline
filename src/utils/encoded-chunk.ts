@@ -58,19 +58,12 @@ export function encodeOrForward<T>(chunk: T[], codec: Codec): Uint8Array | Promi
   return materialize(chunk).then((items) => codec.encode(items));
 }
 
-async function* materializeChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T[]> {
+/** Decodes every encoded chunk in `chunks`; an array passes through unchanged.
+ *
+ * A stream of `[1, 2]` then `encodedChunk(bytes, 1, codec)` → yields `[1, 2]`, then
+ * `codec.decode(bytes)`'s own result. */
+export async function* materializeChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T[]> {
   for await (const chunk of chunks) {
     yield isEncodedChunk(chunk) ? materialize(chunk) : chunk;
   }
-}
-
-/** `materializeChunks()`, for a stream that may carry encoded chunks. Skips the wrapper when
- * `mayCarryEncoded` is `false`, so a class that never encodes pays no Promise per chunk.
- *
- * `materializeChunksIfNeeded(chunksOf([[1, 2]]), false)` → the SAME `chunks` iterable, no wrapper. */
-export function materializeChunksIfNeeded<T>(
-  chunks: AsyncIterable<T[]>,
-  mayCarryEncoded: boolean,
-): AsyncIterable<T[]> {
-  return mayCarryEncoded ? materializeChunks(chunks) : chunks;
 }

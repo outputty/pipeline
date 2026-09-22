@@ -35,7 +35,12 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { Codec } from "@src/codec";
 import { JsonCodec, textEncoder } from "@src/codec";
-import { encodedChunk, encodeOrForward, isEmptyEncodedChunk } from "@src/utils/encoded-chunk";
+import {
+  encodedChunk,
+  encodeOrForward,
+  isEmptyEncodedChunk,
+  materializeChunks,
+} from "@src/utils/encoded-chunk";
 import { chain, errorMessage, isThenable, toError } from "@src/utils/helpers";
 
 const textDecoder = new TextDecoder();
@@ -305,9 +310,9 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     return { ...super.carriedKnobs(), connect: this._connect, codec: this._codec };
   }
 
-  /** `true`: a reply from this class's workers stays encoded until a site reads its items. */
-  protected override mayCarryEncodedChunks(): boolean {
-    return true;
+  /** Decodes the encoded replies this class's workers send, where a site reads items. */
+  protected override readableChunks(chunks: AsyncIterable<T[]>): AsyncIterable<T[]> {
+    return materializeChunks(chunks);
   }
 
   override transform<U, M2 extends "sync" | "async">(
@@ -487,7 +492,8 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   }
 
   /** Sends each chunk to the worker's `/transform/<n>` and returns its reply, still encoded. The
-   * worker runs its own copy of the stage, so `transformer` is unused. */
+   * worker runs its own copy of the stage, so `transformer` is unused. An emptied encoded chunk is
+   * not sent. */
   protected override stageWork<U>(
     _transformer: Transformer<T, U, "sync" | "async">,
     stageIndex: number,
@@ -495,8 +501,10 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     const route = this.routePath("transform", stageIndex);
     // Each step waits only on a value that is really pending: a resolved target, an open connection
     // and a synchronous codec cost no `Promise` per chunk.
-    return (chunk, ctx) =>
-      new Promise<U[]>((resolve, reject) => {
+    return (chunk, ctx) => {
+      // ⚠ Return the tagged chunk, never `[]`, so the next dispatched stage still skips it.
+      if (isEmptyEncodedChunk(chunk)) return chunk as unknown as U[];
+      return new Promise<U[]>((resolve, reject) => {
         const settle: Settle<U[]> = { resolve, reject };
         const target = this.resolveConnect();
         if (!(target instanceof Promise)) {
@@ -508,6 +516,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           reject,
         );
       });
+    };
   }
 
   /**

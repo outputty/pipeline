@@ -788,22 +788,23 @@ AFTER   stage 0 reply -> encoded chunk { payload, rows, codec } ----------------
   reduce emit frame carries `rows` too, and `reduceWork()` yields an encoded chunk.
 - A later dispatched transform or reduce sends the payload verbatim when the codec is the same one.
 - Three sites decode: `drainable()` (every item-returning terminal and `.branch()`), the `.local()`
-  seed (which covers `Pipeline.tap`) and `flattenChunks` (which covers a `.buffer()` recut).
-  `.consume()` decodes nothing.
-- `ConcurrentPipeline`'s fan-out skips a chunk with 0 rows before dispatch, and `reduceWork()`'s own
-  pump loop skips one too before sending it to a dispatched `.reduce()` - both scoped to
-  `isEncodedChunk`, so a real, merely-empty chunk on `HttpPipeline`/`EventEmitterPipeline` still
-  dispatches unchanged. The source cut (`cut.ts`) and the terminal (`result.ts`) already drop empties.
+  seed (which covers `Pipeline.tap`) and the `.buffer()` recut's flatten. `.consume()` decodes
+  nothing.
+- `WebSocketPipeline.stageWork()` skips a chunk with 0 rows before dispatch, returning the tagged
+  chunk itself so the next dispatched stage skips it too, and `reduceWork()`'s own pump loop skips one
+  before sending it to a dispatched `.reduce()`. Both live on the WebSocket family alone, so a real,
+  merely-empty chunk on `HttpPipeline`/`EventEmitterPipeline` still dispatches unchanged. The source
+  cut (`cut.ts`) and the terminal (`result.ts`) already drop empties.
 - The encoded chunk is internal and travels typed `T[]`. A site that reads items without decoding
   returns `[]` without an error, so each decoding site keeps its own e2e case.
-- `Pipeline.mayCarryEncodedChunks()` is the structural gate `.local()`'s seed and `drainable()` read
-  before wrapping a chunk stream in the materializing generator - `false` on the base, `true` only on
-  `WebSocketPipeline`. Wrapping unconditionally regressed `bench:memory` on every non-WebSocket chain
-  (one Promise per chunk for a mechanism it could never carry); this class-level override closes that
-  with no runtime flag.
+- The three decoding sites read their stream through one protected seam,
+  `Pipeline.readableChunks(chunks)`: identity on the base, `materializeChunks` on
+  `WebSocketPipeline` (inherited by `ClusterPipeline`). No base class names the encoded chunk.
+  Wrapping unconditionally regressed `bench:memory` on every non-WebSocket chain (one Promise per
+  chunk for a mechanism it could never carry); the identity default costs nothing.
 - ⚠ A `codec.decode()` failure no longer rejects at the dispatching stage: the primary keeps the
   reply encoded and only decodes at whichever site reads items first (`drainable()`, the `.local()`
-  seed, `flattenChunks`), all outside `runStageChunk`'s own try/catch. `Pipeline.onError()`'s
+  seed, the `.buffer()` recut), all outside `runStageChunk`'s own try/catch. `Pipeline.onError()`'s
   documented per-chunk drop-and-continue contract is not consulted for a decode failure - it throws
   out of the terminal (or `.local()` region) instead. `.consume()` never decodes at all, so a bad
   chunk there completes silently with nothing to report.

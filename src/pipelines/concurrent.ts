@@ -23,7 +23,6 @@ import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
 import { share } from "@src/utils/cut";
 import { applyContextValues, runStageChunk } from "@src/utils/helpers";
-import { isEmptyEncodedChunk } from "@src/utils/encoded-chunk";
 
 /** Construction-time knobs for `ConcurrentPipeline` and every class that extends it. */
 export interface ConcurrentPipelineOptions {
@@ -234,12 +233,8 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
     // ⚠ Kept `async`, so a synchronous throw fails at the chunk's own position in the ordered output.
-    const work: InternalTransformer<T, U> = async (chunk, ctx) => {
-      // ⚠ An emptied encoded chunk is not sent, and is returned as it is, not as `[]`, so the next
-      // dispatched stage still skips it.
-      if (isEmptyEncodedChunk(chunk)) return chunk as unknown as U[];
-      return runStageChunk(rawWork, chunk, ctx, this._runHandler);
-    };
+    const work: InternalTransformer<T, U> = async (chunk, ctx) =>
+      runStageChunk(rawWork, chunk, ctx, this._runHandler);
     const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;
     const newChunks = fanOut(this._chunks, work, this._context, this.maxConcurrency);
 
