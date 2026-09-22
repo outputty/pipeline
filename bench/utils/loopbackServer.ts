@@ -8,7 +8,7 @@
  */
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { toNodeHandler } from "../../src";
+import { toNodeHandler } from "../../src/http";
 
 /** Binds `handler` to a real loopback server, runs `use` against its `http://localhost:<port>` url,
  * and always closes the server after. */

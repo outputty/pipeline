@@ -2,7 +2,13 @@ import { defineConfig } from "tsup";
 import { resolve } from "path";
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/websocket.ts"],
+  entry: [
+    "src/index.ts",
+    "src/websocket.ts",
+    "src/http.ts",
+    "src/cluster.ts",
+    "src/eventemitter.ts",
+  ],
   format: ["esm", "cjs"],
   dts: false,
   clean: true,

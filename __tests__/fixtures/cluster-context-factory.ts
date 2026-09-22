@@ -7,7 +7,7 @@
  * process.
  */
 import cluster from "node:cluster";
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 import { SimpleContextManager } from "../../src";
 
 let factoryCalls = 0;

@@ -4,7 +4,7 @@
  * accumulator carries `process.pid` alongside the sum, the same technique `cluster-reduce.ts` uses,
  * so the primary's own script can tell a region that silently dispatched from one that stayed put.
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 
 const primaryPid = process.pid;
 

@@ -20,7 +20,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
-import { EventEmitterPipeline, type PipelineEmitter, type WorkEvent } from "../src";
+import { EventEmitterPipeline, type PipelineEmitter, type WorkEvent } from "../src/eventemitter";
 import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
 
 function delay(ms: number): Promise<void> {

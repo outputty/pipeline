@@ -13,7 +13,8 @@
  */
 import { describe, test, expect } from "vitest";
 import type { IContextManager } from "../src";
-import { Pipeline, ConcurrentPipeline, HttpPipeline } from "../src";
+import { Pipeline, ConcurrentPipeline } from "../src";
+import { HttpPipeline } from "../src/http";
 import {
   FIXTURE_TIMEOUT,
   HTTP_TIMEOUT,

@@ -6,7 +6,7 @@
  * accident - the array alone cannot tell "really dispatched to a worker" from "silently ran
  * in-process instead".
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 
 const afterContext = new ClusterHttpPipeline<number>().context({ multiplier: 10 });
 const out = await afterContext

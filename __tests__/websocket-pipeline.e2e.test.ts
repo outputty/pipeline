@@ -16,7 +16,7 @@
  * file-scope constraint) are repo-wide gates, verified once at the end of the docs layer, not here.
  */
 import { describe, it, expect } from "vitest";
-import { ClusterHttpPipeline } from "../src";
+import { ClusterHttpPipeline } from "../src/cluster";
 import { WebSocketPipeline } from "../src/websocket";
 import { FIXTURE_TIMEOUT, runFixture, runFixtureJson, expectFixtureOk } from "./helpers/fixtures";
 

@@ -9,15 +9,6 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
-- **The root entry drops Node builtins, splitting `HttpPipeline`/`ClusterHttpPipeline`/
-  `EventEmitterPipeline` onto their own entries** (#249) - `dist/index.js` carries five static
-  top-level imports with no browser equivalent (`cluster`, `http`'s `createServer`, `os`'s
-  `availableParallelism`, `stream`'s `Readable`, `events`'s `EventEmitter`), so a browser bundler
-  aborts resolving the whole module graph before it can tree-shake unused exports - confirmed with a
-  real Turbopack build (`Module not found: Can't resolve 'cluster'`) even for a consumer using only
-  core `Pipeline`/`Transformer`. `@outputty/pipeline/websocket` (#239) is the precedent; this ticket
-  applies the same shape to three new entries (`/http`, `/cluster`, `/eventemitter`), split along the
-  files' own dependency edges rather than one combined entry.
 - **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
   `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
   change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results
@@ -74,6 +65,21 @@ The two older candidates, still not filed:
 
 ## Built
 
+- **The root entry drops Node builtins: `HttpPipeline`/`ClusterHttpPipeline`/`EventEmitterPipeline`
+  move to `/http`/`/cluster`/`/eventemitter`** (#249, `feat!`, PR TBD) - `dist/index.js` carried five
+  static top-level imports with no browser equivalent (`cluster`, `http`'s `createServer`, `os`'s
+  `availableParallelism`, `stream`'s `Readable`, `events`'s `EventEmitter`), so a browser bundler
+  aborted resolving the whole module graph before it could tree-shake unused exports - confirmed with
+  a real Turbopack build (`Module not found: Can't resolve 'cluster'`) even for a consumer using only
+  core `Pipeline`/`Transformer`. `@outputty/pipeline/websocket` (#239) is the precedent; this ticket
+  applies the same shape to three new entries, split along the files' own dependency edges
+  (`client.ts` feeds `http.ts` feeds `cluster.ts`; `eventemitter.ts` is an independent leaf) rather
+  than one combined entry. No file moves - each new entry is a barrel re-exporting from its unmoved
+  `pipelines/*.ts` file. Measured: `dist/index.js` fell from 39.57 KB to 638 B, and grepping the root
+  and its shared chunks for `cluster`/`http`/`os`/`stream`/`events` imports reads `0`.
+  `packaging.e2e.test.ts` bundles a bare `Pipeline`/`Transformer` import with esbuild at
+  `platform: "browser"` against the real built `dist/` and asserts it succeeds. BREAKING, no
+  deprecation period, `minor` bump matching #239's own precedent for the identical shape of change.
 - **A reduce that received no data emits its seed** (#241, `fix`, PR #245 and this docs PR) - a
   reduce over zero rows emitted nothing where `[].reduce(fn, seed)` returns the seed, so a consumer
   counting matching rows over no matches got `undefined` instead of `0`. `Pipeline.reduce` seeds once

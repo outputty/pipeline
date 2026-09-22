@@ -8,7 +8,7 @@
  * construction order, and a worker re-executes this module to hold the same stages. `workers: 2` is
  * pinned so the result does not depend on `os.availableParallelism()`.
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 import { ClusterPipeline } from "../../src/websocket";
 
 const sum = (acc: number, x: number) => acc + x;

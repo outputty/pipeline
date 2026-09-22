@@ -757,7 +757,7 @@ the file that loads `ws`, so a core chunk type can name `Codec` without a utils-
 `Codec` is not generic: one instance serves every stage while the item type changes, so it sees
 `unknown`, and `Pipeline<T>` carries the type hints. The `jsonCodec` object is deleted (BREAKING).
 
-## Package entries - #239 (done), #249 (pending)
+## Package entries - #239 (done), #249 (done)
 
 Five entries, so the root loads no package AND resolves no Node builtin: `@outputty/pipeline`
 (`src/index.ts`), `@outputty/pipeline/websocket` (`src/websocket.ts`, needs `ws`), and
@@ -787,6 +787,13 @@ entries, not one, because the three files' only shared trait is "needs a Node bu
 feeds `http.ts` feeds `cluster.ts` (no cycle), `eventemitter.ts` is unrelated to either. No source
 file moves; each new entry is a barrel re-exporting from its unmoved `pipelines/*.ts` file, the same
 shape `websocket.ts` already uses.
+
+Measured: `dist/index.js` fell from 39.57 KB to 638 B, and `grep -c 'from "cluster"\|from "http"\|
+from "os"\|from "stream"\|from "events"' dist/index.js` (and its shared ESM/CJS chunks) reads `0`.
+`packaging.e2e.test.ts` bundles `import { Pipeline, Transformer } from "@outputty/pipeline"` with
+esbuild at `platform: "browser"` against the real built `dist/` and asserts it succeeds - the same
+class of check that fails today against the unfixed root (a real Turbopack build: `Module not found:
+Can't resolve 'cluster'`).
 
 - **Root is package-free.** `ws` is the only package `src/` imports (`rg 'from "ws"' src` hits
   `pipelines/websocket.ts` alone), and `packaging.e2e.test.ts` runs the built `dist` in a directory

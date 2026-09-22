@@ -1,8 +1,10 @@
 /**
- * #239 - `ws` is optional. Builds the package for real (the three commands `pnpm build` chains, into
- * a scratch `outDir`) and runs the OUTPUT, because vitest runs `src` and cannot see what the bundler
- * did: CJS with no splitting gives `dist/websocket.cjs` its own copy of `Pipeline`, and only a run
- * against `dist` shows `instanceof` failing across the two entries.
+ * #239 - `ws` is optional; #249 - the root loads no Node builtin either. Builds the package for real
+ * (the three commands `pnpm build` chains, into a scratch `outDir`) and runs the OUTPUT, because
+ * vitest runs `src` and cannot see what the bundler did: CJS with no splitting gives
+ * `dist/websocket.cjs` its own copy of `Pipeline`, and only a run against `dist` shows `instanceof`
+ * failing across entries; only a real browser-platform bundle shows a Node builtin import aborting
+ * resolution.
  *
  * Two directories: `withWs` sits under the repo's `tmp/`, so `ws` resolves from the repo's own
  * `node_modules`; `withoutWs` sits under the OS temp directory, where no `ws` exists.
@@ -21,6 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import * as esbuild from "esbuild";
 
 const repo = resolve(import.meta.dirname, "..");
 const bin = (name: string): string => join(repo, "node_modules", ".bin", name);
@@ -96,9 +99,27 @@ describe("the root entry needs no package", () => {
     const out = runNode(
       withoutWs,
       `const root = require("./dist/index.cjs");\n` +
-        `console.log(JSON.stringify(["WebSocketPipeline", "ClusterPipeline", "toNodeWebSocketHandler", "ClusterHttpPipeline", "JsonCodec"].map((name) => name in root)));`,
+        `console.log(JSON.stringify(["WebSocketPipeline", "ClusterPipeline", "toNodeWebSocketHandler", "HttpPipeline", "ClusterHttpPipeline", "EventEmitterPipeline", "JsonCodec"].map((name) => name in root)));`,
     );
-    expect(out).toBe("[false,false,false,true,true]");
+    expect(out).toBe("[false,false,false,false,false,false,true]");
+  });
+
+  it("bundles for a browser target with no unresolved import (#249)", async () => {
+    const result = await esbuild.build({
+      stdin: {
+        contents: `import { Pipeline, Transformer } from "@outputty/pipeline";\nexport { Pipeline, Transformer };`,
+        resolveDir: withWs,
+        loader: "js",
+      },
+      bundle: true,
+      platform: "browser",
+      write: false,
+      alias: { "@outputty/pipeline": join(withWs, "dist", "index.js") },
+      logLevel: "silent",
+    });
+    expect(result.errors).toEqual([]);
+    const bundle = result.outputFiles[0]?.text ?? "";
+    expect(bundle).not.toMatch(/from "cluster"|from "http"|from "os"|from "stream"|from "events"/);
   });
 
   it("fails loud on the /websocket entry when ws is missing", () => {
@@ -159,10 +180,13 @@ describe("a consumer needs no ws types", () => {
       join(consumer, "use.ts"),
       [
         `import { createServer } from "node:http";`,
-        `import { Pipeline, ClusterHttpPipeline, JsonCodec } from "@outputty/pipeline";`,
+        `import { Pipeline, JsonCodec } from "@outputty/pipeline";`,
         `import { WebSocketPipeline, ClusterPipeline, toNodeWebSocketHandler } from "@outputty/pipeline/websocket";`,
-        `export const kept = [new Pipeline<number>(), ClusterHttpPipeline, new JsonCodec()];`,
-        `export const moved = [WebSocketPipeline, ClusterPipeline];`,
+        `import { HttpPipeline } from "@outputty/pipeline/http";`,
+        `import { ClusterHttpPipeline } from "@outputty/pipeline/cluster";`,
+        `import { EventEmitterPipeline } from "@outputty/pipeline/eventemitter";`,
+        `export const kept = [new Pipeline<number>(), new JsonCodec()];`,
+        `export const moved = [WebSocketPipeline, ClusterPipeline, HttpPipeline, ClusterHttpPipeline, EventEmitterPipeline];`,
         `const handler = toNodeWebSocketHandler({ serve() {} });`,
         `export const server = createServer().on("upgrade", (req, socket, head) => handler.upgrade(req, socket, head));`,
       ].join("\n"),

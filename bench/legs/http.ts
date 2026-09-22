@@ -6,7 +6,7 @@
  * pinned run, since a request never reaches the handler at all while pinned (no cost added to the
  * timed path, the same reason `ConcurrentPipeline`'s own counting subclass adds none).
  */
-import { HttpPipeline } from "../../src";
+import { HttpPipeline } from "../../src/http";
 import {
   canonicalChain,
   canonicalInput,

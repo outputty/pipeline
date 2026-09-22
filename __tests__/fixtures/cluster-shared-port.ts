@@ -1,7 +1,7 @@
 /**
  * #17 Done-when 4 — three `ClusterHttpPipeline`s in one program share ONE port and ONE worker set.
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 
 const p1 = new ClusterHttpPipeline<number>();
 const p2 = new ClusterHttpPipeline<number>();
