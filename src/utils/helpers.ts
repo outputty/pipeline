@@ -1,17 +1,11 @@
-/**
- * Helper utilities for checking function signatures.
- */
+/** Small helpers that keep synchronous chains synchronous, and recover from failures. */
 
 import type { IContextManager, PipelineFunction, PipelineErrorHandler } from "@src/types";
 
 /**
- * Type guard that checks if a pipeline function is context-aware (takes 2+ parameters).
+ * Whether a pipeline callback declares a second, context parameter.
  *
- * Context-aware functions have the signature: `(item: T, ctx: IContextManager) => U`
- * Non-context-aware functions have the signature: `(item: T) => U`
- *
- * @param fn - The pipeline function to check
- * @returns True if the function takes a context parameter
+ * ⚠ Reads `fn.length`, so `(x, ctx = d) => …` and `(x, ...rest) => …` count as NOT context-aware.
  *
  * @example
  * ```typescript
@@ -29,16 +23,11 @@ export function isContextAware<Out, T>(
 }
 
 /**
- * The RUN-handler decision every per-chunk catch site shares (#78): `Transformer.process()`'s own
- * `runSequentially` loop (a local stage) and `ConcurrentPipeline.apply()`'s wrapped `work` (a
- * dispatched one) - the two sites #40 built and #78 reuses, so "call the handler, or propagate"
- * lives once rather than twice. No handler registered → rethrow (today's behaviour, the run dies).
- * A handler that itself throws (or a caller who writes `(e) => { throw e; }`) still propagates - it
- * is not caught here, so it escalates past this call to whatever awaits the caller. `runHandler` is
- * declared as bare `void` (`.claude/rules/typescript.md`), which still accepts an `async` callback.
+ * Applies `Pipeline.onError()`'s handler to a failed chunk. Returning means "drop the chunk and
+ * continue"; with no handler, or a handler that throws, the error propagates.
  *
- * `await dropOrRethrow(undefined, err, ctx)` throws `err`. `await dropOrRethrow((e) => log(e), err,
- * ctx)` calls the handler and returns normally - the caller drops the chunk and continues.
+ * `dropOrRethrow(undefined, err, ctx)` throws `err`. `dropOrRethrow((e) => log(e), err, ctx)` calls
+ * the handler and returns `undefined`.
  */
 export function dropOrRethrow(
   runHandler: PipelineErrorHandler | undefined,
@@ -46,19 +35,15 @@ export function dropOrRethrow(
   ctx: IContextManager,
 ): void | Promise<void> {
   if (!runHandler) throw error;
-  // Dual-mode (#90): a SYNCHRONOUS handler returns here without creating a `Promise`, so a
-  // `"sync"`-Mode chain that drops a chunk still returns its array rather than silently widening to
-  // a `Promise` its own compile-time type never promised. The async arm keeps the reason above: the
-  // rejection is settled HERE, so a handler that decides to rethrow only after an `await` of its own
-  // still reaches the caller instead of becoming an unhandled rejection.
+  // ⚠ Return an async handler's promise, so a rethrow after its own `await` reaches the caller.
   const result: unknown = runHandler(error, ctx);
   return isThenable(result) ? Promise.resolve(result).then(() => undefined) : undefined;
 }
 
 /**
- * True when `value` is a thenable - the one place a "did this stay synchronous?" decision is made
- * (#90). Structural, not `instanceof Promise`: a caller's own thenable, a `PromiseLike` from another
- * realm and a native `Promise` all have to widen the chain the same way.
+ * Whether `value` is a thenable, which is what turns a chain async.
+ *
+ * ⚠ A structural test, not `instanceof Promise`: a caller's own thenable must count too.
  *
  * `isThenable(1)` → `false`. `isThenable(Promise.resolve(1))` → `true`.
  */
@@ -71,10 +56,8 @@ export function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T
 }
 
 /**
- * Runs `next` on `value`, creating NO `Promise` when `value` is not already one (#90) - the
- * replacement for every `await` on a composition seam, so a chain whose callbacks all return plain
- * values runs start to finish without a microtask. When `value` IS a thenable the call defers
- * through `.then`, which is the chain widening to async exactly where the first async link sits.
+ * Applies `next` to `value`, waiting only if `value` is a thenable. Use it in place of `await` so
+ * a synchronous chain creates no `Promise`.
  *
  * `chain(2, (x) => x * 2)` → `4`, no `Promise` created. `chain(Promise.resolve(2), (x) => x * 2)` →
  * a `Promise` of `4`.
@@ -83,16 +66,11 @@ export function chain<A, B>(
   value: A | Promise<A>,
   next: (resolved: A) => B | Promise<B>,
 ): B | Promise<B> {
-  // `Promise.resolve` on an already-native `Promise` returns that same instance, so the async arm
-  // allocates nothing extra; it is here to normalize a caller's own non-native thenable.
   return isThenable(value) ? Promise.resolve(value).then(next) : next(value);
 }
 
 /**
- * Collects per-item results into one array, staying synchronous when NO item is pending (#90) -
- * `Promise.all`'s replacement wherever a chunk's items were mapped one at a time. `Promise.all`
- * always allocates and always defers, even over an array of plain values, which is what made a
- * fully-synchronous `.map()` cost a microtask per chunk before this.
+ * `Promise.all` that returns the array itself when no value is pending.
  *
  * `settleMaybe([1, 2])` → `[1, 2]`, no `Promise` created. `settleMaybe([1, Promise.resolve(2)])` →
  * a `Promise` of `[1, 2]`.
@@ -102,17 +80,10 @@ export function settleMaybe<T>(values: (T | PromiseLike<T>)[]): T[] | Promise<T[
 }
 
 /**
- * Runs `run` over every item of `chunk` and settles the results, staying synchronous when none is
- * pending (#90) - the ONE per-item map every element-wise link goes through, rather than a bare
- * `chunk.map(...)` at each site.
+ * Maps `run` over a chunk and settles the results, returning a plain array when none is pending.
  *
- * The bare form is unsafe here: `run` is a caller's own callback, so it can throw SYNCHRONOUSLY for
- * item `i` after items `0..i-1` already returned pending promises. `Array.prototype.map` abandons
- * the array at that point, leaving those promises with no rejection handler ever attached - one of
- * them rejecting then crashes the process under Node's default unhandled-rejection policy. Before
- * #90 the per-item callback was `async`, so a throw became a rejection `Promise.all` always handled;
- * it cannot be now, because that `async` wrapper is exactly what made a synchronous chain allocate.
- * This loop attaches a throwaway `.catch` to whatever was already created, then rethrows.
+ * ⚠ Not a bare `chunk.map(run)`: when `run` throws synchronously, the promises already created
+ * must be marked handled, or one rejecting later crashes the process.
  *
  * `mapSettle([1, 2], (x) => x * 2)` → `[2, 4]`, no `Promise` created.
  */
@@ -130,14 +101,10 @@ export function mapSettle<T, R>(chunk: T[], run: (item: T) => R | Promise<R>): R
 }
 
 /**
- * Attaches a throwaway rejection handler to every pending value in `created` (#90) - what
- * `mapSettle` above owes the siblings of an item whose callback threw synchronously, since nothing
- * downstream will ever await them. Its own function to keep `mapSettle`'s `catch` at this repo's
- * `max-depth: 2`. Exported for `transformer.ts`'s own `filterSettle` (#120's O1), which owes its
- * `tail` the identical disarm on a synchronous throw.
+ * Marks every pending value in `created` as handled, for promises nothing will await after a
+ * synchronous throw.
  *
- * `disarm([Promise.reject(new Error("x"))])` → `undefined`, no unhandled rejection (the rejection
- * gets a throwaway `.catch()`, its reason never read).
+ * `disarm([Promise.reject(new Error("x"))])` → `undefined`, and no unhandled rejection.
  */
 export function disarm<R>(created: (R | Promise<R>)[]): void {
   for (const value of created) {
@@ -146,18 +113,11 @@ export function disarm<R>(created: (R | Promise<R>)[]): void {
 }
 
 /**
- * The try/catch-if-thenable/recover skeleton every ROW- or CHUNK-level recovery site shares (#133):
- * try `attempt`; a synchronous throw OR a rejected `Promise` both route to `recover`. Serves
- * `runStageChunk` below, `drain.ts`'s own `closingOnFailure` and `transformer.ts`'s own `settleRowStep`.
+ * Runs `attempt`, and hands a synchronous throw or a rejection alike to `recover`. It returns a
+ * plain value when `attempt` does.
  *
- * `Reducer.fold` (`utils/reduce.ts`) does NOT use this, by decision: its own docstring records a
- * measured perf note (372.5 ns/item for a hoisted commit/recover pair against 8.9 ns/item inlined)
- * that is specifically about its PER-ITEM fold path - the sites this helper serves are each
- * called at most once per row of a chunk, once per chunk or once per drain, never once per item inside a hot fold,
- * so the trade that note rejects for `Reducer.fold` does not apply here.
- *
- * `tryRecover(() => parseStrict("3"), () => -1)` → `3`, no `Promise` created, `recover` never
- * called.
+ * `tryRecover(() => JSON.parse("3"), () => -1)` → `3`; `tryRecover(() => JSON.parse("x"), () => -1)`
+ * → `-1`. No `Promise` created.
  */
 export function tryRecover<R>(
   attempt: () => R | Promise<R>,
@@ -172,15 +132,11 @@ export function tryRecover<R>(
 }
 
 /**
- * Runs one chunk through a stage on the `"sync"` engine (#90), applying `Pipeline.onError()`'s own
- * RUN handler exactly as `runSequentially` does for the async engine - the two engines must agree on
- * what a chunk failure means, and `dropOrRethrow` is where that decision already lives.
+ * Runs one chunk through a stage, applying `Pipeline.onError()`'s handler on failure. A dropped
+ * chunk comes back as `[]`.
  *
- * A dropped chunk becomes `[]` rather than disappearing: the sync stream is a generator of chunks,
- * so an empty chunk is how "this one contributed nothing" is spelled. A synchronous handler keeps
- * the whole thing synchronous; an async one widens the run from this chunk on.
- *
- * `runStageChunk(doubler, [1, 2], ctx, undefined)` → `[2, 4]`, no `Promise` created.
+ * `runStageChunk(doubler, [1, 2], ctx)` → `[2, 4]`, no `Promise` created. A failing stage with a
+ * handler that returns → `[]`.
  */
 export function runStageChunk<In, Out>(
   runnable: (chunk: In[], ctx: IContextManager) => Out[] | Promise<Out[]>,

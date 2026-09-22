@@ -1,8 +1,6 @@
 /**
- * `@outputty/pipeline/http` (#249) - `HttpPipeline`, its dispatch-client seam, and the Node-only
- * bridge to a plain `http.Server` handler. Kept off the root entry so `@outputty/pipeline` carries
- * no `node:stream`/`node:http` import a browser bundler must resolve; a caller of this entry runs on
- * Node (or a runtime with `node:http`/`node:stream`).
+ * `@outputty/pipeline/http` - `HttpPipeline`, its dispatch client, and the bridge to a plain
+ * `http.Server` handler. Kept off the root entry so the root loads no node:* / ws import.
  */
 
 export { HttpPipeline, type HttpPipelineOptions, toNodeHandler } from "./pipelines/http";

@@ -1,11 +1,11 @@
 /**
- * `Codec` (#209) — how a chunk becomes bytes on a `WebSocketPipeline`/`ClusterPipeline` connection,
- * orthogonal to transport. Lives outside `pipelines/websocket.ts` (the file that loads `ws`) so a
- * core chunk type can name `Codec` with no utils-to-pipelines import edge.
+ * How a chunk becomes bytes on a `WebSocketPipeline`/`ClusterPipeline` connection. Kept out of the
+ * file that loads `ws`, so the root entry can export it.
  *
- * Deliberately not generic: one codec instance serves every stage of a chain while the item type
- * changes per stage, so it sees `unknown` on both sides - `Pipeline<T>` carries the type hints, the
- * same reason `RowErrorHandler` (`types.ts`) stays untyped on its own item.
+ * Not generic: one codec serves every stage while the item type changes, so `Pipeline<T>` carries
+ * the types.
+ *
+ * `codec.decode(await codec.encode(chunk))` → a value equal to `chunk`.
  */
 export interface Codec {
   // oxlint-disable-next-line anti-slop/no-unknown-parameters -- a codec encodes ANY chunk value, one handler for every item type a chain has ever carried; narrowing would break that contract, the same reason RowErrorHandler's `item` stays unknown (types.ts)
@@ -19,14 +19,7 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 /**
- * The shipped default codec - the same JSON shape `HttpPipeline`'s own wire already sends, over
- * `Uint8Array` bytes instead of a JSON-typed HTTP body. Both directions reuse one module-level
- * `TextEncoder`/`TextDecoder` (both stateless) rather than allocating a fresh instance per call,
- * since every dispatched chunk pays this on the hot path (#180 measured this cost).
- *
- * Replaces the deleted `jsonCodec` object (#209, BREAKING, no deprecation period): `import {
- * jsonCodec }` now fails `tsc` with `TS2724` (`JsonCodec`'s own similar spelling upgrades what
- * would otherwise be a bare TS2305 into tsc's "did you mean" form).
+ * The default codec: a chunk as JSON text in UTF-8 bytes.
  *
  * `new JsonCodec().decode(new JsonCodec().encode([1, 2]))` → `[1, 2]`.
  */

@@ -1,13 +1,11 @@
 /**
- * NDJSON framing over a raw byte stream (#45) - the wire format a reduce stage's duplex connection
- * uses both ways: `{"context":{…}}` once, then `{"chunk":[…]}` per upstream chunk going out,
- * `{"emit":[…]}` per emit and `{"error":"…"}` on a mid-stream failure coming back.
+ * NDJSON framing for a reduce stage's duplex connection. Outgoing: `{"context":{…}}` once, then
+ * `{"chunk":[…]}` per chunk. Incoming: `{"emit":[…]}` per emit, `{"error":"…"}` on a failure.
  */
 
-/** Decodes a byte stream into complete lines as they arrive, buffering an incomplete trailing line
- * across reads. The one place both the client (`HttpPipeline.reduceWork`) and the server
- * (`HttpPipeline.fetch`'s `/reduce/<n>` handling) parse NDJSON frames from. A `ReadableStream` is
- * itself async-iterable (WHATWG streams), so no manual `.getReader()`/`.releaseLock()` is needed. */
+/** Reads a byte stream as complete NDJSON lines, as they arrive. Both ends of `/reduce/<n>` use it.
+ *
+ * A stream carrying `'{"a":1}\n{"b"'` then `':2}\n'` → yields `'{"a":1}'`, then `'{"b":2}'`. */
 export async function* readNdjsonLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const decoder = new TextDecoder();
   let buffer = "";
@@ -20,9 +18,6 @@ export async function* readNdjsonLines(stream: ReadableStream<Uint8Array>): Asyn
   if (buffer.length > 0) yield buffer;
 }
 
-/** Splits `buffer` on newlines - every complete line found, and the incomplete remainder still
- * owed a terminator. Its own function so `readNdjsonLines`'s own loop body stays one statement,
- * within this repo's own `max-depth: 2` rule. */
 function splitLines(buffer: string) {
   const lines: string[] = [];
   let rest = buffer;
@@ -35,7 +30,9 @@ function splitLines(buffer: string) {
   return { lines, rest };
 }
 
-/** Encodes one NDJSON frame - `JSON.stringify(value)` plus the trailing newline every frame needs. */
+/** Encodes one value as an NDJSON frame.
+ *
+ * `ndjsonFrame({ emit: [6] })` → the UTF-8 bytes of `'{"emit":[6]}\n'`. */
 export function ndjsonFrame<T>(value: T): Uint8Array {
   return new TextEncoder().encode(`${JSON.stringify(value)}\n`);
 }

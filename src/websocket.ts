@@ -1,8 +1,7 @@
 /**
- * `@outputty/pipeline/websocket` (#239) - the two runners that need the `ws` package,
- * `WebSocketPipeline` and `ClusterPipeline`, and their bridge. Kept off the root entry so
- * `@outputty/pipeline` loads with no package installed; a caller of this entry installs `ws`
- * themselves (an optional peer dependency).
+ * `@outputty/pipeline/websocket` - `WebSocketPipeline`, `ClusterPipeline` and their Node bridge.
+ * Kept off the root entry so the root loads no node:* / ws import. A caller of this entry installs
+ * `ws`, an optional peer dependency.
  */
 
 export {

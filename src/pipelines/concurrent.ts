@@ -1,14 +1,6 @@
 /**
- * `ConcurrentPipeline` (#17) — runs up to `maxConcurrency` chunks of one stage at once, in this
- * process. Replaces the deleted `concurrent()` execution strategy: where `concurrent()`
- * configured a `Transformer`, this configures a `Pipeline` - the chain is identical, only the
- * class differs.
- *
- * `apply()` does NOT call `Transformer.process()` the way the base class does - that bypass IS the
- * mechanism, since `process()` runs a chain sequentially, one chunk at a time. Instead it fans
- * `this._chunks` - the pipeline's OWN already-cut chunk stream, set by `.buffer()` (#39) - out
- * through `stageWork()`, the one method a subclass overrides to change WHERE a stage's work
- * actually happens (`HttpPipeline`, #17 L4, overrides it to POST).
+ * `ConcurrentPipeline`, and the fan-out every dispatching class inherits. A subclass overrides
+ * `stageWork()`/`reduceWork()` to choose where a stage runs.
  */
 
 import type {
@@ -39,28 +31,8 @@ export interface ConcurrentPipelineOptions {
   ordered?: boolean;
 }
 
-/** Every `ConcurrentPipeline` constructor's real parameter type: its own knobs PLUS the base
- * `Pipeline` internals (`context`, `chunks`, …) that `createPipeline()` (below) must be able
- * to pass through on every copy-on-write call. Not exported - a caller only ever sees
- * `ConcurrentPipelineOptions`; the intersection is this file's own plumbing. */
 type ConcurrentPipelineConstructorOptions = ConcurrentPipelineOptions & PipelineConstructorOptions;
 
-/**
- * `ordered: true`'s fan-out: a sliding window of `maxConcurrency` chunks, yielded in ARRIVAL
- * order (never completion order) - a chunk finishing early still waits behind an earlier, slower
- * one. Streams: only `maxConcurrency` chunks are ever pulled ahead of what has been yielded.
- * Yields each dispatched chunk's own RESULT ARRAY, not flattened items (#39) - the fanned-out
- * output is itself a real `_chunks` boundary a later `.buffer()` can recut from.
- *
- * Every dispatched promise gets a throwaway `.catch(() => {})` the moment it is created - purely
- * to mark it "handled" for Node's unhandled-rejection detector. The ORIGINAL promise reference
- * (not the caught one) is what `inFlight` holds and what gets `await`ed in order below, so a real
- * failure still surfaces there, at the position it belongs to.
- *
- * @example
- * chunks `[[1],[2],[3],[4]]`, chunk `1` twelve times slower than the rest, `maxConcurrency: 4` →
- * yields `[1], [2], [3], [4]` in that order - `2`/`3`/`4` finish first but wait behind `1`.
- */
 async function* fanOutOrdered<T, U>(
   chunks: AsyncIterable<T[]>,
   work: (chunk: T[], ctx: IContextManager) => U[] | Promise<U[]>,
@@ -72,7 +44,7 @@ async function* fanOutOrdered<T, U>(
   for await (const chunk of chunks) {
     const p = Promise.resolve(work(chunk, ctx));
     p.catch(() => {
-      // Handled-marker only; the `await` below (on this SAME promise) still throws for real.
+      // ⚠ Marks it handled for a chunk never awaited after an earlier throw; `await p` still throws.
     });
     inFlight.push(p);
 
@@ -86,21 +58,6 @@ async function* fanOutOrdered<T, U>(
   }
 }
 
-/**
- * `ordered: false`'s fan-out: a sliding window of `maxConcurrency` chunks, yielded in COMPLETION
- * order - never draining `chunks` before dispatching (the bug this replaces, #16/#17 Done-when 9).
- * `pullNext()` requests exactly one new chunk per completed slot, so at most `maxConcurrency`
- * chunks are ever in flight or buffered ahead of what has been yielded. Yields each dispatched
- * chunk's own RESULT ARRAY, not flattened items (#39) - same reason as `fanOutOrdered`, above.
- *
- * `Promise.race()` itself attaches a handler to EVERY promise passed to it, so no in-flight
- * promise is ever unhandled, win or lose the race - true even on rejection, and even for a
- * promise still pending when this generator stops after an earlier one throws.
- *
- * @example
- * chunks `[[1],[2],[3],[4]]`, `maxConcurrency: 2`, chunk `1` slower than `2` → yields `[2]` before
- * `[1]` (completion order), then `[3]` and `[4]` as their own slots free up.
- */
 async function* fanOutUnordered<T, U>(
   chunks: AsyncIterable<T[]>,
   work: (chunk: T[], ctx: IContextManager) => U[] | Promise<U[]>,
@@ -108,10 +65,6 @@ async function* fanOutUnordered<T, U>(
   maxConcurrency: number,
 ): AsyncGenerator<U[]> {
   const iterator = chunks[Symbol.asyncIterator]();
-  // `Tagged<U[]>` (`@src/types`), not a local `TaggedResult` (#133) - each in-flight chunk's own
-  // promise, tagged with an id so this function can tell which slot in `inFlight` finished once
-  // `Promise.race` settles: `Promise.race` alone only returns the winning VALUE, not which input
-  // promise produced it.
   const inFlight = new Map<number, Promise<Tagged<U[]>>>();
   let nextId = 0;
   let exhausted = false;
@@ -125,19 +78,12 @@ async function* fanOutUnordered<T, U>(
     }
     const id = nextId++;
     const tagged = Promise.resolve(work(next.value, ctx)).then((result) => ({ id, result }));
-    // Handled-marker only, the same reason as `fanOutOrdered`'s: `Promise.race()` (below) marks
-    // every promise it is GIVEN as handled, but the ramp-up loop can throw (a failing
-    // `iterator.next()`) before an earlier iteration's promise ever reaches a `race()` call -
-    // this closes that gap regardless of when, or whether, `race()` gets to see it.
+    // ⚠ Marks it handled: the ramp-up loop can throw before this promise ever reaches `race()`.
     tagged.catch(() => {});
     inFlight.set(id, tagged);
   }
 
-  // The source is closed however this generator ends - exhausted, thrown, or stopped early by a
-  // consumer's `break`/`.first(n)` (#113). `fanOutOrdered` gets this from its own `for await`,
-  // which calls `.return()` on exit; a MANUAL iterator has to do it, and without this the same
-  // chain leaked its source under `ordered: false` and released it under `ordered: true` - one
-  // boolean apart, two resource outcomes, invisible until the process runs out of handles.
+  // ⚠ A manual iterator is not closed by `for await`, so `finally` closes the source on every exit.
   try {
     for (let i = 0; i < maxConcurrency && !exhausted; i++) {
       await pullNext();
@@ -155,16 +101,8 @@ async function* fanOutUnordered<T, U>(
 }
 
 /**
- * One partition's own accumulator seed, copied from the caller's `initial` (#113).
- *
- * `Pipeline.reduce(fn, initial)` takes a VALUE, and a partitioned reduce needs one accumulator per
- * partition - so handing the same object to all of them made them one accumulator wearing N names.
- * A primitive copies by assignment; anything else is `structuredClone`d.
- *
- * A seed `structuredClone` cannot copy - a function, a class instance, anything holding one - RAISES
- * here rather than silently reverting to the shared object that produced the defect. The caller's
- * own fix is `.local((p) => p.reduce(fn, initial))`, which runs one unpartitioned fold in this
- * process, so the seed is never copied at all.
+ * A fresh copy of the seed for one partition, so partitions never share one mutable accumulator.
+ * A seed that cannot be copied throws; `.local((p) => p.reduce(fn, initial))` avoids the copy.
  *
  * `seedFor(0)` → `0`. `seedFor([])` → a fresh `[]` each call.
  */
@@ -178,32 +116,21 @@ function seedFor<U>(initial: U): U {
     throw new Error(`${SEED_REFUSAL}: ${(error as Error).message}`);
   }
 
-  // A CLASS INSTANCE does not throw - `structuredClone` copies its own properties and silently
-  // drops the prototype, so the partition folds into a stripped object and fails later with
-  // something like `acc.add is not a function`, pointing at the caller's own reducer rather than at
-  // the copy. Comparing prototypes catches exactly that: `Map`, `Set`, `Date` and a plain object
-  // or array all keep theirs, and anything carrying behaviour does not.
+  // ⚠ Refuse a class instance: `structuredClone` drops its prototype without throwing.
   if (Object.getPrototypeOf(copy) !== Object.getPrototypeOf(initial)) {
     throw new Error(`${SEED_REFUSAL}: a class instance loses its prototype when copied`);
   }
   return copy;
 }
 
-/** `seedFor`'s refusal, one string so its two throw sites cannot drift on the advice they give. */
 const SEED_REFUSAL =
   "a partitioned reduce needs one accumulator per partition, and this seed cannot be copied. " +
   "Pass a seed structuredClone can copy, or wrap the fold in " +
   ".local((p) => p.reduce(fn, initial)) to run it unpartitioned in this process";
 
 /**
- * Yields every chunk of `source`, then `[seed]` if `source` yielded none (#241) - the stage-level
- * seed of a partitioned reduce. A partition cannot own this: one whose share of the stream is empty
- * must stay silent while a sibling folds, so only the merged output knows the whole stream was empty.
- * Output-empty is the same fact as fold-never-ran here, because a partition that folded anything
- * yields a trailing accumulator or an emit.
- *
- * `seedIfNoChunk(asyncFrom([]), () => 0)` → yields `[0]`. `seedIfNoChunk(asyncFrom([[3], [7]]), () => 0)` → yields
- * `[3]`, `[7]`.
+ * ⚠ The seed of an empty partitioned reduce comes from here, once for the stage. A partition
+ * seeding itself would repeat it once per partition.
  */
 async function* seedIfNoChunk<U>(source: AsyncGenerator<U[]>, seed: () => U): AsyncGenerator<U[]> {
   let yielded = false;
@@ -214,26 +141,12 @@ async function* seedIfNoChunk<U>(source: AsyncGenerator<U[]>, seed: () => U): As
   if (!yielded) yield [seed()];
 }
 
-/**
- * Merges N partitions' own reduceWork generators (`ConcurrentPipeline.reduce()`, #62) into one, in
- * COMPLETION order - the same pull-next-per-slot shape as `fanOutUnordered` above, but merging
- * whole generators rather than one promise per chunk: there is no order between partitions (a
- * partitioned reduce's own Constraints), so whichever partition's next output chunk is ready first
- * is yielded first. A partition dropping out (its own `share()` view of the shared source ran dry)
- * is simply removed from the race; the merge itself ends once every partition has.
- *
- * @example
- * two partitions, `[[8],[7]]` (fast) and `[[15]]` (slower) -> yields `[8]`, `[7]`, then `[15]` once
- * it arrives - completion order, never partition order.
- */
 async function* mergeUnordered<U>(sources: AsyncGenerator<U[]>[]): AsyncGenerator<U[]> {
   const inFlight = new Map<number, Promise<Tagged<IteratorResult<U[]>>>>();
 
   function pull(id: number): void {
     const tagged = sources[id]!.next().then((result) => ({ id, result }));
-    // Handled-marker only, the same reason `fanOutUnordered`'s own tagged promises get one: a
-    // partition that loses the race - or resolves after some OTHER partition already threw and
-    // this generator stopped consuming - must never surface as an unhandled rejection.
+    // ⚠ Marks it handled: a partition still pending after another one threw is never awaited.
     tagged.catch(() => {});
     inFlight.set(id, tagged);
   }
@@ -250,25 +163,25 @@ async function* mergeUnordered<U>(sources: AsyncGenerator<U[]>[]): AsyncGenerato
 }
 
 /**
- * Runs up to `maxConcurrency` chunks of one stage at once, in this process. Replaces the deleted
- * `concurrent()` execution strategy (#17): where `concurrent()` configured a `Transformer`, this
- * configures a `Pipeline` — the chain is identical, only the class differs.
+ * Runs a chain with up to `maxConcurrency` chunks of each stage in flight at once, in this process.
+ * The chain says what to do; this class says where.
  *
- * `new ConcurrentPipeline([1,2,3,4,5], { maxConcurrency: 4 }).transform((t) => t.map((x) => x *
- * 2)).toArray()` → `[2,4,6,8,10]`.
+ * `In` is the type the pipeline is called with; `T` is the current stage's output.
+ *
+ * ```typescript
+ * const doubled = new Pipeline<number>().transform((t) => t.map((x) => x * 2));
+ * await new ConcurrentPipeline(doubled, { maxConcurrency: 4 })([1, 2, 3, 4, 5]).toArray();
+ * // → [2, 4, 6, 8, 10]
+ * ```
  */
-// `In` (#90) is the type this pipeline is CALLED with, fixed when the chain is declared and carried
-// unchanged through every stage - unlike `T`, which becomes each stage's own output. It defaults to
-// `T` so an existing two-argument spelling keeps meaning what it did.
 export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
   /** Chunks of the current stage kept in flight at once. */
   readonly maxConcurrency: number;
   /** Whether output order is restored to match input order once a chunk finishes. */
   readonly ordered: boolean;
 
-  /** Wraps a chain built elsewhere, running its stages concurrently (#90) - the chain says WHAT to
-   * do, this class says WHERE. Only a source-less pipeline can be wrapped, since its stages are
-   * still recorded calls to replay; one already bound through `.from()` is refused. */
+  /** Wraps a chain built elsewhere, running its stages concurrently. A pipeline already bound to a
+   * source is refused. */
   constructor(pipeline: WrappablePipeline<T, In>, options?: ConcurrentPipelineOptions);
   constructor(options?: ConcurrentPipelineConstructorOptions);
   constructor(
@@ -278,9 +191,6 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     const options = Pipeline.wrapping<ConcurrentPipelineConstructorOptions>(first, second);
     super(options);
     this.maxConcurrency = options?.maxConcurrency ?? 4;
-    // Validated eagerly, at construction - the deleted concurrent() strategy did the same (review
-    // found this dropped: maxConcurrency <= 0 made fanOutUnordered's ramp-up loop never run at
-    // all, silently returning [] without ever touching the source).
     if (this.maxConcurrency < 1) {
       throw new Error("maxConcurrency must be at least 1");
     }
@@ -288,17 +198,10 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
   }
 
   /**
-   * Carries `maxConcurrency`/`ordered` into the NEXT instance a copy-on-write call
-   * (`.context()`, `.buffer()`, `.transform()`, `.apply()`) builds, via `Pipeline.createPipeline()`'s
-   * own `carriedKnobs()` seam (#133) - `HttpPipeline`/`ClusterPipeline`/`EventEmitterPipeline` each
-   * override this method again, `{ ...super.carriedKnobs(), <their own field(s)> }`, for their own
-   * extra knobs (`url`, `workers`, `emitter`).
+   * Carries `maxConcurrency` and `ordered` into each instance a chained call builds. A subclass
+   * with its own knobs extends this.
    *
-   * @example
-   * `new ConcurrentPipeline({ maxConcurrency: 8 }).context({ k: 1 }).maxConcurrency` → `8`, not the
-   * constructor default `4` - without this override, `Pipeline.createPipeline()`'s base
-   * implementation reconstructs via `this.constructor` but only forwards `PipelineConstructorOptions`
-   * fields, which do not include `maxConcurrency`.
+   * `new ConcurrentPipeline({ maxConcurrency: 8 }).context({ k: 1 }).maxConcurrency` → `8`.
    */
   protected override carriedKnobs(): ConcurrentPipelineOptions {
     return {
@@ -308,33 +211,17 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
   }
 
   /**
-   * Always dispatches - `.local(build)` (#61) is what keeps a stage in the orchestrating process
-   * now, wrapping a whole region rather than flagging one call. Everything here goes through this
-   * class's own `stageWork()` fan-out below.
+   * Adds a stage that is dispatched through `stageWork()`. Wrap a region in `.local()` to run it
+   * in this process instead.
    */
   override transform<U, M2 extends "sync" | "async">(
-    // The same `"unset"` refusal the base carries (#90). Without it here, an override re-declares
-    // `transform` WITHOUT the guard and a source-less dispatching chain compiles, then resolves to
-    // `[]` at runtime - a chain composed with no engine decided, which is what the guard exists to
-    // make impossible.
     builder: (t: Transformer<T, T, "async">) => Transformer<T, U, M2>,
   ): ConcurrentPipeline<U, In> {
-    // A dispatching class is `"async"` whatever its callbacks return, so the seed is typed there
-    // rather than at the caller's own Mode.
-    //
-    // The conditional `this` this override used to carry is gone with the base's own (#90): its
-    // guard read `M extends "unset"`, and this class fixes `M` at `"async"`, so it never once
-    // refused anything. Composing before an input is the ordinary case now regardless.
     const seed = new Transformer<T, T, "async">({ transform: (chunk) => chunk });
     return this.apply(builder(seed));
   }
 
   override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ConcurrentPipeline<U, In> {
-    // This body does not delegate to the base's `apply()`, so it repeats the base's own deferral
-    // (#90): with no input yet, the call is recorded and replayed later - against THIS class, so
-    // the replayed stage still dispatches. Without it a dispatching pipeline inherited the call
-    // signature and typed fine, then threw `no source: call .from(data) before composing a stage`
-    // the moment a stage was composed.
     if (this.isDeferred()) {
       return this.defer<U, ConcurrentPipeline<U, In>>((p) =>
         p.apply(transformer as Transformer<unknown, U, "sync" | "async">),
@@ -342,81 +229,43 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     }
     const stageIndex = this._chunkTransforms.length;
     const rawWork = this.stageWork(transformer, stageIndex);
-    // `runStageChunk` (`utils/helpers.ts`) is the same "call the handler, or propagate" decision
-    // the sync engine makes (#78/#90) - a handler that returns rather than throws means "drop this
-    // chunk", and `[]` is the empty-chunk answer the fan-out below needs for that. Kept `async` on
-    // purpose: it turns a synchronous throw from a LOCAL `rawWork` into a rejection, which
-    // `fanOutOrdered` needs to fail at the chunk's own ordered position.
+    // ⚠ Kept `async`, so a synchronous throw fails at the chunk's own position in the ordered output.
     const work: InternalTransformer<T, U> = async (chunk, ctx) => {
-      // An encoded chunk a prior WebSocketPipeline/ClusterPipeline stage emptied is never
-      // dispatched (#209) - the reply would come back empty regardless, so this trades one
-      // network round trip for one property read that never decodes to answer it. Scoped to
-      // `isEmptyEncodedChunk`, not a global flag check: only a class that ever calls `encodedChunk()`
-      // (`websocket.ts`'s own `stageWork()`/`reduceWork()`) can produce one, so this never touches
-      // a real, merely-empty chunk on `HttpPipeline`/`EventEmitterPipeline` - review-caught: an
-      // earlier `encodedChunksEnabled()`-only gate skipped THEIR dispatch too whenever the flag
-      // happened to be set anywhere in the process, an unrelated global toggle deciding an
-      // unrelated class's own dispatch count.
-      //
-      // Returns `chunk` itself, not a fresh `[]` (review-caught): a plain empty array loses the
-      // tag, so the IDENTICAL check on the NEXT dispatched stage no longer recognizes it and
-      // dispatches a chunk already known to be empty. `chunk` is still `{ payload: bytes, rows: 0,
-      // codec }` - already the correct "this stage produced nothing" answer, with nothing to
-      // encode or decode to restate it.
+      // ⚠ An emptied encoded chunk is not sent, and is returned as it is, not as `[]`, so the next
+      // dispatched stage still skips it.
       if (isEmptyEncodedChunk(chunk)) return chunk as unknown as U[];
       return runStageChunk(rawWork, chunk, ctx, this._runHandler);
     };
     const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;
-    // `this._chunks` handed straight to the fan-out - no chunking call of this class's own (#39):
-    // whatever boundary `.buffer()` (or the constructor's own default) already cut is what gets
-    // dispatched, chunk for chunk.
     const newChunks = fanOut(this._chunks, work, this._context, this.maxConcurrency);
 
-    // The explicit 2nd type argument is `createPipeline()`'s own `R` (#133, `pipeline.ts`) - it
-    // hands back `ConcurrentPipeline<U, In>` directly, no trailing `as X` cast of this method's own.
     return this.createPipeline<U, ConcurrentPipeline<U, In>>(newChunks, {
-      // Spread first (#90): a dispatched stage that rebuilt its options field by field silently
-      // dropped `mode`, so the pipeline reverted to `"unset"` after its first `.transform()` and
-      // `.local()`'s own region then refused to compose a stage at all.
       ...this.carriedOptions(),
       chunkTransforms: [
         ...this._chunkTransforms,
-        // `transformer.runnable()` (#78), not `transformer.transform` directly - the seam that
-        // carries the transformer's own row handler in, so a WORKER's identical registry entry
-        // (`HttpPipeline.fetch()`'s own `_chunkTransforms[requested]` lookup) gets row recovery too.
+        // ⚠ `runnable()`, not `transformer.transform`: a worker serving this entry needs the row handler.
         transformer.runnable() as unknown as ChunkTransform,
       ],
-      // A dispatched stage's own output IS a real chunk stream now (#39) - a later `.buffer()`
-      // flattens it like any other stage's output, so no pre-buffer item view survives this call.
-      // `freshPreBuffer()` also nulls `syncPreBufferItems` here - a genuine reset, not a no-op,
-      // whenever `.from()` kept a sync source's own item view alive for `.buffer()`'s F3 fast
-      // path (`pipeline.ts`'s own `fromSource()`); this class still has no `_syncChunks` of its
-      // own, but `syncPreBufferItems` is a separate, now-populatable field.
       ...this.freshPreBuffer(),
     });
   }
 
   /**
-   * Folds every chunk this pipeline produces (#45) by PARTITIONING it (#62): `maxConcurrency`
-   * independent accumulators, each its own `reduceWork()` call over its own `share()` view of the
-   * ONE underlying chunk stream (free-slot dealing, `src/utils/chunk.ts` - a slow partition simply
-   * calls `.next()` less often, so the others pick up its slack), merged in completion order since
-   * there is no order between partitions. Each partition's own result - an `emit()` mid-fold, or its
-   * trailing accumulator once its share of the stream ends - flows downstream as an ordinary value,
-   * exactly like a non-partitioned reduce's own `emit()` output already does: no debt, no throw, no
-   * combine step. A caller who wants ONE final value writes an ordinary second reduce, the same way
-   * they would fold down any other multi-value reduce output: `.local((p) => p.reduce(mergeFn,
-   * initial))` runs it in-process, over the WHOLE stream, sequentially.
+   * Folds the stream in up to `maxConcurrency` partitions, each with its own accumulator. Each
+   * partition's result flows downstream as its own value, in completion order. For one final value,
+   * fold the partials again with `.local((p) => p.reduce(mergeFn, initial))`.
    *
-   * `new ConcurrentPipeline([1,2,3,4,5],{maxConcurrency:2}).buffer(2).reduce((a,x)=>a+x,0)
-   * .local((p)=>p.reduce((a,v)=>a+v,0)).toArray()` → `[15]`.
+   * ```typescript
+   * const summed = new Pipeline<number>()
+   *   .buffer(2)
+   *   .reduce((a, x) => a + x, 0)
+   *   .local((p) => p.reduce((a, v) => a + v, 0));
+   * await new ConcurrentPipeline(summed, { maxConcurrency: 2 })([1, 2, 3, 4, 5]).toArray();
+   * // → [15]
+   * ```
    */
   override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U, In> {
-    // Defers with no input yet, the same as `apply()` above (#90). Replaying it through this same
-    // method is what keeps the partitioning (#62) identical either way.
     if (this.isDeferred()) {
-      // `p`'s own item type is `any` here (PendingStage's `AnyPipeline<any>`, not `T`), so the
-      // cast matches that, not `unknown` - `p` genuinely holds `any`, this isn't a placeholder.
       return this.defer<U, ConcurrentPipeline<U, In>>((p) =>
         p.reduce(
           fn as (acc: U, item: any, ctx: IContextManager, emit: (v: U) => void) => U,
@@ -427,22 +276,12 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
     const work = this.reduceWork(fn, initial, stageIndex);
 
-    // ONE shared iterator over `this._chunks` - `maxConcurrency` partitions each get their own
-    // `share()` view of it, never their own slice: the partition count is a CEILING, not a
-    // promise, since a partition whose view never sees a chunk (fewer chunks than partitions)
-    // simply yields nothing. Each partition's own result (an emit mid-fold, or its trailing
-    // accumulator once its share of chunks ends) flows downstream as an ordinary value - no
-    // debt, no throw. A caller who wants ONE final value writes an ordinary second reduce, same
-    // as any other multi-value reduce output: `.local((p) => p.reduce(mergeFn, initial))`.
     const iterator = this._chunks[Symbol.asyncIterator]();
     const partitions = Array.from({ length: this.maxConcurrency }, () =>
       work(share(iterator), this._context),
     );
-    // A stream no partition folded anything from owes ONE seed, from the stage rather than from any
-    // partition (#241): `[0]` over `[]`, where each partition seeding would repeat it N times.
     const newChunks = seedIfNoChunk(mergeUnordered(partitions), () => seedFor(initial));
 
-    // See `apply()`'s own identical `createPipeline<U, R>()` call above.
     return this.createPipeline<U, ConcurrentPipeline<U, In>>(newChunks, {
       ...this.carriedOptions(),
       chunkTransforms,
@@ -452,25 +291,9 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
   }
 
   /**
-   * Narrows `Pipeline.local()`'s return type only (#61, `~/.claude/rules/typescript.md`) - the body
-   * is an unchanged `super()` call, since `local()`'s own base implementation already builds a
-   * plain `Pipeline` for the region and carries the result back through THIS class's own
-   * `createPipeline()` override, which is what keeps `maxConcurrency`/`ordered` alive for whatever
-   * comes after the region.
-   */
-  /**
-   * Forced `"async"` whatever the source's shape (#90) - `ConcurrentPipeline`, `HttpPipeline` and
-   * `ClusterPipeline` all exist for I/O-bound work and have no synchronous case, so an array source
-   * runs on the async engine here exactly as an `AsyncIterable` one does. `HttpPipeline`/
-   * `ClusterPipeline` inherit this override unchanged rather than re-declaring it (#133: both used
-   * to redeclare an identical `return "async"`, and their own `bind()` overrides, which narrowed
-   * `Pipeline.bind()`'s return type to their own class and nothing else, added no behavior at all -
-   * `Pipeline.bind()` already dispatches through `this.sourcePolicy()` polymorphically, so the base
-   * implementation alone is correct on every subclass).
+   * Runs every dispatching class on the async engine, whatever the input's shape.
    *
-   * `new ConcurrentPipeline(chain)([1, 2, 3])` runs on the async engine whatever `chain` was; so does
-   * `new HttpPipeline(chain, { url })` and `new ClusterPipeline(chain)`, both through this same
-   * override.
+   * `new ConcurrentPipeline(chain)([1, 2, 3])` → an async result, even for an array input.
    */
   protected override sourcePolicy(): SourcePolicy {
     return "async";
@@ -482,85 +305,60 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
     return super.local(build) as unknown as ConcurrentPipeline<U, In>;
   }
 
-  /** Re-declared ONLY to narrow `Pipeline.queue()`'s return type (#123,
-   * `~/.claude/rules/typescript.md`) - same reason as `.local()` above. The body is an unchanged
-   * `super.queue()` call: `.queue()`'s own prefetch engine reads `this.chunkStream()`, which already
-   * dispatches through this class's own chunk stream regardless of the class calling it. */
   override queue(capacity: number): ConcurrentPipeline<T, In> {
     return super.queue(capacity) as unknown as ConcurrentPipeline<T, In>;
   }
 
   /**
-   * The one method a subclass overrides to change WHERE a reducer runs (#45). `stageWork()`'s
-   * sibling: a reducer streams in and out (it emits fewer or more values than it consumes), so this
-   * returns a generator over OUTPUT CHUNKS rather than an `InternalTransformer`. `.reduce()` (#62)
-   * calls this ONE closure `maxConcurrency` times, once per partition, each over its own `share()`
-   * view of the shared chunk stream - this class's own implementation (below) folds one partition
-   * in-process and sequentially, one accumulator PER PARTITION now, not one for the whole stage;
-   * `HttpPipeline` overrides it to open one duplex POST per partition instead, so N partitions are N
-   * concurrent POSTs to the SAME `/reduce/<n>`, each with its own accumulator server-side
-   * (`runReduceStage` builds a fresh `Reducer` per request already, unchanged by #62).
+   * Where one partition of a reduce stage runs; a subclass overrides it to fold elsewhere. The
+   * returned function is called once per partition and yields that partition's output chunks.
+   * This class folds in this process.
+   *
+   * `reduceWork((a, x) => a + x, 0, 0)(chunks, ctx)` over `[1, 2]` then `[3]` → yields `[6]`.
    */
   protected reduceWork<U>(
     fn: ReduceFunction<U, T>,
     initial: U,
     _stageIndex: number,
   ): ReduceWork<T, U> {
-    // A SEED PER PARTITION, not the caller's one value handed to all of them (#113). This closure
-    // is called `maxConcurrency` times, so a mutable `initial` was one accumulator shared by every
-    // partition: measured, `.buffer(1).reduce((acc, x) => (acc.push(x), acc), [])` over `[1,2,3,4]`
-    // at `maxConcurrency: 2` returned `[[1,2,3,4],[1,2,3,4]]` - the SAME array twice, where two
-    // partitions owe `[[1,3],[2,4]]` - and a downstream merge then double-counted every item.
     return (chunks, ctx) => foldChunkStream(fn, seedFor(initial), chunks, ctx);
   }
 
   /**
-   * The one method a subclass overrides to change WHERE a stage runs. `ConcurrentPipeline`'s own
-   * implementation runs the stage's work directly, in-process; `HttpPipeline` (#17 L4) overrides
-   * it to POST the chunk to another instance instead - `apply()`'s own fan-out (above) is
-   * identical either way, since it only ever calls `stageWork()`'s return value.
+   * Where one chunk of a stage runs; a subclass overrides it to run the chunk elsewhere. This class
+   * runs it in this process.
    *
-   * `stageWork(transformer, 0)([1,2], ctx)` → `transformer.transform([1,2], ctx)`'s own result.
+   * `stageWork(doubler, 0)([1, 2], ctx)` → `[2, 4]`.
    */
   protected stageWork<U>(
     transformer: Transformer<T, U, "sync" | "async">,
     _stageIndex: number,
   ): InternalTransformer<T, U> {
-    // `transformer.runnable()` (#78) wires the transformer's own row handler into every dispatch
-    // this method's return value drives - the same seam `apply()` (above) uses to populate this
-    // pipeline's own `_chunkTransforms` entry.
     return transformer.runnable();
   }
 
   /**
-   * The outgoing route for `verb`/`index`, shared by every remote-addressed dispatching class
-   * (#201, review: `HttpPipeline` and `WebSocketPipeline` each carried an identical copy of this
-   * method - moved here so `ClusterPipeline`/`ClusterHttpPipeline` (each already overriding it to
-   * prefix `/pipeline/<pipelineIndex>`) override ONE canonical base implementation rather than two
-   * independently maintained ones). `EventEmitterPipeline` calls it too (#221) - every event it
-   * emits is named after the route a chain was built along, not a plain flat event name.
+   * The route a dispatched stage is addressed by, following the path the chain was built along.
+   *
+   * `routePath("transform", 2)` → `"/transform/2"`; inside a `.branch()` arm named `big` →
+   * `"/branch/0/big/transform/2"`.
    */
   protected routePath(verb: RouteVerb, index: number): string {
     return `${this._routeTrail}/${verb}/${index}`;
   }
 
-  /** This pipeline's own stage registries, or an ARM's when `trail` names one - the one place
-   * `HttpPipeline.fetch()`/`WebSocketPipeline.serve()` both resolve a route's trail, rather than
-   * each spelling the same ternary over the base `Pipeline`'s own `registries()`/`registriesFor()`
-   * (#201, same reuse as `routePath()` above). */
+  /** The stage registries a route's `trail` names: this pipeline's own for `null`, else an arm's.
+   * `null` when no arm matches. */
   protected resolveRegistries(trail: string | null): StageRegistries | null {
     return trail === null ? this.registries() : this.registriesFor(trail);
   }
 }
 
 /**
- * Reads back the route grammar `routePath()` builds (#90, #201): `/transform/<n>` or `/reduce/<n>`,
- * optionally prefixed by a `/branch/<i>/<name>` trail. Both `HttpPipeline` (a URL pathname) and
- * `WebSocketPipeline` (a JSON field) parse the same grammar with this one function.
+ * Parses a route `routePath()` built: `/transform/<n>` or `/reduce/<n>`, optionally after a
+ * `/branch/<i>/<name>` trail. Returns `null` for anything else.
  *
- * Deliberately NOT anchored at the start: `ClusterHttpPipeline`'s shared worker server hands the
- * whole pathname through after looking the pipeline up by index, so the `/pipeline/<i>` prefix it
- * added is still on it.
+ * ⚠ Not anchored at the start: a cluster worker receives the route with its `/pipeline/<i>` prefix.
  *
  * `parseRoute("/pipeline/0/branch/1/big/transform/2")` →
  * `{ trail: "/branch/1/big", verb: "transform", index: 2 }`.
