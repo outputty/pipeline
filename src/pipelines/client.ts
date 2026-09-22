@@ -27,6 +27,8 @@ export const fetchClient: PipelineClient = (url, init) =>
 const FORCE_FETCH = "OUTPUTTY_PIPELINE_FORCE_FETCH";
 
 let resolved: Promise<PipelineClient> | null = null;
+/** `resolved`'s value once it has settled. */
+let settled: PipelineClient | null = null;
 
 /**
  * The client an `HttpPipeline` uses when the caller names none: `node:http` with a keep-alive agent
@@ -36,8 +38,16 @@ let resolved: Promise<PipelineClient> | null = null;
  * `node:http`.
  */
 export function defaultClient(): Promise<PipelineClient> {
-  resolved ??= resolveClient();
+  resolved ??= resolveClient().then((client) => (settled = client));
   return resolved;
+}
+
+/** `defaultClient()`, returned as a plain value once it has resolved, so a dispatch after the first
+ * awaits nothing.
+ *
+ * `defaultClientNow()` → a `Promise` on the first call; the client itself once that settles. */
+export function defaultClientNow(): PipelineClient | Promise<PipelineClient> {
+  return settled ?? defaultClient();
 }
 
 async function resolveClient(): Promise<PipelineClient> {

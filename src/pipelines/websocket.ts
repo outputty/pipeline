@@ -22,6 +22,7 @@ import { Pipeline } from "@src/pipeline";
 import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
+  IContextManager,
   InternalTransformer,
   PipelineMode,
   ReduceFunction,
@@ -35,7 +36,7 @@ import type { Duplex } from "node:stream";
 import type { Codec } from "@src/codec";
 import { JsonCodec, textEncoder } from "@src/codec";
 import { encodedChunk, encodeOrForward, isEmptyEncodedChunk } from "@src/utils/encoded-chunk";
-import { errorMessage, toError } from "@src/utils/helpers";
+import { chain, errorMessage, isThenable, toError } from "@src/utils/helpers";
 
 const textDecoder = new TextDecoder();
 
@@ -116,8 +117,20 @@ function encodeErrorFrame(id: number, error: string): string {
  *
  * `peekFrame(frame)` → `{ id: 0, route: "/pipeline/1/transform/0" }`. */
 export function peekFrame(data: Uint8Array) {
-  const { header } = decodeFrame(data);
-  return { id: header.id, route: header.route };
+  const decoded = decodeFrame(data);
+  lastPeeked = { data, decoded };
+  return { id: decoded.header.id, route: decoded.header.route };
+}
+
+/** The frame `peekFrame()` last decoded, so a `receiveFrame()` on the same bytes parses nothing
+ * again. The header carries the whole context, so a second parse costs as much as the first. */
+let lastPeeked: { data: Uint8Array; decoded: ReturnType<typeof decodeFrame> } | null = null;
+
+/** `decodeFrame(data)`, reusing `peekFrame()`'s result when it decoded these exact bytes. */
+function takeDecoded(data: Uint8Array): ReturnType<typeof decodeFrame> {
+  const peeked = lastPeeked;
+  lastPeeked = null;
+  return peeked !== null && peeked.data === data ? peeked.decoded : decodeFrame(data);
 }
 
 /** Answers a frame whose route names no registered pipeline with an error frame.
@@ -152,6 +165,12 @@ function wrapWebSocket(ws: WSWebSocket): PipelineSocket {
   };
 }
 
+/** The two ends of one dispatched chunk's `Promise`. */
+interface Settle<V> {
+  resolve: (value: V) => void;
+  reject: (error: Error) => void;
+}
+
 interface PendingRequest {
   onFrame: (header: Frame, payload: Uint8Array) => void;
   onError: (message: string) => void;
@@ -159,8 +178,10 @@ interface PendingRequest {
 
 interface ClientConnection {
   socket: PipelineSocket;
-  /** ⚠ Every dispatch awaits this before its first send; sending earlier races the handshake. */
+  /** ⚠ Every dispatch waits for this before its first send; sending earlier races the handshake. */
   ready: Promise<void>;
+  /** Whether `ready` has resolved, so a dispatch on an open connection waits for nothing. */
+  open: boolean;
   nextId: number;
   pending: Map<number, PendingRequest>;
 }
@@ -181,8 +202,12 @@ function getConnection(connect: string): ClientConnection {
     socket,
     pending,
     nextId: 0,
+    open: false,
     ready: new Promise<void>((resolve, reject) => {
-      ws.once("open", () => resolve());
+      ws.once("open", () => {
+        conn.open = true;
+        resolve();
+      });
       ws.once("error", (error: Error) => reject(error));
     }),
   };
@@ -334,7 +359,7 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * `pipeline.receiveFrame(socket, frame)` → the reply goes out on `socket` under the frame's `id`.
    */
   receiveFrame(socket: PipelineSocket, data: Uint8Array): void {
-    const { header, payload } = decodeFrame(data);
+    const { header, payload } = takeDecoded(data);
     const prior = this.frameQueues.get(header.id) ?? Promise.resolve();
     const next = prior.then(() => this.handleParsedFrame(socket, header, payload));
     // ⚠ The tail catches, or one failed frame rejects every later frame for this id.
@@ -454,7 +479,8 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
    * overrides it to round-robin across its workers.
    *
    * ⚠ Returned per call, never written to a field: concurrent partitions would race on one field
-   * and all dial the last worker picked.
+   * and all dial the last worker picked. Callers test it with `instanceof Promise`, never
+   * `isThenable`, which runs on every chunk and slows when handed this object shape.
    */
   protected resolveConnect(): ResolvedConnect | Promise<ResolvedConnect> {
     return { connect: this._connect, release: () => {} };
@@ -467,46 +493,91 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     stageIndex: number,
   ): InternalTransformer<T, U> {
     const route = this.routePath("transform", stageIndex);
+    // Each step waits only on a value that is really pending: a resolved target, an open connection
+    // and a synchronous codec cost no `Promise` per chunk.
     return (chunk, ctx) =>
       new Promise<U[]>((resolve, reject) => {
-        const dispatch = async (): Promise<void> => {
-          const { connect: connectTarget, release } = await this.resolveConnect();
-          const label = `stage ${stageIndex} at ${connectTarget}`;
-          try {
-            const { conn, id } = await openDispatch(connectTarget);
-            const payload = await encodeOrForward(chunk, this._codec);
-            registerPending(conn, connectTarget, id, label, {
-              onFrame: (header, responsePayload) => {
-                conn.pending.delete(id);
-                release();
-                // ⚠ No `rows` fails: an encoded chunk read as zero rows is skipped downstream.
-                if (header.rows === undefined) {
-                  reject(noRowCountError(label));
-                  return;
-                }
-                resolve(encodedChunk(responsePayload, header.rows, this._codec) as unknown as U[]);
-              },
-              onError: (message) => {
-                conn.pending.delete(id);
-                release();
-                reject(new Error(`${label} failed: ${message}`));
-              },
-            });
-            try {
-              conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
-            } catch (sendError) {
-              // ⚠ A DOM `WebSocket.send()` throws on a closed socket. The entry is removed, since
-              // no reply will ever settle it.
-              conn.pending.delete(id);
-              throw sendError;
-            }
-          } catch (error) {
-            release();
-            throw error;
-          }
-        };
-        dispatch().catch(reject);
+        const settle: Settle<U[]> = { resolve, reject };
+        const target = this.resolveConnect();
+        if (!(target instanceof Promise)) {
+          this.dispatchChunk(target, route, stageIndex, chunk, ctx, settle);
+          return;
+        }
+        Promise.resolve(target).then(
+          (resolved) => this.dispatchChunk(resolved, route, stageIndex, chunk, ctx, settle),
+          reject,
+        );
       });
+  }
+
+  /**
+   * Sends one chunk to `target` and settles `settle` with the reply. It waits only on what is
+   * really pending: a connection still opening, or a codec that encodes asynchronously.
+   */
+  private dispatchChunk<U>(
+    { connect: connectTarget, release }: ResolvedConnect,
+    route: string,
+    stageIndex: number,
+    chunk: T[],
+    ctx: IContextManager,
+    settle: Settle<U[]>,
+  ): void {
+    const label = `stage ${stageIndex} at ${connectTarget}`;
+    const fail = (error: Error): void => {
+      release();
+      settle.reject(error);
+    };
+    try {
+      const conn = getConnection(connectTarget);
+      const sent = chain(conn.open ? undefined : conn.ready, () => {
+        const id = conn.nextId++;
+        return chain(encodeOrForward(chunk, this._codec), (payload) =>
+          this.sendRegistered(conn, connectTarget, id, label, release, settle, () =>
+            encodeFrame({ id, route, context: ctx.toDict() }, payload),
+          ),
+        );
+      });
+      if (isThenable(sent)) Promise.resolve(sent).catch(fail);
+    } catch (error) {
+      fail(error as Error);
+    }
+  }
+
+  /** Registers the reply handler for `id`, then sends the frame `frame()` builds. */
+  private sendRegistered<U>(
+    conn: ClientConnection,
+    connectTarget: string,
+    id: number,
+    label: string,
+    release: () => void,
+    settle: Settle<U[]>,
+    frame: () => Uint8Array,
+  ): void {
+    registerPending(conn, connectTarget, id, label, {
+      onFrame: (header, responsePayload) => {
+        conn.pending.delete(id);
+        release();
+        // ⚠ No `rows` fails: an encoded chunk read as zero rows is skipped downstream.
+        if (header.rows === undefined) {
+          settle.reject(noRowCountError(label));
+          return;
+        }
+        settle.resolve(encodedChunk(responsePayload, header.rows, this._codec) as unknown as U[]);
+      },
+      onError: (message) => {
+        conn.pending.delete(id);
+        release();
+        settle.reject(new Error(`${label} failed: ${message}`));
+      },
+    });
+    try {
+      conn.socket.send(frame());
+    } catch (sendError) {
+      // ⚠ A DOM `WebSocket.send()` throws on a closed socket. The entry is removed, since no
+      // reply will ever settle it.
+      conn.pending.delete(id);
+      throw sendError;
+    }
   }
 
   /** Streams the whole reduce stage to the worker's `/reduce/<n>` under one `id`, yielding each
@@ -575,7 +646,8 @@ export class WebSocketPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
           if (streamDone) break;
           // An emptied encoded chunk has nothing to fold.
           if (isEmptyEncodedChunk(chunk)) continue;
-          const payload = await encodeOrForward(chunk, self._codec);
+          const encoding = encodeOrForward(chunk, self._codec);
+          const payload = isThenable(encoding) ? await encoding : encoding;
           if (streamDone) break;
           conn.socket.send(encodeFrame({ id, route, context: ctx.toDict() }, payload));
         }

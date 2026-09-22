@@ -51,12 +51,14 @@ async function* fanOutOrdered<T, U>(
     inFlight.push(p);
 
     if (inFlight.length >= maxConcurrency) {
-      yield await inFlight.shift()!;
+      // ⚠ `yield p`, not `yield await p`: `yield` already awaits, and awaiting twice costs two more
+      // promises per chunk.
+      yield inFlight.shift()!;
     }
   }
 
   while (inFlight.length > 0) {
-    yield await inFlight.shift()!;
+    yield inFlight.shift()!;
   }
 }
 

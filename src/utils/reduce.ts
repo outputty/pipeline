@@ -5,6 +5,8 @@ import { DROP } from "@src/types";
 import type { MaybeAsyncChunks } from "@src/utils/drain";
 import { chain, isThenable } from "@src/utils/helpers";
 
+const NOTHING_EMITTED: readonly never[] = Object.freeze([]);
+
 /**
  * A fold over items, one at a time, that can also `emit()` values mid-fold. Call `.fold()` per
  * item and `.final()` once at the end, which returns the trailing accumulator if one is owed.
@@ -39,35 +41,53 @@ export class Reducer<U, T> {
    * → `[]`, the accumulator left at its prior value.
    */
   fold(item: T, ctx: IContextManager): U[] | Promise<U[]> {
-    const emitted: U[] = [];
     this.folded = true;
     this.itemsSinceEmit++;
 
     try {
-      const next = this.fn(this.acc, item, ctx, (value) => {
-        emitted.push(value);
-        this.itemsSinceEmit = 0;
-      });
+      const next = this.fn(this.acc, item, ctx, this.emit);
       // ⚠ Commit inline, not through closures built before the call: this runs once per item, and
       // allocating them here makes the fold several times slower.
       if (!isThenable(next)) {
         this.acc = next;
-        return emitted;
+        return this.takeEmitted();
       }
       return Promise.resolve(next).then(
         (acc) => {
           this.acc = acc;
-          return emitted;
+          // ⚠ Read here, not before the call: an async `fn` can `emit()` after its first `await`.
+          return this.takeEmitted();
         },
-        (error: Error) => this.recover(item, ctx, emitted, error),
+        (error: Error) => this.recover(item, ctx, error),
       );
     } catch (error) {
-      return this.recover(item, ctx, emitted, error as Error);
+      return this.recover(item, ctx, error as Error);
     }
   }
 
-  private recover(item: T, ctx: IContextManager, emitted: U[], error: Error): U[] | Promise<U[]> {
-    if (!this.rowHandler) throw error;
+  /** What `emit()` pushed during the current `fold()`, collected lazily. Folds on one `Reducer`
+   * never overlap: every caller settles a fold before starting the next. */
+  private emitted: U[] | null = null;
+
+  private readonly emit = (value: U): void => {
+    (this.emitted ??= []).push(value);
+    this.itemsSinceEmit = 0;
+  };
+
+  /** Hands the current fold's emits to the caller and starts the next fold empty. The shared empty
+   * result is frozen: a caller reads it, never writes it. */
+  private takeEmitted(): U[] {
+    const emitted = this.emitted;
+    if (emitted === null) return NOTHING_EMITTED as unknown as U[];
+    this.emitted = null;
+    return emitted;
+  }
+
+  private recover(item: T, ctx: IContextManager, error: Error): U[] | Promise<U[]> {
+    if (!this.rowHandler) {
+      this.emitted = null;
+      throw error;
+    }
     return chain(this.rowHandler(item, error, ctx), (recovered) => {
       // ⚠ `DROP` undoes `fold()`'s increment only above `0`: `fn` may `emit()` and then throw.
       if (recovered === DROP) {
@@ -75,7 +95,7 @@ export class Reducer<U, T> {
       } else {
         this.acc = recovered as U;
       }
-      return emitted;
+      return this.takeEmitted();
     });
   }
 
@@ -100,6 +120,10 @@ export class Reducer<U, T> {
   }
 }
 
+function pushAll<U>(target: U[], values: readonly U[]): void {
+  for (let i = 0; i < values.length; i++) target.push(values[i]);
+}
+
 /**
  * Folds one chunk's items through `reducer`, in order, and returns everything they emitted. It
  * stays synchronous while every fold does.
@@ -121,11 +145,11 @@ export function foldChunk<U, T>(
       const values = reducer.fold(chunk[index], ctx);
       if (isThenable(values)) {
         return Promise.resolve(values).then((settled) => {
-          emitted.push(...settled);
+          pushAll(emitted, settled);
           return drain(index + 1);
         });
       }
-      emitted.push(...(values as U[]));
+      pushAll(emitted, values as U[]);
     }
     return emitted;
   };

@@ -120,15 +120,18 @@ export function settleMaybe<T>(values: (T | PromiseLike<T>)[]): T[] | Promise<T[
  */
 export function mapSettle<T, R>(chunk: T[], run: (item: T) => R | Promise<R>): R[] | Promise<R[]> {
   const results: (R | Promise<R>)[] = [];
+  let pending = false;
   try {
-    for (const item of chunk) {
-      results.push(run(item));
+    for (let i = 0; i < chunk.length; i++) {
+      const result = run(chunk[i]);
+      pending ||= isThenable(result);
+      results.push(result);
     }
   } catch (error) {
-    disarm(results);
+    if (pending) disarm(results);
     throw error;
   }
-  return settleMaybe(results);
+  return pending ? Promise.all(results) : (results as R[]);
 }
 
 /**

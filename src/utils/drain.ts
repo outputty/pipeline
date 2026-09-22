@@ -19,6 +19,20 @@ export function drainSync<T>(
   chunks: MaybeAsyncChunks<T>,
   onItem: (item: T) => boolean | void,
 ): void | Promise<void> {
+  return drainSyncChunks(chunks, (chunk) => pushAll(chunk, onItem));
+}
+
+/**
+ * `drainSync` a whole chunk at a time: `onChunk` returning `true` stops the drain and closes the
+ * source.
+ *
+ * `drainSyncChunks([[1, 2], [3]], (c) => void out.push(c.length))` → `undefined`, no `Promise`
+ * created, with `out` `[2, 1]`.
+ */
+export function drainSyncChunks<T>(
+  chunks: MaybeAsyncChunks<T>,
+  onChunk: (chunk: T[]) => boolean | void,
+): void | Promise<void> {
   const iterator = chunks[Symbol.iterator]();
 
   const resume = (): void | Promise<void> => {
@@ -29,10 +43,10 @@ export function drainSync<T>(
       const chunk = step.value;
       if (isThenable(chunk)) {
         return Promise.resolve(chunk).then((settled) =>
-          pushAll(settled, onItem) ? close(iterator) : resume(),
+          onChunk(settled) === true ? close(iterator) : resume(),
         );
       }
-      if (pushAll(chunk, onItem)) return close(iterator);
+      if (onChunk(chunk) === true) return close(iterator);
     }
   };
 

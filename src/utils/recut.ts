@@ -81,30 +81,60 @@ function* recutPending<T>(
   carry: T[],
   pending: Promise<T[]>,
   state: RecutState<T>,
-): Generator<Promise<T[]>> {
-  const buffered = { buffer: carry, exhausted: false };
-  let first: Promise<T[]> | null = pending;
+): Generator<T[] | Promise<T[]>> {
+  const { size, iterator } = state;
+  // Items not yet cut are `buffer[cursor..]`. A cut is a `slice`, so the buffer is never shifted.
+  let buffer = carry;
+  let cursor = 0;
+  let exhausted = false;
+  let first: T[] | Promise<T[]> | null = pending;
 
-  const cut = async (): Promise<T[]> => {
-    while (buffered.buffer.length < state.size && !buffered.exhausted) {
-      if (first !== null) {
-        buffered.buffer.push(...(await first));
-        first = null;
-        continue;
-      }
-      const step = state.iterator.next();
-      if (step.done === true) {
-        buffered.exhausted = true;
-        break;
-      }
-      buffered.buffer.push(...(await step.value));
+  const append = (items: T[]): void => {
+    if (cursor === buffer.length) {
+      // ⚠ Adopted, never written to: `take()` only slices it, and `append` copies before joining.
+      buffer = items;
+    } else {
+      const joined = buffer.slice(cursor);
+      for (let i = 0; i < items.length; i++) joined.push(items[i]);
+      buffer = joined;
     }
-    return buffered.buffer.splice(0, state.size);
+    cursor = 0;
+  };
+
+  const take = (): T[] => {
+    const out = buffer.slice(cursor, cursor + size);
+    cursor += out.length;
+    return out;
+  };
+
+  /** The next upstream chunk, or `null` once the source is spent. */
+  const nextChunk = (): T[] | Promise<T[]> | null => {
+    if (first !== null) {
+      const pendingFirst = first;
+      first = null;
+      return pendingFirst;
+    }
+    const step = iterator.next();
+    if (step.done === true) {
+      exhausted = true;
+      return null;
+    }
+    return step.value;
+  };
+
+  const fill = async (): Promise<T[]> => {
+    while (buffer.length - cursor < size && !exhausted) {
+      const next = nextChunk();
+      if (next === null) break;
+      append(isThenable(next) ? await next : next);
+    }
+    return take();
   };
 
   // A stream that ends exactly on a boundary yields one trailing `[]`: exhaustion is known only
   // once that cut settles. `PipelineResult.chunks()` drops it.
-  while (!buffered.exhausted || buffered.buffer.length > 0) {
-    yield cut();
+  while (!exhausted || buffer.length - cursor > 0) {
+    // A cut the buffer already holds is yielded as it is, with no `Promise`.
+    yield buffer.length - cursor >= size ? take() : fill();
   }
 }

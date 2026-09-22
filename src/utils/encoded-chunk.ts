@@ -47,19 +47,20 @@ export async function materialize<T>(chunk: T[]): Promise<T[]> {
   return (await chunk.codec.decode(chunk.payload)) as T[];
 }
 
-/** Encodes `chunk` for the wire. An encoded chunk from the same `codec` is sent as it is.
+/** Encodes `chunk` for the wire. An encoded chunk from the same `codec` is sent as it is. It returns
+ * a plain value when `codec.encode` does, and may throw synchronously.
  *
- * `await encodeOrForward([1, 2], codec)` → `codec.encode([1, 2])`'s own result. `await
- * encodeOrForward(encodedChunk(bytes, 2, codec), codec)` → `bytes`, unchanged, no encode call. */
-export async function encodeOrForward<T>(chunk: T[], codec: Codec): Promise<Uint8Array> {
-  const encoded = isEncodedChunk(chunk);
-  if (encoded && chunk.codec === codec) return chunk.payload;
-  return codec.encode(encoded ? await materialize(chunk) : chunk);
+ * `encodeOrForward([1, 2], codec)` → `codec.encode([1, 2])`'s own result.
+ * `encodeOrForward(encodedChunk(bytes, 2, codec), codec)` → `bytes`, unchanged, no encode call. */
+export function encodeOrForward<T>(chunk: T[], codec: Codec): Uint8Array | Promise<Uint8Array> {
+  if (!isEncodedChunk(chunk)) return codec.encode(chunk);
+  if (chunk.codec === codec) return chunk.payload;
+  return materialize(chunk).then((items) => codec.encode(items));
 }
 
 async function* materializeChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T[]> {
   for await (const chunk of chunks) {
-    yield isEncodedChunk(chunk) ? await materialize(chunk) : chunk;
+    yield isEncodedChunk(chunk) ? materialize(chunk) : chunk;
   }
 }
 

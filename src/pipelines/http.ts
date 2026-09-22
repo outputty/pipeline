@@ -26,7 +26,7 @@ import type {
   StageRoute,
 } from "@src/types";
 import { Reducer, foldChunk } from "@src/utils/reduce";
-import { defaultClient, headersFromNode, type PipelineClient } from "@src/pipelines/client";
+import { defaultClientNow, headersFromNode, type PipelineClient } from "@src/pipelines/client";
 import { ndjsonFrame, readNdjsonLines } from "@src/utils/ndjson";
 import { applyContextValues, errorMessage, isPlainRecord, toError } from "@src/utils/helpers";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -184,8 +184,9 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     this._client = options.client;
   }
 
+  /** Tested with `instanceof Promise` for the same reason as `resolveUrl()`. */
   private clientFor(): PipelineClient | Promise<PipelineClient> {
-    return this._client ?? defaultClient();
+    return this._client ?? defaultClientNow();
   }
 
   /** Where the worker's `.fetch` is mounted. */
@@ -306,7 +307,8 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       const resolved = this.resolveUrl();
       const { url, release } = resolved instanceof Promise ? await resolved : resolved;
       try {
-        const client = await this.clientFor();
+        const clientOrPending = this.clientFor();
+        const client = clientOrPending instanceof Promise ? await clientOrPending : clientOrPending;
         const response = await client(`${url}${this.routePath("transform", stageIndex)}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -351,7 +353,8 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
         const requestBody = buildReduceRequestBody(chunks, ctx);
 
         // One client serves both routes.
-        const client = await self.clientFor();
+        const clientOrPending = self.clientFor();
+        const client = clientOrPending instanceof Promise ? await clientOrPending : clientOrPending;
         const response = await client(`${url}${path}`, {
           method: "POST",
           headers: { "content-type": "application/x-ndjson" },

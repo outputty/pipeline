@@ -39,7 +39,7 @@ async function* runSequentially<In, Out>(
   for await (const chunk of chunks) {
     try {
       const out = transformerLogic(chunk, context);
-      yield isThenable(out) ? await out : out;
+      yield out;
     } catch (error) {
       await dropOrRethrow(runHandler, error as Error, context);
     }
@@ -110,6 +110,55 @@ function settleRowStep<T, U>(
   if (isThenable(result)) return [result];
   if (result !== DROP) kept.push(result as U);
   return undefined;
+}
+
+/**
+ * Calls `call` on every item and returns `chunk` once every pending call settles. Only the pending
+ * results are kept.
+ */
+function tapEach<T, R>(
+  chunk: T[],
+  call: (item: T, ctx: IContextManager) => R | Promise<R>,
+  ctx: IContextManager,
+): T[] | Promise<T[]> {
+  const pending: Promise<R>[] = [];
+  try {
+    for (let i = 0; i < chunk.length; i++) keepIfPending(pending, call(chunk[i], ctx));
+  } catch (error) {
+    disarm(pending);
+    throw error;
+  }
+  return pending.length === 0 ? chunk : Promise.all(pending).then(() => chunk);
+}
+
+function keepIfPending<R>(pending: Promise<R>[], result: R | Promise<R>): void {
+  if (isThenable(result)) pending.push(result as Promise<R>);
+}
+
+/**
+ * Appends one `flatMap` result to `out` the way `.flat()` would: an array's items without its
+ * holes, anything else as one item.
+ */
+function flattenInto<U>(out: U[], result: U[] | U): void {
+  if (!Array.isArray(result)) {
+    out.push(result);
+    return;
+  }
+  for (let i = 0; i < result.length; i++) {
+    if (i in result) out.push(result[i] as U);
+  }
+}
+
+/**
+ * `rows.flat()` for `flatMap`'s results, as one indexed loop.
+ *
+ * ⚠ Flatten only once every call has run, as `.flat()` did: a callback may return an array it
+ * changes on a later call.
+ */
+function flattenRows<U>(rows: (U[] | U)[]): U[] {
+  const out: U[] = [];
+  for (let i = 0; i < rows.length; i++) flattenInto(out, rows[i]);
+  return out;
 }
 
 /**
@@ -301,8 +350,10 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
     const call = withContext(fn);
     return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
-        const results = mapSettle(chunk, (x) => call(x, ctx));
-        return chain(results, (rows) => rows.flat());
+        return chain(
+          mapSettle(chunk, (x) => call(x, ctx)),
+          flattenRows,
+        );
       }
       // ⚠ A recovered value is wrapped as one row, even when it is an array; wrapping a success
       // instead would nest it.
@@ -342,10 +393,7 @@ export class Transformer<In, Out, M extends "sync" | "async" = "sync"> {
     const call = withContext(arg);
     return this.pipe((chunk, ctx, run) => {
       if (!run?.rowHandler) {
-        return chain(
-          mapSettle(chunk, (x) => call(x, ctx)),
-          () => chunk,
-        );
+        return tapEach(chunk, call, ctx);
       }
       return settleRows(chunk, (x) => chain(call(x, ctx), () => x), run.rowHandler, ctx);
     });

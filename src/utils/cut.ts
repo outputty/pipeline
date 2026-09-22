@@ -1,8 +1,8 @@
 /** Cuts streams into chunks, flattens them back, and shares, prefetches or collects them. */
 
 import type { ChunkerFunction } from "@src/types";
-import { chain, isThenable } from "@src/utils/helpers";
-import { drainSync, type MaybeAsyncChunks } from "@src/utils/drain";
+import { chain } from "@src/utils/helpers";
+import { drainSyncChunks, type MaybeAsyncChunks } from "@src/utils/drain";
 import { isEncodedChunk, materialize } from "@src/utils/encoded-chunk";
 
 /** Refuses a chunk size below 1, for the chunk cutters.
@@ -80,7 +80,7 @@ export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenera
  * `asAsyncChunks([[1, 2], Promise.resolve([3])])` yields `[1, 2]`, then `[3]`.
  */
 export async function* asAsyncChunks<T>(chunks: MaybeAsyncChunks<T>): AsyncGenerator<T[]> {
-  for (const chunk of chunks) yield isThenable(chunk) ? await chunk : chunk;
+  for (const chunk of chunks) yield chunk;
 }
 
 /**
@@ -190,12 +190,16 @@ export function collectItems<T>(
   const results: T[] = [];
   if (syncChunks === null) return collectAsyncChunks(results, limit, chunks);
   return chain(
-    drainSync(syncChunks, (item) => {
-      results.push(item);
-      return limit !== undefined && results.length >= limit;
-    }),
+    drainSyncChunks(syncChunks, (chunk) => takeFrom(chunk, results, limit)),
     () => results,
   );
+}
+
+/** Appends `chunk`'s items to `results`, stopping at `limit`. Returns whether `limit` is reached. */
+function takeFrom<T>(chunk: T[], results: T[], limit: number | undefined): boolean {
+  const take = limit === undefined ? chunk.length : Math.min(chunk.length, limit - results.length);
+  for (let i = 0; i < take; i++) results.push(chunk[i]);
+  return limit !== undefined && results.length >= limit;
 }
 
 async function collectAsyncChunks<T>(
@@ -204,10 +208,7 @@ async function collectAsyncChunks<T>(
   chunks: () => AsyncIterable<T[]>,
 ): Promise<T[]> {
   for await (const chunk of chunks()) {
-    const take =
-      limit === undefined ? chunk.length : Math.min(chunk.length, limit - results.length);
-    for (let i = 0; i < take; i++) results.push(chunk[i]);
-    if (limit !== undefined && results.length >= limit) break;
+    if (takeFrom(chunk, results, limit)) break;
   }
   return results;
 }

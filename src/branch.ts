@@ -7,7 +7,7 @@
 
 import type { AnyPipeline, Pipeline, PipelineSource } from "./pipeline";
 import type { Drainable, IContextManager, JoinMode, PipelineMode } from "./types";
-import { drainSync, type MaybeAsyncChunks } from "./utils/drain";
+import { drainSyncChunks, type MaybeAsyncChunks } from "./utils/drain";
 import { chain, mapSettle } from "./utils/helpers";
 
 /** An arm's own pipeline, before its builder composes anything onto it. */
@@ -166,37 +166,34 @@ function classifyItems<T>(
   arms: readonly BranchArm<T>[],
   broadcast: boolean,
 ): Map<string, T[]> | Promise<Map<string, T[]>> {
-  const grouped = new Map<string, T[]>(arms.map((arm) => [arm.name, []]));
-  if (syncChunks === null) return classifyAsyncChunks(grouped, chunks, arms, broadcast);
-  return chain(
-    drainSync(syncChunks, (item) => {
-      claimItem(item, arms, grouped, broadcast);
-    }),
-    () => grouped,
-  );
+  // One bucket per arm, by position, so routing an item needs no lookup by name.
+  const buckets: T[][] = arms.map(() => []);
+  const grouped = new Map<string, T[]>(arms.map((arm, index) => [arm.name, buckets[index]!]));
+  const claimChunk = (chunk: T[]): void => {
+    for (let i = 0; i < chunk.length; i++) claimItem(chunk[i], arms, buckets, broadcast);
+  };
+  if (syncChunks === null) return classifyAsyncChunks(grouped, chunks, claimChunk);
+  return chain(drainSyncChunks(syncChunks, claimChunk), () => grouped);
 }
 
 async function classifyAsyncChunks<T>(
   grouped: Map<string, T[]>,
   chunks: () => AsyncIterable<T[]>,
-  arms: readonly BranchArm<T>[],
-  broadcast: boolean,
+  claimChunk: (chunk: T[]) => void,
 ): Promise<Map<string, T[]>> {
-  for await (const chunk of chunks()) {
-    for (const item of chunk) claimItem(item, arms, grouped, broadcast);
-  }
+  for await (const chunk of chunks()) claimChunk(chunk);
   return grouped;
 }
 
 function claimItem<T>(
   item: T,
   arms: readonly BranchArm<T>[],
-  grouped: Map<string, T[]>,
+  buckets: T[][],
   broadcast: boolean,
 ): void {
-  for (const arm of arms) {
-    if (!arm.predicate(item)) continue;
-    grouped.get(arm.name)!.push(item);
+  for (let a = 0; a < arms.length; a++) {
+    if (!arms[a]!.predicate(item)) continue;
+    buckets[a]!.push(item);
     if (!broadcast) return;
   }
 }
