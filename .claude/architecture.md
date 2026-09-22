@@ -757,20 +757,43 @@ the file that loads `ws`, so a core chunk type can name `Codec` without a utils-
 `Codec` is not generic: one instance serves every stage while the item type changes, so it sees
 `unknown`, and `Pipeline<T>` carries the type hints. The `jsonCodec` object is deleted (BREAKING).
 
-## Package entries - #239 (done)
+## Package entries - #239 (done), #249 (done)
 
-Two entries, so the root loads no package: `@outputty/pipeline` (`src/index.ts`) and
-`@outputty/pipeline/websocket` (`src/websocket.ts`), each with `import`, `require` and `types`
-conditions in `package.json`'s `exports`.
+Five entries, so the root loads no package AND resolves no Node builtin: `@outputty/pipeline`
+(`src/index.ts`), `@outputty/pipeline/websocket` (`src/websocket.ts`, needs `ws`), and
+`@outputty/pipeline/http` / `/cluster` / `/eventemitter` (needs Node builtins), each with `import`,
+`require` and `types` conditions in `package.json`'s `exports`.
 
 ```text
-@outputty/pipeline              Pipeline, ConcurrentPipeline, HttpPipeline, ClusterHttpPipeline,
-  src/index.ts                    EventEmitterPipeline, Transformer, Codec, JsonCodec ...   no package
+@outputty/pipeline              Pipeline, ConcurrentPipeline, Transformer, Codec, JsonCodec ...
+  src/index.ts                                                                     no package, no node:*
 @outputty/pipeline/websocket    WebSocketPipeline, ClusterPipeline, toNodeWebSocketHandler,
   src/websocket.ts                PipelineSocket, NodeWebSocketHandler + options types      needs ws
     src/pipelines/websocket.ts        the ONE file that imports ws
     src/pipelines/websocket-cluster.ts ClusterPipeline; must not import cluster.ts
+@outputty/pipeline/http         HttpPipeline, toNodeHandler, PipelineClient, fetchClient,
+  src/http.ts                     defaultClient + options type                    needs node:http/stream
+@outputty/pipeline/cluster      ClusterHttpPipeline + options type                needs node:cluster/http/os
+  src/cluster.ts                   extends HttpPipeline - pulls http.ts's module graph in too
+@outputty/pipeline/eventemitter EventEmitterPipeline, PipelineEmitter, WorkEvent + options type
+  src/eventemitter.ts              needs node:events - independent leaf, no cross-import either way
 ```
+
+`#249`'s own split (`.claude/CLAUDE.md`'s Language, `http`/`cluster`/`eventemitter` entries): a
+bundler resolves every static import before it can tree-shake unused exports, so `cluster.ts`'s
+`node:cluster`/`node:http`/`node:os`, `http.ts`'s `node:stream` and `eventemitter.ts`'s `node:events`
+each abort a browser build even for a consumer who never imports the class that needs them. Three
+entries, not one, because the three files' only shared trait is "needs a Node builtin" - `client.ts`
+feeds `http.ts` feeds `cluster.ts` (no cycle), `eventemitter.ts` is unrelated to either. No source
+file moves; each new entry is a barrel re-exporting from its unmoved `pipelines/*.ts` file, the same
+shape `websocket.ts` already uses.
+
+Measured: `dist/index.js` fell from 39.57 KB to 638 B, and `grep -c 'from "cluster"\|from "http"\|
+from "os"\|from "stream"\|from "events"' dist/index.js` (and its shared ESM/CJS chunks) reads `0`.
+`packaging.e2e.test.ts` bundles `import { Pipeline, Transformer } from "@outputty/pipeline"` with
+esbuild at `platform: "browser"` against the real built `dist/` and asserts it succeeds - the same
+class of check that fails today against the unfixed root (a real Turbopack build: `Module not found:
+Can't resolve 'cluster'`).
 
 - **Root is package-free.** `ws` is the only package `src/` imports (`rg 'from "ws"' src` hits
   `pipelines/websocket.ts` alone), and `packaging.e2e.test.ts` runs the built `dist` in a directory

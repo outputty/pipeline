@@ -20,7 +20,8 @@ import { httpMatchesFloor, measureHttpPipeline } from "../bench/legs/http";
 import { branchMatchesFloor } from "../bench/legs/branch";
 import { eventEmitterMatchesFloor, measureEventEmitterPipeline } from "../bench/legs/eventemitter";
 import { withLoopbackServer, countingHandler } from "../bench/utils/loopbackServer";
-import { HttpPipeline, EventEmitterPipeline } from "../src";
+import { HttpPipeline } from "../src/http";
+import { EventEmitterPipeline } from "../src/eventemitter";
 import {
   FIXTURE_TIMEOUT,
   HTTP_TIMEOUT,

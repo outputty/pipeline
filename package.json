@@ -27,6 +27,21 @@
       "types": "./dist/websocket.d.ts",
       "require": "./dist/websocket.cjs",
       "import": "./dist/websocket.js"
+    },
+    "./http": {
+      "types": "./dist/http.d.ts",
+      "require": "./dist/http.cjs",
+      "import": "./dist/http.js"
+    },
+    "./cluster": {
+      "types": "./dist/cluster.d.ts",
+      "require": "./dist/cluster.cjs",
+      "import": "./dist/cluster.js"
+    },
+    "./eventemitter": {
+      "types": "./dist/eventemitter.d.ts",
+      "require": "./dist/eventemitter.cjs",
+      "import": "./dist/eventemitter.js"
     }
   },
   "files": [
@@ -56,6 +71,7 @@
     "@oxlint/plugins": "1.74.0",
     "@types/node": "^26.1.1",
     "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.2",
     "oxlint": "^1.74.0",
     "prettier": "^3.9.5",
     "tsc-alias": "^1.9.2",

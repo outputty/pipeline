@@ -3,7 +3,7 @@
  * server, no listen, no fork, no url, no explicit teardown. Case 3 asserts THIS script exits on
  * its own with code 0 - the unref'd idle timer (#17 L5) is what makes that true.
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 
 const data = await new ClusterHttpPipeline<number>()
 

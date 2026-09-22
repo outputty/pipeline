@@ -178,7 +178,8 @@ the class name changes.
 > re-ordered by `ordered` (default `true`). Use it when the per-chunk work is I/O-bound.
 > **`HttpPipeline`** - each chunk dispatched over HTTP to another instance running the same code. It
 > mounts its own routes, one per stage; the caller gives it the url where it is mounted, and may give
-> it a `client` deciding how a chunk travels.
+> it a `client` deciding how a chunk travels. It imports from `@outputty/pipeline/http` and needs a
+> Node runtime.
 > **`client`** - how a dispatched chunk reaches the other instance. It takes the global `fetch`
 > signature, so the default is a drop-in and so is a caller's own. The default is the fastest client
 > the runtime offers, resolved once per process; a caller supplies their own to add authentication, a
@@ -190,7 +191,8 @@ the class name changes.
 > `@outputty/pipeline/websocket` and needs the `ws` package installed.
 > **`ClusterHttpPipeline`** - each chunk dispatched to another process on the same machine, over
 > HTTP. It brings up its own workers on first run and every later pipeline in the process reuses
-> them. `options.client` is `HttpPipeline`'s own knob, forwarded to `super` unchanged.
+> them. `options.client` is `HttpPipeline`'s own knob, forwarded to `super` unchanged. It imports
+> from `@outputty/pipeline/cluster` and needs a Node runtime.
 > **`ClusterPipeline`** - the same "each chunk to another process on the same machine" shape as
 > `ClusterHttpPipeline`, over `WebSocketPipeline`'s own persistent connection instead. It imports
 > from `@outputty/pipeline/websocket` and needs the `ws` package installed. Each worker gets its own
@@ -202,7 +204,7 @@ the class name changes.
 > `EventEmitter`, under the stage's route: `/transform/<n>`, or `/branch/<i>/<name>/transform/<n>`
 > inside a branch arm. The composed function is never itself a listener; any number of extra
 > Workers may register from anywhere in the process, and every one of them runs on every chunk
-> alongside it.
+> alongside it. It imports from `@outputty/pipeline/eventemitter` and needs a Node runtime.
 > **Stage** - one `.transform()` or `.apply()` call. A stage is identified by its position in the
 > chain, so a dispatching class sends a chunk and a stage index, never a function.
 > **`.local(build)`** - runs a whole region of the chain in the orchestrating process, on every
@@ -216,11 +218,14 @@ the class name changes.
 > one: `WebSocketPipeline` and `ClusterPipeline` need it, and every other class needs no package at
 > all.
 
-Installing `@outputty/pipeline` installs no other package, and loading its root entry loads none.
-`Pipeline`, `ConcurrentPipeline`, `HttpPipeline`, `ClusterHttpPipeline` and `EventEmitterPipeline`
-run with nothing else on disk. `WebSocketPipeline` and `ClusterPipeline` live on the
-`@outputty/pipeline/websocket` entry, which loads `ws`, and a caller who imports it installs `ws`
-first. Their published types name no `ws` type, so `@types/ws` is not needed.
+Installing `@outputty/pipeline` installs no other package, and loading its root entry loads none -
+not even a Node one. `Pipeline`, `ConcurrentPipeline` and `Transformer` run anywhere a JS engine
+does, browser included. `HttpPipeline` and `PipelineClient`/`fetchClient`/`defaultClient` live on
+`@outputty/pipeline/http`, `ClusterHttpPipeline` on `@outputty/pipeline/cluster`, `EventEmitterPipeline`
+on `@outputty/pipeline/eventemitter` - each needs a Node runtime, not another package. `WebSocketPipeline`
+and `ClusterPipeline` live on the `@outputty/pipeline/websocket` entry, which loads `ws`, and a caller
+who imports it installs `ws` first. Their published types name no `ws` type, so `@types/ws` is not
+needed.
 
 The chunk is the unit of concurrency, so a `ConcurrentPipeline`'s parallelism is its buffer size
 times `maxConcurrency`, never `maxConcurrency` alone. A chain left at the default buffer of 1000 with

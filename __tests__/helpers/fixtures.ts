@@ -8,7 +8,7 @@ import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { expect } from "vitest";
-import { toNodeHandler } from "../../src";
+import { toNodeHandler } from "../../src/http";
 
 /** A subprocess fixture (`node:cluster`, `execFile`) pays real process/fork startup cost. */
 export const FIXTURE_TIMEOUT = 20000;

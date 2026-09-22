@@ -40,13 +40,9 @@ import { createHook } from "node:async_hooks";
 import { getHeapStatistics, GCProfiler } from "node:v8";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Readable } from "node:stream";
-import {
-  Pipeline,
-  ConcurrentPipeline,
-  HttpPipeline,
-  EventEmitterPipeline,
-  type Transformer,
-} from "../src";
+import { Pipeline, ConcurrentPipeline, type Transformer } from "../src";
+import { HttpPipeline } from "../src/http";
+import { EventEmitterPipeline } from "../src/eventemitter";
 import { ClusterPipeline } from "../src/websocket";
 import {
   canonicalChain,

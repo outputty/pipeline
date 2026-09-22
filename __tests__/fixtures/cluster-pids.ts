@@ -4,7 +4,7 @@
  * primary to round-robin a NEW connection to every worker (node-parallelism skill, T3: a reused
  * keep-alive connection stays pinned to one worker for its life).
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 
 const workers = 3;
 const items = Array.from({ length: 30 }, (_, i) => i);

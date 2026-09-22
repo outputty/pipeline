@@ -13,9 +13,9 @@ what it needs:
 
 - **`Pipeline`** - nothing.
 - **`ConcurrentPipeline`** - nothing.
-- **`HttpPipeline`** - nothing.
-- **`ClusterHttpPipeline`** - nothing.
-- **`EventEmitterPipeline`** - nothing.
+- **`HttpPipeline`** - no package, imported from `@outputty/pipeline/http`.
+- **`ClusterHttpPipeline`** - no package, imported from `@outputty/pipeline/cluster`.
+- **`EventEmitterPipeline`** - no package, imported from `@outputty/pipeline/eventemitter`.
 - **`WebSocketPipeline`** - `ws`, imported from `@outputty/pipeline/websocket`.
 - **`ClusterPipeline`** - `ws`, imported from `@outputty/pipeline/websocket`.
 
@@ -331,7 +331,7 @@ close the server:
 ```typescript
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { HttpPipeline, toNodeHandler } from "@outputty/pipeline";
+import { HttpPipeline, toNodeHandler } from "@outputty/pipeline/http";
 
 // The "another instance" side: a source-less pipeline holding the SAME chain, so its
 // .fetch can serve it.
@@ -386,7 +386,7 @@ canonical example below exits on its own with no explicit teardown:
 <!-- compiles -->
 
 ```typescript
-import { ClusterHttpPipeline } from "@outputty/pipeline";
+import { ClusterHttpPipeline } from "@outputty/pipeline/cluster";
 
 const data = await new ClusterHttpPipeline<number>()
   .transform((t) => t.map((x: number) => x * 2))([1, 2, 3, 4, 5])
@@ -545,7 +545,7 @@ work entirely.
 <!-- compiles -->
 
 ```typescript
-import { EventEmitterPipeline } from "@outputty/pipeline";
+import { EventEmitterPipeline } from "@outputty/pipeline/eventemitter";
 
 const pipeline = new EventEmitterPipeline<number>().transform((t) => t.map((x: number) => x * 2));
 

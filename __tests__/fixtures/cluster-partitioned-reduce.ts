@@ -5,7 +5,7 @@
  * value, same as `emit()` already does on a non-partitioned reduce. `merged` demonstrates the
  * optional, hand-written second reduce a caller writes when they want ONE final value.
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 
 const sum = await new ClusterHttpPipeline<number>({ maxConcurrency: 2 })
 

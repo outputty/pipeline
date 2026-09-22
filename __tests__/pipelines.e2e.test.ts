@@ -12,13 +12,9 @@
  * layer lands, its cases flip from `it.fails` to `it`.
  */
 import { describe, it, expect } from "vitest";
-import {
-  Pipeline,
-  Transformer,
-  ConcurrentPipeline,
-  HttpPipeline,
-  ClusterHttpPipeline,
-} from "../src";
+import { Pipeline, Transformer, ConcurrentPipeline } from "../src";
+import { HttpPipeline } from "../src/http";
+import { ClusterHttpPipeline } from "../src/cluster";
 import {
   FIXTURE_TIMEOUT,
   HTTP_TIMEOUT,

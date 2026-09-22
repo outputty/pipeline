@@ -10,7 +10,7 @@
  * manually-registered Worker on `/transform/0`, counted while the `.local()` chain runs -
  * `stageWork()` never runs there, so this manual Worker never fires either.
  */
-import { EventEmitterPipeline } from "../../src";
+import { EventEmitterPipeline } from "../../src/eventemitter";
 import {
   canonicalChain,
   canonicalInput,

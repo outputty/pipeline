@@ -7,7 +7,7 @@
  * surfaces a throwing observer as a real `uncaughtException`, which Vitest's own process-wide
  * handler would report as a test-runner error rather than a value this script can observe.
  */
-import { EventEmitterPipeline } from "../../src";
+import { EventEmitterPipeline } from "../../src/eventemitter";
 import {
   captureUncaughtExceptions,
   drainUncaughtExceptions,

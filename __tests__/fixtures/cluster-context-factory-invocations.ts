@@ -5,7 +5,7 @@
  * serve - `factoryCalls` here is a per-process counter, read live at serve time, so a rebuild
  * anywhere in that process would show up as a HIGHER max than 1 for that worker's pid.
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 import { SimpleContextManager } from "../../src";
 
 let factoryCalls = 0;

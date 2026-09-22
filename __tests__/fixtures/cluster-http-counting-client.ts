@@ -4,7 +4,7 @@
  * immediately, empty - `cluster.ts`'s own header), so a call count is a call count IN THE PRIMARY
  * by construction; naming it that way in the output is documentation, not a separate check.
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 
 let calls = 0;
 const countingClient = async (url: string, init: RequestInit): Promise<Response> => {

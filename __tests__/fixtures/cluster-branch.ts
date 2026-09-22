@@ -7,7 +7,8 @@
  * stage-less one - after which the primary's `/pipeline/0/transform/0` was served by the ARM's
  * stage table. Measured before the fix: `{"rest":["REST:undefined","REST:undefined"]}`.
  */
-import { Pipeline, ClusterHttpPipeline } from "../../src";
+import { Pipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 
 type Order = { id: number; total: number };
 

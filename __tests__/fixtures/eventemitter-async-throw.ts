@@ -12,7 +12,7 @@
  * throw after `await`, not an explicit `reject()`, still settles it) in one real run, and proving
  * the SLOWER, losing composed-function promise never leaks as unhandled once it resolves later.
  */
-import { EventEmitterPipeline } from "../../src";
+import { EventEmitterPipeline } from "../../src/eventemitter";
 import { drainUnhandledRejections, errorMessage, runFixtureMain } from "./unhandled-rejection";
 
 function delay(ms: number): Promise<void> {

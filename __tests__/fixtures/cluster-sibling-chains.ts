@@ -7,7 +7,7 @@
  * `/pipeline/0/transform/0`, the worker resolved `registry[0]` to the SECOND chain, and the run
  * returned that chain's output with no error. Measured before the fix: `{"doubled":[100,200]}`.
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 
 const base = new ClusterHttpPipeline<number>({ workers: 2 });
 const doubled = base.transform((t) => t.map((x: number) => x * 2));

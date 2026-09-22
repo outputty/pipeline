@@ -10,13 +10,9 @@
  */
 import { describe, test, expect } from "vitest";
 import type { IContextManager } from "../src";
-import {
-  Pipeline,
-  ConcurrentPipeline,
-  EventEmitterPipeline,
-  HttpPipeline,
-  Transformer,
-} from "../src";
+import { Pipeline, ConcurrentPipeline, Transformer } from "../src";
+import { HttpPipeline } from "../src/http";
+import { EventEmitterPipeline } from "../src/eventemitter";
 import { FIXTURE_TIMEOUT, HTTP_TIMEOUT, withServer, runFixtureJson } from "./helpers/fixtures";
 import { countPromises } from "./helpers/sequences";
 

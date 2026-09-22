@@ -17,7 +17,7 @@
  * the way `cluster-basic.ts` does would be flaky here; skipping the print entirely means only the
  * PRIMARY ever writes a line, so `lastJsonLine` has nothing to race against).
  */
-import { ClusterHttpPipeline } from "../../src";
+import { ClusterHttpPipeline } from "../../src/cluster";
 
 interface Tagged {
   sum: number;
