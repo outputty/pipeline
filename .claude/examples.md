@@ -1,5 +1,5 @@
 <!-- examples.md - canonical worked examples, one per concept. No executable docs harness exists yet
-     (roadmap.md's first Building candidate) - a fence marked `<!-- illustrative -->` names something
+     (roadmap.md, Later) - a fence marked `<!-- illustrative -->` names something
      undefined and is hand-verified against the real `__tests__/*.e2e.test.ts` suite; a fence marked
      `<!-- compiles -->` is a real, self-contained program, pasted into a throwaway `tmp/` script and
      run for real on each edit that touches it. Reused verbatim; pin a new example here first. -->
