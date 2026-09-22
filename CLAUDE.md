@@ -324,6 +324,20 @@ none of it survived the hand-trim (#745).
   own `Pipeline` copy and `Pipeline.wrapping`'s `instanceof` reads a root chain as an options object.
   `NodeWebSocketHandler.upgrade` is typed with `node:http`'s `IncomingMessage` and `node:stream`'s
   `Duplex`, so no `.d.ts` names a `ws` type and `@types/ws` is not needed.
+- **`http`/`cluster`/`eventemitter` entries** (pending #249, no prior term) - three more tsup entries
+  (`src/http.ts`, `src/cluster.ts`, `src/eventemitter.ts`), each a barrel shaped like `websocket.ts`
+  above, splitting `HttpPipeline`/`ClusterHttpPipeline`/`EventEmitterPipeline` and `client.ts`'s
+  `PipelineClient`/`fetchClient`/`defaultClient` off the root. Unlike `websocket`, the reason is not
+  an optional PACKAGE (`ws`) but five static Node BUILTIN imports (`cluster`, `http`'s
+  `createServer`, `os`'s `availableParallelism`, `stream`'s `Readable`, `events`'s `EventEmitter`)
+  that a bundler resolves before it can tree-shake unused exports - present on the root even for a
+  consumer who never imports `HttpPipeline` at all, and fatal to a browser build (`Module not found:
+  Can't resolve 'cluster'`, a real Turbopack build). Split three ways, not one, by shared dependency:
+  `client.ts` only ever feeds `http.ts`, `cluster.ts` extends `HttpPipeline`, `eventemitter.ts` is an
+  independent leaf - so `@outputty/pipeline/cluster` still pulls `http.ts`'s module graph in
+  transitively (both are Node-only anyway), but `@outputty/pipeline/eventemitter` pulls in neither.
+  BREAKING, no deprecation period, matching `websocket`'s own precedent: all seven names leave the
+  root.
 - **`options.client`** (#179) - how a dispatched chunk reaches another instance, on `HttpPipeline`
   and therefore on `ClusterHttpPipeline`. `PipelineClient` is `(url: string, init: RequestInit) =>
   Promise<Response>` - the global `fetch` signature, so the default is a drop-in and so is a

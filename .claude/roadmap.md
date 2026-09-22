@@ -9,6 +9,15 @@ already exists (Building / Later), or one already tried (Killed) - point the new
 
 ## Building - open tickets, detail in each issue
 
+- **The root entry drops Node builtins, splitting `HttpPipeline`/`ClusterHttpPipeline`/
+  `EventEmitterPipeline` onto their own entries** (#249) - `dist/index.js` carries five static
+  top-level imports with no browser equivalent (`cluster`, `http`'s `createServer`, `os`'s
+  `availableParallelism`, `stream`'s `Readable`, `events`'s `EventEmitter`), so a browser bundler
+  aborts resolving the whole module graph before it can tree-shake unused exports - confirmed with a
+  real Turbopack build (`Module not found: Can't resolve 'cluster'`) even for a consumer using only
+  core `Pipeline`/`Transformer`. `@outputty/pipeline/websocket` (#239) is the precedent; this ticket
+  applies the same shape to three new entries (`/http`, `/cluster`, `/eventemitter`), split along the
+  files' own dependency edges rather than one combined entry.
 - **Cross-runtime benchmarks** (#11) - the package ships no numbers, so nothing compares it against
   `ix`, `streaming-iterables`, `effect`, `rxjs` or the runtime's own stream helpers, and a hot-path
   change has no baseline to regress against. Six pinned runtimes in Docker, two tables, results
