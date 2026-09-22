@@ -9,10 +9,6 @@ import type { MaybeAsyncChunks } from "./utils/drain";
  */
 export const DEFAULT_CHUNK_SIZE = 1000;
 
-/** Idle time with no dispatch in flight before a worker set is killed so the process can exit.
- * Shared by `ClusterHttpPipeline` and `ClusterPipeline`, which cannot import each other's file. */
-export const IDLE_KILL_MS = 500;
-
 /**
  * Whether a chain runs synchronously, and so whether its terminal ops return a value or a
  * `Promise`. `"unset"` is the ordinary state of a composed chain: an async callback or an async

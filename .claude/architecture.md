@@ -771,7 +771,8 @@ Can't resolve 'cluster'`).
   `pipelines/websocket.ts` alone), and `packaging.e2e.test.ts` runs the built `dist` in a directory
   with no `ws`, greps every root bundle, chunk and `.d.ts` for it, and typechecks a strict consumer
   with neither `ws` nor `@types/ws`.
-- **`cluster.ts` and `websocket-cluster.ts` share nothing but `IDLE_KILL_MS`** (`src/types.ts`).
+- **`cluster.ts` and `websocket-cluster.ts` share only `worker-set.ts`**: the worker registry,
+  fork-and-ready bootstrap, in-flight count and idle kill. `worker-set.ts` has no side effect at load.
   `cluster.ts` starts the HTTP worker server at module scope, so importing it from the WebSocket side
   would start that server in every `/websocket` worker.
 - **Both entries share one class copy.** ESM splits chunks by default; CJS needs `splitting: true`
@@ -1253,7 +1254,7 @@ rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed
   registering transforms" rule above already assumes); a caller constructing a fresh one per request
   grows the registry unbounded.
 - The idle-kill window between a `ClusterHttpPipeline`/`ClusterPipeline`'s last dispatch and its
-  workers being killed (`cluster.ts`'s `IDLE_KILL_MS`, shared by both classes' own `kill()`) is
+  workers being killed (`IDLE_KILL_MS` in `worker-set.ts`, shared by both classes) is
   `500`ms - a chosen value, not a tuned or caller-facing one. Long enough that back-to-back
   dispatches in a real workload never trigger a re-fork; short
   enough that a script holding only the canonical example exits on its own well inside a normal test

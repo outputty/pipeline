@@ -15,10 +15,11 @@ import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { HttpPipeline, toNodeHandler, errorResponse } from "@src/pipelines/http";
 import type { HttpPipelineOptions } from "@src/pipelines/http";
 import type { PipelineClient } from "@src/pipelines/client";
-import { emptyChunks, Pipeline } from "@src/pipeline";
-import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
+import { Pipeline } from "@src/pipeline";
+import type { WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import { IDLE_KILL_MS } from "@src/types";
+import { onWorkerDrainNothing, pipelineRoute, WorkerSet } from "@src/pipelines/worker-set";
+import type { SlotOptions } from "@src/pipelines/worker-set";
 import type {
   InternalTransformer,
   ReduceFunction,
@@ -35,146 +36,38 @@ export type ClusterHttpPipelineOptions = {
   client?: PipelineClient;
 } & ConcurrentPipelineOptions;
 
-type ClusterHttpPipelineConstructorOptions = ClusterHttpPipelineOptions &
-  PipelineConstructorOptions & { pipelineIndex?: number };
+type ClusterHttpPipelineConstructorOptions = ClusterHttpPipelineOptions & SlotOptions;
 
-function isReadyMessage(
-  // oxlint-disable-next-line anti-slop/no-unknown-parameters -- this IS the I/O boundary parser the rule's own message asks for; message is genuinely unparsed until this function runs
-  message: unknown,
-): message is { type: "outputty-pipeline-ready"; port: number } {
-  return (
-    typeof message === "object" &&
-    message !== null &&
-    "type" in message &&
-    message.type === "outputty-pipeline-ready" &&
-    "port" in message &&
-    typeof message.port === "number"
-  );
-}
+/** One per process, on the primary and on every worker. `listen(0)` under `cluster` gives every
+ * worker the same port, so the first address reported is the one every dispatch uses. */
+const workerSet = new WorkerSet<ClusterHttpPipeline<unknown>, number>({
+  readyType: "outputty-pipeline-ready",
+  addressField: "port",
+  addressKind: "number",
+  failure: "a ClusterHttpPipeline worker failed before reporting its port",
+});
 
-class WorkerSet {
-  private nextPipelineIndex = 0;
-  private readonly registry = new Map<number, ClusterHttpPipeline<unknown>>();
-  private bootstrapPromise: Promise<number> | undefined;
-  private inFlight = 0;
-  private idleTimer: ReturnType<typeof setTimeout> | undefined;
-  /** ⚠ Kill only these ids: `cluster.workers` also holds every other worker set's workers. */
-  private readonly ownWorkerIds = new Set<number>();
-
-  register(pipeline: ClusterHttpPipeline<unknown>): number {
-    const index = this.nextPipelineIndex++;
-    this.registry.set(index, pipeline);
-    return index;
-  }
-
-  claimIndex(): number {
-    return this.nextPipelineIndex++;
-  }
-
-  lookup(index: number): ClusterHttpPipeline<unknown> | undefined {
-    return this.registry.get(index);
-  }
-
-  /** Forks the workers once per process and resolves with the port they share. `listen(0)` under
-   * `cluster` gives every worker the same port. */
-  bootstrap(workerCount: number): Promise<number> {
-    this.bootstrapPromise ??= new Promise((resolve, reject) => {
-      const count = workerCount > 0 ? workerCount : availableParallelism();
-      let sharedPort: number | undefined;
-      let readyCount = 0;
-      let settled = false;
-      for (let i = 0; i < count; i++) {
-        const worker = cluster.fork();
-        this.ownWorkerIds.add(worker.id);
-        worker.on("message", (message) => {
-          if (!isReadyMessage(message)) return;
-          sharedPort ??= message.port;
-          readyCount++;
-          if (readyCount === count && !settled) {
-            settled = true;
-            resolve(sharedPort!);
-          }
-        });
-        // ⚠ A worker that dies before reporting must reject, or every dispatch hangs forever.
-        const fail = (detail: string): void => {
-          if (settled) return;
-          settled = true;
-          reject(
-            new Error(`a ClusterHttpPipeline worker failed before reporting its port: ${detail}`),
-          );
-        };
-        worker.on("error", (error: Error) => fail(error.message));
-        worker.on("exit", (code, signal) => fail(`exited with code ${code}, signal ${signal}`));
-      }
-    });
-    return this.bootstrapPromise;
-  }
-
-  /** Marks one dispatch in flight and returns the port plus its `release`. A second `release`
-   * call does nothing. */
-  async enter(workerCount: number): Promise<{ port: number; release: () => void }> {
-    const port = await this.bootstrap(workerCount);
-    this.inFlight++;
-    let released = false;
-    const release = (): void => {
-      if (released) return;
-      released = true;
-      this.inFlight--;
-      if (this.inFlight === 0) this.scheduleIdleCheck();
-    };
-    return { port, release };
-  }
-
-  /** ⚠ The timer is `unref()`'d; the workers keep the process alive until it kills them. */
-  private scheduleIdleCheck(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => {
-      if (this.inFlight > 0) {
-        this.scheduleIdleCheck();
-        return;
-      }
-      this.kill();
-    }, IDLE_KILL_MS);
-    this.idleTimer.unref();
-  }
-
-  /** ⚠ Kills, never `.unref()`s: a forked worker holds the event loop open through a handle no
-   * public API releases. */
-  kill(): void {
-    const workers = cluster.workers ?? {};
-    for (const id of this.ownWorkerIds) {
-      workers[id]?.kill();
+/** The HTTP server every worker runs. It routes `/pipeline/<i>/…` to pipeline `i`'s `.fetch()`,
+ * which reads the trailing `/transform/<n>`. */
+function startWorkerServer(): void {
+  const routeToRegisteredPipeline = async (request: Request): Promise<Response> => {
+    const { pathname } = new URL(request.url);
+    const pipeline = workerSet.lookupRoute(pathname);
+    if (!pipeline) {
+      return errorResponse(404, `unknown pipeline route ${pathname}`);
     }
-    this.ownWorkerIds.clear();
-    this.bootstrapPromise = undefined; // a later dispatch bootstraps a fresh set
-  }
+    return pipeline.fetch(request);
+  };
 
-  /** The HTTP server every worker runs. It routes `/pipeline/<i>/…` to pipeline `i`'s `.fetch()`,
-   * which reads the trailing `/transform/<n>`. */
-  startWorkerServer(): void {
-    const routeToRegisteredPipeline = async (request: Request): Promise<Response> => {
-      const { pathname } = new URL(request.url);
-      const match = /^\/pipeline\/(\d+)\//.exec(pathname);
-      const pipeline = match ? this.lookup(Number(match[1])) : undefined;
-      if (!pipeline) {
-        return errorResponse(404, `unknown pipeline route ${pathname}`);
-      }
-      return pipeline.fetch(request);
-    };
-
-    const server = createServer(toNodeHandler(routeToRegisteredPipeline));
-    server.listen(0, () => {
-      const { port } = server.address() as AddressInfo;
-      process.send?.({ type: "outputty-pipeline-ready", port });
-    });
-  }
+  const server = createServer(toNodeHandler(routeToRegisteredPipeline));
+  server.listen(0, () => {
+    const { port } = server.address() as AddressInfo;
+    process.send?.({ type: "outputty-pipeline-ready", port });
+  });
 }
-
-/** One per process, on the primary and on every worker. */
-const workerSet = new WorkerSet();
 
 if (cluster.isWorker) {
-  workerSet.startWorkerServer();
+  startWorkerServer();
 }
 
 /**
@@ -206,30 +99,9 @@ export class ClusterHttpPipeline<T, In = T> extends HttpPipeline<T, In> {
   ) {
     const options = Pipeline.wrapping<ClusterHttpPipelineConstructorOptions>(first, second);
     // The url is set once the workers pick a port, on the first dispatch.
-    const own: ClusterHttpPipelineConstructorOptions & HttpPipelineOptions = {
-      ...options,
-      url: "",
-    };
-    // ⚠ On a worker every terminal op resolves empty: a worker holds the stages and never
-    // orchestrates a drain.
-    if (cluster.isWorker) {
-      own.chunks = emptyChunks<T>();
-      own.preBufferItems = null;
-    }
-    super(own);
+    super(onWorkerDrainNothing({ ...options, url: "" }));
     this.workers = options?.workers ?? availableParallelism();
-
-    // Which instances claim a pipeline index:
-    // - A composed, unbound instance with no trail claims a fresh one. ⚠ Inheriting the base's lets
-    //   two sibling chains share an index, and the second silently serves both.
-    // - ⚠ A bound instance never claims. Workers bind lazily, so a claim there shifts their
-    //   indexes away from the primary's.
-    // - ⚠ A `.branch()` arm never registers. It is reached through its parent's route, and
-    //   registering it overwrites the parent.
-    const claimsOwnSlot = options?.bound !== true && (options?.routeTrail ?? "") === "";
-    this.pipelineIndex = claimsOwnSlot
-      ? workerSet.register(this as ClusterHttpPipeline<unknown>)
-      : (options?.pipelineIndex ?? workerSet.claimIndex());
+    this.pipelineIndex = workerSet.claimSlot(this as ClusterHttpPipeline<unknown>, options);
   }
 
   /** Carries `workers` and `pipelineIndex` into the next copy-on-write instance. */
@@ -273,13 +145,13 @@ export class ClusterHttpPipeline<T, In = T> extends HttpPipeline<T, In> {
    *
    * `routePath("transform", 0)` → `/pipeline/2/transform/0` for `pipelineIndex` 2. */
   protected override routePath(verb: RouteVerb, index: number): string {
-    return `/pipeline/${this.pipelineIndex}${super.routePath(verb, index)}`;
+    return pipelineRoute(this.pipelineIndex, super.routePath(verb, index));
   }
 
   /** Starts the workers if needed, points `_url` at them and returns the dispatch's `release`. */
   protected async bootstrapAndSetUrl(): Promise<() => void> {
-    const { port, release } = await workerSet.enter(this.workers);
-    this._url = `http://localhost:${port}`;
+    const { addresses, release } = await workerSet.enter(this.workers);
+    this._url = `http://localhost:${addresses[0]}`;
     return release;
   }
 

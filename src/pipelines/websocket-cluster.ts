@@ -25,172 +25,79 @@ import type {
   ResolvedConnect,
 } from "@src/pipelines/websocket";
 import type { Codec } from "@src/codec";
-import { emptyChunks, Pipeline } from "@src/pipeline";
-import type { PipelineConstructorOptions, WrappablePipeline } from "@src/pipeline";
+import { Pipeline } from "@src/pipeline";
+import type { WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import { IDLE_KILL_MS } from "@src/types";
+import { onWorkerDrainNothing, pipelineRoute, WorkerSet } from "@src/pipelines/worker-set";
+import type { SlotOptions } from "@src/pipelines/worker-set";
 import type { ReduceFunction, PipelineMode, RouteVerb } from "@src/types";
 
-function isWsReadyMessage(
-  // oxlint-disable-next-line anti-slop/no-unknown-parameters -- this IS the I/O boundary parser the rule's own message asks for; message is genuinely unparsed until this function runs
-  message: unknown,
-): message is { type: "outputty-pipeline-ws-ready"; socketPath: string } {
-  return (
-    typeof message === "object" &&
-    message !== null &&
-    "type" in message &&
-    message.type === "outputty-pipeline-ws-ready" &&
-    "socketPath" in message &&
-    typeof message.socketPath === "string"
-  );
-}
-
-class WsWorkerSet {
-  private nextPipelineIndex = 0;
-  private readonly registry = new Map<number, ClusterPipeline<unknown>>();
-  private bootstrapPromise: Promise<string[]> | undefined;
-  private inFlight = 0;
-  private idleTimer: ReturnType<typeof setTimeout> | undefined;
-  private nextWorkerIndex = 0;
-  /** ⚠ Kill only these ids: `cluster.workers` also holds every other worker set's workers. */
-  private readonly ownWorkerIds = new Set<number>();
-
-  register(pipeline: ClusterPipeline<unknown>): number {
-    const index = this.nextPipelineIndex++;
-    this.registry.set(index, pipeline);
-    return index;
-  }
-
-  claimIndex(): number {
-    return this.nextPipelineIndex++;
-  }
-
-  lookup(index: number): ClusterPipeline<unknown> | undefined {
-    return this.registry.get(index);
-  }
-
-  /** Forks the workers once per process and resolves with each worker's socket path. */
-  bootstrap(workerCount: number): Promise<string[]> {
-    this.bootstrapPromise ??= new Promise((resolve, reject) => {
-      const count = workerCount > 0 ? workerCount : availableParallelism();
-      const paths: string[] = [];
-      let settled = false;
-      for (let i = 0; i < count; i++) {
-        const worker = cluster.fork();
-        this.ownWorkerIds.add(worker.id);
-        worker.on("message", (message) => {
-          if (!isWsReadyMessage(message)) return;
-          paths.push(message.socketPath);
-          if (paths.length === count && !settled) {
-            settled = true;
-            resolve(paths);
-          }
-        });
-        // ⚠ A worker that dies before reporting must reject, or every dispatch hangs forever.
-        const fail = (detail: string): void => {
-          if (settled) return;
-          settled = true;
-          reject(
-            new Error(`a ClusterPipeline worker failed before reporting its socket: ${detail}`),
-          );
-        };
-        worker.on("error", (error: Error) => fail(error.message));
-        worker.on("exit", (code, signal) => fail(`exited with code ${code}, signal ${signal}`));
-      }
-    });
-    return this.bootstrapPromise;
-  }
-
-  /** Marks one dispatch in flight and returns the next worker's target, round-robin, plus its
-   * `release`. */
-  async enter(workerCount: number): Promise<{ connect: string; release: () => void }> {
-    const paths = await this.bootstrap(workerCount);
-    const path = paths[this.nextWorkerIndex % paths.length]!;
-    this.nextWorkerIndex++;
-    this.inFlight++;
-    let released = false;
-    const release = (): void => {
-      if (released) return;
-      released = true;
-      this.inFlight--;
-      if (this.inFlight === 0) this.scheduleIdleCheck();
-    };
-    return { connect: `ws+unix:${path}:/`, release };
-  }
-
-  private scheduleIdleCheck(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => {
-      if (this.inFlight > 0) {
-        this.scheduleIdleCheck();
-        return;
-      }
-      this.kill();
-    }, IDLE_KILL_MS);
-    this.idleTimer.unref();
-  }
-
-  kill(): void {
-    const workers = cluster.workers ?? {};
-    for (const id of this.ownWorkerIds) {
-      workers[id]?.kill();
-    }
-    this.ownWorkerIds.clear();
-    this.bootstrapPromise = undefined;
-  }
-
-  /** The WebSocket server every worker runs on its own socket path. It routes `/pipeline/<i>/…`
-   * frames to pipeline `i`'s `receiveFrame()`. */
-  startWorkerServer(): void {
-    // A live Set, answered over IPC for tests; not a lifetime counter.
-    const openConnections = new Set<PipelineSocket>();
-    // oxlint-disable-next-line anti-slop/no-unknown-parameters -- this IS the I/O boundary parser the rule's own message asks for; a worker's own "message" event is genuinely unparsed until this function runs, same reason isWsReadyMessage (above) narrows to unknown first
-    process.on("message", (message: unknown) => {
-      const isQuery =
-        typeof message === "object" &&
-        message !== null &&
-        "type" in message &&
-        message.type === "outputty-pipeline-query-connections";
-      if (!isQuery) return;
-      process.send?.({ type: "outputty-pipeline-connections", count: openConnections.size });
-    });
-
-    const routeToRegisteredPipeline = (socket: PipelineSocket, data: Uint8Array): void => {
-      const { id, route } = peekFrame(data);
-      const match = route !== undefined ? /^\/pipeline\/(\d+)\//.exec(route) : null;
-      const pipeline = match ? this.lookup(Number(match[1])) : undefined;
-      if (!pipeline) {
-        sendUnknownRouteError(socket, id, route);
-        return;
-      }
-      pipeline.receiveFrame(socket, data);
-    };
-
-    const handler = toNodeWebSocketHandler({
-      serve(socket) {
-        openConnections.add(socket);
-        socket.onClose(() => openConnections.delete(socket));
-        socket.onMessage((data) => {
-          if (typeof data === "string") return;
-          routeToRegisteredPipeline(socket, data);
-        });
-      },
-    });
-
-    const socketPath = join(tmpdir(), `outputty-pipeline-ws-${process.pid}.sock`);
-    const server = createServer();
-    server.on("upgrade", (request, socket, head) => handler.upgrade(request, socket, head));
-    server.listen(socketPath, () => {
-      process.send?.({ type: "outputty-pipeline-ws-ready", socketPath });
-    });
-  }
-}
-
 /** One per process, on the primary and on every worker. */
-const wsWorkerSet = new WsWorkerSet();
+const wsWorkerSet = new WorkerSet<ClusterPipeline<unknown>, string>({
+  readyType: "outputty-pipeline-ws-ready",
+  addressField: "socketPath",
+  addressKind: "string",
+  failure: "a ClusterPipeline worker failed before reporting its socket",
+});
+
+let nextWorkerIndex = 0;
+
+/** Starts the workers if needed and returns the next worker's target, round-robin, plus the
+ * dispatch's `release`. */
+async function enterNextWorker(workerCount: number): Promise<ResolvedConnect> {
+  const { addresses, release } = await wsWorkerSet.enter(workerCount);
+  const path = addresses[nextWorkerIndex % addresses.length]!;
+  nextWorkerIndex++;
+  return { connect: `ws+unix:${path}:/`, release };
+}
+
+/** The WebSocket server every worker runs on its own socket path. It routes `/pipeline/<i>/…`
+ * frames to pipeline `i`'s `receiveFrame()`. */
+function startWorkerServer(): void {
+  // A live Set, answered over IPC for tests; not a lifetime counter.
+  const openConnections = new Set<PipelineSocket>();
+  // oxlint-disable-next-line anti-slop/no-unknown-parameters -- this IS the I/O boundary parser the rule's own message asks for; a worker's own "message" event is genuinely unparsed until this function runs
+  process.on("message", (message: unknown) => {
+    const isQuery =
+      typeof message === "object" &&
+      message !== null &&
+      "type" in message &&
+      message.type === "outputty-pipeline-query-connections";
+    if (!isQuery) return;
+    process.send?.({ type: "outputty-pipeline-connections", count: openConnections.size });
+  });
+
+  const routeToRegisteredPipeline = (socket: PipelineSocket, data: Uint8Array): void => {
+    const { id, route } = peekFrame(data);
+    const pipeline = wsWorkerSet.lookupRoute(route);
+    if (!pipeline) {
+      sendUnknownRouteError(socket, id, route);
+      return;
+    }
+    pipeline.receiveFrame(socket, data);
+  };
+
+  const handler = toNodeWebSocketHandler({
+    serve(socket) {
+      openConnections.add(socket);
+      socket.onClose(() => openConnections.delete(socket));
+      socket.onMessage((data) => {
+        if (typeof data === "string") return;
+        routeToRegisteredPipeline(socket, data);
+      });
+    },
+  });
+
+  const socketPath = join(tmpdir(), `outputty-pipeline-ws-${process.pid}.sock`);
+  const server = createServer();
+  server.on("upgrade", (request, socket, head) => handler.upgrade(request, socket, head));
+  server.listen(socketPath, () => {
+    process.send?.({ type: "outputty-pipeline-ws-ready", socketPath });
+  });
+}
 
 if (cluster.isWorker) {
-  wsWorkerSet.startWorkerServer();
+  startWorkerServer();
 }
 
 /**
@@ -223,24 +130,9 @@ export class ClusterPipeline<T, In = T> extends WebSocketPipeline<T, In> {
   ) {
     const options = Pipeline.wrapping<ClusterPipelineConstructorOptions>(first, second);
     // Dispatch never reads `connect`; `resolveConnect()` supplies the target per call.
-    const own: ClusterPipelineConstructorOptions & WebSocketPipelineOptions = {
-      ...options,
-      connect: "",
-    };
-    // ⚠ On a worker every terminal op resolves empty.
-    if (cluster.isWorker) {
-      own.chunks = emptyChunks<T>();
-      own.preBufferItems = null;
-    }
-    super(own);
+    super(onWorkerDrainNothing({ ...options, connect: "" }));
     this.workers = options?.workers ?? availableParallelism();
-
-    // ⚠ Same index rules as `ClusterHttpPipeline`'s constructor: bound instances and branch arms
-    // never register.
-    const claimsOwnSlot = options?.bound !== true && (options?.routeTrail ?? "") === "";
-    this.pipelineIndex = claimsOwnSlot
-      ? wsWorkerSet.register(this as ClusterPipeline<unknown>)
-      : (options?.pipelineIndex ?? wsWorkerSet.claimIndex());
+    this.pipelineIndex = wsWorkerSet.claimSlot(this as ClusterPipeline<unknown>, options);
   }
 
   /** Carries `workers` and `pipelineIndex` into the next copy-on-write instance. */
@@ -284,13 +176,13 @@ export class ClusterPipeline<T, In = T> extends WebSocketPipeline<T, In> {
    *
    * `routePath("transform", 0)` → `/pipeline/2/transform/0` for `pipelineIndex` 2. */
   protected override routePath(verb: RouteVerb, index: number): string {
-    return `/pipeline/${this.pipelineIndex}${super.routePath(verb, index)}`;
+    return pipelineRoute(this.pipelineIndex, super.routePath(verb, index));
   }
 
   /** Starts the workers if needed and picks the next one per dispatch; see
    * `WebSocketPipeline.resolveConnect()` for why it is never stored. */
   protected override resolveConnect(): Promise<ResolvedConnect> {
-    return wsWorkerSet.enter(this.workers);
+    return enterNextWorker(this.workers);
   }
 }
 
@@ -303,5 +195,4 @@ export type ClusterPipelineOptions = {
   codec?: Codec;
 } & ConcurrentPipelineOptions;
 
-type ClusterPipelineConstructorOptions = ClusterPipelineOptions &
-  PipelineConstructorOptions & { pipelineIndex?: number };
+type ClusterPipelineConstructorOptions = ClusterPipelineOptions & SlotOptions;
