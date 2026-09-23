@@ -1172,7 +1172,7 @@ unconditionally (above), a cost the other three classes do not pay the same way.
 `Pipeline` has no `.local()` row: the base class never dispatches, so pinning it changes nothing to
 measure. O1 (#120) collapsed `Transformer.filter()`'s sync no-handler branch from three passes to
 one, making `Pipeline` clearly faster; O2 (fusing adjacent sync `map`/`filter` links) was spiked
-against this same baseline and killed - roughly a third faster end to end, priced against a `#45`-shaped
+against this same baseline and killed - only modestly faster end to end, priced against a `#45`-shaped
 rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed section.
 
 ## Constraints in dependencies
