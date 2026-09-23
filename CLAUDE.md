@@ -69,11 +69,6 @@ Serena is registered in this repo's `.mcp.json` and is the primary tool set for 
 - Keep `pnpm-workspace.yaml` content-only (no `packages:` glob). Its presence stops a nested-worktree install climbing into an ancestor checkout.
 - `CLAUDE.md` and `.claude/` are prettier-ignored.
 
-## Tests
-
-- Test e2e on the real objects: construct the real `Pipeline`/`Transformer` and assert its real output, never a mock.
-- A spike is never committed; its answer moves into a real test under `__tests__/`.
-
 ## This repo
 
 The `tracker` skill's GitHub ids for this repo. Read them here; never guess one.
