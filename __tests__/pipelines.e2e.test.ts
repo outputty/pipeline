@@ -23,7 +23,7 @@ import {
   expectFixtureOk,
   runFixtureJson,
 } from "./helpers/fixtures";
-import { parseStrict, chunksOf } from "./helpers/sequences";
+import { parseStrict, chunksOf, countPromisesAsync } from "./helpers/sequences";
 
 /** The "another instance" side of an `HttpPipeline` chain: an empty-source pipeline whose only
  * job is to hold the SAME stage definitions `builder` describes, so its `.fetch` can serve them. */
@@ -722,5 +722,67 @@ describe("#113 - a partitioned reduce owns its accumulator, and every fan-out cl
     // A macrotask, so a generator closed by `.return()` has run its `finally`.
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(closed.sort()).toEqual(["ordered", "unordered"]);
+  });
+});
+
+describe("ordered: false yields from a completion queue", () => {
+  it("yields chunks that settle in one tick in the order they settled", async () => {
+    const release: (() => void)[] = [];
+    let allStarted!: () => void;
+    const started = new Promise<void>((resolve) => (allStarted = resolve));
+    const run = new ConcurrentPipeline<number>({ maxConcurrency: 3, ordered: false })
+      .buffer(1)
+      .transform((t) =>
+        t.map(async (x: number) => {
+          await new Promise<void>((resolve) => {
+            release[x] = resolve;
+            if (release.filter(Boolean).length === 3) allStarted();
+          });
+          return x;
+        }),
+      )([0, 1, 2])
+      .toArray();
+
+    await started;
+    release[2]();
+    release[1]();
+    release[0]();
+    expect(await run).toEqual([2, 1, 0]);
+  });
+
+  it("creates as many promises per chunk at maxConcurrency 64 as at 4", async () => {
+    const N = 2000;
+    const items = Array.from({ length: N }, (_, i) => i);
+    const perChunk = async (maxConcurrency: number): Promise<number> => {
+      const run = new ConcurrentPipeline<number>({ maxConcurrency, ordered: false })
+        .buffer(1)
+        .transform((t) => t.map((x: number) => x));
+      return (await countPromisesAsync(() => run(items).toArray())) / N;
+    };
+    const at4 = await perChunk(4);
+    const at64 = await perChunk(64);
+    expect(Math.abs(at64 - at4)).toBeLessThan(0.5);
+  });
+
+  it("leaves no unhandled rejection from work still in flight when the consumer stops early", async () => {
+    const run = new ConcurrentPipeline<number>({ maxConcurrency: 4, ordered: false })
+      .buffer(1)
+      .transform((t) =>
+        t.map(async (x: number) => {
+          if (x === 0) return x;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          throw new Error(`late-${x}`);
+        }),
+      );
+    let unhandled: unknown;
+    const record = (reason: unknown): void => void (unhandled = reason);
+    process.on("unhandledRejection", record);
+    try {
+      expect(await run([0, 1, 2, 3]).first(1)).toEqual([0]);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    } finally {
+      process.off("unhandledRejection", record);
+    }
+    expect(unhandled).toBeUndefined();
   });
 });

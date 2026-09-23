@@ -1,39 +1,20 @@
-/**
- * Cutting a stream into chunks, flattening chunks back to items, sharing one iterator across several
- * consumers, collecting a drain to an array, and prefetching a shared iterator's own chunks ahead of
- * the consumer (`prefetch`, #123) - split out of `chunk.ts` along with `drain.ts` (draining a
- * `MaybeAsyncChunks` stream) and `recut.ts` (re-cutting an already-staged one), re-exported from
- * `chunk.ts` so nothing importing that barrel has to change. `prefetch` lands here rather than a
- * dedicated file: the ticket's own file scope named `share()` as its neighbor, and #133's own split
- * groups real seams, not one file per function - a prefetching helper over a shared iterator is the
- * same "sharing" family `share()` itself is.
- */
+/** Cuts streams into chunks, flattens them back, and shares, prefetches or collects them. */
 
 import type { ChunkerFunction } from "@src/types";
-import { chain, isThenable } from "@src/utils/helpers";
-import { drainSync, type MaybeAsyncChunks } from "@src/utils/drain";
-import { isEncodedChunk, materialize } from "@src/utils/encoded-chunk";
+import { chain } from "@src/utils/helpers";
+import { drainSyncChunks, type MaybeAsyncChunks } from "@src/utils/drain";
 
-/** The `chunkSize`/`size` guard `buildChunkGenerator`, `buildSyncChunkGenerator` and
- * `recut.ts`'s own `recutSyncChunks` each need before doing any real work (#133: was spelled
- * inline 3x, collapsed to this one call). The message stays verbatim -
- * `sync-mode.e2e.test.ts` asserts it.
+/** Refuses a chunk size below 1, for the chunk cutters.
  *
  * `assertPositiveChunkSize(0)` throws `Error("chunkSize must be at least 1")`;
- * `assertPositiveChunkSize(3)` returns, no error. */
+ * `assertPositiveChunkSize(3)` returns. */
 export function assertPositiveChunkSize(size: number): void {
   if (size < 1) {
     throw new Error("chunkSize must be at least 1");
   }
 }
 
-/** The `capacity`/`size` guard every NUMERIC knob shares, labelled so each throws under its own name
- * rather than a generic one. Four call sites: `.buffer(size)`'s deferred branch and its bound branch
- * (#179 - the bound one used to validate through `sizeReduceFunction`, deleted with the fold engine's
- * numeric arm), `.queue(capacity)` (#123), and the constructor's own `chunkSize` (#179).
- *
- * Kept apart from `assertPositiveChunkSize` above: that one's own message is asserted verbatim by
- * `sync-mode.e2e.test.ts` and is never the wording a caller-facing knob owes its user.
+/** Refuses a numeric knob that is not a whole number of at least 1, naming the knob in the error.
  *
  * `assertWholeNumberAtLeastOne("queue capacity", 0)` throws `Error("queue capacity must be a whole
  * number of at least 1")`; `assertWholeNumberAtLeastOne("queue capacity", 3)` returns. */
@@ -44,10 +25,7 @@ export function assertWholeNumberAtLeastOne(label: string, value: number): void 
 }
 
 /**
- * Build a chunking function that breaks an async iterable into chunks of a specified size.
- *
- * @param chunkSize - Maximum number of items per chunk
- * @returns A function that takes an AsyncIterable and yields chunks
+ * Builds a function that cuts an async iterable into chunks of at most `chunkSize` items.
  *
  * @example
  * ```typescript
@@ -75,7 +53,6 @@ export function buildChunkGenerator<T>(chunkSize: number): ChunkerFunction<T> {
       }
     }
 
-    // Yield any remaining items as the final chunk
     if (chunk.length > 0) {
       yield chunk;
     }
@@ -83,77 +60,35 @@ export function buildChunkGenerator<T>(chunkSize: number): ChunkerFunction<T> {
 }
 
 /**
- * Flattens a chunk stream into its items, in order (#39) - the one place a chunk becomes items
- * again for `.buffer()`'s re-cut fallback. Materializes each chunk first (#209): an encoded chunk
- * a dispatched stage left behind is decoded here, since a re-cut needs real items to slice.
+ * Flattens a chunk stream into its items, in order, so `.buffer()` can re-cut it.
  *
- * @example
- * `[...flattenChunks([[1, 2], [3]])]` → `[1, 2, 3]`.
+ * A stream of `[1, 2]` then `[3]` → yields `1`, `2`, `3`.
  */
 export async function* flattenChunks<T>(chunks: AsyncIterable<T[]>): AsyncGenerator<T> {
-  for await (const chunk of chunks) {
-    // `isEncodedChunk` checked synchronously first (#209) - `materialize` is `async`, so awaiting
-    // it costs a Promise even on its own no-op fast path; skipping the call for a real chunk keeps
-    // this generator's per-chunk cost at what it was before the encoded-chunk mechanism existed.
-    yield* isEncodedChunk(chunk) ? await materialize(chunk) : chunk;
-  }
+  for await (const chunk of chunks) yield* chunk;
 }
 
 /**
- * Hands a synchronously-cut chunk stream to a consumer that needs an `AsyncIterable` (#179) - the
- * seam between `buildSyncChunkGenerator` above and the two places a chain is on the async engine
- * while its DATA is not: `fromSource()`'s own forced-async branch over an array, and `.buffer(size)`
- * re-cutting a source a dispatching class pinned async.
- *
- * One `Promise` per CHUNK, where `buildChunkGenerator` over `toAsyncIterable(data)` pays one per
- * ROW twice over - `toAsyncIterable`'s own `Promise.resolve` per pull, then the cutter's `for await`
- * on top. A slot may still be a pending `Promise` (a stage between two `.buffer()` calls widens only
- * its own output), so a thenable is awaited; the loop is hand-rolled so a settled slot costs no extra `await`
- * per chunk than `yield*` over the same slots.
+ * Turns a synchronously-cut chunk stream into an async one, for a chain on the async engine whose
+ * data is in memory. A pending chunk is awaited.
  *
  * `asAsyncChunks([[1, 2], Promise.resolve([3])])` yields `[1, 2]`, then `[3]`.
  */
 export async function* asAsyncChunks<T>(chunks: MaybeAsyncChunks<T>): AsyncGenerator<T[]> {
-  for (const chunk of chunks) yield isThenable(chunk) ? await chunk : chunk;
+  for (const chunk of chunks) yield chunk;
 }
 
 /**
- * `buildChunkGenerator`'s synchronous counterpart (#90) - identical cutting, over an `Iterable`
- * rather than an `AsyncIterable`, so an in-memory source never becomes an async iterator just to be
- * chunked. That per-item conversion, not the per-chunk `Promise.all`, is where most of the old
- * cost sat: a chain with ZERO transform stages still paid it.
+ * `buildChunkGenerator` over a synchronous `Iterable`, so an in-memory source is cut without
+ * becoming async. An array is cut with `slice`.
  *
- * Not a shared implementation with the async one: a `for await` loop and a `for` loop are different
- * statements, and an `async function*` is async even when its input is not - there is no body both
- * can share that stays synchronous for this one.
+ * ⚠ Test `Array.isArray`, never `length`. A string has a `length` too, and `slice` would cut
+ * `"abcd"` into `"ab"` rather than `["a", "b"]`.
  *
- * An ARRAY source takes `slice` instead (#179): the per-item loop below pays the iterator protocol
- * once per row and regrows `chunk` from empty as it fills, where `slice(i, i + chunkSize)` produces
- * the identical chunk in one correctly-sized allocation. Measured over 1,000,000 rows into 1000-row
- * chunks, output asserted identical: 10.80, 10.62, 10.38 ns/row for the per-item loop against 0.37,
- * 0.42, 0.36 for `slice`. `fromSource()` (`src/pipeline.ts`) hands this function the caller's own
- * array unwrapped, so an ordinary `new Pipeline<number>()(items)` takes this arm.
+ * ⚠ Keep `Number.isInteger` on the `slice` arm. `slice` truncates a fractional size, so `2.5` would
+ * cut an array differently from a `Set` holding the same items.
  *
- * ⚠ `Array.isArray` is the test, never a `length` check. A string is iterable AND length-bearing,
- * and a `length`-plus-`slice` guard would hand back STRINGS where every other source yields arrays:
- * `slice` on a string returns a string, so a `Pipeline<string>` over `"abcd"` would produce `"ab"`
- * rather than `["a", "b"]`. The per-item arm rejects nothing - it cuts a string into its characters,
- * which is the shipped behaviour and stays so. Every other `Iterable` - a `Set`, a `Map`, a
- * generator, a caller's own iterable object - keeps the per-item arm, including its own early-stop
- * behaviour: the array arm never touches the iterator protocol at all, so a source's `finally` block
- * has nothing to run there and nothing to close.
- *
- * ⚠ `Number.isInteger` guards the arm too, and is not optional. `slice(i, i + chunkSize)` truncates
- * both bounds where the per-item arm cuts at `length >= chunkSize`, so a fractional size made the
- * two arms disagree on the SAME data: `chunkSize: 2.5` over `[1..7]` cut an array into
- * `[[1,2],[3,4,5],[6,7]]` against a `Set`'s own `[[1,2,3],[4,5,6],[7]]` - one knob, two chunkings,
- * the engine disagreeing with itself (review-caught). A fractional size is incoherent either way and
- * the constructor refuses it now (`Pipeline`'s own `chunkSize` guard, the same one `.buffer(size)`
- * has always had); this arm still checks, because this function is reached from `recut.ts` and from
- * `.buffer()` as well, and an arm that silently re-cuts differently is worse than a slower one.
- *
- * `[...buildSyncChunkGenerator<number>(3)([1, 2, 3, 4, 5, 6, 7])]` → `[[1, 2, 3], [4, 5, 6], [7]]`,
- * by either arm.
+ * `[...buildSyncChunkGenerator<number>(3)([1, 2, 3, 4, 5, 6, 7])]` → `[[1, 2, 3], [4, 5, 6], [7]]`.
  */
 export function buildSyncChunkGenerator<T>(
   chunkSize: number,
@@ -186,19 +121,12 @@ export function buildSyncChunkGenerator<T>(
 }
 
 /**
- * Wraps an existing iterator as an `AsyncIterable` that pulls from that SAME iterator on every
- * `.next()` call. Calling `share()` N times over one iterator and handing each result to its own
- * consumer is free-slot dealing (`ConcurrentPipeline.reduce()`, #62, fans one chunk stream out to
- * `maxConcurrency` independent partitions this way): whichever consumer calls `.next()` next gets
- * the next item, with no dealer, no per-consumer queue and no backpressure mechanism of its own - a
- * slow consumer simply calls `.next()` less often, so the other consumers pick up its slack.
- * Deliberately never delegates `.return()`/`.throw()`: one consumer stopping early (a `for await`
- * `break`) must not close the shared iterator out from under every other consumer still pulling
- * from it.
+ * Lets several consumers pull from one iterator: each item goes to whichever consumer asks next.
+ * `ConcurrentPipeline.reduce()` deals its chunks to its partitions this way.
  *
- * @example
- * 3 consumers sharing one iterator over `[0..8]`, consumer 0 made 30x slower than the other two ->
- * per-consumer `[[0],[1,3,5,7],[2,4,6,8]]`, union 9 of 9 distinct, 0 duplicates.
+ * ⚠ Never forwards `.return()`, so one consumer's `break` does not close the iterator for the rest.
+ *
+ * Two `share(it)` consumers over an iterator of `[0..8]` → each item reaches exactly one of them.
  */
 export function share<T>(iterator: AsyncIterator<T>): AsyncIterable<T> {
   return {
@@ -209,34 +137,12 @@ export function share<T>(iterator: AsyncIterator<T>): AsyncIterable<T> {
 }
 
 /**
- * Prefetches up to `capacity` chunks ahead of the consumer (#123) - an already-cut chunk stream in,
- * the same stream out, only WHEN each chunk is fetched changes. Written as a plain `async function*`
- * deliberately, mirroring `ConcurrentPipeline`'s own `fanOutOrdered` (`src/pipelines/concurrent.ts`)
- * rather than a hand-rolled `AsyncIterable` object: a generator's body does not run at all until its
- * OWN first `.next()` call, which is what makes "the pump starts on the first consumer pull, not at
- * construction" free rather than a flag this function has to track itself. The same guarantee makes
- * concurrent callers safe with NO manual locking - the language serializes concurrent `.next()` calls
- * on one generator instance into one resumption at a time, so `share()`-based fan-out
- * (`ConcurrentPipeline.reduce()`'s own partitioning) can wrap this generator's iterator exactly the
- * way it wraps `_chunks`' own, with the identical no-dealer fairness `share()` already documents.
+ * Fetches up to `capacity` chunks ahead of the consumer, so the source keeps working while the
+ * consumer is busy. The chunks and their order are unchanged. `.queue(capacity)` uses it.
  *
- * `pending` holds exactly `capacity` `upstream.next()` calls at every steady-state point: the first
- * `capacity` are issued before the first chunk is ever yielded, and each `.shift()` is followed by
- * one more `upstream.next()` call, keeping the window full until `upstream` reports done. Every
- * pushed promise gets a throwaway `.catch(() => {})` the instant it is created (the ORIGINAL
- * reference is what `pending` holds and what a later `await` re-throws for real) - `fanOutOrdered`'s
- * own comment explains why: without it, a chunk queued `capacity` deep but never reached because an
- * EARLIER one threw first is an unhandled rejection, not a caught one.
+ * ⚠ Keep it a generator: its body runs on the first pull, so nothing is fetched at construction.
  *
- * No `Promise.race` anywhere: a single async generator source serializes its own internal work
- * regardless of how many `.next()` calls are already in flight, so racing them buys no overlap -
- * proven during #123's own planning. The overlap this function buys comes from PRODUCTION and
- * CONSUMPTION running concurrently (the source keeps working while the consumer processes an
- * earlier chunk), never from concurrent production itself.
- *
- * @example
- * `prefetch(upstream, 3)` over a 100ms/item source feeding a 30ms/item consumer, 5 items: the fully
- * serial baseline (no queue) runs ~671ms; queued, ~539ms - overlap, same 5 outputs, same order.
+ * `prefetch(upstream, 3)` → the same chunks as `upstream`, with up to 3 already requested.
  */
 export async function* prefetch<T>(
   upstream: AsyncIterable<T[]>,
@@ -247,6 +153,7 @@ export async function* prefetch<T>(
 
   const pull = (): void => {
     const next = iterator.next();
+    // ⚠ Marks it handled: a chunk never reached after an earlier throw must not crash the process.
     next.catch(() => {});
     pending.push(next);
   };
@@ -263,23 +170,12 @@ export async function* prefetch<T>(
 }
 
 /**
- * Collects a bound pipeline's items to an array, staying synchronous when the chain is (#90), and
- * stopping early once `limit` items are in hand - the ONE collect every caller shares:
- * `PipelineResult.toArray()`, its `first(n)` (which IS `toArray` with a limit), and `.branch()`,
- * which collects the parent chain before routing. Three copies of the same engine decision before.
+ * Collects a pipeline result's items into an array, stopping once `limit` items are in hand. It
+ * returns a plain array when the chain is synchronous. `.toArray()` and `.first(n)` use it.
  *
- * `syncChunks` is `Pipeline.drainable()`'s own sync view, `null` on the async engine, where `chunks`
- * is read instead.
+ * `syncChunks` is the synchronous chunk view, or `null` on the async engine, where `chunks` is read.
  *
- * The async arm walks CHUNKS, never a flattened item stream (#179). `Pipeline.drainable()`'s own
- * chunk view already arrives in chunks, so flattening it first cost one `await` - and therefore one
- * microtask - per ROW, for data that was never per-row to begin with. Measured on
- * `ConcurrentPipeline` at N=10,000 over an async generator with `.buffer(1000)`, output asserted
- * identical: `.toArray()` fell from 12.009 promises per row to 7.006, which is the source's own
- * floor - an async generator costs 4.000 per row before any package code runs, and `.buffer(size)`
- * a further 3.001.
- *
- * `collectItems(chunksOf([[1, 2], [3]]), noChunks)` → `[1, 2, 3]`, no `Promise` created.
+ * `collectItems([[1, 2], [3]], unused)` → `[1, 2, 3]`; with `limit` 2 → `[1, 2]`. No `Promise`.
  */
 export function collectItems<T>(
   syncChunks: MaybeAsyncChunks<T> | null,
@@ -289,28 +185,25 @@ export function collectItems<T>(
   const results: T[] = [];
   if (syncChunks === null) return collectAsyncChunks(results, limit, chunks);
   return chain(
-    drainSync(syncChunks, (item) => {
-      results.push(item);
-      return limit !== undefined && results.length >= limit;
-    }),
+    drainSyncChunks(syncChunks, (chunk) => takeFrom(chunk, results, limit)),
     () => results,
   );
 }
 
-/** `collectItems`'s async arm, its own function so the caller above stays one expression per
- * engine. The early exit is a `break` out of the `for await`, exactly as the flattened version's
- * was, so the chunk iterator's own `.return()` still runs and a generator source still reaches its
- * `finally`. */
+/** Appends `chunk`'s items to `results`, stopping at `limit`. Returns whether `limit` is reached. */
+function takeFrom<T>(chunk: T[], results: T[], limit: number | undefined): boolean {
+  const take = limit === undefined ? chunk.length : Math.min(chunk.length, limit - results.length);
+  for (let i = 0; i < take; i++) results.push(chunk[i]);
+  return limit !== undefined && results.length >= limit;
+}
+
 async function collectAsyncChunks<T>(
   results: T[],
   limit: number | undefined,
   chunks: () => AsyncIterable<T[]>,
 ): Promise<T[]> {
   for await (const chunk of chunks()) {
-    const take =
-      limit === undefined ? chunk.length : Math.min(chunk.length, limit - results.length);
-    for (let i = 0; i < take; i++) results.push(chunk[i]);
-    if (limit !== undefined && results.length >= limit) break;
+    if (takeFrom(chunk, results, limit)) break;
   }
   return results;
 }

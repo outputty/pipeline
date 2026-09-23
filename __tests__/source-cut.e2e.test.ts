@@ -127,9 +127,9 @@ describe("#179 .buffer(size) cuts by count on all three arms (Done-when 5)", () 
     ]);
   });
 
-  it("leaves .buffer(fn) on the fold engine, DROP and all", async () => {
-    // A per-item callback is what the `Reducer<T[], T>` engine is for, and it keeps it: this case
-    // pins that the numeric split did not take the callback form with it.
+  it("keeps .buffer(fn) deciding per item, DROP and all", async () => {
+    // A per-item callback runs `.buffer(fn)`'s own item loop: this case pins that the numeric split
+    // did not take the callback form with it.
     const out = new Pipeline<number>().buffer((item: number, _ctx, emit) => {
       if (item < 0) return DROP;
       if (item % 3 === 0) {

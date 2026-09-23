@@ -18,7 +18,7 @@ import { Pipeline } from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { SimpleContextManager } from "@src/context/simple";
 import { DROP } from "@src/types";
-import { buildSyncChunkGenerator } from "@src/utils/chunk";
+import { buildSyncChunkGenerator } from "@src/utils/cut";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { HttpPipeline } from "@src/pipelines/http";
 import { ClusterHttpPipeline } from "@src/pipelines/cluster";

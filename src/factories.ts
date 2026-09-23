@@ -1,16 +1,15 @@
 /**
- * Top-level factory functions for building a `Transformer` directly, without the `new Transformer()`
- * constructor's options object. Their own module: `index.ts` is a barrel only — re-exports, zero
- * logic — so these live here rather than inline in it.
+ * Factory functions for building a `Transformer` without the constructor's options object.
  */
 
 import { Transformer } from "./transformer";
 
 /**
- * Create a new sequential Transformer. Chunk-agnostic (#39) - it takes no chunk size; the caller's
- * `Pipeline` decides that via `.buffer(size)`.
+ * Create an identity transformer to chain onto.
  *
- * @returns A new Transformer with sequential execution
+ * @returns An identity `Transformer<T, T>`
+ *
+ * `createTransformer<number>().map((x) => x * 2)` over `[1, 2]` → `[2, 4]`.
  */
 export function createTransformer<T>(): Transformer<T, T> {
   return new Transformer<T, T>({ transform: (chunk) => chunk });

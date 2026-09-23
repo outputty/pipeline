@@ -1,43 +1,35 @@
 /**
- * What calling a `Pipeline` produces (#90): one call's output, over one input.
+ * What calling a `Pipeline` produces: one call's output, over one input. The terminal ops live
+ * here, so one chain serves many inputs: `score(a)` and `score(b)` are two results over one chain.
  *
- * A `Pipeline` holds its input TYPE and no data, so it carries no terminal ops - it cannot be
- * drained without being given something to drain. Calling it pairs the chain with an input and
- * hands back this, which is where `toArray`/`first`/`consume`/`forEach` and both iteration
- * protocols live. The split is what keeps a chain reusable: `score(a)` and `score(b)` are two
- * results over one chain, not two chains.
- *
- * A result is not chainable. `score(rows).transform(...)` is `TS2339` - a chain is composed before
- * the data arrives, never after.
+ * A result is not chainable: `score(rows).transform(...)` is `TS2339`.
  */
 
 import type { Drainable, PipelineMode } from "./types";
 import type { Pipeline, PipelineSource } from "./pipeline";
-import type { MaybeAsyncChunks } from "./utils/chunk";
 import { isThenable } from "./utils/helpers";
-import { collectItems, drainSyncSettled } from "./utils/chunk";
+import { collectItems } from "./utils/cut";
+import { drainSyncSettled, type MaybeAsyncChunks } from "./utils/drain";
 
-/** The pipeline shape a result drains, with the Mode and policy erased - a result is handed its
- * pipeline by `Pipeline`'s own call signature, which has already fixed both. */
+const NOT_SYNC_ITERABLE =
+  "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()";
+
+/** The pipeline shape a result drains, with the Mode erased. */
 type BoundPipeline<T> = Pipeline<T, "sync" | "async", unknown>;
 
 /**
  * One call of a `Pipeline` over one input.
  *
- * Every terminal RE-DRAINS: it re-binds the input to the chain and runs it again. Replayability
- * cannot be detected at runtime - the `src[Symbol.iterator]() === src` test agrees with reality on
- * arrays, `Set`s, strings, custom iterables, generators and `Map.values()`, then reports a
- * `ReadableStream` as replayable when a second drain yields `[]`, and merely running the test locks
- * the stream so the FIRST drain throws. So no detection is attempted: an array or a `Set` re-drains
- * correctly, and a spent generator or stream yields `[]`.
+ * ⚠ Every terminal re-drains the input; replayability is not detectable, so none is attempted. An
+ * array re-drains correctly, and a spent generator or stream yields `[]`.
  *
  * @example
  * `const r = score([1, 2, 3]); r.first(1)` → `[2]`, then `r.toArray()` → `[2, 4, 6]`.
  */
 export class PipelineResult<T, M extends PipelineMode> {
-  /** The chain, still source-less - re-bound to `_input` once per terminal. */
+  /** The chain, run over `_input` once per terminal. */
   private readonly _pipeline: BoundPipeline<unknown>;
-  /** The input this result was called with, kept rather than drained, so a terminal can re-run. */
+  /** The input this result was called with, kept so a terminal can re-run it. */
   private readonly _input: PipelineSource<unknown>;
 
   constructor(pipeline: BoundPipeline<unknown>, input: PipelineSource<unknown>) {
@@ -45,40 +37,22 @@ export class PipelineResult<T, M extends PipelineMode> {
     this._input = input;
   }
 
-  /** Binds the input to the chain and returns the views a terminal drains through. Runs ONCE per
-   * terminal call - which is what makes every terminal re-drain, and equally what stops one from
-   * re-draining twice: each terminal destructures both halves here and threads `chunks` into its own
-   * async arm. Calling it again there ran a user's `.local(build)` callback twice per call.
-   *
-   * Typed `Drainable<T>` (#133) - the SAME shape `Pipeline.drainable()` itself returns, so this
-   * wrapper needs only the cast from `Drainable<unknown>` (this result's own `_pipeline` is bound
-   * to `T = unknown`) to `Drainable<T>`, never a second, independent spelling of its three fields.
-   * `context` goes unread here - only `branch.ts`'s own `runBranch` needs it.
-   *
-   * `materialize` (#209) forwards to `Pipeline.drainable()`'s own knob - `.consume()` passes
-   * `false`, since it reads no item and therefore decodes nothing; every other terminal keeps the
-   * default. */
+  /** ⚠ Call once per terminal and thread both views through: a second call runs a `.local(build)`
+   * callback twice. */
   private drainable(materialize = true): Drainable<T> {
     return this._pipeline.drainable(this._input, materialize) as Drainable<T>;
   }
 
   /**
-   * Iterate the CHUNKS this run produces, rather than its items - the boundary `.buffer(size)`
-   * declared, as the chain actually cut it.
-   *
-   * `Pipeline` used to carry this as its own `[Symbol.asyncIterator]`. With no input on a chain
-   * there is nothing to iterate, so it moved here with the rest of the drains, and the item-wise
-   * `for await` above stays the default: a chunk view is the deliberate ask, never what a plain
-   * loop hands you by accident.
+   * Iterate the chunks this run produces, as `.buffer()` cut them, rather than its items.
    *
    * @example
-   * `for await (const chunk of pipeline.buffer(2).chunks([1, 2, 3]))` yields `[1, 2]`, then `[3]`.
+   * `for await (const chunk of new Pipeline<number>().buffer(2)([1, 2, 3]).chunks())` yields
+   * `[1, 2]`, then `[3]`.
    */
   async *chunks(): AsyncGenerator<T[]> {
-    // Empty chunks are dropped, so the two engines agree on what a consumer sees. A sync fold
-    // cannot guard its own pending yields - emptiness is not knowable before a chunk settles -
-    // so `.buffer(2).transform(t => t.map(async x => x)).reduce(sum, 0)` over `[1..5]` produced
-    // `[[],[],[],[15]]` on a sync source against `[[15]]` on an async one.
+    // ⚠ Empty chunks are dropped, or a sync source yields `[[],[],[],[15]]` where an async one
+    // yields `[[15]]` for the same fold.
     for await (const chunk of this.drainable().chunks()) {
       if (chunk.length > 0) yield chunk;
     }
@@ -107,35 +81,24 @@ export class PipelineResult<T, M extends PipelineMode> {
     return this.collect(n);
   }
 
-  /** Collects up to `limit` items, `undefined` for the whole stream (#90) - `first` IS `toArray`
-   * with an early exit, so the two engines' collect decision is made once here rather than twice
-   * per method. Calls `drainable()` exactly once, like every other terminal. */
   private collect(limit: number | undefined): M extends "sync" ? T[] : Promise<T[]> {
     const { syncChunks, chunks } = this.drainable();
     return collectItems(syncChunks, chunks, limit) as M extends "sync" ? T[] : Promise<T[]>;
   }
 
   /**
-   * Run the chain for its side effects, collecting nothing - and reading no item, so it decodes
-   * none (#209): every stage still runs, but a dispatched reply an upstream stage left encoded is
-   * never materialized, unlike `forEach(() => {})`, which drains through the materialized view.
+   * Run the chain for its side effects, collecting nothing.
    *
    * @example
    * `score([1, 2, 3]).consume()` → `undefined`, every stage having run.
    */
   consume(): M extends "sync" ? void : Promise<void> {
-    // Not `forEach(() => {})` (#209): that reads through the materialized view, so a no-op
-    // callback still paid every stage's own decode. `drainable(false)` skips it - `.consume()`
-    // reads no item, so it decodes nothing, whether or not an upstream stage left one encoded.
     const { syncChunks, chunks } = this.drainable(false);
     return (
       syncChunks !== null ? drainSyncSettled(syncChunks, () => {}) : this.consumeAsync(chunks)
     ) as M extends "sync" ? void : Promise<void>;
   }
 
-  /** `.consume()`'s own async arm - drains every CHUNK for its side effects, decoding none of
-   * them: a sync chain never dispatches and so never carries an encoded one, but the async arm
-   * genuinely can, and this is the one terminal that must never call `materialize()` on it. */
   private async consumeAsync(chunks: () => AsyncIterable<T[]>): Promise<void> {
     for await (const _chunk of chunks()) {
       // Every stage already ran to produce this chunk; there is nothing left to do with it.
@@ -145,9 +108,8 @@ export class PipelineResult<T, M extends PipelineMode> {
   /**
    * Call `fn` for each item, in order.
    *
-   * The `Promise<void>` arm is declared FIRST because the void-return rule makes an `async` callback
-   * assignable to `(item: T) => void`: a `void` arm listed first would swallow it, type the call
-   * `void`, and leave every callback fired and undrained.
+   * ⚠ The `Promise<void>` overload comes first: listed second, a `void` overload swallows an async
+   * callback and types the call `void`, leaving it undrained.
    *
    * @example
    * `score([1, 2, 3]).forEach(write)` → `undefined`, `write` called with `2`, `4`, `6`.
@@ -156,18 +118,11 @@ export class PipelineResult<T, M extends PipelineMode> {
   forEach(fn: (item: T) => void): M extends "sync" ? void : Promise<void>;
   forEach(fn: (item: T) => void | Promise<void>): void | Promise<void> {
     const { syncChunks, chunks } = this.drainable();
-    // Each callback's own return is settled before the next item, so a `forEach` that turns out to
-    // be async still runs strictly in order and still reports its own failures.
+    // Each callback settles before the next item, so an async `forEach` runs in order and reports
+    // its failures.
     return syncChunks !== null ? drainSyncSettled(syncChunks, fn) : this.forEachAsync(fn, chunks);
   }
 
-  /** `forEach`'s async arm, which settles each callback in turn (#179).
-   *
-   * Walks CHUNKS and runs a synchronous inner loop over each, rather than draining a flattened item
-   * stream: the flattened form paid one `await` - one microtask - per row just to reach the next
-   * item, and a second for the callback's own return. Measured on `ConcurrentPipeline` at N=10,000
-   * over an async generator with `.buffer(1000)`, output asserted identical: 14.009 promises per row
-   * before, 7.008 after, which is the same figure `.toArray()` reads on the identical chain. */
   private async forEachAsync(
     fn: (item: T) => void | Promise<void>,
     chunks: () => AsyncIterable<T[]>,
@@ -187,41 +142,27 @@ export class PipelineResult<T, M extends PipelineMode> {
   [Symbol.iterator](): M extends "sync" ? Iterator<T> : never {
     const { syncChunks } = this.drainable();
     if (syncChunks === null) {
-      throw new TypeError(
-        "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
-      );
+      throw new TypeError(NOT_SYNC_ITERABLE);
     }
     return syncItems(syncChunks) as unknown as M extends "sync" ? Iterator<T> : never;
   }
 
   /**
-   * Iterate the ITEMS asynchronously. Present on every result, sync ones included, so one loop
+   * Iterate the items asynchronously. Present on every result, sync ones included, so one loop
    * shape reads any chain.
-   *
-   * ⚠ This yields items where `Pipeline`'s own `[Symbol.asyncIterator]` yields CHUNKS. The
-   * divergence is deliberate: on a result, `[...r]` yields items and `forEach` receives items, so a
-   * `for await` handing back an array would be the one loop out of three that reads differently.
    *
    * @example
    * `for await (const x of score([1, 2, 3]))` yields `2`, `4`, `6`.
    */
   async *[Symbol.asyncIterator](): AsyncGenerator<T> {
-    // Yields each chunk's items by synchronous delegation (#179), rather than reading a flattened
-    // item stream: `yield* chunk` over a real array suspends this generator per item with no second
-    // async generator underneath it to pull through.
     for await (const chunk of this.drainable().chunks()) {
       yield* chunk;
     }
   }
 }
 
-/** Calls `fn` for each of one chunk's items, settling a genuinely thenable return before moving on
- * (#179) - `forEachAsync`'s own inner loop, its own function so that method stays within this
- * repo's `max-depth: 2`.
- *
- * `isThenable` rather than a bare `await`: awaiting a plain value allocates a `Promise` too, once
- * per row, so a synchronous callback on an async chain paid for asynchrony it never used. Order is
- * unchanged either way - a thenable is still settled before the next item runs. */
+/** ⚠ `isThenable`, not a bare `await`: awaiting a plain value allocates a `Promise` per row for a
+ * synchronous callback. */
 async function settleChunk<T>(chunk: T[], fn: (item: T) => void | Promise<void>): Promise<void> {
   for (let i = 0; i < chunk.length; i++) {
     const settled = fn(chunk[i]);
@@ -230,25 +171,15 @@ async function settleChunk<T>(chunk: T[], fn: (item: T) => void | Promise<void>)
 }
 
 /**
- * A `"sync"` result's items, yielded lazily (#90) - what `[Symbol.iterator]` hands back.
- *
- * Lazy, not `toArray()[Symbol.iterator]()`: a `for…of` with a `break` used to run the whole chain
- * first and leave the source open, where `.first(n)` over the same chain stopped early and closed
- * it - so one object's two iteration protocols disagreed, the async one having been lazy all along.
- * A generator's own `return()` runs its `finally`, which closes the chunk iterator exactly as an
- * early `.first(n)` does.
- *
- * A pending chunk throws rather than blocking: the type says `"sync"`, so reaching one means an
- * `any` boundary let an async callback through, and there is nothing to hand back item by item.
+ * ⚠ Lazy, not `toArray()[Symbol.iterator]()`: the eager form runs the whole chain before a `break`
+ * and leaves the source open. A pending chunk throws, since there is no item to hand back.
  */
 function* syncItems<T>(chunks: MaybeAsyncChunks<T>): Generator<T> {
   for (const chunk of chunks) {
     if (isThenable(chunk)) {
       // Nothing else will await it, and an abandoned rejection is fatal under Node's default.
       void Promise.resolve(chunk).catch(() => {});
-      throw new TypeError(
-        "an async pipeline result is not a sync iterable - use `for await`, or await .toArray()",
-      );
+      throw new TypeError(NOT_SYNC_ITERABLE);
     }
     yield* chunk;
   }

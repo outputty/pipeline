@@ -14,6 +14,7 @@ import { JsonCodec, type Codec } from "../src";
 import { WebSocketPipeline, type PipelineSocket } from "../src/websocket";
 import { withWebSocketServer } from "./helpers/websocket";
 import { FIXTURE_TIMEOUT, runFixtureJson } from "./helpers/fixtures";
+import { chunksOf } from "./helpers/sequences";
 // Done-when 7's own compile-time probe (below): a real named import, not a `typeof import()`
 // namespace access, so its own `@ts-expect-error` pins the ACTUAL diagnostic that shape produces.
 // @ts-expect-error - jsonCodec is deleted (BREAKING, #209); tsc: TS2724 '"../src"' has no exported member named 'jsonCodec'. Did you mean 'JsonCodec'?
@@ -133,7 +134,7 @@ describe("#209 review: an emptied chunk is never sent to a dispatched reduce eit
   // Same shape as "an emptied chunk is never re-dispatched to the next stage" (Done-when 3), but for
   // the reduce pump specifically (`WebSocketPipeline.reduceWork()`'s own dispatch loop) - the
   // `isEncodedChunk(chunk) && chunk.rows === 0` skip this review added there, mirroring
-  // `ConcurrentPipeline.apply()`'s existing one for a plain dispatched transform.
+  // `WebSocketPipeline.stageWork()`'s own one for a plain dispatched transform.
   it("output [0], the server decodes only 8 items - the empty chunk never reaches the fold", async () => {
     const serverCodec = new CountingCodec(new JsonCodec());
     const worker = makeWorker(
@@ -238,6 +239,49 @@ describe("#209 branch after one dispatched stage matches planning spike 2's own 
   });
 });
 
+describe("a .buffer() recut directly after a dispatched stage decodes its encoded replies", () => {
+  // No `.local()` or `.tap()` sits between the dispatched stage and the recut, so the recut itself
+  // is the only site that can decode the replies it flattens.
+  const worker = makeWorker((t) =>
+    t
+      .transform((tr) => tr.map((x: number) => x * 2))
+      .transform((tr) => tr.map((x: number) => x + 1)),
+  );
+
+  it(".buffer(3) recuts by count", async () => {
+    await withWebSocketServer(worker, async (connect) => {
+      const result = new WebSocketPipeline<number>({ connect })
+        .buffer(1)
+        .transform((t) => t.map((x: number) => x * 2))
+        .buffer(3)
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(await chunksOf(result)).toEqual([
+        [3, 5, 7],
+        [9, 11, 13],
+        [15, 17],
+      ]);
+    });
+  });
+
+  it(".buffer(fn) recuts per item", async () => {
+    await withWebSocketServer(worker, async (connect) => {
+      const result = new WebSocketPipeline<number>({ connect })
+        .buffer(1)
+        .transform((t) => t.map((x: number) => x * 2))
+        .buffer((x: number, _ctx, emit) => {
+          if (x % 6 === 0) emit();
+          return x;
+        })
+        .transform((t) => t.map((x: number) => x + 1))([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(await chunksOf(result)).toEqual([
+        [3, 5],
+        [7, 9, 11],
+        [13, 15, 17],
+      ]);
+    });
+  });
+});
+
 describe("#209 a pipeline with no codec still encodes JSON (Done-when 6)", () => {
   it("wire payload bytes equal a plain TextEncoder/JSON.stringify of the chunk", async () => {
     const inner = new JsonCodec();
@@ -265,7 +309,7 @@ describe("#209 review: a codec decode failure bypasses Pipeline.onError() (pinni
   // `stageWork()`'s onFrame decoded at dispatch time and a throwing `codec.decode()` rejected
   // `runStageChunk`'s own promise, which `Pipeline.onError()`'s documented per-chunk drop-and-continue
   // contract (Language, CLAUDE.md) caught like any other row failure. Now decode is deferred to
-  // `materialize()`, called outside `runStageChunk` (`drainable()`, `.local()`'s seed, `flattenChunks`),
+  // `materialize()`, called outside `runStageChunk` (`drainable()`, `.local()`'s seed, the `.buffer()` recut),
   // so `.onError()` is never consulted - the whole terminal rejects instead of dropping the one chunk.
   it("a stage failure IS dropped by onError (control) - a decode failure is NOT", async () => {
     const stageWorker = makeWorker((t) =>

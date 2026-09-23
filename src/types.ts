@@ -1,28 +1,18 @@
 /**
- * Core type definitions for @outputty/pipeline
- *
- * Migrated from laygo-python with async-first design.
+ * Core type definitions for @outputty/pipeline.
  */
 
-import type { MaybeAsyncChunks } from "./utils/chunk";
+import type { MaybeAsyncChunks } from "./utils/drain";
 
 /**
- * Default chunk size for processing.
+ * Items per chunk when a chain never calls `.buffer(size)`.
  */
 export const DEFAULT_CHUNK_SIZE = 1000;
 
-/** How long with zero in-flight dispatches before workers are killed and the process can exit on
- * its own (Done-when 3). Not a caller-facing option - the ticket names the mechanism (an unref'd
- * idle timer), not a tuned value; a re-fork after a real idle gap costs ~50-60ms (architecture.md's
- * own measurement), which this window is comfortably larger than for back-to-back dispatches.
- * Shared by `ClusterHttpPipeline` and `ClusterPipeline`, which cannot import each other's file. */
-export const IDLE_KILL_MS = 500;
-
 /**
- * Whether a chain runs synchronously, and therefore whether its terminal ops return a value or a
- * `Promise` (#90). `"unset"` is the ORDINARY state of a composed chain: nothing about it is async
- * yet, and either an async callback or an async input decides otherwise later. Composing ahead of
- * the data is the normal case, so nothing refuses an `"unset"` receiver.
+ * Whether a chain runs synchronously, and so whether its terminal ops return a value or a
+ * `Promise`. `"unset"` is the ordinary state of a composed chain: an async callback or an async
+ * input can still decide it.
  *
  * `new Pipeline<number>()` is `"unset"`; calling it with an array keeps that, an `AsyncIterable`
  * widens it, and a single `Promise`-returning callback anywhere in the chain makes it `"async"`.
@@ -30,41 +20,18 @@ export const IDLE_KILL_MS = 500;
 export type PipelineMode = "unset" | "sync" | "async";
 
 /**
- * What a `Pipeline` class does to an input's own shape (#90). `"shape"` keeps it, so an array is
- * `"sync"`; `"async"` overrides it, which is every dispatching class - `ConcurrentPipeline`,
- * `HttpPipeline` and `ClusterPipeline` all exist for I/O-bound work and have no synchronous case.
- *
- * A RUNTIME value only, read by `sourcePolicy()`. It was also a type parameter on `Pipeline`, with
- * an `AssignMode<P, S>` operator applying it on top of every stage's own `JoinMode` - deleted, and
- * the reason is worth recording because the parameter outlived it twice over. Its stated reason was
- * that a subclass's `.from()` override had to be a narrowing of the base's; `.from()` went with
- * this ticket. What it was ACTUALLY still doing was collapsing `JoinMode<M, M2>` to the literal
- * `"async"` on a dispatching class, because `JoinMode` tested `S` first and so never reduced while
- * `M2` was abstract - the subclass's own narrowing overrides then failed `TS2416`, nine of them.
- * `JoinMode` testing `M` first (below) short-circuits on the concrete `"async"` those classes pin,
- * which is the same collapse one level up, with no parameter to carry.
+ * What a class does to an input's shape: `"shape"` keeps it (an array runs `"sync"`), `"async"`
+ * forces async. A runtime value only, read by `sourcePolicy()`.
  */
 export type SourcePolicy = "shape" | "async";
 
 /**
- * The Mode a stage produces from the chain's own Mode `M` and the stage's own Mode `S` (#90): a
- * stage runs synchronously only when the chain reaching it already does, since one asynchronous
- * half defers everything after it.
+ * The Mode a stage produces from the chain's Mode `M` and the stage's Mode `S`. One async half makes
+ * everything after it async; an `"unset"` stage leaves a `"sync"` chain undecided.
  *
- * `M` is tested FIRST, and deliberately: a dispatching class pins `M` to the literal `"async"`, so
- * `JoinMode<"async", M2>` reduces immediately even where `M2` is still abstract. Testing `S` first
- * gives the identical answer at every concrete instantiation, but leaves the conditional deferred
- * inside a generic scope - which is what made the three dispatching classes need a whole extra type
- * parameter to state what this line now states.
- *
- * `"unset"` is the source-less chain, which the callable shape makes the ordinary case: a chain is
- * composed before its input exists, so a sync stage leaves the decision open for the input to make,
- * while ONE async stage decides it whatever the input turns out to be.
- *
- * `S` may itself be `"unset"`, for a `.local()` region composed before any input. The two arms that
- * produces are deliberately asymmetric: an undecided stage leaves a `"sync"` chain undecided, since
- * the input can still make it either; it leaves an `"async"` chain async, since one asynchronous
- * half has already deferred everything after it whatever the region turns out to be.
+ * ⚠ `M` is tested first so a class pinning `M` to `"async"` reduces while `S` is still abstract.
+ * Testing `S` first gives the same concrete answers but stays deferred in a generic scope. Do not
+ * reorder.
  *
  * `JoinMode<"sync", "sync">` → `"sync"`. `JoinMode<"async", "sync">` → `"async"`.
  * `JoinMode<"unset", "sync">` → `"unset"`. `JoinMode<"unset", "async">` → `"async"`.
@@ -81,14 +48,11 @@ export type JoinMode<M extends PipelineMode, S extends PipelineMode> = M extends
       : "unset";
 
 /**
- * The Mode the seed `Transformer` inside `.transform()` starts at, for a chain whose own Mode is
- * `M` (#90). A source-less chain is provisionally synchronous: nothing about it is async yet, and
- * either an async callback or an async input decides otherwise later.
+ * The Mode the seed `Transformer` inside `.transform()` starts at, for a chain in Mode `M`. An
+ * undecided chain starts synchronous.
  *
- * Written as a conditional rather than the intersection `M & ("sync" | "async")` that preceded it.
- * That intersection is `never` for `"unset"`, which made the seed's Mode `never`, the callback's
- * own `M2` infer as `never`, and every source-less `.transform()` return `Pipeline<U, never, …>` -
- * a chain that then typed every terminal `never` and accepted nothing.
+ * ⚠ Not the intersection `M & ("sync" | "async")`: that is `never` for `"unset"` and types every
+ * terminal `never`.
  *
  * `SeedMode<"unset">` → `"sync"`. `SeedMode<"sync">` → `"sync"`. `SeedMode<"async">` → `"async"`.
  */
@@ -97,33 +61,20 @@ export type SeedMode<M extends PipelineMode> = M extends "async" ? "async" : "sy
 /**
  * A pipeline callback: maps `item` to `T` (or `Promise<T>`), with an optional shared `ctx`.
  *
- * ONE signature, not a union of `(item)` / `(item, ctx)` arms — TypeScript will not contextually
- * type a parameter against a union of function types, so a union arm makes an un-annotated
- * `.map((o) => …)` callback an implicit `any`. Declaring `ctx` in the single signature keeps a
- * 1-arg caller valid by arity flexibility (fewer params is assignable) while restoring inference of
- * `item`. `isContextAware` (`./utils/helpers.ts`) reads `fn.length` at runtime to decide whether to
- * pass `ctx`.
+ * ⚠ One signature, not a union of `(item)` / `(item, ctx)` arms: a union makes an un-annotated
+ * `.map((o) => …)` callback's `o` an implicit `any`.
  *
  * `(o) => o.total` and `(o, ctx) => ctx.get("k")` both satisfy `PipelineFunction<Order, number>`.
  */
 export type PipelineFunction<Out, T> = (item: Out, ctx: IContextManager) => T | Promise<T>;
 
 /**
- * A pipeline reduce callback: folds `item` into `acc`, with an optional shared `ctx`, and can push a
- * value downstream mid-fold via `emit` (#45) — `emit` is FOURTH, so `ctx` keeps arity 3, matching
- * `PipelineFunction`'s own `ctx` slot (the arity-sniffing `isContextAwareReduce` this comment used to
- * reference is gone: every caller now always passes all four arguments, so no branch on `fn.length`
- * is needed). ONE signature for the same reason as `PipelineFunction` above — a union of arities
- * would block contextual inference and make `acc`/`item` implicit `any` in an un-annotated
- * `.reduce((acc, x) => …)`.
+ * A reduce callback: folds `item` into `acc`, with an optional shared `ctx`, and can push a value
+ * downstream mid-fold through `emit`. `Transformer.reduce` folds one chunk; `Pipeline.reduce` folds
+ * every chunk.
  *
- * `Transformer.reduce(fn, initial)` folds the ONE chunk it receives and keeps no state between
- * chunks; `Pipeline.reduce(fn, initial)` folds EVERY chunk the pipeline produces, the only place
- * cross-chunk state lives (`ConcurrentPipeline.reduce(fn, initial)` is the one override that always
- * dispatches it - `.local(build)` (#61) is what keeps it in-process instead, the base `Pipeline`
- * never gains that override). Both call `fn` with all four arguments regardless of its declared
- * arity — JS ignores the extras, so `(acc, x, emit) => …` silently receives `ctx` in `emit`'s slot and
- * throws "emit is not a function" on the first call; write `(acc, x, _ctx, emit)`.
+ * ⚠ `fn` always receives all four arguments, so `(acc, x, emit) => …` gets `ctx` in `emit`'s slot
+ * and throws "emit is not a function". Write `(acc, x, _ctx, emit)`.
  *
  * `(acc, x) => acc + x` and `(acc, x, ctx, emit) => { acc += x; if (acc >= 6) { emit(acc); return 0;
  * } return acc; }` both satisfy it.
@@ -136,25 +87,19 @@ export type ReduceFunction<U, Out> = (
 ) => U | Promise<U>;
 
 /**
- * The sentinel a `RowErrorHandler` returns to remove its row from the output entirely (#78) - a
- * `unique symbol`, never a string or `null`, so `undefined` stays an ordinary value a handler may
- * legitimately return (a map to `undefined` is not the same as dropping the row). Every site that
- * reads a handler's return tests it with `!== DROP`, never a truthiness check.
+ * The value a `RowErrorHandler` returns to remove its row from the output. A symbol, so `undefined`
+ * stays an ordinary value a handler may return.
+ *
+ * `.onError(() => DROP).map(parseStrict)` over `["a", "3"]` → `[3]`.
  */
 export const DROP: unique symbol = Symbol("DROP");
 
 /**
- * The ROW handler (#78; replaces #40's chunk-level notification contract entirely) - one plain
- * function, may be async, registered via `Transformer.onError(fn)`. `item` is `unknown` because one
- * handler covers every element-wise link in a chain regardless of that link's own item type
- * (`.map()`, `.filter()`, `.flatMap()`, `.tap(fn)`, `Transformer.reduce()`'s fold step); its return
- * is unchecked for the same reason - inherent to the design, not a gap.
+ * The row handler `Transformer.onError(fn)` registers; may be async. `item` is `unknown` because one
+ * handler covers every element-wise link, each at its own item type.
  *
- * Returning a value puts that value in the row's place; returning `DROP` removes the row; throwing
- * (or returning a rejected `Promise`) escalates past the row to the CHUNK, reaching
- * `PipelineErrorHandler` (below) instead. The return type is bare `unknown` (#133) - `unknown |
- * typeof DROP | Promise<unknown | typeof DROP>` is compiler-identical, since `unknown` already
- * absorbs every other arm of a union it appears in.
+ * Returning a value puts it in the row's place, and returning `DROP` removes the row. Throwing fails
+ * the whole chunk, which reaches `PipelineErrorHandler`.
  *
  * `(item, error, ctx) => (error.message.includes("Invalid") ? DROP : -1)` recovers a bad row to
  * `-1` and drops anything else that fails.
@@ -163,12 +108,10 @@ export const DROP: unique symbol = Symbol("DROP");
 export type RowErrorHandler = (item: unknown, error: Error, ctx: IContextManager) => unknown;
 
 /**
- * The RUN handler (#78), registered via `Pipeline.onError(fn)` - position-DEPENDENT, unlike
- * `RowErrorHandler`: it must be set before the `.transform()`/`.apply()` call whose chunk failures
- * it should catch, since it reaches a stage only through that stage's own dispatch (`Pipeline.apply()`
- * threads it into `Transformer.process()`, `ConcurrentPipeline.apply()` reads it directly off `this`).
- * Returning drops the failing CHUNK and the run continues to the next one; throwing stops the run,
- * rejecting with whatever it throws.
+ * The run handler `Pipeline.onError(fn)` registers. Returning drops the failing chunk and the run
+ * continues; throwing stops the run with that error.
+ *
+ * ⚠ Position-dependent, unlike `RowErrorHandler`: it catches only stages added after it.
  *
  * `(error, ctx) => console.warn(error.message)` logs and continues; `(error) => { throw error; }`
  * makes every chunk failure fatal, same as no handler at all.
@@ -176,24 +119,19 @@ export type RowErrorHandler = (item: unknown, error: Error, ctx: IContextManager
 export type PipelineErrorHandler = (error: Error, ctx: IContextManager) => void;
 
 /**
- * Carries a chain's row handler down through a composed `InternalTransformer` call (#78) -
- * `Transformer.runnable()` builds it once, reading `this.rowHandler` off the FINAL transformer, and
- * `pipe()` forwards the same instance to every link underneath. A link with no `run.rowHandler` set
- * runs its pre-#78 code path unchanged - the seam costs nothing until a handler is registered.
+ * The row handler a composed chain's links read while they run. `Transformer.runnable()` builds it.
+ *
+ * `{ rowHandler: () => DROP }` → every link of that run drops a failing row.
  */
 export interface RunScope {
   rowHandler?: RowErrorHandler;
 }
 
 /**
- * Internal transformer function that processes chunks.
+ * One chunk-transform step: a chunk in, the next chunk out, plain or as a `Promise`. `run` carries
+ * the row handler; a standalone caller omits it.
  *
- * Supports both synchronous and asynchronous transformers.
- * When used with execution strategies, Promise results are automatically awaited.
- *
- * `run` is optional and forwarded by `pipe()` alone (#78) - a caller driving a `Transformer`
- * standalone via `.process()` never has to supply it; `Transformer.runnable()` is what builds it
- * from `this.rowHandler` before the top of the chain is ever called.
+ * `(chunk) => chunk.map((x) => x * 2)` over `[1, 2, 3]` → `[2, 4, 6]`.
  */
 export type InternalTransformer<In, Out> = (
   chunk: In[],
@@ -202,28 +140,18 @@ export type InternalTransformer<In, Out> = (
 ) => Out[] | Promise<Out[]>;
 
 /**
- * Chunker function type - breaks an async iterable into chunks.
+ * Breaks an async iterable into chunks.
  */
 export type ChunkerFunction<T> = (data: AsyncIterable<T>) => AsyncGenerator<T[]>;
 
 /**
- * `.buffer(fn)`'s own callback (#88) - decides the chunk boundary per item, in place of
- * `ChunkerFunction`'s whole-stream cut. `item` is folded into a `T[]` pending array the framework
- * owns and never hands to `fn`; `emit()` takes no value because there is nothing to pass - it flushes
- * whatever is currently pending and resets it to `[]`. Returning a value appends it to the
- * (possibly just-reset) pending array; returning `DROP` skips the item entirely, the same sentinel
- * `RowErrorHandler` already uses to mean "no row here." `bufferReduceFunction`
- * (`src/utils/reduce.ts`) is the adapter from this type onto the `Reducer<T[], T>` class
- * `Pipeline.reduce()` already uses.
+ * `.buffer(fn)`'s callback: decides the chunk boundary per item. `emit()` closes the pending chunk.
+ * Returning a value appends it to the pending chunk; returning `DROP` skips the item.
  *
- * ⚠ `.buffer(size)` is NOT this mechanism, since #179. It ran on the same fold engine, configured
- * with an identity `fn` and a framework-side auto-flush at `pending.length >= size`, and now cuts by
- * count through the ordinary chunk cutters instead: a fold engine buys a per-item decision, which a
- * count never makes, and charged a per-item closure call plus an array-mutating accumulator for it.
+ * ⚠ `.buffer(size)` cuts by count and does not run through this callback.
  *
  * `(item, ctx, emit) => (item.ts - windowStart >= FIVE_MINUTES ? (emit(), windowStart = item.ts, item)
- * : item)` cuts a chunk boundary every time an item's own timestamp crosses a five-minute window,
- * the real chunk boundary `.tap()` observes in `product.md`'s own example.
+ * : item)` closes a chunk each time an item's timestamp crosses a five-minute window.
  */
 export type BufferFunction<T> = (
   item: T,
@@ -260,30 +188,25 @@ export interface IContextManager {
 }
 
 /**
- * Options for creating a Transformer (#133: absorbs what `transformer.ts`'s own, unexported
- * `TransformerConstructorOptions` used to wrap this in - the two never had a real boundary between
- * them, since a caller passing `TransformerOptions` to `new Transformer()` could already set
- * `rowHandler` structurally, wrapper or not). `rowHandler` is set internally, by `.onError(fn)`'s
- * own copy-on-write - a caller constructs a `Transformer` from `{ transform }` alone in practice.
+ * Options for `new Transformer()`. A caller passes `transform`; `.onError(fn)` sets `rowHandler`.
+ *
+ * `{ transform: (chunk) => chunk.map((x) => x * 2) }` → a transformer that doubles each item.
  */
 export interface TransformerOptions<In, Out> {
   /**
-   * Initial transformer function.
+   * The chunk transform this transformer starts from.
    */
   transform?: InternalTransformer<In, Out>;
-  /** The row handler `.onError(fn)` installs; see `RowErrorHandler` above. */
+  /** The row handler `.onError(fn)` installs. */
   rowHandler?: RowErrorHandler;
 }
 
 /**
- * A stage's registered-transform table (#133) - `chunkTransforms`/`reduceStages` spelled inline 6x
- * across `pipeline.ts`'s own copy-on-write call sites and `pipelines/http.ts`'s registry lookup
- * before this. `ChunkTransform`/`ReduceStage` live here rather than in `pipeline.ts` because this
- * type, like `ReduceWork` below, is shared across `pipeline.ts` and every `pipelines/*.ts` dispatch
- * override.
+ * A chain's registered stages, by index: the per-chunk transforms and the reduce stages. A
+ * dispatching class's serving side looks a stage up here.
  *
- * `{ chunkTransforms: [mapStage, filterStage], reduceStages: new Map() }` → the table a two-stage
- * `.transform((t) => t.map(f).filter(g))` chain carries between copy-on-write calls.
+ * `{ chunkTransforms: [stage0], reduceStages: new Map() }` → the table for
+ * `.transform((t) => t.map(f).filter(g))`, which is one stage.
  */
 export interface StageRegistries {
   chunkTransforms: ChunkTransform[];
@@ -291,9 +214,7 @@ export interface StageRegistries {
 }
 
 /**
- * A chunk-wise transform function: takes one chunk (array) and produces the next chunk (array),
- * optionally reading/writing the shared context (#17, relocated from `pipeline.ts` by #133 so
- * `StageRegistries` above can reference it with no import cycle).
+ * One registered per-chunk stage: a chunk in, the next chunk out, with the shared context.
  *
  * `(chunk, ctx) => chunk.map((x) => x * 2)` over `[1, 2, 3]` → `[2, 4, 6]`.
  */
@@ -302,42 +223,33 @@ export type ChunkTransform = (
   ctx: IContextManager,
 ) => unknown[] | Promise<unknown[]>;
 
-/** A registered reduce stage's own definition (relocated from `pipeline.ts` by #133, same reason as
- * `ChunkTransform` above) - `pushReduceStage()` (`pipeline.ts`) is the one place that builds one,
- * `HttpPipeline.fetch()` (#45 L5) the one place that reads one back to serve `/reduce/<n>`. Untyped
- * on `U`/`T` (kept as `unknown`) since a `Pipeline`'s own map holds reduce stages of every type a
- * chain has ever registered, not just its current `T`.
+/** One registered reduce stage: its fold and its seed. Untyped because one registry holds reduce
+ * stages of every item type the chain carries.
  *
- * `{ fn: (acc, x) => acc + x, initial: 0 }` → the stage `HttpPipeline.fetch()` looks up to serve
- * `/reduce/<n>` for a chain built as `.reduce((acc, x) => acc + x, 0)`. */
+ * `.reduce((acc, x) => acc + x, 0)` → `{ fn: (acc, x) => acc + x, initial: 0 }`. */
 export interface ReduceStage<U = unknown, T = unknown> {
   fn: ReduceFunction<U, T>;
   initial: U;
 }
 
 /**
- * A dispatching class's own dispatched-reduce shape (#133) - spelled inline 3x today
- * (`pipelines/concurrent.ts`, `http.ts`, `cluster.ts`): the per-class override of WHERE a reduce
- * stage's fold actually runs, called once and returning a closure `ConcurrentPipeline.reduce()`
- * calls `maxConcurrency` times, each its own partition.
+ * Where a dispatching class runs one partition of a reduce stage: a chunk stream in, the fold's
+ * values out. `ConcurrentPipeline.reduce()` calls it once per partition.
  *
- * `(chunks, ctx) => foldEachPartition(chunks, ctx)` - the closure `reduceWork()` returns, called
- * once per partition, each folding its own `share()` view of the one shared chunk stream.
+ * `(chunks, ctx) => …` over one partition's chunks → that partition's folded values.
  */
 export type ReduceWork<T, U> = (
   chunks: AsyncIterable<T[]>,
   ctx: IContextManager,
 ) => AsyncGenerator<U[]>;
 
-/** The two verbs a dispatched stage's route names (#133) - spelled inline 4x across `pipelines/
- * http.ts` and `cluster.ts` before this: `/transform/<n>` for a per-chunk stage, `/reduce/<n>` for a
+/** The verb a dispatched route names: `/transform/<n>` for a per-chunk stage, `/reduce/<n>` for a
  * fold.
  *
  * `"transform"` → the verb in `/transform/0`; `"reduce"` → the verb in `/reduce/0`. */
 export type RouteVerb = "transform" | "reduce";
 
-/** A parsed dispatch route - what `HttpPipeline.fetch()`'s own path-matching produces, and
- * `routePath()` builds the string form of (#133).
+/** A parsed dispatch route. `routePath()` builds its string form.
  *
  * `routePath("transform", 0)` → `"/transform/0"`; parsing it back →
  * `{ trail: null, verb: "transform", index: 0 }`. */
@@ -347,31 +259,18 @@ export interface StageRoute {
   index: number;
 }
 
-/** A value tagged with the id of the partition or source that produced it (#133) - unifies
- * `pipelines/concurrent.ts`'s own `TaggedResult<U>` (`= Tagged<U[]>`) with the inline
- * `{ id: number; result: IteratorResult<U[]> }` shape `share()`'s racer already matched.
+/** A served route's stage, or the message a transport answers an unknown one with.
  *
- * `{ id: 2, result: [4, 5, 6] }` → partition 2's own chunk, tagged so `Promise.race` over every
- * in-flight partition can tell which one just settled. */
-export interface Tagged<R> {
-  id: number;
-  result: R;
-}
+ * A route naming stage 9 of a two-stage chain →
+ * `{ ok: false, error: "unknown stage 9; this deployment serves 0..1" }`. */
+export type StageLookup<S> = { ok: true; stage: S } | { ok: false; error: string };
 
 /**
- * The three views a terminal op or a `.branch()` arm drains a bound chain through (#133) - unifies
- * `Pipeline.drainable()`'s own return shape (`pipeline.ts`), `PipelineResult`'s private re-spelling
- * of the same fields cast through it (`result.ts`), and `BranchOwner`'s own structural subset
- * (`branch.ts`). `chunks` is a THUNK, not the stream itself - each terminal calls
- * `Pipeline.drainable()` exactly once and threads the thunk into its own sync/async arm, so
- * building the stream is deferred to whichever arm actually runs.
+ * The views a terminal op or `.branch()` drains one call's run through. `syncChunks` is `null` for
+ * an async run; `chunks` builds the async stream on demand.
  *
- * A flattened per-ITEM view sat here too until #179. Every async terminal now walks `chunks` and
- * runs its own synchronous inner loop, so nothing read it: flattening cost one `await`, and
- * therefore one microtask, per row to re-derive items the chunk view already held.
- *
- * `pipeline.drainable([1, 2, 3])` → `{ syncChunks: [[1, 2, 3]], chunks: () => …,
- * context: <this run's manager> }` for a synchronous chain over an array.
+ * `new Pipeline<number>().drainable([1, 2, 3])` → `syncChunks` yields `[[1, 2, 3]]`, and `context`
+ * is this run's manager.
  */
 export interface Drainable<T> {
   syncChunks: MaybeAsyncChunks<T> | null;

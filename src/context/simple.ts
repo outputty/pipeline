@@ -1,14 +1,11 @@
 /**
- * Simple context manager implementation.
+ * The in-memory context manager.
  */
 
 import type { IContextManager } from "@src/types";
 
 /**
- * Simple in-memory context manager for sharing state across pipeline operations.
- *
- * Thread-safe in JavaScript (single-threaded event loop), but not process-safe.
- * For multi-process scenarios, use a more sophisticated implementation.
+ * An in-memory context for sharing state across a pipeline run. It is not shared across processes.
  *
  * @example
  * ```typescript
@@ -40,17 +37,12 @@ export class SimpleContextManager implements IContextManager {
   }
 
   /**
-   * Get a value by key with a default fallback.
+   * The value stored under `key`, or `defaultValue` when the key is absent.
    *
-   * Tests key PRESENCE, not `value !== undefined` (#113): a deliberately stored `undefined` is a
-   * real value here, the same distinction `DROP` exists for on the row-handler side, where
-   * `types.ts` records that "`undefined` stays an ordinary value a handler may legitimately
-   * return". Comparing the value instead made `.set("k", undefined)` read back as the default while
-   * `.get("k")` returned `undefined` - two accessors disagreeing about whether the key exists.
+   * ⚠ Tests key presence, not `value !== undefined`, so a stored `undefined` is returned. Testing
+   * the value makes this disagree with `.get()`.
    *
-   * @param key - The key to look up
-   * @param defaultValue - Value to return if the key is absent
-   * @returns The stored value if the key is present, otherwise the default
+   * `ctx.set("k", undefined); ctx.getOrDefault("k", 0)` → `undefined`.
    */
   getOrDefault<T>(key: string, defaultValue: T): T {
     return Object.hasOwn(this.data, key) ? (this.data[key] as T) : defaultValue;

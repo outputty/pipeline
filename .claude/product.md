@@ -231,7 +231,7 @@ The chunk is the unit of concurrency, so a `ConcurrentPipeline`'s parallelism is
 times `maxConcurrency`, never `maxConcurrency` alone. A chain left at the default buffer of 1000 with
 `maxConcurrency: 3` holds 3000 callbacks in flight, not 3. Call `.buffer(size)` to lower the ceiling,
 and prefer the widest chunk that fits it: of two chains holding the same 16 in flight, the
-wide-chunk one runs roughly twice as fast, because a narrow chunk pays the per-chunk cost more often.
+wide-chunk one runs several times as fast, because a narrow chunk pays the per-chunk cost more often.
 
 | `.buffer(size)` | `maxConcurrency` | items in flight |
 | --- | --- | --- |
@@ -241,9 +241,8 @@ wide-chunk one runs roughly twice as fast, because a narrow chunk pays the per-c
 
 Buffer size dominates `maxConcurrency` on the canonical `.map().filter()` chain on
 `ConcurrentPipeline`: a 10,000-item buffer beats a 100-item one clearly, whatever `maxConcurrency` is
-set to. `maxConcurrency` matters most at a small buffer and least at a large one, and pushing it past
-4 at the default buffer size (1000) stopped helping on this chain - 16 read a little worse than 4,
-the fan-out's own scheduling overhead outweighing the parallelism gained. The defaults - `.buffer()` unset at 1000, `maxConcurrency` unset
+set to. With a synchronous stage, `maxConcurrency` barely moves the cost at any buffer size. The
+defaults - `.buffer()` unset at 1000, `maxConcurrency` unset
 at 4 - stay a reasonable point on this chain, not its fastest cell.
 
 ```ts
@@ -278,7 +277,7 @@ takes the global `fetch` signature; supply one to add an auth header, a proxy or
 a pipeline picks the fastest client its runtime offers, once per process: `node:http` over a shared
 keep-alive connection for an `http:` url on Node, and the global `fetch` everywhere else - on Bun,
 Deno and Cloudflare Workers, and for an `https:` url, which `node:http` cannot speak. Dispatching a
-stage is several times cheaper than on the global `fetch`, and a caller who changes nothing gets that.
+stage costs about half as much as on the global `fetch`, and a caller who changes nothing gets that.
 
 ⚠ A client supplied by the caller must stream in both directions. A reduce stage holds one connection
 open for the whole stream and sends results back along it while chunks are still going out, so a
