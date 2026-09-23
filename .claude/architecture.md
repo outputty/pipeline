@@ -90,13 +90,11 @@ src/
                              defaultClient() resolves node:http with a shared keep-alive Agent once
                              per process, both node: imports dynamic and inside one try so a runtime
                              without them falls back rather than failing to load
-    cluster.ts               ClusterHttpPipeline (#17, renamed #201) - the WorkerSet class
-                             (register/claimIndex/lookup/bootstrap/enter/kill/startWorkerServer)
-                             replaces 5 module-level mutable bindings and 4 free functions with one
-                             per-process singleton (#133); bootstrapAndSetUrl() calls
-                             workerSet.enter() once, no longer bootstraps twice. Loads no ws, and
-                             websocket-cluster.ts never imports it: its module scope starts the HTTP
-                             worker server in every worker (#239)
+    cluster.ts               ClusterHttpPipeline - its resolveUrl() enters the shared worker set
+                             once per dispatch. Loads no ws, and websocket-cluster.ts never imports
+                             it: its module scope starts the HTTP worker server in every worker
+    worker-set.ts            WorkerSet - the registry, fork-and-ready bootstrap, in-flight count and
+                             idle kill both cluster classes share; no side effect at load
     websocket.ts             WebSocketPipeline (#201) - encodeFrame/decodeFrame (the 4-byte
                              length-prefixed binary framing), getConnection() (the per-connect-target
                              memoized client), stageWork()/reduceWork()/serve()/receiveFrame(),
@@ -105,9 +103,9 @@ src/
                              Duplex, so no .d.ts names a ws type, #239), peekFrame()/
                              sendUnknownRouteError() (ClusterPipeline's own shared-worker-server seam).
                              The one file that imports ws
-    websocket-cluster.ts     ClusterPipeline (#201, moved here #239) - the SAME shape as cluster.ts
-                             over WsWorkerSet, N distinct ws+unix: socket paths instead of one shared
-                             port, enter() round-robining across them
+    websocket-cluster.ts     ClusterPipeline - the same worker set as cluster.ts over N distinct
+                             ws+unix: socket paths instead of one shared port, enterNextWorker()
+                             round-robining across them
     eventemitter.ts           EventEmitterPipeline (#124, events renamed to routes #221) -
                              stageWork() calls the composed function directly and dispatches
                              through pipeline.emitter for any extra Workers; apply()/drainable()
@@ -498,7 +496,7 @@ async engine did per ROW for data that arrives per CHUNK (#179):
    array-mutating accumulator - for a cut that only counts. It now cuts by count on all three arms;
    `.buffer(fn)` kept the fold engine until #256 gave it its own item loop.
 4. `stageWork()` called the global `fetch` once per chunk, where `node:http` with a keep-alive agent
-   is several times cheaper. `options.client` is the seam, and `node:http` the default on Node.
+   costs about half as much. `options.client` is the seam, and `node:http` the default on Node.
 
 On `bench/overhead.ts`, every dispatching class's pinned row fell by more than an order of
 magnitude, to within a little of a bare `Pipeline` running the same region - which is what pinning
@@ -598,7 +596,7 @@ inside a chunk runs together, so a chain's items in flight is the buffer size ti
 coprime factors included.
 
 How that product is SPLIT is a throughput choice, not a parallelism one. Two pairs reaching the same
-16 in flight over microtask-only work: `.buffer(16)` with `maxConcurrency: 1` runs roughly twice as
+16 in flight over microtask-only work: `.buffer(16)` with `maxConcurrency: 1` runs several times as
 fast as `.buffer(1)` with `maxConcurrency: 16`, because a chunk pays the per-chunk cost once where
 `.buffer(1)` pays it per item. The gap closes when the callback dominates - over a workload that
 waits on every item, the same pair runs level. Prefer the widest chunk that fits the
@@ -681,17 +679,16 @@ the FIRST `:` (verified against `ws` 8.21.3's own `initAsClient`, `lib/websocket
 (`ws+unix:///tmp/w.sock:/`) dials the wrong path, an empty authority segment `ws` does not strip.
 
 `ClusterPipeline` (#201, in `websocket-cluster.ts`) reparents onto `WebSocketPipeline`;
-`ClusterHttpPipeline` is its HTTP/TCP counterpart. `WsWorkerSet` mirrors `WorkerSet`'s shape one seam apart: each worker
+`ClusterHttpPipeline` is its HTTP/TCP counterpart. Both use one `WorkerSet` (`worker-set.ts`), one seam apart: each worker
 binds its own UNIQUE `ws+unix:` socket path (never a shared port, the way HTTP's `listen(0)` shares
 one across every worker) - a WebSocket connection is persistent, so sharing one target across workers
 would mean only one worker is ever dialed, and `#201`'s own Done-when 3 needs one distinct connection
 per worker to count. Each worker computes its own path from its own `process.pid` (unique, no
 coordination needed) and reports it back over `cluster.fork()`'s IPC channel; `enter()` round-robins
-across the bootstrapped set instead of handing back the single shared value `WorkerSet.enter()` does.
-⚠ `WorkerSet.kill()` and `WsWorkerSet.kill()` both iterate `cluster.workers`, a registry `node:cluster`
-shares PROCESS-WIDE - before #201 review only one `WorkerSet` ever existed per process, so this never
-mattered; with two sibling classes now forking into the same shared registry, one class's idle timer
-could kill the OTHER's still-in-flight workers. Both now track `ownWorkerIds` and kill only their own.
+across the bootstrapped set instead of handing back one shared port.
+⚠ `WorkerSet.kill()` iterates `cluster.workers`, a registry `node:cluster` shares process-wide. With
+both cluster classes forking into it, one set's idle timer could kill the other's in-flight workers,
+so each set tracks `ownWorkerIds` and kills only its own.
 
 ⚠ `ClusterPipeline.resolveConnect()` is the ONE override on the class - `bootstrapAndSetConnect()`/
 `stageWork()`/`reduceWork()` overrides that used to wrap the round-robin around a SHARED
@@ -702,14 +699,14 @@ could kill the OTHER's still-in-flight workers. Both now track `ownWorkerIds` an
 worker the LAST write picked. Found live: a `maxConcurrency: 2` reduce read `totalConnections: 1`,
 not 2 (`websocket-cluster-reduce.ts`'s own regression case, now asserted in
 `websocket-pipeline.e2e.test.ts`'s Done-when 4 test). `resolveConnect()` is called fresh by each
-dispatch (`wsWorkerSet.enter(this.workers)`) with nothing shared to race on - the base
+dispatch (`enterNextWorker(this.workers)`) with nothing shared to race on - the base
 `WebSocketPipeline.resolveConnect()` still reads `this._connect` unchanged, single-target, for every
-class that never overrides it. `WsWorkerSet.enter()`'s own round-robin index increments
-synchronously right after its `await bootstrap()`, with no further `await` before the increment -
+class that never overrides it. `enterNextWorker()`'s round-robin index increments
+synchronously right after its `await wsWorkerSet.enter()`, with no further `await` before the increment -
 concurrent callers queue on that one `await` in registration order, so each gets a DISTINCT index
 even when several `enter()` calls land in the same synchronous burst.
 
-`WsWorkerSet.startWorkerServer()`'s connection counter (queried by `#201`'s own Done-when 3 IPC
+The WebSocket worker server's connection counter (queried by `#201`'s own Done-when 3 IPC
 channel) is a `Set<PipelineSocket>` sized on query, not an incrementing total - a plain counter with
 no decrement read a transient reconnect on one worker as two open connections; `onClose` deletes the
 socket from the set, so `.size` always reads what is connected NOW.
@@ -997,8 +994,8 @@ the list once into a cached plan (`plan()`): every dispatched stage's `stageWork
 `runnable()` and every run handler is fixed there, and each call runs the plan over its own
 `RunFlow` - its streams and its context - constructing no pipeline. Adjacent in-process stages fuse
 into one op, whose sync run is one generator. Measured from the built `dist/` on a three-stage sync
-chain over three items, a call fell from 4.4 µs, when each call replayed every stage through
-copy-on-write, to under 0.4 µs.
+chain over three items, a call costs about a tenth of what it did when each call replayed every
+stage through copy-on-write.
 
 `Pipeline.drainable(input)` is the ONE seam between the two classes: it runs the plan over `input`,
 then returns a
@@ -1251,8 +1248,8 @@ rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed
   passed ONE `this._context` to every concurrently in-flight chunk. #31 carries that pre-existing
   sharing across a process boundary; it neither introduces nor worsens it, and no fix landed in that
   ticket by explicit decision.
-- `WorkerSet`/`WsWorkerSet`'s own `registry` field (`cluster.ts`, one per-process singleton per
-  class since #133 - was 5 separate module-level bindings) never evicts an entry - every distinct
+- `WorkerSet`'s `registry` field (`worker-set.ts`, one instance per cluster class per process)
+  never evicts an entry - every distinct
   `ClusterHttpPipeline`/`ClusterPipeline` constructed in a process stays reachable for that process's
   life. Sound for the documented construction pattern (one `ClusterHttpPipeline`/`ClusterPipeline`
   per logical chain, built once at module scope, the same "no top-level side effects beyond
@@ -1263,10 +1260,8 @@ rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed
   `500`ms - a chosen value, not a tuned or caller-facing one. Long enough that back-to-back
   dispatches in a real workload never trigger a re-fork; short
   enough that a script holding only the canonical example exits on its own well inside a normal test
-  timeout. `WorkerSet.kill()`/`WsWorkerSet.kill()` each track their own forked worker ids
-  (`ownWorkerIds`, #201 review) and kill only those - both iterate `cluster.workers`, a registry
-  `node:cluster` shares PROCESS-WIDE, so before either tracked its own ids, a process using BOTH
-  classes had one's idle timer kill the other's still-in-flight workers.
+  timeout. Each `WorkerSet` tracks its own forked worker ids (`ownWorkerIds`) and kills only
+  those, because `cluster.workers` is shared process-wide by both cluster classes.
 
 - Node's `fetch` IS full duplex against a `node:http` server, refuting the half-duplex reading of
   `duplex: "half"`. Measured on Node 26.5.0 (undici): response headers at +207ms with the request

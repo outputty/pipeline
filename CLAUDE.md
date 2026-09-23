@@ -49,7 +49,7 @@ Serena is registered in this repo's `.mcp.json` and is the primary tool set for 
 - **`websocket` entry** - `@outputty/pipeline/websocket`, the tsup entry (`src/websocket.ts`) that alone loads the optional peer `ws`.
 - **`http`/`cluster`/`eventemitter` entries** - three tsup entries (`src/http.ts`, `src/cluster.ts`, `src/eventemitter.ts`) that keep Node builtin imports off the root entry.
 - **`options.client`** - how a dispatched chunk reaches another instance on `HttpPipeline`: a `PipelineClient`, the global `fetch` signature.
-- **Stage** - one `.apply()` call, and therefore one `.transform()` call; its identity is its index in `_chunkTransforms`.
+- **Stage** - one `.apply()` call, and therefore one `.transform()` call; its identity is its index in the stage table `registries()` builds (`chunkTransforms`).
 - **`.local(build)`** - runs a whole region of the chain in the orchestrating process, whatever the pipeline class.
 - **Context / `IContextManager`** - the shared key-value store threading through a pipeline run: `.get()`/`.set()`/`.getOrDefault()`/`.toDict()`; `SimpleContextManager` is the shipped implementation.
 - **`context` / `contextFactory`** - the two ways a caller supplies a manager, and the whole of the exported `PipelineOptions`.
