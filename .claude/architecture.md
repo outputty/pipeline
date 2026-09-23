@@ -52,15 +52,14 @@ src/
                           StageRegistries (a stage's chunkTransforms+reduceStages pair),
                           Drainable<T> (the 3-field drain view PipelineResult/BranchOwner share),
                           ReduceWork<T,U>, RouteVerb/StageRoute (#133)
-  pipeline.ts            Pipeline: the chain, context, stages, Pipeline.drainable, createPipeline<U,
-                          R>() + defer<U,R>() (each takes its own return type, letting a
-                          DISPATCHING SUBCLASS's own two-argument call - `ConcurrentPipeline.apply()`
-                          - skip the `as X` cast its base-class caller still needs, #133) + onError()
-                          (#78); isSync()/freshPreBuffer() are `protected` methods a dispatching
-                          subclass may override, `asyncIterableFrom()`/`isAsyncSource()` are unexported
-                          module-level functions - all 4 unify 2-4 raw-spelled copies each within this
-                          file (#133); emptyChunks<U>() is EXPORTED (`cluster.ts` calls it too, to empty
-                          a worker's own chunk stream)
+  pipeline.ts            Pipeline: the recorder. Each stage method records one StageDescriptor on
+                          a persistent StageNode list; plan() compiles it once into StageOps that
+                          drainable() runs over one call's RunFlow. planApply()/planReduce() are the
+                          `protected` hooks a dispatching subclass overrides, registries() reads the
+                          stage tables straight from the descriptors, createPipeline()/record() are
+                          the copy-on-write seam. `asyncIterableFrom()`/`isAsyncSource()` are
+                          unexported module-level functions; emptyChunks<U>() is EXPORTED
+                          (`worker-set.ts` calls it too, to drain nothing on a worker)
   transformer.ts          Transformer: the chainable map/filter/reduce/tap chain, plus onError()
                           (the row handler, #78) and runnable() (the seam that carries it in); every
                           element-wise link (map/filter/flatMap/tap(fn)) shares one pipe() body (#133)
@@ -159,33 +158,36 @@ src/
 
 ## How a chunk flows
 
-The cut lives on `Pipeline`, never `Transformer` (#39). `Pipeline` owns a persisted chunk stream
-(`_chunks`), cut once - either by the constructor's own default the moment one is first needed, or
-by `.buffer(size)` - and carried unchanged through every later stage; `Transformer.process()` never
-cuts, only processes whatever chunk it is handed:
+The cut lives on `Pipeline`, never `Transformer` (#39). A call's plan cuts the input once - by the
+chunk size a leading `.buffer(size)` set, else the `1000`-item default - and every later stage
+receives that chunk stream unchanged until another `.buffer()` recuts it. `Transformer.process()`
+never cuts, only processes whatever chunk it is handed:
 
 ```text
-Pipeline constructor / .buffer(size)              the ONLY place a cut happens
-	buildChunkGenerator(size)(preBufferItems)       cuts the flattened item stream into In[] chunks
-Pipeline.apply(transformer) (every later stage)
-	Transformer.process(this._chunks, context)      NO cut here - runs the chunks it is handed
+Pipeline.drainable(input) -> runFlow()             the source cut, once per call
+	buildSyncChunkGenerator / buildChunkGenerator(chunkSize)(input)
+.buffer(size) op                                    the only other place a cut happens
+	cutOp(...)                                       recuts the raw input, or the stage output
+.apply(transformer) op (every later stage)          NO cut here
+	sync run:  stageChunks(syncChunks, steps, ctx)   adjacent in-process stages fused, chunk by chunk
+	async run: Transformer.process(chunks, ctx, runHandler)
 		runSequentially(internalTransformer, chunks, context)   one chunk at a time, in order
 			internalTransformer(chunk, ctx)          one map/filter/flatMap/reduce/tap link, chained
 				isContextAware(fn) ? fn(item, ctx) : fn(item)      arity-checked once per link, not per item
-Pipeline.toArray() (or any terminal op, or async iteration)
-	flattenChunks(_chunks)                          the ONE place chunks become items again
+PipelineResult terminal op
+	walks the run's chunks, looping each chunk in process
 ```
 
-`_preBufferItems` is the pre-cut ITEM view a `.buffer()` call recuts from - carried forward
-unchanged by every copy-on-write method EXCEPT `.apply()`, which nulls it (a real stage just
-consumed `_chunks`, so nothing is left to recut from except that stage's own output). This is what
-collapses `.buffer(2).buffer(3).buffer(4)` (nothing between them) to only the LAST cut ever actually
-applied: each intermediate `.buffer()` call builds a chunk generator that is simply never driven,
-since the next `.buffer()` reads `_preBufferItems`, not `_chunks`.
+`RunFlow.syncItems`/`asyncItems` are the raw input a `.buffer()` call recuts from. Every op keeps
+them EXCEPT a stage (an apply, a reduce, a queue), which nulls them: a real stage just consumed the
+stream, so nothing is left to recut from except that stage's own output. This is what collapses
+`.buffer(2).buffer(3).buffer(4)` (nothing between them) to only the LAST cut ever actually applied:
+each intermediate `.buffer()` builds a chunk generator that is simply never driven, since the next
+`.buffer()` reads the raw input, not the previous cut.
 
 A `ConcurrentPipeline`/`HttpPipeline`/`ClusterPipeline` stage bypasses `Transformer.process()`
-entirely - see "The pipeline family", below - but shares the SAME `_chunks` state: its own fan-out
-reads `this._chunks` directly and cuts none of its own, so a custom `.buffer()` boundary reaches a
+entirely - see "The pipeline family", below - but reads the SAME run stream: its own fan-out reads
+`flow.chunks` directly and cuts none of its own, so a custom `.buffer()` boundary reaches a
 dispatched stage exactly like a local one. Wrap the chain in one of those classes for concurrency
 instead of configuring the `Transformer`.
 
@@ -197,28 +199,24 @@ emit)` directly; a verdict is awaited only when it is a thenable. `emit()` swaps
 closed chunk and `settle` appends the item after, which is flush-then-append; `DROP` appends nothing;
 an `emit()` with nothing pending closes nothing. The trailing chunk is whatever is pending at the end.
 
-⚠ `.buffer(size)` shared that engine until #179 and no longer does, though the chunk boundaries it
-produces are identical. It was configured with an identity `fn` and a framework-side auto-flush at
-`pending.length >= size`, through an adapter called `sizeReduceFunction` - deleted with the split. A
-fold engine buys a per-ITEM decision, which a count never makes, and charged a closure call plus an
-array-mutating accumulator per row for it: over an async generator with output asserted identical,
-`.buffer(1000)` created clearly more promises per row through the fold than cutting by count, which
-sits at `buildChunkGenerator`'s own floor, exactly where the same chain with NO `.buffer()` call at
-all sits. `.buffer(size)` now cuts by count on all three arms with the same cutters
-`fromSource()` uses, through the one private `cutBy()` that `.buffer(fn)` shares (#232), and `.buffer(size)` validates its size on the BOUND path too, where
-`sizeReduceFunction` used to be what refused a bad one (BREAKING: `.local((p) => p.buffer(2.5))`
-threw nothing before and now throws under `.buffer()`'s own name).
+`.buffer(fn)` runs its own item loop (`src/utils/buffer-cut.ts`): one pending array and one `emit`
+per run, instead of the `Reducer<T[], T>` fold it used before, which paid several closures per row.
+
+⚠ `.buffer(size)` does not share that loop, though the chunk boundaries it produces are identical to
+cutting by count. It cuts by count with the same cutters the source cut uses, at
+`buildChunkGenerator`'s own floor, through the one `cutOp()` that `.buffer(fn)` shares, and
+validates its size inside a `.local()` region too (`.local((p) => p.buffer(2.5))` throws under
+`.buffer()`'s own name).
 
 ```text
-Pipeline.buffer(sizeOrFn)
-	isDeferred() ? record + replay : …
-	cutBy(cutSync, recut, cutAsync, recutAsync)
-		isSync() && _syncPreBufferItems  → cutSync(items)
-		isSync()                         → recut(_syncChunks)            a slot may be a pending Promise
-		_syncPreBufferItems              → asAsyncChunks(cutSync(items))
-		_preBufferItems                  → cutAsync(items)
-		else (a stage ran, async)        → recutAsync(readableChunks(_chunks)), with
-		                                   preBufferItems = flattenChunks(same) for a back-to-back .buffer()
+Pipeline.buffer(sizeOrFn)            records one descriptor; a leading numeric one also sets chunkSize
+cutOp(cutSync, recut, cutAsync, recutAsync, flow, readable)
+	sync run && syncItems            → cutSync(items)
+	sync run                         → recut(syncChunks)             a slot may be a pending Promise
+	syncItems                        → asAsyncChunks(cutSync(items))
+	asyncItems                       → cutAsync(items)
+	else (a stage ran, async)        → recutAsync(readableChunks(chunks)), with
+	                                   asyncItems = flattenChunks(same) for a back-to-back .buffer()
 	size: buildSyncChunkGenerator / recutSyncChunks / buildChunkGenerator / recutChunks
 	fn:   cutSyncItemsWith / recutSyncChunksWith / cutItemsWith / recutChunksWith
 ```
@@ -251,18 +249,15 @@ Promise-first - `(item, ctx, emit) => Promise<T | typeof DROP>` → `Pipeline<T,
 `(item, ctx, emit) => T | typeof DROP` → `this` - mirroring `Pipeline.reduce()`'s own split rather
 than `.tap()`'s `M extends "async" ? this : …` conditional-collapse form: neither `.reduce()` nor
 `.buffer()` has a subclass override needing `this`-preservation, so there is no "already async, stay
-`this`" case worth the extra complexity. The implementation body's own `_mode` field is NOT updated
-explicitly for an async `fn` on a `"sync"`-Mode chain - `.reduce()`'s own sync branch has the
-identical gap (`mode: this.sourcePolicy() === "async" ? "async" : "sync"`, blind to `fn`'s own
-async-ness) - and this is safe for the same reason `.reduce()`'s is: `cutSyncItemsWith`'s own
-loop discovers a genuine `Promise` from the DATA, never from `_mode`, so a terminal op still
-returns the right value; only `isSync()`'s own bookkeeping reads stale until the next real cut.
+`this`" case worth the extra complexity. A sync run stays on the sync engine for an async `fn`, as
+it does for an async `.reduce()`: `cutSyncItemsWith`'s own loop discovers a genuine `Promise` from
+the DATA, so a terminal op still returns the right value.
 
 ## Prefetching - #123
 
 `.queue(capacity)` (`Pipeline.queue`, `src/pipeline.ts`) is `.buffer()`'s sibling, not its
-replacement: it never cuts a chunk itself, it reads `this.chunkStream()` (never `_chunks` directly -
-that skips a genuinely synchronous chain's own `_syncChunks`) and wraps whatever chunking is already
+replacement: it never cuts a chunk itself, it reads the run's stream through `streamOf()` (never
+`flow.chunks` directly - that skips a genuinely synchronous run's own sync chunks) and wraps whatever chunking is already
 in effect (`.buffer()`'s own cut, or the `1000`-item default) with `prefetch()`
 (`src/utils/cut.ts`, beside `share()`). `.buffer()` staying pull-driven is what makes it free when
 unused; `.queue()` is the opt-in cost for a caller who wants the source running ahead of the
@@ -282,7 +277,7 @@ verify itself:
   generator instance "concurrently" (no `await` between the calls) does not run two overlapping
   activations of the body: the engine queues the calls and resumes the body once per call, strictly
   in order. `share()`-based fan-out (`ConcurrentPipeline.reduce()`'s own partitioning) wraps
-  `prefetch()`'s own returned iterator exactly the way it wraps `_chunks`' - no extra locking, no
+  `prefetch()`'s own returned iterator exactly the way it wraps any upstream stage's - no extra locking, no
   planning-time FIFO waiter list, because the language already serializes the resumptions `share()`'s
   own docstring describes ("whichever consumer calls `.next()` next gets the next item").
 - **Early-exit cleanup for free.** `prefetch()`'s own `try { ... } finally { await
@@ -338,10 +333,10 @@ from overlap alone, with the same outputs in the same order.
 
 `PipelineMode` (`"unset" | "sync" | "async"`) is decided by the input a chain is called with and by
 its callbacks. Calling with an `Iterable` keeps the chain's Mode, an `AsyncIterable` widens it, and
-one callback returning a `Promise` widens it through `.transform()`'s overloads. A synchronous chain
-runs a parallel set of plain `function*` utilities (`buildSyncChunkGenerator`, `recutSyncChunks`,
-`_syncChunks`), so nothing async-shaped is constructed until a stage's own function returns a
-thenable; from that point every later link defers through `.then`.
+one callback returning a `Promise` widens it through `.transform()`'s overloads. A synchronous run
+uses a parallel set of plain `function*` utilities (`buildSyncChunkGenerator`, `recutSyncChunks`)
+from the compiled plan, so nothing async-shaped is constructed until a stage's own function returns
+a thenable; from that point every later link defers through `.then`.
 
 `ConcurrentPipeline` and every dispatching subclass force `"async"` through `sourcePolicy()` - each
 dispatches a chunk across a real boundary, whatever the caller's callbacks are.
@@ -360,9 +355,9 @@ becomes runnable:
 
 ```text
 Transformer.runnable()                     reads this.rowHandler off the FINAL transformer
-	Pipeline.apply()                         stored into _chunkTransforms, and passed to process()
-	ConcurrentPipeline.apply()               stored into _chunkTransforms
-	ConcurrentPipeline.stageWork()           what HttpPipeline.fetch()'s registry lookup invokes
+	Pipeline.planApply()                     compiled once into the in-process op
+	ConcurrentPipeline.stageWork()           the dispatched op's in-process work
+	Pipeline.registries()                    what HttpPipeline.fetch()'s registry lookup invokes
 InternalTransformer(chunk, ctx, run?)      pipe() forwards `run` down the composed chain
 	map/filter/flatMap/tap(fn)               per-row try/catch, only when run.rowHandler is set
 	Transformer.reduce -> Reducer.fold       the one place a single item is folded
@@ -378,16 +373,17 @@ and the run continues, throwing stops it. It cannot be a catch on the drain side
 generator that throws is finished - measured, a `Pipeline` over `["1","x","3","4"]` at `.buffer(1)`
 yields `[[1]]` and then `done`, losing rows `3` and `4`, where the same failure guarded inside the
 per-chunk loop yields `[1,3,4]`. So it plugs into the two per-chunk guards #40 already built:
-`runSequentially`'s own try/catch for a local stage, and `ConcurrentPipeline.apply()`'s wrapped
+`runSequentially`'s own try/catch for a local stage, and `ConcurrentPipeline.planApply()`'s wrapped
 `work` for a dispatched one, where returning `[]` IS the "drop this chunk" answer the fan-out needs.
 The unit dropped is therefore the chunk; nothing smaller is in scope there.
 
-`Pipeline.reduce()` is out of reach: it calls `foldChunkStream(fn, initial, this._chunks,
-this._context)` with no `Transformer` anywhere, so only `Transformer.reduce()`'s fold gets row
+`Pipeline.reduce()` is out of reach: its op calls `foldChunkStream(fn, initial, flow.chunks,
+flow.ctx)` with no `Transformer` anywhere, so only `Transformer.reduce()`'s fold gets row
 recovery.
 
 Async iteration (`for await` over a `PipelineResult`) reads the exact same drained stream every
-terminal op reads (#39, #90) - there is no separate replay path any more. `.apply()` already ran `Transformer.process()` when it built `_chunks`, lazily, so `.tap()`
+terminal op reads (#39, #90) - there is no separate replay path any more. A call's `.apply()` op
+already set up `Transformer.process()` when it built the run's chunks, lazily, so `.tap()`
 and `.onError()` fire identically whichever consumption path drains it. The killed "source position"
 mechanism (`_rootSource`/`_sourcePositionViolations`/`inertKnobsOf`, `normalize(rootSource)`) existed
 only to protect against a knob a SEPARATE replay path couldn't honor; once every consumption path
@@ -405,11 +401,11 @@ stages either side of it still dispatch - measured over a real loopback `HttpPip
 between two dispatched stages: `orchestratorSeen [2,4,6,8,10]`, two HTTP requests served (one per
 dispatched stage, none for the tap), the worker's OWN identical `.tap()` call never invoked.
 
-The index consequence follows from `.local()` carrying the built region's own `_chunkTransforms`
-back (`Pipeline.local`, below): a `Pipeline.tap()` call occupies a real slot in that shared array even
-though it never dispatches, so a stage placed after it gets the NEXT index along, not the one its
-position in the chain alone would suggest. A second instance's own registry (`HttpPipeline.fetch`'s
-`_chunkTransforms` lookup) needs the identical `.tap()` call built into it too, for its indices to
+The index consequence follows from a `.local()` region's stages continuing the parent's stage
+indexes (`Pipeline.local`, below): a `Pipeline.tap()` call occupies a real index even though it
+never dispatches, so a stage placed after it gets the NEXT index along, not the one its position in
+the chain alone would suggest. A second instance's own registry (`HttpPipeline.fetch`'s
+`registries()` lookup) needs the identical `.tap()` call built into it too, for its indices to
 line up with the orchestrator's - a real second instance already has it, since it re-executes the
 same entry module.
 
@@ -456,12 +452,16 @@ instead of one shared port - see "WebSocketPipeline - #201" below for the wire i
 `routePath()`/the registries-resolving helper both moved to `ConcurrentPipeline` (#201 review): one
 canonical implementation `HttpPipeline`/`WebSocketPipeline` inherit and `ClusterHttpPipeline`/
 `ClusterPipeline` each override the same way, rather than two independently maintained copies.
-`.local(build)` (#61) is the one way to keep a whole region in-process: it builds a bare `Pipeline`
-over `this._chunks`/`this._context` (never `this.constructor` - the region must never be able to
-dispatch, whatever class called it), runs `build` against that bare pipeline, and carries the built
-region's `_chunks`/`_context`/`_chunkTransforms`/`_reduceStages` back through `this.createPipeline()`
-- the SAME seam every other copy-on-write method uses to resume the caller's own class. Each
-dispatching subclass re-declares `local()` to narrow its return type only
+`.local(build)` (#61) is the one way to keep a whole region in-process. It records one `local`
+descriptor. Each call that reaches it hands `build` a bare `Pipeline` (never `this.constructor` - the
+region must never be able to dispatch, whatever class called it) over the run's context, recording
+after an origin node, and that bare pipeline cannot be called or wrapped. The stages `build` added,
+read back from its result down to the origin node, compile with the bare class's own in-process
+hooks, continuing the parent's stage indexes and run handler; the caller's own class compiles the
+stages after the region. A result that does not descend from the origin node empties the run from
+there on. `build` runs per terminal call and decides how many stages the region adds, so a chain
+holding a region compiles per call, and `registries()` runs each region's `build` once, memoized, to
+list its stages. Each dispatching subclass re-declares `local()` to narrow its return type only
 (`~/.claude/rules/typescript.md`); the body is an unchanged `super.local(build)` call at every
 level, needing no per-level code - the base implementation is already correct everywhere because a
 bare `Pipeline`'s own `.transform()`/`.reduce()` never fan out or POST. `.local()` runs the async
@@ -491,7 +491,7 @@ async engine did per ROW for data that arrives per CHUNK (#179):
 1. Every async terminal flattened the chunk stream back to items, paying one `await` per row to
    re-derive what the chunk view already held. All five now walk `chunks()` with a synchronous inner
    loop, and the item view is deleted for having no reader left.
-2. `fromSource()` turned an ARRAY into an async iterator item by item, paying `toAsyncIterable`'s own
+2. The source cut turned an ARRAY into an async iterator item by item, paying `toAsyncIterable`'s own
    `Promise.resolve` per pull and then `buildChunkGenerator`'s `for await` on top. An array is now
    cut with `slice` and handed over whole chunks.
 3. `.buffer(size)` folded every item through `Reducer<T[], T>` - a per-item closure call and an
@@ -518,28 +518,24 @@ subtraction - `code.md`'s own 2026-09-12 entry). No fix lands: the round trip IS
 optimized by this section's own point 4, and JSON's own wire format is #172's finding, not
 re-litigated here.
 
-`fromSource()`'s own async-generator branch (point 2 above is the ARRAY-forced-async branch; a
+The source cut's own async-generator branch (point 2 above is the ARRAY-forced-async branch; a
 GENUINE async generator source keeps the general path, `toAsyncIterable` + `buildChunkGenerator`'s
 `for await`) pays a few promises per row - `collectItems()`'s own docstring already named this "the
 source's own floor" (#179). #180 confirms it is truly unreachable, not merely unoptimized: a
 hand-rolled `.next()`-based consumer of the SAME generator, bypassing `for await`'s own sugar
 entirely, creates the same number of promises as a plain `for await` drain - no daylight between
-them - while today's real `fromSource()` path sits a negligible fraction above that floor already. The cost is the async generator PROTOCOL's own resumption machinery, paid once per
+them - while a pipeline over such a source sits a negligible fraction above that floor already. The cost is the async generator PROTOCOL's own resumption machinery, paid once per
 `.next()` call regardless of who calls it; no consumer shape, hand-rolled or otherwise, reaches below
-it. No fix lands, recorded as why rather than attempted: `fromSource()` is already within noise of
+it. No fix lands, recorded as why rather than attempted: the source cut is already within noise of
 the language's own floor.
 
 Two mechanics make it work. `Pipeline`'s copy-on-write methods construct via a `protected
-createPipeline<U, R = AnyPipeline<U>>(chunks, options)` that calls `this.constructor` rather than a
-hard-coded `new Pipeline<U>`, so a subclass survives a `.transform()`/`.context()`/`.buffer()`
-chain. Its own `R` type parameter is what lets a DISPATCHING SUBCLASS's own two-argument call get
-back its OWN narrower type with no trailing `as X` cast -
-`this.createPipeline<U, ConcurrentPipeline<U, In>>(...)` in `ConcurrentPipeline.apply()`/`.reduce()`
-(#133); `defer<U, R = AnyPipeline<U>>()` carries the identical pattern for the source-less path. The
-base `Pipeline`'s OWN copy-on-write methods still call the one-argument form and still cast
-`as this` (`.context()`/`.onError()`/`.buffer()`'s three branches), since `R`'s default
-(`AnyPipeline<U>`) cannot narrow to `this` without a second argument only a subclass site actually
-supplies.
+createPipeline<R>(options, tail)` that calls `this.constructor` rather than a hard-coded
+`new Pipeline<U>`, so a subclass survives a `.transform()`/`.context()`/`.buffer()` chain; `record()`
+is the one caller that adds a stage node to `tail`. The recorded list travels under a module-private
+symbol key in the options, so `PipelineConstructorOptions` never names it. Each stage method
+constructs exactly one instance, which is what keeps a cluster class's slot numbering identical on
+the primary and on every worker.
 
 `createPipeline()` itself is declared ONCE, on the base, and is never overridden again (#133,
 replacing a `createPipeline()` override at every level). It merges its `options` argument with
@@ -563,24 +559,26 @@ protected override carriedKnobs(): HttpPipelineOptions {
 
 `chunkSize` never appears here at all
 (#39), since `.buffer()` is `Pipeline`'s own knob now, not a constructor option. The `options`
-argument `createPipeline()` merges `carriedKnobs()` on top of is `this.carriedOptions()` (pre-#133,
-unchanged) - the FULL `PipelineState`, declared apart from the exported `PipelineOptions` (#90): a
-caller writes `context`/`contextFactory`, and every carried knob is named once in `carriedOptions()`
+argument `createPipeline()` merges `carriedKnobs()` on top of is `this.carriedOptions()` - the
+recorder's knobs (`context`, `contextIsDefault`, `chunkSize`, `runHandler`, `mode`, `bound`,
+`routeTrail`, `branchStages`), declared in `PipelineState` apart from the exported
+`PipelineOptions` (#90): a caller writes `context`/`contextFactory`, and every carried knob is named
+once in `carriedOptions()`
 rather than field by field at each call site, which is what stops one being dropped, as `mode` and
 then `bound` each silently were. `carriedKnobs()` is the narrower, #133-introduced sibling: only the
 handful of fields a DISPATCHING subclass alone adds (never `mode`/`bound`/`context`, which
 `carriedOptions()` already owns). And a
-stage's identity is its INDEX in `_chunkTransforms` - the table `apply()` already maintains - so a
+stage's identity is its INDEX in the stage table `registries()` builds from the recorded stages - so a
 dispatching class sends a chunk plus an index, never a function. Every instance runs the same code,
 so index N means the same transform on both sides; a mixed-version fleet breaks that assumption
 silently, which is why atomic deploys are a documented requirement rather than a check.
 
-`ConcurrentPipeline.apply()` does NOT call `transformer.process()` for a non-local stage - that
+`ConcurrentPipeline.planApply()` does NOT call `transformer.process()` for a non-local stage - that
 bypass IS the mechanism, since `process()` runs a chain sequentially, one chunk at a time. It fans
-`this._chunks` - the pipeline's OWN already-cut chunk stream, set by `.buffer()` (#39) - out through
+`flow.chunks` - the run's OWN already-cut chunk stream, set by `.buffer()` (#39) - out through
 `stageWork()`, and `fanOutOrdered`/`fanOutUnordered` (`concurrent.ts`) yield each dispatched chunk's
-own RESULT ARRAY rather than flattening it: the fanned-out output IS itself a real `_chunks`
-boundary, so a later `.buffer()` recuts from it exactly like any other stage's output. `apply()`
+own RESULT ARRAY rather than flattening it: the fanned-out output IS itself a real chunk
+boundary, so a later `.buffer()` recuts from it exactly like any other stage's output. `planApply()`
 wraps `stageWork()`'s own work in a try/catch of its own (#40) - `Transformer.process()` never runs
 on this path, so this wrapper is the one place a dispatched stage's failing chunk is still in scope,
 and #78 makes it the site `Pipeline.onError()` plugs into, returning `[]` to drop the chunk. No
@@ -897,13 +895,11 @@ a multi-Worker route is discarded with no trace once another contender has alrea
 for it. This matches "first to settle wins" for the WINNER; nothing catches a bug in a Worker that
 merely lost the race.
 
-`apply()` is overridden a second time, wrapping the stage's own output chunk stream so
+`planApply()` is overridden a second time, wrapping the stage's own output chunk stream so
 `<route>:end` fires once, after every chunk that stage's fan-out produced has been yielded from
-THIS WRAPPED STREAM - the stage index it wraps under is read OFF THE RESULT
-(`dispatched._chunkTransforms.length - 1`, the slot `super.apply()` just appended), never
-independently re-derived, so it can never drift from `ConcurrentPipeline.apply()`'s own internal
-computation, and `dispatched.routePath(...)` (not `this.routePath(...)`) is what makes the route
-carry an arm's own trail rather than the parent's when `dispatched` is an arm's pipeline. Both the
+THIS WRAPPED STREAM - the stage index it wraps under is the one `ConcurrentPipeline.planApply()`
+receives for the same stage, so it can never drift from `stageWork()`'s own route, and
+`this.routePath(...)` carries an arm's own trail when the recorder is an arm's pipeline. Both the
 wrapped generator's `onEnd` here and `drainable()`'s own `fireOnce` (below) call `emitSafely()`,
 never a raw `emitter.emit()` - the callback runs inside the stream's own `finally` block, and JS's
 finally-overrides-exception semantics mean an unguarded throw there would REPLACE whatever real
@@ -947,8 +943,8 @@ One emitter, any number of chains built on it, none of them sharing anything to 
   here (both composed functions registering as the shared emitter's first stage's own listener,
   then racing on every dispatch) has no mechanism left to reproduce it.
 - Two chains FORKED from the SAME unbound instance - two `.transform()` calls off one shared base,
-  or two `.branch()` arms (`Pipeline.branch()`'s own `emptyOfOwnClass()` resets the arm's
-  `_chunkTransforms` to `[]`, so its first stage is index 0 again) - each closes over its OWN
+  or two `.branch()` arms (`Pipeline.branch()`'s own `emptyOfOwnClass()` starts the arm with no
+  recorded stages, so its first stage is index 0 again) - each closes over its OWN
   composed function inside its OWN `stageWork()` call; `#124`'s own defect here (the second fork's
   own first stage already marked registered on a shared `Set`, so its dispatch silently reused the
   first fork's Worker) has no `Set` left to share.
@@ -975,7 +971,7 @@ any number of inputs.
 
 ```text
 new Pipeline<In>(options?)      the chain. Stages are RECORDED, not run.
-  .transform / .apply           each records its own call in _pendingStages
+  .transform / .apply           each records one StageDescriptor
   .buffer / .reduce / .local    same - which is what keeps each one's POSITION
   .branch(build)                -> a runner, the arms bound once
   (input)                       -> PipelineResult
@@ -994,12 +990,18 @@ Pipeline extends Function`: its `super()` runs `CreateDynamicFunction`, which th
 Code generation from strings disallowed for this context` wherever code generation is banned - a CSP
 page, a Cloudflare Worker, `node --disallow-code-generation-from-strings`.
 
-A stage composed before an input is recorded as its own CALL, not its result, and replayed against
-the bound pipeline when one arrives. Recording the call is what keeps a deferred chain and a bound
-one on identical code, and what preserves a stage's position - recording only a `.buffer()`'s SIZE
-instead applied it to the source cut, so a `.buffer()` written after a stage took effect before it.
+A stage call records one immutable descriptor on a persistent list that copy-on-write shares, which
+preserves each stage's position - recording only a `.buffer()`'s SIZE instead applied it to the
+source cut, so a `.buffer()` written after a stage took effect before it. The first call compiles
+the list once into a cached plan (`plan()`): every dispatched stage's `stageWork()`, every
+`runnable()` and every run handler is fixed there, and each call runs the plan over its own
+`RunFlow` - its streams and its context - constructing no pipeline. Adjacent in-process stages fuse
+into one op, whose sync run is one generator. Measured from the built `dist/` on a three-stage sync
+chain over three items, a call fell from 4.4 µs, when each call replayed every stage through
+copy-on-write, to under 0.4 µs.
 
-`Pipeline.drainable(input)` is the ONE seam between the two classes: it binds, then returns a
+`Pipeline.drainable(input)` is the ONE seam between the two classes: it runs the plan over `input`,
+then returns a
 `Drainable<T>` - `{ syncChunks, chunks, context }` (`types.ts`, #133; three independent
 re-spellings of this exact shape collapsed to the one type - `BranchOwner.drainable()` and
 `PipelineResult`'s own field each used to declare it inline). Each terminal calls it exactly once
@@ -1019,10 +1021,10 @@ On `ConcurrentPipeline` over an async generator with `.buffer(1000)`, output ass
 `.toArray()` and `.forEach()` each now create clearly fewer promises per row - both down to the
 same count, which is the source's own floor.
 
-Two knobs that look alike are deliberately apart. `PipelineMode` (`"unset" | "sync" | "async"`) is a
-TYPE fact about what a chain produces; `_bound` is the RUNTIME fact of whether an input is attached.
-`"unset"` answered both until a callable chain - `"unset"` for its whole life, bound only for the
-duration of one call - made that impossible.
+`PipelineMode` (`"unset" | "sync" | "async"`) is a TYPE fact about what a chain produces. At runtime
+each call picks its engine from the input's shape and `sourcePolicy()`, so a callable chain stays
+`"unset"` for its whole life. `_bound` marks only a `.local()` region's pipeline and `bind()`'s copy,
+which refuse to be called or wrapped.
 
 ## Branching - a stage whose arms run where the chain runs (#90)
 
@@ -1093,9 +1095,9 @@ reaches it through `.buffer(size)` times `maxConcurrency`; the harness asserts e
 peak equals the target before recording a time.
 
 A worker process (`ClusterPipeline`'s own bootstrap; `HttpPipeline`'s own `.fetch()`-side instance
-in general) never orchestrates: its chunk stream is empty, set at construction, so every terminal op
-resolves immediately with an EMPTY result - the worker exists only to hold the transforms
-(`_chunkTransforms`, registered by running the same entry module the primary runs) and serve
+in general) never orchestrates: a cluster class's `drainable()` hands a worker no chunks, so every
+terminal op resolves immediately with an EMPTY result - the worker exists only to hold the
+transforms (`registries()`, read from the stages the same entry module records) and serve
 `.fetch()` requests against them.
 
 ## Internal overhead benchmarks
@@ -1293,8 +1295,9 @@ rewrite or a leaky single-pattern peephole, in `.claude/roadmap.md`'s own Killed
 
 A reducer is a fold with cross-chunk state, so it does not fit `InternalTransformer` (`chunk` in,
 `Out[]` out, one output chunk per input chunk). Its shape is a stream operator: `Pipeline.reduce()`
-folds `this._chunks` directly (in-process, sequential, no `reduceWork()` indirection - the base class
-never dispatches); `ConcurrentPipeline.reduce()` overrides it to always delegate to `reduceWork()` -
+folds the run's stream directly through `planReduce()` (in-process, sequential, no `reduceWork()`
+indirection - the base class never dispatches); `ConcurrentPipeline.planReduce()` overrides it to
+always delegate to `reduceWork()` -
 `stageWork()`'s sibling, the one method a subclass overrides to change WHERE a reducer runs.
 Wrapping the call in `.local(build)` (#61) runs `build`'s own `.reduce()` against a bare `Pipeline`
 instead, the base class's own fold:
@@ -1369,14 +1372,13 @@ unconditionally - JS ignores the extras a shorter callback never declared, so no
 check is needed anywhere in the reduce path (unlike `map`/`filter`'s own `isContextAware`, which
 still branches on arity to decide whether to pass `ctx` at all).
 
-A reduce stage takes the next index in the SHARED stage-index space `_chunkTransforms` already uses,
-so `/transform/<n>` and `/reduce/<n>` never collide: `pushReduceStage()` (`src/pipeline.ts`, shared by
-base `Pipeline.reduce()` and `ConcurrentPipeline.reduce()`) registers the stage in `_reduceStages`
-and writes a placeholder into the SAME `_chunkTransforms` index that throws if ever invoked as a
-plain per-chunk transform - the fail-loud guard, and the only one needed: #39 already deleted the
-whole source-position/replay mechanism a reduce-specific `sourcePositionViolations` list would have
-needed to hook into, since async iteration reads the exact same persisted `_chunks` every terminal
-op reads.
+A reduce stage takes the next index in the SHARED stage-index space the per-chunk stages use, so
+`/transform/<n>` and `/reduce/<n>` never collide: `registries()` (`src/pipeline.ts`) registers the
+stage in `reduceStages` and writes a placeholder into the SAME `chunkTransforms` index that throws if
+ever invoked as a plain per-chunk transform - the fail-loud guard, and the only one needed: #39
+already deleted the whole source-position/replay mechanism a reduce-specific
+`sourcePositionViolations` list would have needed to hook into, since async iteration reads the
+exact same stream every terminal op reads.
 
 The wire is NDJSON both ways over one POST, `HttpPipeline.routePath("reduce", index)` (`routePath`
 takes a verb, `stage` or `reduce`, replacing the old `stagePath(index)`): `{"context":{…}}` once,

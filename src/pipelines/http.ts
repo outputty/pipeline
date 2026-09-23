@@ -239,13 +239,11 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
       return this.serveReduceRequest(route, request);
     }
 
-    // ⚠ Answered before `resolveRegistries()`, which can replay the chain and throw. A throw there
-    // turns this 404 into a rejected promise.
+    // ⚠ Answered before `resolveRegistries()`, which runs each `.local()` region's `build` and can
+    // throw. A throw there turns this 404 into a rejected promise.
     if (route === null) {
       return errorResponse(404, `unknown stage ${pathname}`);
     }
-    // ⚠ Not `_chunkTransforms` directly: a worker never binds an input, so that field is still
-    // empty and every stage reads as unknown.
     const lookup = this.lookupTransformStage(route, pathname);
     if (!lookup.ok) {
       return errorResponse(404, lookup.error);

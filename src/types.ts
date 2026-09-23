@@ -266,7 +266,7 @@ export interface StageRoute {
 export type StageLookup<S> = { ok: true; stage: S } | { ok: false; error: string };
 
 /**
- * The views a terminal op or `.branch()` drains a bound chain through. `syncChunks` is `null` for
+ * The views a terminal op or `.branch()` drains one call's run through. `syncChunks` is `null` for
  * an async run; `chunks` builds the async stream on demand.
  *
  * `new Pipeline<number>().drainable([1, 2, 3])` → `syncChunks` yields `[[1, 2, 3]]`, and `context`

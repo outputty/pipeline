@@ -290,10 +290,7 @@ function descriptorsSince(
   return descs.reverse();
 }
 
-/**
- * Runs every step over each chunk in turn, one chunk at a time: the order a generator per step
- * gives, with one generator for all of them.
- */
+/** Runs every step over a chunk, in stage order, before the next chunk is pulled. */
 function* stageChunks(
   source: MaybeAsyncChunks<unknown>,
   steps: readonly InProcessStep[],

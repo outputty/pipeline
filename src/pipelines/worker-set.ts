@@ -74,8 +74,8 @@ export class WorkerSet<P, V extends number | string> {
    * route to.
    * - A composed, unbound instance with no trail claims a fresh slot. ⚠ Inheriting the base's lets
    *   two sibling chains share a slot, and the second silently serves both.
-   * - ⚠ A bound instance never claims. Workers bind lazily, so a claim there shifts their slots
-   *   away from the primary's.
+   * - ⚠ A bound instance never claims. `bind()` builds one outside composition, so a claim there
+   *   shifts every later slot away from the other process's.
    * - ⚠ A `.branch()` arm never registers. It is reached through its parent's route, and
    *   registering it overwrites the parent.
    */

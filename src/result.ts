@@ -27,7 +27,7 @@ type BoundPipeline<T> = Pipeline<T, "sync" | "async", unknown>;
  * `const r = score([1, 2, 3]); r.first(1)` → `[2]`, then `r.toArray()` → `[2, 4, 6]`.
  */
 export class PipelineResult<T, M extends PipelineMode> {
-  /** The chain, re-bound to `_input` once per terminal. */
+  /** The chain, run over `_input` once per terminal. */
   private readonly _pipeline: BoundPipeline<unknown>;
   /** The input this result was called with, kept so a terminal can re-run it. */
   private readonly _input: PipelineSource<unknown>;
