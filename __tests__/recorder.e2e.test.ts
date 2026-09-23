@@ -136,6 +136,24 @@ describe(".local() regions", () => {
   });
 });
 
+describe("the callable instance", () => {
+  it("keeps .bind a Pipeline method, whose result cannot be called or wrapped", () => {
+    const doubled = new Pipeline<number>().transform((t) => t.map((x) => x * 2)) as unknown as {
+      bind(data: number[]): Pipeline<number>;
+    };
+    expect(doubled.bind).not.toBe(Function.prototype.bind);
+
+    const bound = doubled.bind([1, 2]);
+    expect(bound).toBeInstanceOf(Pipeline);
+    expect(() => bound([3]).toArray()).toThrow(
+      "cannot call a pipeline that is already bound to a source",
+    );
+    expect(() => new ConcurrentPipeline(bound)).toThrow(
+      "cannot wrap a pipeline that is already bound to a source",
+    );
+  });
+});
+
 describe("cluster slots", () => {
   it("claims one slot per stage call on the primary, and none for a call or a stage table", () => {
     const first = new ClusterHttpPipeline(new Pipeline<number>());

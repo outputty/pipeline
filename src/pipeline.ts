@@ -466,6 +466,19 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     return self;
   }
 
+  /**
+   * A copy of this chain that cannot be called or wrapped, like a `.local()` region's pipeline.
+   * `data` is never read. It keeps `.bind` a `Pipeline` method, so it never reaches
+   * `Function.prototype.bind`.
+   *
+   * `pipeline.bind([1, 2])([3])` → throws "cannot call a pipeline that is already bound…".
+   */
+  protected bind<U>(data: AsyncIterable<U>): Pipeline<U, "async", In>;
+  protected bind<U>(data: Iterable<U>): Pipeline<U, M extends "async" ? "async" : "sync">;
+  protected bind<U>(_data: PipelineSource<U>): Pipeline<U, "sync" | "async"> {
+    return this.createPipeline({ ...this.carriedOptions(), bound: true }, this._tail);
+  }
+
   /** Which engine a call runs on: `"shape"` follows the input, `"async"` forces async. A
    * dispatching class overrides it to `"async"`. */
   protected sourcePolicy(): SourcePolicy {
@@ -530,7 +543,8 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * the call; each call then compiles them afresh. */
   protected plan(): Plan {
     if (this._plan !== undefined) return this._plan;
-    const descs = descriptorsSince(this._tail, null)!;
+    // A bound pipeline cuts its input and runs none of its stages.
+    const descs = this._bound ? [] : descriptorsSince(this._tail, null)!;
     const perCall = descs.some((desc) => desc.kind === "local");
     this._plan = {
       descs,
