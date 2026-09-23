@@ -13,7 +13,6 @@ import type {
   RouteVerb,
   StageRoute,
   StageRegistries,
-  Tagged,
   ReduceWork,
   ReduceStage,
   StageLookup,
@@ -34,6 +33,9 @@ export interface ConcurrentPipelineOptions {
 
 type ConcurrentPipelineConstructorOptions = ConcurrentPipelineOptions & PipelineConstructorOptions;
 
+/** Marks a promise's rejection handled without observing it. */
+function ignore(): void {}
+
 async function* fanOutOrdered<T, U>(
   chunks: AsyncIterable<T[]>,
   work: (chunk: T[], ctx: IContextManager) => U[] | Promise<U[]>,
@@ -44,9 +46,8 @@ async function* fanOutOrdered<T, U>(
 
   for await (const chunk of chunks) {
     const p = Promise.resolve(work(chunk, ctx));
-    p.catch(() => {
-      // ⚠ Marks it handled for a chunk never awaited after an earlier throw; `await p` still throws.
-    });
+    // ⚠ Marks it handled for a chunk never awaited after an earlier throw; `await p` still throws.
+    p.catch(ignore);
     inFlight.push(p);
 
     if (inFlight.length >= maxConcurrency) {
@@ -61,6 +62,82 @@ async function* fanOutOrdered<T, U>(
   }
 }
 
+/**
+ * Settled work, handed out in the order it settled. Each watched promise carries a tag naming its
+ * producer, and `take()` reports it in `lastTag`. At most `capacity` promises are watched and not
+ * yet taken, so the ring never grows. One consumer waits at a time.
+ *
+ * ⚠ Not `Promise.race` over the in-flight set: a race attaches a reaction to every pending promise
+ * on each call, so its cost per chunk grows with `maxConcurrency`.
+ *
+ * Watching `a` (tag 0) then `b` (tag 1), with `b` settling first → `take()` returns `b`'s value,
+ * `lastTag` is `1`.
+ */
+class CompletionQueue<R> {
+  /** Watched and not yet taken, settled or not. */
+  size = 0;
+  /** The tag of the entry the last `take()` returned. */
+  lastTag = 0;
+  private readonly tags: number[];
+  private readonly values: (R | Error | undefined)[];
+  private readonly failed: boolean[];
+  private head = 0;
+  private count = 0;
+  private waiter: (() => void) | null = null;
+  private readonly handlers: [(value: R) => void, (error: Error) => void][] = [];
+
+  constructor(private readonly capacity: number) {
+    this.tags = new Array<number>(capacity).fill(0);
+    this.values = new Array<R | Error | undefined>(capacity).fill(undefined);
+    this.failed = new Array<boolean>(capacity).fill(false);
+  }
+
+  /** Queues `work`'s outcome under `tag` once it settles. Its rejection is handled from here on. */
+  watch(work: PromiseLike<R>, tag: number): void {
+    this.size++;
+    const pair = (this.handlers[tag] ??= [
+      (value) => this.push(tag, value, false),
+      (error: Error) => this.push(tag, error, true),
+    ]);
+    work.then(pair[0], pair[1]);
+  }
+
+  /** `null` when an entry is ready now, else a promise that resolves when one is. */
+  whenReady(): Promise<void> | null {
+    if (this.count > 0) return null;
+    return new Promise((resolve) => {
+      this.waiter = resolve;
+    });
+  }
+
+  /** The earliest-settled entry's value; throws its error when it rejected. */
+  take(): R {
+    const slot = this.head;
+    const value = this.values[slot];
+    const failed = this.failed[slot];
+    this.lastTag = this.tags[slot];
+    this.values[slot] = undefined;
+    this.head = (slot + 1) % this.capacity;
+    this.count--;
+    this.size--;
+    if (failed) throw value;
+    return value as R;
+  }
+
+  private push(tag: number, value: R | Error, failed: boolean): void {
+    const slot = (this.head + this.count) % this.capacity;
+    this.tags[slot] = tag;
+    this.values[slot] = value;
+    this.failed[slot] = failed;
+    this.count++;
+    const waiter = this.waiter;
+    if (waiter !== null) {
+      this.waiter = null;
+      waiter();
+    }
+  }
+}
+
 async function* fanOutUnordered<T, U>(
   chunks: AsyncIterable<T[]>,
   work: (chunk: T[], ctx: IContextManager) => U[] | Promise<U[]>,
@@ -68,8 +145,7 @@ async function* fanOutUnordered<T, U>(
   maxConcurrency: number,
 ): AsyncGenerator<U[]> {
   const iterator = chunks[Symbol.asyncIterator]();
-  const inFlight = new Map<number, Promise<Tagged<U[]>>>();
-  let nextId = 0;
+  const done = new CompletionQueue<U[]>(maxConcurrency);
   let exhausted = false;
 
   async function pullNext(): Promise<void> {
@@ -79,11 +155,7 @@ async function* fanOutUnordered<T, U>(
       exhausted = true;
       return;
     }
-    const id = nextId++;
-    const tagged = Promise.resolve(work(next.value, ctx)).then((result) => ({ id, result }));
-    // ⚠ Marks it handled: the ramp-up loop can throw before this promise ever reaches `race()`.
-    tagged.catch(() => {});
-    inFlight.set(id, tagged);
+    done.watch(Promise.resolve(work(next.value, ctx)), 0);
   }
 
   // ⚠ A manual iterator is not closed by `for await`, so `finally` closes the source on every exit.
@@ -92,10 +164,9 @@ async function* fanOutUnordered<T, U>(
       await pullNext();
     }
 
-    while (inFlight.size > 0) {
-      const { id, result } = await Promise.race(inFlight.values());
-      inFlight.delete(id);
-      yield result;
+    while (done.size > 0) {
+      const ready = done.whenReady();
+      yield ready === null ? done.take() : (await ready, done.take());
       await pullNext();
     }
   } finally {
@@ -145,23 +216,17 @@ async function* seedIfNoChunk<U>(source: AsyncGenerator<U[]>, seed: () => U): As
 }
 
 async function* mergeUnordered<U>(sources: AsyncGenerator<U[]>[]): AsyncGenerator<U[]> {
-  const inFlight = new Map<number, Promise<Tagged<IteratorResult<U[]>>>>();
+  const done = new CompletionQueue<IteratorResult<U[]>>(sources.length);
+  for (let id = 0; id < sources.length; id++) done.watch(sources[id]!.next(), id);
 
-  function pull(id: number): void {
-    const tagged = sources[id]!.next().then((result) => ({ id, result }));
-    // ⚠ Marks it handled: a partition still pending after another one threw is never awaited.
-    tagged.catch(() => {});
-    inFlight.set(id, tagged);
-  }
-
-  for (let id = 0; id < sources.length; id++) pull(id);
-
-  while (inFlight.size > 0) {
-    const { id, result } = await Promise.race(inFlight.values());
-    inFlight.delete(id);
-    if (result.done) continue;
-    yield result.value;
-    pull(id);
+  while (done.size > 0) {
+    const ready = done.whenReady();
+    if (ready !== null) await ready;
+    const step = done.take();
+    if (step.done) continue;
+    const id = done.lastTag;
+    yield step.value;
+    done.watch(sources[id]!.next(), id);
   }
 }
 

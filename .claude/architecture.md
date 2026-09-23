@@ -51,7 +51,7 @@ src/
                           interface, plus DROP/RowErrorHandler/PipelineErrorHandler/RunScope (#78);
                           StageRegistries (a stage's chunkTransforms+reduceStages pair),
                           Drainable<T> (the 3-field drain view PipelineResult/BranchOwner share),
-                          ReduceWork<T,U>, RouteVerb/StageRoute, Tagged<R> (#133)
+                          ReduceWork<T,U>, RouteVerb/StageRoute (#133)
   pipeline.ts            Pipeline: the chain, context, stages, Pipeline.drainable, createPipeline<U,
                           R>() + defer<U,R>() (each takes its own return type, letting a
                           DISPATCHING SUBCLASS's own two-argument call - `ConcurrentPipeline.apply()`
@@ -301,9 +301,9 @@ mechanism planning assumed it would need:
   would finish first. Measured: a source with per-item delays `[300ms, 10ms, 10ms]`, three
   concurrent `.next()` calls issued at once - the 10ms item's own timer does not start until the
   300ms item's body returns (`item 1 STARTS its own 10ms delay at 301 ms`), despite being called at
-  the same instant. `fanOutUnordered` (below) races real independent WORK on already-pulled chunks,
-  never repeated pulls on one shared generator - that distinction is why the same shape pays off
-  there and not here, and why `prefetch()` contains no `Promise.race` anywhere.
+  the same instant. `fanOutUnordered` (below) waits on real independent WORK on already-pulled
+  chunks, never on repeated pulls of one shared generator - that distinction is why completion order
+  means something there and nothing here, and why `prefetch()` contains no `Promise.race` anywhere.
 - **"The array is empty" is not "the stream is exhausted."** `prefetch()`'s own `pending` array is
   refilled synchronously, in the same tick as the shift that emptied one slot (`pull()` runs
   immediately after `pending.shift()`, before the next `yield`) - so two consumers sharing one
@@ -477,8 +477,9 @@ ever held well before a run ends, so `retainedMb` reads near-zero regardless), `
 a little MORE than `ordered:true` on a chain built to trigger holding, the opposite of the naive
 prediction. A discriminating check (re-run at `maxConcurrency: 64`, raising the buffer's own bound)
 found no consistent gap-vs-window-size correlation - the buffer's own real footprint is below
-`heldAtEndMB`'s resolution on this chain; the gap is something else, unverified further (`fanOutUnordered`'s own `Promise.race()`-based bookkeeping,
-a `Map<number, Promise>` re-raced on every settle, is the untested candidate).
+`heldAtEndMB`'s resolution on this chain; the gap is something else, unverified further. It is not
+the unordered fan-out's own bookkeeping: replacing its per-chunk `Promise.race` with a completion
+queue left `ordered:false` holding the same amount.
 
 That async-engine cost is essentially GONE, and the reason it survived so long is a diagnosis this
 document had wrong. It read: reducible, though not eliminable while `sourcePolicy()` still pins Mode
@@ -1347,8 +1348,12 @@ independent accumulator over its own `share()` view (`src/utils/cut.ts`) of the 
 stream - free-slot dealing, no dealer, no per-partition queues, a slow partition simply calls
 `.next()` less often, so the others pick up its slack. `mergeUnordered()`
 (`src/pipelines/concurrent.ts`) merges the partitions' own output in completion order, since there is
-no order between them. Each partition's own result - an `emit()` mid-fold, or its trailing
-accumulator once its share of the stream ends - flows downstream as an ordinary value, the same way
+no order between them. It and `fanOutUnordered()` both read that order from one `CompletionQueue`:
+each watched promise pushes its outcome into a fixed ring as it settles, and the one consumer takes
+the oldest. Its cost per chunk is constant in `maxConcurrency`, where a `Promise.race` over the
+in-flight set attaches a reaction to every pending promise on each call. Two chunks settling in the
+same tick come out in the order they settled. Each partition's own result - an `emit()` mid-fold, or
+its trailing accumulator once its share of the stream ends - flows downstream as an ordinary value, the same way
 a non-partitioned reduce's own `emit()` output already does: no forced merge, no thrown error, no
 `combine` parameter. A caller who wants ONE final value writes an ordinary second reduce as the next
 stage - `.local((p) => p.reduce(mergeFn, initial))` - the same pattern used to fold down any other

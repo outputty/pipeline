@@ -314,8 +314,8 @@ function branchBroadcastExpected(rows: number[]): MemoryIdentity {
  * `maxConcurrency` 4 and 64 each swung by up to 2 MB with NO consistent direction relative to the
  * window size - noise, not a scaling signal. The buffer's own real footprint is below `heldAtEndMB`'s
  * resolution at this chain's chunk size; the 2.2 MB gap this case measures is NOT the reorder buffer
- * - `fanOutUnordered`'s own `Promise.race()`-based bookkeeping (a `Map<number, Promise>` re-raced on
- * every settle, `src/pipelines/concurrent.ts`) is the untested candidate for it, left unverified.
+ * - and not `fanOutUnordered`'s bookkeeping either: replacing its race with a completion queue left
+ * held memory unchanged. Its cause is unidentified.
  * Done-when 11 is satisfied by the measurement itself, not by this case isolating the mechanism it
  * set out to: a reorder buffer's own retention, on this chain, is bounded and negligible.
  */

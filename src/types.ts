@@ -265,15 +265,6 @@ export interface StageRoute {
  * `{ ok: false, error: "unknown stage 9; this deployment serves 0..1" }`. */
 export type StageLookup<S> = { ok: true; stage: S } | { ok: false; error: string };
 
-/** A value tagged with the id of the partition or source that produced it, so a `Promise.race`
- * over several can tell which one settled. `fanOutUnordered` and `mergeUnordered` use it.
- *
- * `{ id: 2, result: [4, 5, 6] }` → partition 2's chunk. */
-export interface Tagged<R> {
-  id: number;
-  result: R;
-}
-
 /**
  * The views a terminal op or `.branch()` drains a bound chain through. `syncChunks` is `null` for
  * an async run; `chunks` builds the async stream on demand.
