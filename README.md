@@ -288,9 +288,9 @@ Extends `Pipeline`. Runs several chunks of a stage at once, in this process. Eve
 method above applies unchanged; `ConcurrentPipeline` adds no new ones, only its own constructor
 knobs - see [Where the work runs](#where-the-work-runs) for items in flight.
 
-Internally, `.apply()` never calls `Transformer.process()` here the way `Pipeline` does - it fans
-`this._chunks` (the pipeline's own already-cut chunk stream) out through up to `maxConcurrency`
-concurrent calls of the SAME stage. `ordered: true` keeps them in a sliding window so a slower
+Internally, a stage never runs through `Transformer.process()` here the way it does on `Pipeline` -
+the run's already-cut chunk stream fans out through up to `maxConcurrency` concurrent calls of the
+SAME stage. `ordered: true` keeps them in a sliding window so a slower
 chunk is never overtaken by a faster one; `false` yields whichever chunk finishes first.
 
 <!-- compiles -->
@@ -761,7 +761,7 @@ An async generator's own per-item cost (a few promises per row, `for await`'s ow
 protocol) is a floor this package cannot lower: a hand-rolled consumer pulling the same generator
 with `.next()` directly, bypassing `for await` entirely, measures the identical cost - the price is
 paid inside V8's own async generator machinery, once per `.next()` call, whoever calls it.
-`fromSource()` already sits a negligible fraction above that floor. The cost is specific to a
+A pipeline over such a source sits a negligible fraction above that floor. The cost is specific to a
 `function*`/`async function*` source, not to asynchrony itself: a hand-rolled, non-generator
 `AsyncIterable` (a plain object whose `next()` returns `Promise.resolve({ value, done })`) creates
 half the generator's promises per row over the identical `for await` consumption. Prefer a plain
