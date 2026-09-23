@@ -152,7 +152,7 @@ times `maxConcurrency` - items in flight - never `maxConcurrency` alone. A chain
 default buffer of 1000 with `maxConcurrency: 3` holds 3000 callbacks in flight, not 3. Call
 `.buffer(size)` to lower the ceiling, and prefer the widest chunk that fits it: measured in
 [`.claude/architecture.md`](.claude/architecture.md), of two chains holding the same 16 in flight,
-the wide-chunk one runs roughly twice as fast, because a narrow chunk pays the per-chunk cost more
+the wide-chunk one runs several times as fast, because a narrow chunk pays the per-chunk cost more
 often.
 
 | `.buffer(size)` | `maxConcurrency` | items in flight |
@@ -164,10 +164,8 @@ often.
 Buffer size dominates `maxConcurrency` on the canonical chain (`.map().filter()` on
 `ConcurrentPipeline`). A larger buffer amortizes per-chunk overhead over more rows, and that
 dominates: a 10000-item buffer beats a 100-item one clearly, whatever `maxConcurrency` is set to.
-`maxConcurrency` matters most at a SMALL buffer (100: a clear gain as concurrency rises) and matters
-least at a large one (10000: flat within noise). At the default buffer (1000), pushing
-`maxConcurrency` past 4 stopped helping - 16 read a little WORSE than 4 on this chain, the fan-out's
-own scheduling overhead outweighing the parallelism gained. The defaults (`.buffer()` unset = 1000, `maxConcurrency` unset = 4) stay unchanged - they sit at a reasonable point on this chain, not the fastest combination,
+On this chain, whose stage is synchronous, `maxConcurrency` barely moves the cost at any buffer
+size. The defaults (`.buffer()` unset = 1000, `maxConcurrency` unset = 4) stay unchanged - they sit at a reasonable point on this chain, not the fastest combination,
 which trades a wider chunk for a smaller one a caller with a wide CPU-bound stage may prefer to widen.
 
 `.tap()` is the one exception, and it is deliberate. `Pipeline.tap(fn)` always runs in the
@@ -350,7 +348,7 @@ await new Promise<void>((resolve) => server.close(() => resolve()));
   resolved once per process: `node:http` with a shared keep-alive agent for an `http:` url on Node,
   and the global `fetch` everywhere else - on Bun, Deno and Cloudflare Workers, and for an `https:`
   url, which `node:http` cannot speak. On a real loopback server with identical output,
-  `/transform/<n>` is several times cheaper on `node:http` than on the global `fetch`.
+  `/transform/<n>` costs about half as much on `node:http` as on the global `fetch`.
 - **`.fetch`** - a `(request: Request) => Promise<Response>` handler serving this pipeline's
   stages. Prefix-agnostic: it reads only its own trailing `/transform/<n>`/`/reduce/<n>` segment, so
   mounting it under any path is safe.
