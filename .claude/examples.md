@@ -650,8 +650,8 @@ Real output, `Pipeline async source` (the async-generator source case) and `Conc
 }
 ```
 
-The three numbers map onto `bench/memory.ts`'s own columns: promises per row is `promisesPerRow`, garbage collections is `gcCount`, and peak heap is `heldAtEndMB`, the mid-run peak read off real collector events. Collections come from `v8.GCProfiler` and allocation from `v8.getHeapStatistics().total_allocated_bytes`, not `PerformanceObserver('gc')` or a `heapUsed` delta: `roadmap.md` records the observer reading zero collections for a run with 13.
+The three numbers map onto `bench/memory.ts`'s own columns: promises per row is `promisesPerRow`, garbage collections is `gcCount`, and peak heap is `heldAtEndMB`, the mid-run peak read off real collector events. Collections come from `v8.GCProfiler` and allocation from `v8.getHeapStatistics().total_allocated_bytes`, not `PerformanceObserver('gc')` or a `heapUsed` delta: `roadmap.md` records the observer reading zero collections for a run that collected many times.
 
-`nsPerRow` is not part of the record. Two identical runs of one case read -7% and +68%, so a wall-clock figure measures the machine.
+`nsPerRow` is not part of the record. Two identical runs of one case disagreed widely, so a wall-clock figure measures the machine.
 
 `bench:compare` restores `src/` with `git checkout HEAD -- src/`, which cannot delete a file the new HEAD removed. After a compare on a stack that deletes a source file, `git status` shows the deleted file as added: remove it with `git rm -f`.

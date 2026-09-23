@@ -48,7 +48,7 @@
 - **`EventEmitterPipeline` as an observability class** - `.tap()` already observes, attaches mid-drain and isolates a throwing listener.
 - **`EventEmitterPipeline` as a round-robin dispatch mode** - dropped with concurrency control on the user's scope pullback; broadcast dispatch shipped.
 - **A forward-descending `Transformer` composition** - makes every link a middleware, a larger contract than `map`/`filter`/`reduce` need.
-- **A worker-thread pool** - loopback HTTP is faster above ~7-8 KB per chunk, where almost every real chunk sits.
+- **A worker-thread pool** - loopback HTTP is faster at all but the smallest chunks, and almost every real chunk sits in that range.
 - **`workerPool()` as an execution-strategy factory** - a strategy discards the composed chain, so a caller's `.map()` silently never runs.
 - **Delegation as a plain async `transform`** - killed with the strategy seam itself.
 - **A caller-owned stage map, named by string** - a stage's position already identifies it.

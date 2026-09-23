@@ -138,8 +138,8 @@ for await (const chunk of new Pipeline<{ id: number; ts: number }>()
 `.queue(capacity)` decouples a chain's pull from its own source: instead of drawing the next chunk
 only when a downstream consumer asks for it, up to `capacity` chunks sit ready ahead of time,
 produced as fast as the source allows. A slow producer's latency then overlaps with a slower
-consumer's own processing instead of adding to it - measured, a 100ms/item source feeding a
-30ms/item stage ran 674ms with no queue and 542ms with one, from overlap alone, same output. Order
+consumer's own processing instead of adding to it - a slow source feeding a faster stage runs
+clearly faster queued than fully serial, from overlap alone, with the same output. Order
 is preserved: `.queue()` never reorders items, only changes WHEN they are pulled.
 
 > **`.queue(capacity)`** - prefetches up to `capacity` chunks `.buffer()` already cut, ready ahead of
@@ -160,9 +160,9 @@ const data = await new Pipeline<number>()
 [6, 8, 10]
 ```
 
-A `function*`/`async function*` source carries its own protocol cost - about 4 promises per row at
-10,000 rows - paid once per `.next()` call regardless of who consumes it; this package's own
-consumption already sits within a fraction of a percent of that floor. A plain `AsyncIterable` built
+A `function*`/`async function*` source carries its own protocol cost - a few promises per row - paid
+once per `.next()` call regardless of who consumes it; this package's own consumption already sits
+a negligible fraction above that floor. A plain `AsyncIterable` built
 by hand, rather than a generator function, halves it: prefer one when you control how a source is
 built and the difference matters at your own scale.
 
@@ -230,8 +230,8 @@ needed.
 The chunk is the unit of concurrency, so a `ConcurrentPipeline`'s parallelism is its buffer size
 times `maxConcurrency`, never `maxConcurrency` alone. A chain left at the default buffer of 1000 with
 `maxConcurrency: 3` holds 3000 callbacks in flight, not 3. Call `.buffer(size)` to lower the ceiling,
-and prefer the widest chunk that fits it: two chains holding the same 16 in flight over 50000 items
-ran 27 ms and 63 ms, because a narrow chunk pays the per-chunk cost more often.
+and prefer the widest chunk that fits it: of two chains holding the same 16 in flight, the
+wide-chunk one runs roughly twice as fast, because a narrow chunk pays the per-chunk cost more often.
 
 | `.buffer(size)` | `maxConcurrency` | items in flight |
 | --- | --- | --- |
@@ -239,13 +239,11 @@ ran 27 ms and 63 ms, because a narrow chunk pays the per-chunk cost more often.
 | 100 | 3 | 300 |
 | 1 | 16 | 16 |
 
-Buffer size dominates `maxConcurrency` on the canonical `.map().filter()` chain, 200,000 rows on
-`ConcurrentPipeline`: every row of a 10,000-item buffer beats every row of a 100-item one, whatever
-`maxConcurrency` is set to (13.02, 11.92, 12.15 ns/row across `maxConcurrency` 1, 4, 16, against
-25.66, 20.35, 19.03 for a 100-item buffer). `maxConcurrency` matters most at a small buffer and least
-at a large one, and pushing it past 4 at the default buffer size (1000) stopped helping on this chain
-- 16 read worse than 4 (18.04 against 14.73 ns/row), the fan-out's own scheduling overhead
-outweighing the parallelism gained. The defaults - `.buffer()` unset at 1000, `maxConcurrency` unset
+Buffer size dominates `maxConcurrency` on the canonical `.map().filter()` chain on
+`ConcurrentPipeline`: a 10,000-item buffer beats a 100-item one clearly, whatever `maxConcurrency` is
+set to. `maxConcurrency` matters most at a small buffer and least at a large one, and pushing it past
+4 at the default buffer size (1000) stopped helping on this chain - 16 read a little worse than 4,
+the fan-out's own scheduling overhead outweighing the parallelism gained. The defaults - `.buffer()` unset at 1000, `maxConcurrency` unset
 at 4 - stay a reasonable point on this chain, not its fastest cell.
 
 ```ts
@@ -280,7 +278,7 @@ takes the global `fetch` signature; supply one to add an auth header, a proxy or
 a pipeline picks the fastest client its runtime offers, once per process: `node:http` over a shared
 keep-alive connection for an `http:` url on Node, and the global `fetch` everywhere else - on Bun,
 Deno and Cloudflare Workers, and for an `https:` url, which `node:http` cannot speak. Dispatching a
-stage costs a fifth of what it did on the global `fetch`, and a caller who changes nothing gets that.
+stage is several times cheaper than on the global `fetch`, and a caller who changes nothing gets that.
 
 ⚠ A client supplied by the caller must stream in both directions. A reduce stage holds one connection
 open for the whole stream and sends results back along it while chunks are still going out, so a
