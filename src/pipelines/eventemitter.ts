@@ -3,12 +3,18 @@
 import type { ConcurrentPipelineOptions } from "@src/pipelines/concurrent";
 import { ConcurrentPipeline } from "@src/pipelines/concurrent";
 import { Pipeline } from "@src/pipeline";
-import type { PipelineConstructorOptions, PipelineSource, WrappablePipeline } from "@src/pipeline";
+import type {
+  PipelineConstructorOptions,
+  PipelineSource,
+  StageOp,
+  WrappablePipeline,
+} from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
 import type {
   Drainable,
   IContextManager,
   InternalTransformer,
+  PipelineErrorHandler,
   PipelineMode,
   ReduceFunction,
 } from "@src/types";
@@ -89,21 +95,30 @@ export class EventEmitterPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
     return super.transform(builder) as unknown as EventEmitterPipeline<U, In>;
   }
 
+  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): EventEmitterPipeline<U, In> {
+    return super.apply(transformer) as unknown as EventEmitterPipeline<U, In>;
+  }
+
   /**
    * Also emits `<route>:end` after the stage's last chunk.
    *
    * ⚠ Under `maxConcurrency > 1`, an early `.first(n)` can fire `:end` before some in-flight
    * `:done`/`:error` events. `:end` means no more chunks, not that every Worker finished.
    */
-  override apply<U>(transformer: Transformer<T, U, "sync" | "async">): EventEmitterPipeline<U, In> {
-    const dispatched = super.apply(transformer) as EventEmitterPipeline<U, In>;
-    if (dispatched.isDeferred()) return dispatched;
-
+  protected override planApply(
+    transformer: Transformer<any, any, any>,
+    index: number,
+    runHandler: PipelineErrorHandler | undefined,
+  ): StageOp {
+    const dispatched = super.planApply(transformer, index, runHandler);
     const emitter = this.emitter;
-    const route = dispatched.routePath("transform", dispatched._chunkTransforms.length - 1);
-    const source = dispatched._chunks;
-    dispatched._chunks = withEndSignal(source, () => emitSafely(emitter, `${route}:end`));
-    return dispatched;
+    const endEvent = `${this.routePath("transform", index)}:end`;
+    return {
+      run(flow) {
+        dispatched.run(flow);
+        flow.chunks = withEndSignal(flow.chunks, () => emitSafely(emitter, endEvent));
+      },
+    };
   }
 
   override local<U, M2 extends PipelineMode>(

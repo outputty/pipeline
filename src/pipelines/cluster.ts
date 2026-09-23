@@ -16,11 +16,11 @@ import { HttpPipeline, toNodeHandler, errorResponse } from "@src/pipelines/http"
 import type { HttpPipelineOptions, ResolvedUrl } from "@src/pipelines/http";
 import type { PipelineClient } from "@src/pipelines/client";
 import { Pipeline } from "@src/pipeline";
-import type { WrappablePipeline } from "@src/pipeline";
+import type { PipelineSource, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import { onWorkerDrainNothing, pipelineRoute, WorkerSet } from "@src/pipelines/worker-set";
+import { drainsNothingOnWorker, pipelineRoute, WorkerSet } from "@src/pipelines/worker-set";
 import type { SlotOptions } from "@src/pipelines/worker-set";
-import type { ReduceFunction, PipelineMode, RouteVerb } from "@src/types";
+import type { Drainable, ReduceFunction, PipelineMode, RouteVerb } from "@src/types";
 
 /** Construction-time knobs for `ClusterHttpPipeline`. */
 export type ClusterHttpPipelineOptions = {
@@ -93,7 +93,7 @@ export class ClusterHttpPipeline<T, In = T> extends HttpPipeline<T, In> {
   ) {
     const options = Pipeline.wrapping<ClusterHttpPipelineConstructorOptions>(first, second);
     // Dispatch never reads `url`; `resolveUrl()` supplies the target per call.
-    super(onWorkerDrainNothing({ ...options, url: "" }));
+    super({ ...options, url: "" });
     this.workers = options?.workers ?? availableParallelism();
     this.pipelineIndex = workerSet.claimSlot(this as ClusterHttpPipeline<unknown>, options);
   }
@@ -132,6 +132,11 @@ export class ClusterHttpPipeline<T, In = T> extends HttpPipeline<T, In> {
 
   override queue(capacity: number): ClusterHttpPipeline<T, In> {
     return super.queue(capacity) as unknown as ClusterHttpPipeline<T, In>;
+  }
+
+  /** Drains no chunks on a worker: a worker serves the stages and never orchestrates a run. */
+  override drainable(input: PipelineSource<In>, materialize = true): Drainable<T> {
+    return drainsNothingOnWorker(super.drainable(input, materialize));
   }
 
   /** Prefixes every route with `/pipeline/<pipelineIndex>`, so several pipelines share one worker

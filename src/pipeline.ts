@@ -22,6 +22,7 @@ import type {
   StageRegistries,
   Drainable,
   BufferFunction,
+  InternalTransformer,
 } from "./types";
 import { DEFAULT_CHUNK_SIZE, DROP } from "./types";
 import { SimpleContextManager } from "./context/simple";
@@ -122,7 +123,8 @@ export type AnyPipeline<U> = Pipeline<U, PipelineMode, any>;
  */
 export type WrappablePipeline<T, In> = Pipeline<T, PipelineMode, In>;
 
-/** One stage call recorded on an unbound pipeline, replayed against it once an input is bound. */
+/** A stage call as a function over a pipeline. Kept for `PipelineState.pendingStages`, which the
+ * constructor accepts and ignores. */
 export type PendingStage = (pipeline: AnyPipeline<any>) => AnyPipeline<any>;
 
 /** The knobs a caller passes when constructing a `Pipeline`. Both choose its context manager. */
@@ -136,27 +138,31 @@ export interface PipelineOptions {
   contextFactory?: () => IContextManager;
 }
 
-/** Internal state each copy-on-write call carries to the next instance. */
+/**
+ * Internal state each copy-on-write call carries to the next instance. The constructor reads
+ * `chunkSize`, `runHandler`, `mode`, `routeTrail`, `branchStages`, `contextIsDefault` and `bound`;
+ * it accepts the other fields and ignores them.
+ */
 export interface PipelineState {
-  /** An already-cut chunk stream the new instance reads. */
+  /** Ignored. */
   chunks?: AsyncIterable<unknown[]>;
-  /** The raw items a back-to-back `.buffer()` recuts from; `null` once a stage has run. */
+  /** Ignored. */
   preBufferItems?: AsyncIterable<unknown> | null;
-  /** Every stage's chunk transform, by stage index. A serving side looks stages up here. */
+  /** Ignored; the stage tables come from the recorded stages. */
   chunkTransforms?: ChunkTransform[];
-  /** Every reduce stage, keyed by its index in the same space as `chunkTransforms`. */
+  /** Ignored; the stage tables come from the recorded stages. */
   reduceStages?: Map<number, ReduceStage>;
-  /** The run handler from `.onError()`. Only stages applied after it see it. */
+  /** The run handler every recorded stage starts with, until an `.onError()` replaces it. */
   runHandler?: PipelineErrorHandler;
-  /** Which engine the terminals read at runtime. */
+  /** `"async"` runs every input on the async engine. */
   mode?: PipelineMode;
-  /** The chunk stream of a `"sync"` chain; `null` on an `"async"` one, which uses `chunks`. */
+  /** Ignored. */
   syncChunks?: MaybeAsyncChunks<unknown> | null;
-  /** `preBufferItems` for a `"sync"` chain. */
+  /** Ignored. */
   syncPreBufferItems?: Iterable<unknown> | null;
   /** The chunk size that cuts the input. A whole number of at least 1. */
   chunkSize?: number;
-  /** Every stage composed before an input was bound, in order. */
+  /** Ignored; the recorded stages travel with copy-on-write. */
   pendingStages?: PendingStage[];
   /** The route prefix a branch arm's stages sit under, `/branch/<i>/<name>`; empty on a chain. */
   routeTrail?: string;
@@ -164,12 +170,74 @@ export interface PipelineState {
   branchStages?: Map<number, BranchArm<unknown>[]>;
   /** Whether the pipeline built `context` itself. A built manager is replaced on every call. */
   contextIsDefault?: boolean;
-  /** Whether an input is bound. `mode` is a separate, type-level fact. */
+  /** Whether this is a `.local()` region's pipeline, which cannot be called or wrapped. */
   bound?: boolean;
 }
 
 /** What the constructor and `createPipeline()` take: the caller's knobs plus the carried state. */
 export type PipelineConstructorOptions = PipelineOptions & PipelineState;
+
+/** One stage call, as a stage method records it. `origin` marks where a `.local()` region starts. */
+export type StageDescriptor =
+  | { readonly kind: "apply"; readonly transformer: Transformer<any, any, any> }
+  | { readonly kind: "reduce"; readonly fn: ReduceFunction<any, any>; readonly initial: unknown }
+  | { readonly kind: "buffer"; readonly size: number }
+  | { readonly kind: "bufferFn"; readonly fn: BufferFunction<any> }
+  | { readonly kind: "queue"; readonly capacity: number }
+  | { readonly kind: "onError"; readonly handler: PipelineErrorHandler }
+  | {
+      readonly kind: "local";
+      readonly build: (p: AnyPipeline<any>) => AnyPipeline<any>;
+    }
+  | { readonly kind: "origin" };
+
+/** A recorded chain, newest stage first. Copy-on-write shares every earlier node. */
+export interface StageNode {
+  readonly prev: StageNode | null;
+  readonly desc: StageDescriptor;
+}
+
+/**
+ * One run's streams, which each stage replaces in turn. `syncChunks` is `null` on the async engine,
+ * which reads `chunks`. `syncItems`/`asyncItems` are the raw input a `.buffer()` recuts, `null` once
+ * a stage has consumed it.
+ */
+export interface RunFlow {
+  ctx: IContextManager;
+  syncChunks: MaybeAsyncChunks<unknown> | null;
+  chunks: AsyncIterable<unknown[]>;
+  syncItems: Iterable<unknown> | null;
+  asyncItems: AsyncIterable<unknown> | null;
+}
+
+/** What compiling a stage needs from the stages before it: the run handler in force and the next
+ * stage index. */
+export interface PlanState {
+  runHandler: PipelineErrorHandler | undefined;
+  index: number;
+}
+
+/** A compiled stage: `run` replaces the flow's streams with this stage's output. */
+export interface StageOp {
+  run(flow: RunFlow): void;
+}
+
+/** A chain compiled once: its stages oldest first, and their ops when no `.local()` region makes
+ * them depend on the call. */
+export interface Plan {
+  descs: readonly StageDescriptor[];
+  ops: readonly StageOp[] | null;
+  cutSync: (items: Iterable<unknown>) => MaybeAsyncChunks<unknown>;
+  cutAsync: (items: AsyncIterable<unknown>) => AsyncIterable<unknown[]>;
+  forcesAsync: boolean;
+}
+
+/** Carries the recorded stages through the constructor without widening its options type. */
+const RECORDED: unique symbol = Symbol("recorded");
+
+type RecordedOptions = PipelineConstructorOptions & { [RECORDED]?: StageNode | null };
+
+const ORIGIN: StageDescriptor = { kind: "origin" };
 
 function reduceStagePlaceholder(stageIndex: number): ChunkTransform {
   return () => {
@@ -178,6 +246,81 @@ function reduceStagePlaceholder(stageIndex: number): ChunkTransform {
         `/transform/${stageIndex}`,
     );
   };
+}
+
+/** The flow's chunks as an async stream, whichever engine it runs on. */
+function streamOf(flow: RunFlow): AsyncIterable<unknown[]> {
+  const syncChunks = flow.syncChunks;
+  if (syncChunks === null) return flow.chunks;
+  return asyncIterableFrom(() => asAsyncChunks(syncChunks));
+}
+
+/** Marks the raw input consumed, so a later `.buffer()` recuts the stage output instead. */
+function consumed(flow: RunFlow): void {
+  flow.syncItems = null;
+  flow.asyncItems = null;
+}
+
+function runOps(ops: readonly StageOp[], flow: RunFlow): void {
+  for (let i = 0; i < ops.length; i++) ops[i]!.run(flow);
+}
+
+/** The stages from `tail` back to (not including) `origin`, oldest first; `null` when `tail` does
+ * not descend from `origin`. */
+function descriptorsSince(
+  tail: StageNode | null,
+  origin: StageNode | null,
+): StageDescriptor[] | null {
+  const descs: StageDescriptor[] = [];
+  let node = tail;
+  while (node !== origin) {
+    if (node === null) return null;
+    descs.push(node.desc);
+    node = node.prev;
+  }
+  return descs.reverse();
+}
+
+function* stageChunks<In, Out>(
+  source: MaybeAsyncChunks<In>,
+  runnable: InternalTransformer<In, Out>,
+  ctx: IContextManager,
+  runHandler: PipelineErrorHandler | undefined,
+): Generator<Out[] | Promise<Out[]>> {
+  for (const chunk of source) {
+    yield chain(chunk, (settled) => runStageChunk(runnable, settled, ctx, runHandler));
+  }
+}
+
+/** The op for one `.buffer()`: cut the raw input when no stage has consumed it yet, else recut the
+ * stage output. `readable` decodes chunks before an async recut reads their items. */
+function cutOp(
+  cutSync: (items: Iterable<unknown>) => MaybeAsyncChunks<unknown>,
+  recut: (slots: MaybeAsyncChunks<unknown>) => MaybeAsyncChunks<unknown>,
+  cutAsync: (items: AsyncIterable<unknown>) => AsyncIterable<unknown[]>,
+  recutAsync: (chunks: AsyncIterable<unknown[]>) => AsyncIterable<unknown[]>,
+  flow: RunFlow,
+  readable: (chunks: AsyncIterable<unknown[]>) => AsyncIterable<unknown[]>,
+): void {
+  // ⚠ `recut` re-slices slots without flattening: a slot can hold a pending `Promise<T[]>` even
+  // on a sync chain.
+  if (flow.syncChunks !== null) {
+    flow.syncChunks = flow.syncItems !== null ? cutSync(flow.syncItems) : recut(flow.syncChunks);
+    return;
+  }
+  if (flow.syncItems !== null) {
+    flow.chunks = asAsyncChunks(cutSync(flow.syncItems));
+    flow.asyncItems = null;
+    return;
+  }
+  if (flow.asyncItems !== null) {
+    flow.chunks = cutAsync(flow.asyncItems);
+    return;
+  }
+  const chunks = readable(flow.chunks);
+  flow.chunks = recutAsync(chunks);
+  // Drained only when a back-to-back `.buffer()` replaces this one, never alongside `recutAsync`.
+  flow.asyncItems = flattenChunks(chunks);
 }
 
 /**
@@ -193,29 +336,31 @@ export interface Pipeline<T, M extends PipelineMode = "unset", In = T> {
  * A chain over input type `In`, holding no data. Stage methods return a new pipeline; calling one
  * runs it over an input and returns a `PipelineResult`.
  *
+ * A pipeline records its stages and compiles them once, on its first call, into a plan that each
+ * call runs with its own streams and context.
+ *
  * All stages share one context manager. A run's `ctx.set()` reaches the caller only through a
  * manager passed as `options.context`.
  *
  * `new Pipeline<number>().transform((t) => t.map((x) => x * 2))([1, 2, 3]).toArray()` → `[2, 4, 6]`.
  */
 export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
-  protected _chunks!: AsyncIterable<T[]>;
-  protected _preBufferItems!: AsyncIterable<T> | null;
   protected _context!: IContextManager;
-  protected _chunkTransforms!: ChunkTransform[];
-  protected _reduceStages!: Map<number, ReduceStage>;
+  protected _contextIsDefault!: boolean;
+  /** The run handler the first recorded stage starts with. */
   protected _runHandler?: PipelineErrorHandler;
   protected _mode!: PipelineMode;
-  protected _syncChunks!: MaybeAsyncChunks<T> | null;
-  protected _syncPreBufferItems!: Iterable<T> | null;
   protected _chunkSize!: number;
-  protected _pendingStages!: PendingStage[];
-  protected _contextIsDefault!: boolean;
   protected _routeTrail!: string;
   protected _branchStages!: Map<number, BranchArm<unknown>[]>;
+  /** Whether this is a `.local()` region's pipeline, which cannot be called or wrapped. */
+  protected _bound!: boolean;
+  /** The recorded stages, newest first; `null` for none. */
+  protected _tail!: StageNode | null;
+  /** `plan()`'s memo. Never carried through copy-on-write. */
+  protected _plan?: Plan;
   /** `registriesFor()`'s memo, by trail. Never carried through copy-on-write. */
   protected _armRegistries?: Map<string, StageRegistries>;
-  protected _bound!: boolean;
   /** `registries()`'s memo. Never carried through copy-on-write. */
   protected _registries?: StageRegistries;
 
@@ -249,92 +394,29 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     self._contextIsDefault =
       options?.contextIsDefault ??
       (options?.context === undefined && options?.contextFactory === undefined);
-    self._chunkTransforms = options?.chunkTransforms ?? [];
-    self._reduceStages = options?.reduceStages ?? new Map();
     self._runHandler = options?.runHandler;
     self._mode = options?.mode ?? "unset";
-    self._syncChunks = (options?.syncChunks ?? null) as MaybeAsyncChunks<T> | null;
-    self._chunks = (options?.chunks ?? emptyChunks<T>()) as AsyncIterable<T[]>;
-    self._preBufferItems = (options?.preBufferItems ?? null) as AsyncIterable<T> | null;
-    self._syncPreBufferItems = (options?.syncPreBufferItems ?? null) as Iterable<T> | null;
     // ⚠ Validate here: a caller can pass `chunkSize` directly, and an unchecked `2.5` cuts an array
     // and a `Set` into different chunks.
     if (options?.chunkSize !== undefined) {
       assertWholeNumberAtLeastOne("chunkSize", options.chunkSize);
     }
     self._chunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
-    self._pendingStages = options?.pendingStages ?? [];
     self._bound = options?.bound ?? false;
     self._routeTrail = options?.routeTrail ?? "";
     self._branchStages = options?.branchStages ?? new Map();
+    self._tail = (options as RecordedOptions | undefined)?.[RECORDED] ?? null;
     return self;
   }
 
-  /**
-   * Binds an input to this chain and returns the bound pipeline that drains it. An `Iterable` runs
-   * on the sync engine and an `AsyncIterable` on the async one, unless `sourcePolicy()` forces async.
-   */
-  protected bind<U>(data: AsyncIterable<U>): Pipeline<U, "async", In>;
-  protected bind<U>(data: Iterable<U>): Pipeline<U, M extends "async" ? "async" : "sync">;
-  protected bind<U>(data: PipelineSource<U>): Pipeline<U, "sync" | "async"> {
-    return this.fromSource<U>(data, this.sourcePolicy()) as Pipeline<U, "sync" | "async">;
-  }
-
-  /** Cuts `data` into chunks and replays the recorded stages over them. `policy` is the class's
-   * `sourcePolicy()`. */
-  protected fromSource<U>(data: PipelineSource<U>, policy: SourcePolicy): AnyPipeline<U> {
-    const mode: "sync" | "async" =
-      isAsyncSource(data) || policy === "async" || this._mode === "async" ? "async" : "sync";
-    const boundOptions: PipelineConstructorOptions = {
-      ...this.carriedOptions(),
-      mode,
-      pendingStages: [],
-      context: this.contextForRun(),
-      bound: true,
-    };
-
-    if (mode === "sync") {
-      const items = data as Iterable<U>;
-      return this.replayPending(
-        this.createPipeline<U>(emptyChunks<U>(), {
-          ...boundOptions,
-          syncChunks: buildSyncChunkGenerator<U>(this._chunkSize)(items),
-          syncPreBufferItems: items,
-          preBufferItems: null,
-        }),
-      );
-    }
-
-    const items = toAsyncIterable(data);
-    // An array forced onto the async engine is cut synchronously, so it pays no per-item promise.
-    const chunks = Array.isArray(data)
-      ? asAsyncChunks<U>(buildSyncChunkGenerator<U>(this._chunkSize)(data as Iterable<U>))
-      : buildChunkGenerator<U>(this._chunkSize)(items);
-    return this.replayPending(
-      this.createPipeline<U>(chunks, {
-        ...boundOptions,
-        preBufferItems: items,
-        syncChunks: null,
-        // A sync input forced async keeps its sync view, so `.buffer()` can recut it synchronously.
-        syncPreBufferItems: isAsyncSource(data) ? null : (data as Iterable<U>),
-      }),
-    );
-  }
-
-  private replayPending<U>(bound: AnyPipeline<U>): AnyPipeline<U> {
-    let current: AnyPipeline<any> = bound;
-    for (const stage of this._pendingStages) current = stage(current);
-    return current as AnyPipeline<U>;
-  }
-
-  /** Which engine a bound input runs on: `"shape"` follows the input, `"async"` forces async. A
+  /** Which engine a call runs on: `"shape"` follows the input, `"async"` forces async. A
    * dispatching class overrides it to `"async"`. */
   protected sourcePolicy(): SourcePolicy {
     return "shape";
   }
 
   /**
-   * Builds the next instance of this pipeline's own class over an already-cut `chunks` stream. A
+   * Builds the next instance of this pipeline's own class, recording `tail` as its stages. A
    * subclass with extra constructor knobs overrides `carriedKnobs()`, not this. `R` is the return
    * type the caller wants back.
    *
@@ -342,12 +424,18 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    * `class Sub extends Pipeline<number> {}`: `new Sub().transform((t) => t.map((x) => x + 1))
    * .constructor.name` → `"Sub"`.
    */
-  protected createPipeline<U, R = AnyPipeline<U>>(
-    chunks: AsyncIterable<U[]>,
-    options: PipelineConstructorOptions,
-  ): R {
-    const Ctor = this.constructor as new (options?: PipelineConstructorOptions) => AnyPipeline<U>;
-    return new Ctor({ ...options, ...this.carriedKnobs(), chunks }) as unknown as R;
+  protected createPipeline<R>(options: PipelineConstructorOptions, tail: StageNode | null): R {
+    const Ctor = this.constructor as new (options?: PipelineConstructorOptions) => R;
+    return new Ctor({ ...options, ...this.carriedKnobs(), [RECORDED]: tail } as RecordedOptions);
+  }
+
+  /** A copy of this pipeline with `desc` recorded after its stages. `extra` overrides carried
+   * state. */
+  protected record<R>(desc: StageDescriptor, extra?: PipelineState): R {
+    return this.createPipeline<R>(
+      { ...this.carriedOptions(), ...extra },
+      { prev: this._tail, desc },
+    );
   }
 
   /** A subclass's extra constructor knobs, which `createPipeline()` carries to every new instance.
@@ -357,21 +445,15 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     return {};
   }
 
-  /** Every knob a copy-on-write call carries into the next instance, except `chunks`. Spread it
-   * whole; a hand-built list drops knobs silently. */
+  /** Every knob a copy-on-write call carries into the next instance. Spread it whole; a hand-built
+   * list drops knobs silently. */
   protected carriedOptions(): PipelineConstructorOptions {
     return {
       context: this._context,
-      chunkTransforms: this._chunkTransforms,
-      reduceStages: this._reduceStages,
-      preBufferItems: this._preBufferItems,
-      syncPreBufferItems: this._syncPreBufferItems,
+      contextIsDefault: this._contextIsDefault,
       chunkSize: this._chunkSize,
       runHandler: this._runHandler,
       mode: this._mode,
-      syncChunks: this._syncChunks,
-      pendingStages: this._pendingStages,
-      contextIsDefault: this._contextIsDefault,
       bound: this._bound,
       routeTrail: this._routeTrail,
       // ⚠ A copy: `.branch()` writes into this map, and a shared one leaks arms into siblings.
@@ -379,36 +461,219 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     };
   }
 
-  /** The options a real stage passes once it has consumed the chunk stream, so a later `.buffer()`
-   * recuts that stage's output. */
-  protected freshPreBuffer(): Pick<
-    PipelineConstructorOptions,
-    "preBufferItems" | "syncPreBufferItems"
-  > {
-    return { preBufferItems: null, syncPreBufferItems: null };
-  }
-
   /** The context manager one run gets. A caller-named manager is kept across calls; a default one
    * is replaced per run, so two calls never see each other's writes. */
   protected contextForRun(): IContextManager {
-    if (!this._contextIsDefault || !this.isDeferred()) return this._context;
+    if (!this._contextIsDefault || this._bound) return this._context;
     // ⚠ Seed from the chain's values; an empty manager drops what `.context()` declared.
     return new SimpleContextManager(this._context.toDict());
   }
 
-  /** Records a stage call on an unbound pipeline, to replay once an input is bound. `extra`
-   * overrides carried state; `R` is the return type the caller wants back. */
-  protected defer<U, R = AnyPipeline<U>>(run: PendingStage, extra?: PipelineState): R {
-    return this.createPipeline<U>(emptyChunks<U>(), {
-      ...this.carriedOptions(),
-      ...extra,
-      pendingStages: [...this._pendingStages, run],
-    }) as unknown as R;
+  /** This chain compiled once. Its ops are `null` when a `.local()` region makes them depend on
+   * the call; each call then compiles them afresh. */
+  protected plan(): Plan {
+    if (this._plan !== undefined) return this._plan;
+    const descs = descriptorsSince(this._tail, null)!;
+    const perCall = descs.some((desc) => desc.kind === "local");
+    this._plan = {
+      descs,
+      ops: perCall ? null : this.compileStages(descs, { runHandler: this._runHandler, index: 0 }),
+      cutSync: buildSyncChunkGenerator<unknown>(this._chunkSize),
+      cutAsync: buildChunkGenerator<unknown>(this._chunkSize),
+      forcesAsync: this.sourcePolicy() === "async" || this._mode === "async",
+    };
+    return this._plan;
   }
 
-  /** Whether stage calls are recorded rather than run: true until an input is bound. */
-  protected isDeferred(): boolean {
-    return !this._bound;
+  /** Compiles stages with no `.local()` among them into ops, advancing `state` past them. */
+  protected compileStages(descs: readonly StageDescriptor[], state: PlanState): StageOp[] {
+    const ops: StageOp[] = [];
+    const readable = (chunks: AsyncIterable<unknown[]>) => this.readableChunks(chunks as never);
+    for (const desc of descs) {
+      switch (desc.kind) {
+        case "apply":
+          ops.push(this.planApply(desc.transformer, state.index++, state.runHandler));
+          break;
+        case "reduce":
+          ops.push(this.planReduce(desc.fn, desc.initial, state.index++));
+          break;
+        case "onError":
+          state.runHandler = desc.handler;
+          break;
+        case "buffer":
+          ops.push(bySizeOp(desc.size, readable));
+          break;
+        case "bufferFn":
+          ops.push(byFnOp(desc.fn, readable));
+          break;
+        case "queue":
+          ops.push(queueOp(desc.capacity));
+          break;
+        default:
+          break;
+      }
+    }
+    return ops;
+  }
+
+  /**
+   * The op for one stage added by `.apply()`/`.transform()`. This class runs it in this process;
+   * a dispatching class overrides it to run the stage elsewhere.
+   *
+   * `planApply(doubler, 0, undefined).run(flow)` → `flow`'s chunks, doubled.
+   */
+  protected planApply(
+    transformer: Transformer<any, any, any>,
+    _index: number,
+    runHandler: PipelineErrorHandler | undefined,
+  ): StageOp {
+    const runnable = transformer.runnable() as InternalTransformer<unknown, unknown>;
+    return {
+      run(flow) {
+        // A `"sync"` run calls the same `runnable` an `"async"` one does, with no `Promise` unless
+        // the transformer returns one.
+        if (flow.syncChunks !== null) {
+          flow.syncChunks = stageChunks(flow.syncChunks, runnable, flow.ctx, runHandler);
+        } else {
+          flow.chunks = transformer.process(flow.chunks, flow.ctx, runHandler);
+        }
+        consumed(flow);
+      },
+    };
+  }
+
+  /**
+   * The op for one `.reduce()` stage. This class folds every chunk in this process with one
+   * accumulator; a dispatching class overrides it to partition the fold.
+   *
+   * `planReduce((a, x) => a + x, 0, 0).run(flow)` over `[1, 2]` then `[3]` → `flow` yields `[6]`.
+   */
+  protected planReduce<U>(fn: ReduceFunction<U, any>, initial: U, _index: number): StageOp {
+    return {
+      run(flow) {
+        if (flow.syncChunks !== null) {
+          flow.syncChunks = foldSyncChunkStream(fn, initial, flow.syncChunks, flow.ctx);
+        } else {
+          flow.chunks = foldChunkStream(fn, initial, flow.chunks, flow.ctx, true);
+        }
+        consumed(flow);
+      },
+    };
+  }
+
+  /** Runs `descs` over `flow`, compiling each `.local()` region as the call reaches it. Returns
+   * `false` once a region's `build` returned a pipeline it did not derive from its argument; the
+   * flow is then empty and the later stages never run. */
+  protected runStages(descs: readonly StageDescriptor[], state: PlanState, flow: RunFlow): boolean {
+    let start = 0;
+    for (let i = 0; i < descs.length; i++) {
+      const desc = descs[i]!;
+      if (desc.kind !== "local") continue;
+      runOps(this.compileStages(descs.slice(start, i), state), flow);
+      if (!this.runRegion(desc.build, state, flow)) return false;
+      start = i + 1;
+    }
+    runOps(this.compileStages(descs.slice(start), state), flow);
+    return true;
+  }
+
+  /** A plain pipeline for a `.local()` region's `build`, over this run's context. Its stages are
+   * recorded after an origin node, so the ones `build` added can be read back. */
+  private regionOf(ctx: IContextManager, runHandler: PipelineErrorHandler | undefined) {
+    const origin: StageNode = { prev: null, desc: ORIGIN };
+    const region = new Pipeline<unknown, "sync" | "async">({
+      context: ctx,
+      contextIsDefault: this._contextIsDefault,
+      chunkSize: this._chunkSize,
+      runHandler,
+      bound: true,
+      routeTrail: this._routeTrail,
+      branchStages: new Map(this._branchStages),
+      [RECORDED]: origin,
+    } as RecordedOptions);
+    return { region, origin };
+  }
+
+  /** Runs one `.local()` region: `build` runs now, and its stages run in this process. */
+  private runRegion(
+    build: (p: AnyPipeline<any>) => AnyPipeline<any>,
+    state: PlanState,
+    flow: RunFlow,
+  ): boolean {
+    const { region, origin } = this.regionOf(flow.ctx, state.runHandler);
+    if (flow.syncChunks === null) flow.chunks = this.readableChunks(flow.chunks as never);
+    const built = build(region);
+    const descs = descriptorsSince(built._tail, origin);
+    if (descs === null) {
+      flow.syncChunks = null;
+      flow.chunks = EMPTY_CHUNKS;
+      consumed(flow);
+      return false;
+    }
+    return region.runStages(descs, state, flow);
+  }
+
+  /** Runs this chain over `input` with the run's context `ctx` and returns the final streams. */
+  private runFlow(input: PipelineSource<unknown>, ctx: IContextManager): RunFlow {
+    const plan = this.plan();
+    const flow: RunFlow = {
+      ctx,
+      syncChunks: null,
+      chunks: EMPTY_CHUNKS,
+      syncItems: null,
+      asyncItems: null,
+    };
+    if (!isAsyncSource(input) && !plan.forcesAsync) {
+      const items = input as Iterable<unknown>;
+      flow.syncChunks = plan.cutSync(items);
+      flow.syncItems = items;
+    } else {
+      const items = toAsyncIterable(input);
+      // An array forced onto the async engine is cut synchronously, so it pays no per-item promise.
+      flow.chunks = Array.isArray(input)
+        ? asAsyncChunks(plan.cutSync(input))
+        : plan.cutAsync(items);
+      flow.asyncItems = items;
+      // A sync input forced async keeps its sync view, so `.buffer()` can recut it synchronously.
+      flow.syncItems = isAsyncSource(input) ? null : (input as Iterable<unknown>);
+    }
+    if (plan.ops !== null) runOps(plan.ops, flow);
+    else this.runStages(plan.descs, { runHandler: this._runHandler, index: 0 }, flow);
+    return flow;
+  }
+
+  /** Fills `tables` with the stages of `descs`, running each `.local()` region's `build` once over
+   * `ctx`. Returns `false` when a region's `build` returned an unrelated pipeline. */
+  private registerStages(
+    descs: readonly StageDescriptor[],
+    state: PlanState,
+    tables: StageRegistries,
+    ctx: IContextManager,
+  ): boolean {
+    for (const desc of descs) {
+      if (desc.kind === "local" && !this.registerRegion(desc.build, state, tables, ctx)) {
+        return false;
+      }
+      if (desc.kind === "apply") {
+        tables.chunkTransforms[state.index++] = desc.transformer.runnable() as ChunkTransform;
+      } else if (desc.kind === "reduce") {
+        const stageIndex = state.index++;
+        tables.chunkTransforms[stageIndex] = reduceStagePlaceholder(stageIndex);
+        tables.reduceStages.set(stageIndex, { fn: desc.fn, initial: desc.initial });
+      }
+    }
+    return true;
+  }
+
+  private registerRegion(
+    build: (p: AnyPipeline<any>) => AnyPipeline<any>,
+    state: PlanState,
+    tables: StageRegistries,
+    ctx: IContextManager,
+  ): boolean {
+    const { region, origin } = this.regionOf(ctx, state.runHandler);
+    const regionDescs = descriptorsSince(build(region)._tail, origin);
+    return regionDescs !== null && region.registerStages(regionDescs, state, tables, ctx);
   }
 
   /**
@@ -435,26 +700,26 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   }
 
   /**
-   * The stage registries a serving side reads to answer `/transform/<n>` and `/reduce/<n>`. An
-   * unbound chain replays its stages over an empty input once to fill them.
+   * The stage registries a serving side reads to answer `/transform/<n>` and `/reduce/<n>`, read
+   * from the recorded stages. A `.local()` region's `build` runs once to list its stages.
    */
   protected registries(): StageRegistries {
-    if (!this.isDeferred()) {
-      return { chunkTransforms: this._chunkTransforms, reduceStages: this._reduceStages };
-    }
     if (this._registries === undefined) {
-      const materialised = this.bind([] as T[]) as unknown as AnyPipeline<T>;
-      this._registries = {
-        chunkTransforms: materialised._chunkTransforms,
-        reduceStages: materialised._reduceStages,
-      };
+      const tables: StageRegistries = { chunkTransforms: [], reduceStages: new Map() };
+      const complete = this.registerStages(
+        this.plan().descs,
+        { runHandler: this._runHandler, index: 0 },
+        tables,
+        this.contextForRun(),
+      );
+      this._registries = complete ? tables : { chunkTransforms: [], reduceStages: new Map() };
     }
     return this._registries;
   }
 
   /**
-   * The options that reproduce an unbound `pipeline`'s chain on another class. It throws for a
-   * bound pipeline, which has no recorded stages left to replay.
+   * The options that reproduce `pipeline`'s chain on another class. It throws for a `.local()`
+   * region's pipeline, which exists only while its region is built.
    *
    * @example
    * `new HttpPipeline(scored, { url })` runs `scored`'s stages over HTTP.
@@ -468,12 +733,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     return {
       context: pipeline._context,
       contextIsDefault: pipeline._contextIsDefault,
-      chunkTransforms: [...pipeline._chunkTransforms],
-      reduceStages: new Map(pipeline._reduceStages),
       runHandler: pipeline._runHandler,
       chunkSize: pipeline._chunkSize,
-      pendingStages: [...pipeline._pendingStages],
-    };
+      [RECORDED]: pipeline._tail,
+    } as RecordedOptions;
   }
 
   /**
@@ -491,13 +754,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     return (first ?? second ?? {}) as O;
   }
 
-  /** This pipeline's chunks as an async stream, whichever engine it runs on. */
-  protected chunkStream(): AsyncIterable<T[]> {
-    if (!this.isSync()) return this._chunks;
-    const syncChunks = this._syncChunks!;
-    return asyncIterableFrom(() => asAsyncChunks(syncChunks));
-  }
-
   /**
    * `chunks` as real items, for a site that reads them. A class whose stages can reply with encoded
    * chunks overrides it to decode them; every other class reads its chunks as they are.
@@ -506,11 +762,6 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    */
   protected readableChunks(chunks: AsyncIterable<T[]>): AsyncIterable<T[]> {
     return chunks;
-  }
-
-  /** Whether this pipeline runs on the synchronous engine. */
-  protected isSync(): boolean {
-    return this._mode === "sync" && this._syncChunks !== null;
   }
 
   /** The context manager this chain carries. */
@@ -533,7 +784,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- Context is a generic bag by design, unknown until a caller parses it at its own boundary (see .oxlintrc.json)
   context(ctx: Record<string, unknown>): this {
     applyContextValues(this._context, ctx);
-    return this.createPipeline<T>(this._chunks, this.carriedOptions()) as this;
+    return this.createPipeline<this>(this.carriedOptions(), this._tail);
   }
 
   /**
@@ -552,14 +803,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   ): M extends "async" ? this : Pipeline<T, "async", In>;
   onError(handler: (error: Error, ctx: IContextManager) => void): this;
   onError(handler: PipelineErrorHandler): this | Pipeline<T, "async", In> {
-    // ⚠ Defer like a stage: setting `runHandler` directly would cover stages written before it.
-    if (this.isDeferred()) {
-      return this.defer<T, this>((p) => p.onError(handler));
-    }
-    return this.createPipeline<T>(this._chunks, {
-      ...this.carriedOptions(),
-      runHandler: handler,
-    }) as this;
+    return this.record<this>({ kind: "onError", handler });
   }
 
   /**
@@ -571,43 +815,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   apply<U, M2 extends "sync" | "async">(
     transformer: Transformer<T, U, M2>,
   ): Pipeline<U, JoinMode<M, M2>, In> {
-    if (this.isDeferred()) {
-      return this.defer<U, Pipeline<U, JoinMode<M, M2>, In>>((p) =>
-        p.apply(transformer as Transformer<unknown, U, M2>),
-      );
-    }
-    const runnable = transformer.runnable();
-    const carried = {
-      ...this.carriedOptions(),
-      chunkTransforms: [...this._chunkTransforms, runnable as unknown as ChunkTransform],
-      ...this.freshPreBuffer(),
-    };
-
-    // A `"sync"` chain runs the same `runnable` an `"async"` one does, with no `Promise` unless the
-    // transformer returns one.
-    if (this.isSync()) {
-      const source = this._syncChunks!;
-      const ctx = this._context;
-      const runHandler = this._runHandler;
-      function* stageChunks(): Generator<U[] | Promise<U[]>> {
-        for (const chunk of source) {
-          yield chain(chunk, (settled) => runStageChunk(runnable, settled, ctx, runHandler)) as
-            U[] | Promise<U[]>;
-        }
-      }
-      return this.createPipeline<U>(emptyChunks<U>(), {
-        ...carried,
-        syncChunks: stageChunks(),
-      }) as Pipeline<U, JoinMode<M, M2>, In>;
-    }
-
-    return this.createPipeline<U>(
-      transformer.process(this._chunks, this._context, this._runHandler),
-      {
-        ...carried,
-        syncChunks: null,
-      },
-    ) as Pipeline<U, JoinMode<M, M2>, In>;
+    return this.record({ kind: "apply", transformer });
   }
 
   /**
@@ -644,75 +852,18 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   ): Pipeline<T, "async", In>;
   buffer(fn: (item: T, ctx: IContextManager, emit: () => void) => T | typeof DROP): this;
   buffer(sizeOrFn: number | BufferFunction<T>): this | Pipeline<T, "async", In> {
+    if (typeof sizeOrFn !== "number") {
+      return this.record<this>({ kind: "bufferFn", fn: sizeOrFn as BufferFunction<unknown> });
+    }
     // ⚠ Refuse a fractional size too: the cutting paths round it differently.
-    if (typeof sizeOrFn === "number") {
-      assertWholeNumberAtLeastOne("buffer size", sizeOrFn);
-    }
-
-    // A numeric `.buffer()` before any stage also sets the size that cuts the input.
-    if (this.isDeferred()) {
-      if (typeof sizeOrFn === "number") {
-        const size = sizeOrFn;
-        const cutsTheSource = this._pendingStages.length === 0;
-        return this.defer<T, this>((p) => p.buffer(size), cutsTheSource ? { chunkSize: size } : {});
-      }
-      const fn = sizeOrFn;
-      return this.defer<T, this>((p) => p.buffer(fn));
-    }
-
-    if (typeof sizeOrFn === "number") {
-      const size = sizeOrFn;
-      return this.cutBy(
-        buildSyncChunkGenerator<T>(size),
-        (slots) => recutSyncChunks(slots, size),
-        buildChunkGenerator<T>(size),
-        (chunks) => recutChunks(chunks, size),
-      );
-    }
-    const fn = sizeOrFn;
-    const ctx = this._context;
-    return this.cutBy(
-      cutSyncItemsWith<T>(fn, ctx),
-      (slots) => recutSyncChunksWith(slots, fn, ctx),
-      cutItemsWith<T>(fn, ctx),
-      recutChunksWith<T>(fn, ctx),
+    assertWholeNumberAtLeastOne("buffer size", sizeOrFn);
+    // A numeric `.buffer()` before any stage also sets the size that cuts the input. Inside a
+    // `.local()` region it never does: the input was cut before the region ran.
+    const cutsTheSource = this._tail === null && !this._bound;
+    return this.record<this>(
+      { kind: "buffer", size: sizeOrFn },
+      cutsTheSource ? { chunkSize: sizeOrFn } : {},
     );
-  }
-
-  private cutBy(
-    cutSync: (items: Iterable<T>) => MaybeAsyncChunks<T>,
-    recut: (slots: MaybeAsyncChunks<T>) => MaybeAsyncChunks<T>,
-    cutAsync: (items: AsyncIterable<T>) => AsyncIterable<T[]>,
-    recutAsync: (chunks: AsyncIterable<T[]>) => AsyncIterable<T[]>,
-  ): this {
-    // ⚠ `recut` re-slices slots without flattening: a slot can hold a pending `Promise<T[]>` even
-    // on a sync chain.
-    if (this.isSync()) {
-      const items = this._syncPreBufferItems;
-      return this.createPipeline<T>(emptyChunks<T>(), {
-        ...this.carriedOptions(),
-        syncChunks: items !== null ? cutSync(items) : recut(this._syncChunks!),
-      }) as this;
-    }
-
-    if (this._syncPreBufferItems !== null) {
-      const syncItems = this._syncPreBufferItems;
-      return this.createPipeline<T>(asAsyncChunks<T>(cutSync(syncItems)), {
-        ...this.carriedOptions(),
-        preBufferItems: null,
-        syncPreBufferItems: syncItems,
-      }) as this;
-    }
-
-    if (this._preBufferItems !== null) {
-      return this.createPipeline<T>(cutAsync(this._preBufferItems), this.carriedOptions()) as this;
-    }
-    const chunks = this.readableChunks(this._chunks);
-    return this.createPipeline<T>(recutAsync(chunks), {
-      ...this.carriedOptions(),
-      // Drained only when a back-to-back `.buffer()` replaces this one, never alongside `recutAsync`.
-      preBufferItems: flattenChunks(chunks),
-    }) as this;
   }
 
   /**
@@ -725,20 +876,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
    */
   queue(capacity: number): Pipeline<T, "async", In> {
     assertWholeNumberAtLeastOne("queue capacity", capacity);
-
-    if (this.isDeferred()) {
-      return this.defer<T, Pipeline<T, "async", In>>((p) => p.queue(capacity));
-    }
-
-    return this.createPipeline<T, Pipeline<T, "async", In>>(
-      prefetch<T>(this.chunkStream(), capacity),
-      {
-        ...this.carriedOptions(),
-        ...this.freshPreBuffer(),
-        mode: "async",
-        syncChunks: null,
-      },
-    );
+    return this.record({ kind: "queue", capacity });
   }
 
   /**
@@ -761,43 +899,12 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     initial: U,
   ): Pipeline<U, JoinMode<M, "sync">, In>;
   reduce<U>(fn: ReduceFunction<U, T>, initial: U): AnyPipeline<U> {
-    if (this.isDeferred()) {
-      // The cast only picks an overload: a union-typed `fn` matches neither on its own.
-      return this.defer<U>((p) =>
-        p.reduce(
-          fn as (acc: U, item: any, ctx: IContextManager, emit: (v: U) => void) => U,
-          initial,
-        ),
-      );
-    }
-    const { chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
-    const carried = {
-      ...this.carriedOptions(),
-      chunkTransforms,
-      reduceStages,
-      ...this.freshPreBuffer(),
-    };
-
-    if (this.isSync()) {
-      return this.createPipeline<U>(emptyChunks<U>(), {
-        ...carried,
-        syncChunks: foldSyncChunkStream(fn, initial, this._syncChunks!, this._context),
-      }) as AnyPipeline<U>;
-    }
-
-    return this.createPipeline<U>(
-      foldChunkStream(fn, initial, this.chunkStream(), this._context, true),
-      {
-        ...carried,
-        mode: "async",
-        syncChunks: null,
-      },
-    ) as AnyPipeline<U>;
+    return this.record({ kind: "reduce", fn, initial });
   }
 
   /**
    * Runs the stages `build` adds in this process, whatever class this pipeline is. Stages after the
-   * region run the way this class runs them.
+   * region run the way this class runs them. `build` runs once per terminal call.
    *
    * @param build - Receives a plain `Pipeline` over this chain's chunks; its result is the region.
    *
@@ -809,20 +916,10 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   local<U, M2 extends PipelineMode>(
     build: (p: Pipeline<T, M, any>) => Pipeline<U, M2, any>,
   ): Pipeline<U, JoinMode<M, M2>, In> {
-    if (this.isDeferred()) {
-      return this.defer<U, Pipeline<U, JoinMode<M, M2>, In>>((p) =>
-        (p as unknown as Pipeline<T, M, In>).local(build),
-      );
-    }
-    const region = new Pipeline<T, "sync" | "async">({
-      ...this.carriedOptions(),
-      chunks: this.readableChunks(this._chunks),
-      pendingStages: [],
+    return this.record({
+      kind: "local",
+      build: build as unknown as (p: AnyPipeline<any>) => AnyPipeline<any>,
     });
-    const built = build(region as unknown as Pipeline<T, M, any>);
-    return this.createPipeline<U>(built._chunks, {
-      ...built.carriedOptions(),
-    }) as Pipeline<U, JoinMode<M, M2>, In>;
   }
 
   /**
@@ -853,36 +950,23 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     }) as unknown as this;
   }
 
-  /** Registers a reduce stage at the next stage index and returns the updated registries. Its
-   * `chunkTransforms` slot throws if run as a per-chunk transform. */
-  protected pushReduceStage<U>(
-    fn: ReduceFunction<U, T>,
-    initial: U,
-  ): { stageIndex: number } & StageRegistries {
-    const stageIndex = this._chunkTransforms.length;
-    const reduceStages = new Map(this._reduceStages);
-    reduceStages.set(stageIndex, { fn, initial } as ReduceStage);
-    return {
-      stageIndex,
-      chunkTransforms: [...this._chunkTransforms, reduceStagePlaceholder(stageIndex)],
-      reduceStages,
-    };
-  }
-
   /**
-   * Binds `input` and returns what a `PipelineResult` drains. That is the sync chunk stream (or
-   * `null`), the async chunk stream, and this run's context manager.
+   * Runs this chain over `input` and returns what a `PipelineResult` drains. That is the sync chunk
+   * stream (or `null`), the async chunk stream, and this run's context manager.
    *
    * `materialize: false` hands back the chunks without making them readable as items; `.consume()`
    * passes it because it reads no item.
    */
   drainable(input: PipelineSource<In>, materialize = true): Drainable<T> {
-    const bound = this.bind(input as Iterable<In>) as unknown as AnyPipeline<T>;
+    const flow = this.runFlow(input as PipelineSource<unknown>, this.contextForRun());
     return {
-      syncChunks: bound.isSync() ? bound._syncChunks : null,
-      chunks: () => (materialize ? bound.readableChunks(bound.chunkStream()) : bound.chunkStream()),
+      syncChunks: flow.syncChunks as MaybeAsyncChunks<T> | null,
+      chunks: () => {
+        const stream = streamOf(flow) as AsyncIterable<T[]>;
+        return materialize ? this.readableChunks(stream) : stream;
+      },
       // ⚠ This run's manager, not the chain's: an arm must see the writes this run just made.
-      context: bound._context,
+      context: flow.ctx,
     };
   }
 
@@ -920,29 +1004,73 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
   }
 
   /**
-   * An empty, unbound pipeline of this class with the given context and route trail, for a
-   * `.branch()` arm to build on.
+   * An empty pipeline of this class with the given context and route trail, for a `.branch()` arm
+   * to build on.
    *
    * @example
    * On an `HttpPipeline`, it returns an `HttpPipeline` with the parent's url and no stages.
    */
   protected emptyOfOwnClass<U>(context: IContextManager, routeTrail = ""): AnyPipeline<U> {
-    return this.createPipeline<U>(emptyChunks<U>(), {
-      ...this.carriedOptions(),
-      context,
-      contextIsDefault: false,
-      routeTrail,
-      branchStages: new Map(),
-      chunkTransforms: [],
-      reduceStages: new Map(),
-      pendingStages: [],
-      preBufferItems: null,
-      syncPreBufferItems: null,
-      syncChunks: null,
-      mode: "unset",
-      bound: false,
-    });
+    return this.createPipeline<AnyPipeline<U>>(
+      {
+        ...this.carriedOptions(),
+        context,
+        contextIsDefault: false,
+        routeTrail,
+        branchStages: new Map(),
+        mode: "unset",
+        bound: false,
+      },
+      null,
+    );
   }
+}
+
+/** A numeric `.buffer(size)`: cuts and recuts by count. */
+function bySizeOp(
+  size: number,
+  readable: (chunks: AsyncIterable<unknown[]>) => AsyncIterable<unknown[]>,
+): StageOp {
+  const cutSync = buildSyncChunkGenerator<unknown>(size);
+  const recut = (slots: MaybeAsyncChunks<unknown>) => recutSyncChunks(slots, size);
+  const cutAsync = buildChunkGenerator<unknown>(size);
+  const recutAsync = (chunks: AsyncIterable<unknown[]>) => recutChunks(chunks, size);
+  return {
+    run(flow) {
+      cutOp(cutSync, recut, cutAsync, recutAsync, flow, readable);
+    },
+  };
+}
+
+/** A `.buffer(fn)`: `fn` decides each boundary, with the run's context. */
+function byFnOp(
+  fn: BufferFunction<unknown>,
+  readable: (chunks: AsyncIterable<unknown[]>) => AsyncIterable<unknown[]>,
+): StageOp {
+  return {
+    run(flow) {
+      const ctx = flow.ctx;
+      cutOp(
+        cutSyncItemsWith(fn, ctx),
+        (slots) => recutSyncChunksWith(slots, fn, ctx),
+        cutItemsWith(fn, ctx),
+        recutChunksWith(fn, ctx),
+        flow,
+        readable,
+      );
+    },
+  };
+}
+
+/** A `.queue(capacity)`: prefetches the stream, which makes the run async from here on. */
+function queueOp(capacity: number): StageOp {
+  return {
+    run(flow) {
+      flow.chunks = prefetch(streamOf(flow), capacity);
+      flow.syncChunks = null;
+      consumed(flow);
+    },
+  };
 }
 
 // Makes every `Pipeline` instance, subclasses included, a real function (`instanceof Function`,

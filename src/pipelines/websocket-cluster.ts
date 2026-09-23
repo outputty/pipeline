@@ -26,11 +26,11 @@ import type {
 } from "@src/pipelines/websocket";
 import type { Codec } from "@src/codec";
 import { Pipeline } from "@src/pipeline";
-import type { WrappablePipeline } from "@src/pipeline";
+import type { PipelineSource, WrappablePipeline } from "@src/pipeline";
 import type { Transformer } from "@src/transformer";
-import { onWorkerDrainNothing, pipelineRoute, WorkerSet } from "@src/pipelines/worker-set";
+import { drainsNothingOnWorker, pipelineRoute, WorkerSet } from "@src/pipelines/worker-set";
 import type { SlotOptions } from "@src/pipelines/worker-set";
-import type { ReduceFunction, PipelineMode, RouteVerb } from "@src/types";
+import type { Drainable, ReduceFunction, PipelineMode, RouteVerb } from "@src/types";
 
 /** One per process, on the primary and on every worker. */
 const wsWorkerSet = new WorkerSet<ClusterPipeline<unknown>, string>({
@@ -130,7 +130,7 @@ export class ClusterPipeline<T, In = T> extends WebSocketPipeline<T, In> {
   ) {
     const options = Pipeline.wrapping<ClusterPipelineConstructorOptions>(first, second);
     // Dispatch never reads `connect`; `resolveConnect()` supplies the target per call.
-    super(onWorkerDrainNothing({ ...options, connect: "" }));
+    super({ ...options, connect: "" });
     this.workers = options?.workers ?? availableParallelism();
     this.pipelineIndex = wsWorkerSet.claimSlot(this as ClusterPipeline<unknown>, options);
   }
@@ -169,6 +169,11 @@ export class ClusterPipeline<T, In = T> extends WebSocketPipeline<T, In> {
 
   override queue(capacity: number): ClusterPipeline<T, In> {
     return super.queue(capacity) as unknown as ClusterPipeline<T, In>;
+  }
+
+  /** Drains no chunks on a worker: a worker serves the stages and never orchestrates a run. */
+  override drainable(input: PipelineSource<In>, materialize = true): Drainable<T> {
+    return drainsNothingOnWorker(super.drainable(input, materialize));
   }
 
   /** Prefixes every route with `/pipeline/<pipelineIndex>`, so several pipelines share one worker

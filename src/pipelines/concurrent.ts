@@ -7,6 +7,7 @@ import type {
   IContextManager,
   InternalTransformer,
   ReduceFunction,
+  PipelineErrorHandler,
   SourcePolicy,
   PipelineMode,
   ChunkTransform,
@@ -17,7 +18,12 @@ import type {
   ReduceStage,
   StageLookup,
 } from "@src/types";
-import { Pipeline, type PipelineConstructorOptions, type WrappablePipeline } from "@src/pipeline";
+import {
+  Pipeline,
+  type PipelineConstructorOptions,
+  type StageOp,
+  type WrappablePipeline,
+} from "@src/pipeline";
 import { Transformer } from "@src/transformer";
 import { foldChunkStream } from "@src/utils/reduce";
 import { share } from "@src/utils/cut";
@@ -290,28 +296,7 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
   }
 
   override apply<U>(transformer: Transformer<T, U, "sync" | "async">): ConcurrentPipeline<U, In> {
-    if (this.isDeferred()) {
-      return this.defer<U, ConcurrentPipeline<U, In>>((p) =>
-        p.apply(transformer as Transformer<unknown, U, "sync" | "async">),
-      );
-    }
-    const stageIndex = this._chunkTransforms.length;
-    const rawWork = this.stageWork(transformer, stageIndex);
-    // ⚠ Kept `async`, so a synchronous throw fails at the chunk's own position in the ordered output.
-    const work: InternalTransformer<T, U> = async (chunk, ctx) =>
-      runStageChunk(rawWork, chunk, ctx, this._runHandler);
-    const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;
-    const newChunks = fanOut(this._chunks, work, this._context, this.maxConcurrency);
-
-    return this.createPipeline<U, ConcurrentPipeline<U, In>>(newChunks, {
-      ...this.carriedOptions(),
-      chunkTransforms: [
-        ...this._chunkTransforms,
-        // ⚠ `runnable()`, not `transformer.transform`: a worker serving this entry needs the row handler.
-        transformer.runnable() as unknown as ChunkTransform,
-      ],
-      ...this.freshPreBuffer(),
-    });
+    return super.apply(transformer) as unknown as ConcurrentPipeline<U, In>;
   }
 
   /**
@@ -329,29 +314,58 @@ export class ConcurrentPipeline<T, In = T> extends Pipeline<T, "async", In> {
    * ```
    */
   override reduce<U>(fn: ReduceFunction<U, T>, initial: U): ConcurrentPipeline<U, In> {
-    if (this.isDeferred()) {
-      return this.defer<U, ConcurrentPipeline<U, In>>((p) =>
-        p.reduce(
-          fn as (acc: U, item: any, ctx: IContextManager, emit: (v: U) => void) => U,
-          initial,
-        ),
-      );
-    }
-    const { stageIndex, chunkTransforms, reduceStages } = this.pushReduceStage(fn, initial);
-    const work = this.reduceWork(fn, initial, stageIndex);
+    return super.reduce(
+      fn as (acc: U, item: T, ctx: IContextManager, emit: (v: U) => void) => U,
+      initial,
+    ) as unknown as ConcurrentPipeline<U, In>;
+  }
 
-    const iterator = this._chunks[Symbol.asyncIterator]();
-    const partitions = Array.from({ length: this.maxConcurrency }, () =>
-      work(share(iterator), this._context),
-    );
-    const newChunks = seedIfNoChunk(mergeUnordered(partitions), () => seedFor(initial));
+  /**
+   * Keeps up to `maxConcurrency` chunks of the stage in flight, each run through `stageWork()`.
+   *
+   * `planApply(doubler, 0, undefined).run(flow)` → `flow`'s chunks, doubled, in input order when
+   * `ordered`.
+   */
+  protected override planApply(
+    transformer: Transformer<any, any, any>,
+    index: number,
+    runHandler: PipelineErrorHandler | undefined,
+  ): StageOp {
+    const rawWork = this.stageWork(transformer as Transformer<T, unknown>, index);
+    // ⚠ Kept `async`, so a synchronous throw fails at the chunk's own position in the ordered output.
+    const work: InternalTransformer<T, unknown> = async (chunk, ctx) =>
+      runStageChunk(rawWork, chunk, ctx, runHandler);
+    const fanOut = this.ordered ? fanOutOrdered : fanOutUnordered;
+    const maxConcurrency = this.maxConcurrency;
+    return {
+      run(flow) {
+        flow.chunks = fanOut(flow.chunks as AsyncIterable<T[]>, work, flow.ctx, maxConcurrency);
+        flow.syncItems = null;
+        flow.asyncItems = null;
+      },
+    };
+  }
 
-    return this.createPipeline<U, ConcurrentPipeline<U, In>>(newChunks, {
-      ...this.carriedOptions(),
-      chunkTransforms,
-      reduceStages,
-      ...this.freshPreBuffer(),
-    });
+  /**
+   * Deals the stream's chunks to `maxConcurrency` partitions, each folded by `reduceWork()`.
+   *
+   * `planReduce((a, x) => a + x, 0, 0).run(flow)` over `[1, 2]` then `[3]` at `maxConcurrency: 2`
+   * → `flow` yields `[3]` and `[3]`, in completion order.
+   */
+  protected override planReduce<U>(fn: ReduceFunction<U, any>, initial: U, index: number): StageOp {
+    const work = this.reduceWork(fn as ReduceFunction<U, T>, initial, index);
+    const maxConcurrency = this.maxConcurrency;
+    return {
+      run(flow) {
+        const iterator = (flow.chunks as AsyncIterable<T[]>)[Symbol.asyncIterator]();
+        const partitions = Array.from({ length: maxConcurrency }, () =>
+          work(share(iterator), flow.ctx),
+        );
+        flow.chunks = seedIfNoChunk(mergeUnordered(partitions), () => seedFor(initial));
+        flow.syncItems = null;
+        flow.asyncItems = null;
+      },
+    };
   }
 
   /**

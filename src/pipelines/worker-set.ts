@@ -8,6 +8,7 @@ import cluster from "node:cluster";
 import { availableParallelism } from "node:os";
 import { emptyChunks } from "@src/pipeline";
 import type { PipelineConstructorOptions } from "@src/pipeline";
+import type { Drainable } from "@src/types";
 
 /** Idle time with no dispatch in flight before a worker set is killed so the process can exit. */
 export const IDLE_KILL_MS = 500;
@@ -42,15 +43,15 @@ export function pipelineRoute(pipelineIndex: number, route: string): string {
 }
 
 /**
- * Returns the constructor options a cluster pipeline passes to `super()`: unchanged on the primary,
- * and with an empty chunk stream on a worker, because a worker holds the stages and never
- * orchestrates a drain, so every terminal op there resolves empty.
+ * What a cluster pipeline's terminal drains: `drainable` itself on the primary, and no chunks on a
+ * worker, because a worker holds the stages and never orchestrates a drain.
  *
- * `onWorkerDrainNothing({ chunks })` on a worker → `{ chunks: <empty>, preBufferItems: null }`.
+ * `drainsNothingOnWorker(drainable)` on a worker → `{ syncChunks: null, chunks: () => <empty> }`
+ * with `drainable`'s context.
  */
-export function onWorkerDrainNothing<O extends PipelineConstructorOptions>(own: O): O {
-  if (!cluster.isWorker) return own;
-  return { ...own, chunks: emptyChunks(), preBufferItems: null };
+export function drainsNothingOnWorker<T>(drainable: Drainable<T>): Drainable<T> {
+  if (!cluster.isWorker) return drainable;
+  return { syncChunks: null, chunks: () => emptyChunks<T>(), context: drainable.context };
 }
 
 /**
