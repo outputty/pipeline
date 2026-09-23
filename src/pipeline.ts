@@ -43,7 +43,7 @@ import {
   recutChunksWith,
   recutSyncChunksWith,
 } from "./utils/buffer-cut";
-import { applyContextValues, chain, runStageChunk } from "./utils/helpers";
+import { applyContextValues, isThenable, runStageChunk } from "./utils/helpers";
 import { PipelineResult } from "./result";
 import { BranchBuilder, runBranch } from "./branch";
 import type {
@@ -220,6 +220,15 @@ export interface PlanState {
 /** A compiled stage: `run` replaces the flow's streams with this stage's output. */
 export interface StageOp {
   run(flow: RunFlow): void;
+  /** The in-process stages this op runs, which a neighbouring in-process op can fuse with. */
+  readonly steps?: readonly InProcessStep[];
+}
+
+/** One stage run in this process, with the run handler in force where it was added. */
+export interface InProcessStep {
+  readonly transformer: Transformer<any, any, any>;
+  readonly runnable: InternalTransformer<unknown, unknown>;
+  readonly runHandler: PipelineErrorHandler | undefined;
 }
 
 /** A chain compiled once: its stages oldest first, and their ops when no `.local()` region makes
@@ -281,15 +290,63 @@ function descriptorsSince(
   return descs.reverse();
 }
 
-function* stageChunks<In, Out>(
-  source: MaybeAsyncChunks<In>,
-  runnable: InternalTransformer<In, Out>,
+/**
+ * Runs every step over each chunk in turn, one chunk at a time: the order a generator per step
+ * gives, with one generator for all of them.
+ */
+function* stageChunks(
+  source: MaybeAsyncChunks<unknown>,
+  steps: readonly InProcessStep[],
   ctx: IContextManager,
-  runHandler: PipelineErrorHandler | undefined,
-): Generator<Out[] | Promise<Out[]>> {
+): Generator<unknown[] | Promise<unknown[]>> {
   for (const chunk of source) {
-    yield chain(chunk, (settled) => runStageChunk(runnable, settled, ctx, runHandler));
+    let slot = chunk;
+    for (let i = 0; i < steps.length; i++) slot = runStep(steps[i]!, slot, ctx);
+    yield slot;
   }
+}
+
+function runStep(
+  step: InProcessStep,
+  slot: unknown[] | Promise<unknown[]>,
+  ctx: IContextManager,
+): unknown[] | Promise<unknown[]> {
+  if (!isThenable(slot)) return runStageChunk(step.runnable, slot, ctx, step.runHandler);
+  return Promise.resolve(slot).then((settled) =>
+    runStageChunk(step.runnable, settled, ctx, step.runHandler),
+  );
+}
+
+/** The op for consecutive in-process stages. A sync run fuses them into one generator; an async
+ * run keeps one `Transformer.process()` per stage. */
+function inProcessOp(steps: readonly InProcessStep[]): StageOp {
+  return {
+    steps,
+    run(flow) {
+      if (flow.syncChunks !== null) {
+        flow.syncChunks = stageChunks(flow.syncChunks, steps, flow.ctx);
+      } else {
+        for (const step of steps) {
+          flow.chunks = step.transformer.process(flow.chunks, flow.ctx, step.runHandler);
+        }
+      }
+      consumed(flow);
+    },
+  };
+}
+
+/** `ops` with every run of adjacent in-process ops merged into one. */
+function fuseInProcess(ops: readonly StageOp[]): StageOp[] {
+  const fused: StageOp[] = [];
+  for (const op of ops) {
+    const last = fused.at(-1);
+    if (op.steps !== undefined && last?.steps !== undefined) {
+      fused[fused.length - 1] = inProcessOp([...last.steps, ...op.steps]);
+    } else {
+      fused.push(op);
+    }
+  }
+  return fused;
 }
 
 /** The op for one `.buffer()`: cut the raw input when no stage has consumed it yet, else recut the
@@ -513,7 +570,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
           break;
       }
     }
-    return ops;
+    return fuseInProcess(ops);
   }
 
   /**
@@ -528,18 +585,7 @@ export class Pipeline<T, M extends PipelineMode = "unset", In = T> {
     runHandler: PipelineErrorHandler | undefined,
   ): StageOp {
     const runnable = transformer.runnable() as InternalTransformer<unknown, unknown>;
-    return {
-      run(flow) {
-        // A `"sync"` run calls the same `runnable` an `"async"` one does, with no `Promise` unless
-        // the transformer returns one.
-        if (flow.syncChunks !== null) {
-          flow.syncChunks = stageChunks(flow.syncChunks, runnable, flow.ctx, runHandler);
-        } else {
-          flow.chunks = transformer.process(flow.chunks, flow.ctx, runHandler);
-        }
-        consumed(flow);
-      },
-    };
+    return inProcessOp([{ transformer, runnable, runHandler }]);
   }
 
   /**
