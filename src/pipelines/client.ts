@@ -93,7 +93,7 @@ async function resolveClient(): Promise<PipelineClient> {
  * `Response` resolves on the `response` event - headers - so the caller reads frames while the
  * request body is still being written, which is what `/reduce/<n>`'s duplex NDJSON wire needs. An
  * adapter that collected `init.body` to a string and the response into a `Buffer` would lose no data
- * and pass every `/transform/<n>` case, then silently break duplex: the `node-http-runtime` skill
+ * and pass every `/transform/<n>` case, then silently break duplex: the `typescript-node` skill
  * records that exact trap, measured as every reply arriving in one frame after the request body
  * closed. */
 function buildNodeClient(

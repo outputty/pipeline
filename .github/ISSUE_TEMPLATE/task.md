@@ -1,51 +1,61 @@
 ---
 name: Ticket
-about: One roadmap item a build session can take - the interface, the end state, and what it waits on
+about: One roadmap item a build session can take - the problem, the end-to-end example, and the end state
 labels: ready
 ---
 
-## Problem
+<The problem in one short paragraph: what happens today, why it is wrong, what it costs. Define each term at first use. A ticket filed before the design is settled keeps only this paragraph and `## Settle first`, and carries `needs-planning` instead of `ready`.>
 
-<what happens today, then the gap, then what the gap costs. Define each term at first use.>
+## What should happen
 
-## Interface
-
-```lang
-<the top-level call from outside, as agreed in planning>
-```
-
-New seam (repeat per new capability, method or type this ticket's level commits to; skip if none):
+<The full end-to-end program, both states, real values throughout - no ellipsis, no paraphrase.>
 
 ```lang
-<the seam's signature and where it sits, named and signed — the builder picks how it is implemented, never what it is>
+// before - today, real
+<the exact call that runs today>
 ```
-
-Input:
 
 ```json
-<real values, no ellipsis>
+<the real input it ran against>
 ```
-
-Output (shape):
 
 ```json
-<real fields; types stand in for values the builder produces>
+<the real output or error it produced>
 ```
 
-Sibling: `<path:line>` or `none, new surface` · Where: `<the one folder the work belongs in>` · Anchor: `<file:line, diagram, or probe for each structural claim>`
+```lang
+// after - once this ships
+<the same call, or its replacement>
+```
 
-## Done when
+```json
+<the output once built>
+```
 
-1. `<command>` prints `<expected output>`
-2. <the next end-to-end case>
-3. No file outside `<folder>` changed
+## What not to do
 
-## Constraints
+<Delete when this ticket does not follow up a reverted attempt.>
 
-- <a fact that shapes the build, with its consequence>
+```lang
+// tried in <PR#>, reverted - <the one-line reason>
+<the reverted code, as it was written>
+```
+
+## Implementation criteria
+
+<One directive or checkable case per line. Outcomes only: a layer plan, a file-scope limit or an unpicked library stays out.>
+
+- <the pattern, file or symbol this must follow, with its `path:line`>
+- <a structural fact the build depends on, with its `file:line`, diagram or probe>
+- `<command>` prints `<expected output>`.
+- Gating: `none`, or `<FLAG_NAME>` at `<the orchestrator or class-construction site>`.
+- Sibling: `<path:line>` or `none, new surface`.
+- Where: `<the folder the work belongs in>`.
+
+## Referenced PRs
+
+<Delete when no PR is open yet. Per PR: its number, then the same before/after shape as above.>
 
 ## Settle first
 
-- <an unresolved question, or "none">
-
-<!-- No Layers section. The build session posts its layer plan as its own comment on the ticket. -->
+<Delete when nothing is unresolved. One open question per line.>

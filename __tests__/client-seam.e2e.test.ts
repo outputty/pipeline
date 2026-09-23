@@ -86,7 +86,7 @@ describe("#179 HttpPipeline dispatches through options.client (Done-when 6)", ()
     // the caller while the request body is still being written.
     //
     // Verified by sabotage rather than assumed. Rebuilding the default client to collect the
-    // response into a `Buffer` before resolving - the shape the `node-http-runtime` skill records as
+    // response into a `Buffer` before resolving - the shape the `typescript-node` skill records as
     // the trap - left every other case in this file passing and failed this one alone, with
     // `expected 7 to be less than 6`: every emit arrived after the source had finished.
     const events: string[] = [];

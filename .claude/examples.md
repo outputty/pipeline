@@ -1,5 +1,5 @@
 <!-- examples.md - canonical worked examples, one per concept. No executable docs harness exists yet
-     (roadmap.md's first Building candidate) - a fence marked `<!-- illustrative -->` names something
+     (roadmap.md, Later) - a fence marked `<!-- illustrative -->` names something
      undefined and is hand-verified against the real `__tests__/*.e2e.test.ts` suite; a fence marked
      `<!-- compiles -->` is a real, self-contained program, pasted into a throwaway `tmp/` script and
      run for real on each edit that touches it. Reused verbatim; pin a new example here first. -->
@@ -533,35 +533,28 @@ console.log(JSON.stringify(data)); // [10,20,30,40,50]
 
 ## Case 13 - a synchronous chain, widening once async is introduced
 
-`.from(source)` decides whether the chain runs synchronously from the source's own shape - a plain
-array stays synchronous through every stage, and `.toArray()` returns `number[]` directly, no
-`await`. `.transform()` cannot be called before `.from()` at all - a compile error, since there is
-no source yet to decide sync or async against.
+A chain called with a plain array, whose callbacks are all synchronous, stays synchronous through
+every stage: `.toArray()` returns `number[]` directly, no `await`. One callback returning a
+`Promise` widens the chain's Mode, and the same terminal returns `Promise<number[]>`.
 
-<!-- illustrative, pending #90 -->
+<!-- compiles -->
 
 ```ts
 import { Pipeline } from "@outputty/pipeline";
 
-const data = new Pipeline()
-  .from([1, 2, 3, 4, 5])
-  .transform((t) => t.map((x) => x * 2).filter((x) => x > 4))
+const data = new Pipeline<number>()
+  .transform((t) => t.map((x) => x * 2).filter((x) => x > 4))([1, 2, 3, 4, 5])
   .toArray(); // number[] - no await
-```
 
-```json
-[6, 8, 10]
-```
-
-The same chain widens to asynchronous the moment any stage's own function returns a `Promise`:
-
-<!-- illustrative, pending #90 -->
-
-```ts
-const widened = await new Pipeline()
-  .from([1, 2, 3, 4, 5])
-  .transform((t) => t.map(async (x) => x * 2).filter((x) => x > 4))
+const widened = await new Pipeline<number>()
+  .transform((t) => t.map(async (x) => x * 2).filter((x) => x > 4))([1, 2, 3, 4, 5])
   .toArray(); // Promise<number[]>
+
+console.log(JSON.stringify(data), JSON.stringify(widened));
+```
+
+```text
+[6,8,10] [6,8,10]
 ```
 
 ## Case 14 - prefetching ahead of the consumer
@@ -657,8 +650,8 @@ Real output, `Pipeline async source` (the async-generator source case) and `Conc
 }
 ```
 
-The three numbers map onto `bench/memory.ts`'s own columns: promises per row is `promisesPerRow`, garbage collections is `gcCount`, and peak heap is `heldAtEndMB`, the mid-run peak read off real collector events. Collections come from `v8.GCProfiler` and allocation from `v8.getHeapStatistics().total_allocated_bytes`, not `PerformanceObserver('gc')` or a `heapUsed` delta: `roadmap.md` records the observer reading zero collections for a run with 13.
+The three numbers map onto `bench/memory.ts`'s own columns: promises per row is `promisesPerRow`, garbage collections is `gcCount`, and peak heap is `heldAtEndMB`, the mid-run peak read off real collector events. Collections come from `v8.GCProfiler` and allocation from `v8.getHeapStatistics().total_allocated_bytes`, not `PerformanceObserver('gc')` or a `heapUsed` delta: `roadmap.md` records the observer reading zero collections for a run that collected many times.
 
-`nsPerRow` is not part of the record. Two identical runs of one case read -7% and +68%, so a wall-clock figure measures the machine.
+`nsPerRow` is not part of the record. Two identical runs of one case disagreed widely, so a wall-clock figure measures the machine.
 
 `bench:compare` restores `src/` with `git checkout HEAD -- src/`, which cannot delete a file the new HEAD removed. After a compare on a stack that deletes a source file, `git status` shows the deleted file as added: remove it with `git rm -f`.

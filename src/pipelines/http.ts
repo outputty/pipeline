@@ -312,7 +312,7 @@ export class HttpPipeline<T, In = T> extends ConcurrentPipeline<T, In> {
   }
 
   /**
-   * Serves one stage's chunk of work over HTTP. Prefix-agnostic (`node-http-runtime` skill): reads
+   * Serves one stage's chunk of work over HTTP. Prefix-agnostic (`typescript-node` skill): reads
    * only the trailing `/transform/<n>` segment, so a framework `.mount()` that rewrites the path ahead
    * of it (Hono's own default) never breaks routing.
    *
@@ -599,7 +599,7 @@ async function errorDetailOf(response: Response): Promise<string> {
 
 /**
  * Bridges a `.fetch` handler to `http.Server`'s `(req, res)` callback — Node exposes
- * `Request`/`Response`/`fetch` but serves no fetch handler natively (`node-http-runtime` skill:
+ * `Request`/`Response`/`fetch` but serves no fetch handler natively (`typescript-node` skill:
  * `createServer(async (req) => new Response("hi"))` hangs, the returned `Response` is ignored).
  * Bun, Deno and Cloudflare need nothing; this exists for Node only.
  *

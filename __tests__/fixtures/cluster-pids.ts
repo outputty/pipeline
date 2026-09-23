@@ -1,7 +1,7 @@
 /**
  * #17 Done-when 2 — distinct `process.pid` values serve stage 0, and the count matches `workers`.
  * `maxConcurrency` must be at least `workers` so enough chunks are ever in flight at once for the
- * primary to round-robin a NEW connection to every worker (node-parallelism skill, T3: a reused
+ * primary to round-robin a NEW connection to every worker (typescript-node skill: a reused
  * keep-alive connection stays pinned to one worker for its life).
  */
 import { ClusterHttpPipeline } from "../../src/cluster";

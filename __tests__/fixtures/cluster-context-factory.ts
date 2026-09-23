@@ -27,7 +27,7 @@ class PoolContext extends SimpleContextManager {
 const orchestratorInstance = cluster.isPrimary ? new PoolContext() : undefined;
 
 const workers = 3;
-// More items than workers, matching cluster-pids.ts's own convention (node-parallelism skill, T3):
+// More items than workers, matching cluster-pids.ts's own convention (typescript-node skill):
 // a reused keep-alive connection stays pinned to one worker for its life, so enough chunks must be
 // in flight at once (maxConcurrency === workers) for the primary to round-robin a NEW connection
 // to every worker at all.
