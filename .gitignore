@@ -42,7 +42,4 @@ dist
 # macOS
 .DS_Store
 
-# Serena MCP (user-scoped, per-developer); its own .serena/.gitignore only covers cache + local yml
-.serena/
-
 tmp/

@@ -28,13 +28,6 @@ Each doc holds current state only; git log and closed issues hold history.
 
 # @outputty/pipeline
 
-## Serena
-
-Serena is registered in this repo's `.mcp.json` and is the primary tool set for code files. Built-in Read/Edit/Grep stay for non-code files and for a cross-file regex discovery step.
-
-- Load it on first use: `ToolSearch(query: "select:mcp__serena__get_symbols_overview,mcp__serena__find_symbol,mcp__serena__find_referencing_symbols")`.
-- Before an edit: `get_symbols_overview`, then `find_symbol` with `include_body=true`, then `replace_symbol_body` / `insert_before_symbol` / `insert_after_symbol` / `replace_content`.
-
 ## Language
 
 - **Pipeline** - the chain, and nothing else: `new Pipeline<In>(options?)` declares the type it accepts, holds no data, and is the function you call.
